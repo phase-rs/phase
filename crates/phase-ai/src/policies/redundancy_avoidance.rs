@@ -337,7 +337,9 @@ fn redundancy_delta(
         | Effect::Reveal { .. }
         // CR 702.xxx: Prepare (Strixhaven) — no redundancy detection.
         | Effect::BecomePrepared { .. }
-        | Effect::BecomeUnprepared { .. } => None,
+        | Effect::BecomeUnprepared { .. }
+        // CR 702.94a: MiracleCast is an internal engine trigger effect — no redundancy.
+        | Effect::MiracleCast { .. } => None,
     }
 }
 

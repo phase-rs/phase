@@ -1041,6 +1041,16 @@ pub enum WaitingFor {
         object_id: ObjectId,
         cost: super::mana::ManaCost,
     },
+    /// CR 702.94a: The miracle triggered ability has resolved — the player may now
+    /// cast the revealed card for its miracle cost. This happens during trigger
+    /// resolution per CR 608.2g (timing restrictions do not apply).
+    /// `GameAction::CastSpellAsMiracle` accepts; `GameAction::DecideOptionalEffect
+    /// { accept: false }` declines.
+    MiracleCastOffer {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: super::mana::ManaCost,
+    },
     /// CR 608.2d + CR 101.4: An opponent may choose to perform an optional effect.
     /// Prompts opponents in APNAP order. First accept wins; remaining are not prompted.
     OpponentMayChoice {
@@ -1502,7 +1512,8 @@ impl WaitingFor {
             | WaitingFor::CombatTaxPayment { player, .. }
             | WaitingFor::PhyrexianPayment { player, .. }
             | WaitingFor::DiscardChoice { player, .. }
-            | WaitingFor::MiracleReveal { player, .. } => Some(*player),
+            | WaitingFor::MiracleReveal { player, .. }
+            | WaitingFor::MiracleCastOffer { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
         }
     }

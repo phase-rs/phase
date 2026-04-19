@@ -899,6 +899,38 @@ pub enum CastingPermission {
     WarpExile { castable_after_turn: u32 },
 }
 
+/// CR 611.2a + CR 108.3: Identifies which player a `CastingPermission` is granted
+/// to at resolution time. Resolved to a concrete `PlayerId` by
+/// `grant_permission::resolve` before the permission is written to the target
+/// `GameObject`. Drives both `granted_to` binding and, for durations scoped to
+/// that player (e.g., `UntilYourNextTurn`), the prune step in `layers.rs`.
+///
+/// Default is `AbilityController` for all pre-existing parser call sites.
+/// Additional variants support compound-exile patterns where multiple objects
+/// are granted distinct permissions tied to different players:
+/// - `ObjectOwner` — Suspend Aggression: "its owner may play it". Each object
+///   in the tracked set is granted to its own owner (CR 108.3).
+/// - `ParentTargetController` — Expedited Inheritance: "its controller may
+///   exile [N] ... They may play those cards". The grant is tied to the
+///   parent effect's player target rather than the triggered-ability controller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PermissionGrantee {
+    /// CR 611.2a default — the controller of the effect that created the grant.
+    #[default]
+    AbilityController,
+    /// CR 108.3 — each iterated object's owner (per-object binding).
+    ObjectOwner,
+    /// CR 109.4 — the player target of the parent effect in the chain.
+    ParentTargetController,
+}
+
+/// Returns true when `grantee` is the default (`AbilityController`). Used as a
+/// `skip_serializing_if` predicate so pre-existing card JSON stays unchanged.
+pub fn is_default_grantee(g: &PermissionGrantee) -> bool {
+    matches!(g, PermissionGrantee::AbilityController)
+}
+
 /// CR 702.85a: Typed cast-time predicates attached to an `ExileWithAltCost`
 /// permission. Extend this enum when future mechanics need cast-time gating
 /// that cannot be evaluated at permission-grant time (e.g., X-cost spells
@@ -3276,6 +3308,13 @@ pub enum Effect {
         permission: CastingPermission,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 611.2a + CR 108.3: Which player the permission binds to at grant
+        /// resolution. Defaults to `AbilityController` for every pre-existing
+        /// parse site. `ObjectOwner` powers per-object iteration grants
+        /// (Suspend Aggression). `ParentTargetController` binds to the parent
+        /// effect's player target (Expedited Inheritance).
+        #[serde(default, skip_serializing_if = "is_default_grantee")]
+        grantee: PermissionGrantee,
     },
     /// Choose card(s) from a zone (typically exiled cards from a prior effect).
     /// Building block for impulse draw, cascade, hideaway, and similar exile-then-select patterns.
@@ -3365,6 +3404,12 @@ pub enum Effect {
     /// time (the cascade spell is on the stack when cascade resolves per CR 702.85a),
     /// so no threshold parameter is stored on the variant itself.
     Cascade,
+    /// CR 702.94a: Miracle trigger resolution — offers the player the chance to
+    /// cast the source card from hand for its miracle cost. Carries the cost so
+    /// the resolution handler can populate `WaitingFor::MiracleCastOffer`.
+    MiracleCast {
+        cost: super::mana::ManaCost,
+    },
     /// CR 701.24g: Put a card at a specific position in its owner's library.
     /// Unlike ChangeZone { destination: Library } which auto-shuffles (CR 401.3),
     /// this uses move_to_library_position for precise placement without shuffling.
@@ -3872,6 +3917,7 @@ impl Effect {
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
             | Effect::Cascade
+            | Effect::MiracleCast { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl { .. }
             | Effect::ChangeTargets { .. }
@@ -4020,6 +4066,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RevealUntil { .. } => "RevealUntil",
         Effect::Discover { .. } => "Discover",
         Effect::Cascade => "Cascade",
+        Effect::MiracleCast { .. } => "MiracleCast",
         Effect::PutAtLibraryPosition { .. } => "PutAtLibraryPosition",
         Effect::PutOnTopOrBottom { .. } => "PutOnTopOrBottom",
         Effect::GiftDelivery { .. } => "GiftDelivery",
@@ -4172,6 +4219,7 @@ pub enum EffectKind {
     RevealUntil,
     Discover,
     Cascade,
+    MiracleCast,
     PutAtLibraryPosition,
     PutOnTopOrBottom,
     GiftDelivery,
@@ -4328,6 +4376,7 @@ impl From<&Effect> for EffectKind {
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::Cascade => EffectKind::Cascade,
+            Effect::MiracleCast { .. } => EffectKind::MiracleCast,
             Effect::PutAtLibraryPosition { .. } => EffectKind::PutAtLibraryPosition,
             Effect::PutOnTopOrBottom { .. } => EffectKind::PutOnTopOrBottom,
             Effect::GiftDelivery { .. } => EffectKind::GiftDelivery,
@@ -4796,6 +4845,9 @@ pub enum AbilityCondition {
         filter: TargetFilter,
         #[serde(default)]
         use_lki: bool,
+        /// When true, the condition is satisfied when the target does NOT match.
+        #[serde(default)]
+        negated: bool,
     },
     /// CR 608.2c: "If this creature/permanent is a [type]" — gates sub_ability on whether
     /// the ability's source object matches the filter. Used by leveler-style cards

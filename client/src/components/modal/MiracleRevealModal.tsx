@@ -7,6 +7,7 @@ import { SHARD_ABBREVIATION } from "../../viewmodel/costLabel.ts";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 
 type MiracleReveal = Extract<WaitingFor, { type: "MiracleReveal" }>;
+type MiracleCastOffer = Extract<WaitingFor, { type: "MiracleCastOffer" }>;
 
 function ManaCostSymbols({ cost }: { cost: ManaCost }) {
   if (cost.type === "NoCost" || cost.type === "SelfManaCost")
@@ -31,28 +32,45 @@ export function MiracleRevealModal() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
 
-  if (waitingFor?.type !== "MiracleReveal") return null;
   if (!canActForWaitingState) return null;
 
-  const data = waitingFor.data as MiracleReveal["data"];
+  if (waitingFor?.type === "MiracleReveal") {
+    const data = waitingFor.data as MiracleReveal["data"];
+    return (
+      <MiracleRevealContent
+        objectId={data.object_id}
+        cost={data.cost}
+        dispatch={dispatch}
+        phase="reveal"
+      />
+    );
+  }
 
-  return (
-    <MiracleRevealContent
-      objectId={data.object_id}
-      cost={data.cost}
-      dispatch={dispatch}
-    />
-  );
+  if (waitingFor?.type === "MiracleCastOffer") {
+    const data = waitingFor.data as MiracleCastOffer["data"];
+    return (
+      <MiracleRevealContent
+        objectId={data.object_id}
+        cost={data.cost}
+        dispatch={dispatch}
+        phase="cast"
+      />
+    );
+  }
+
+  return null;
 }
 
 function MiracleRevealContent({
   objectId,
   cost,
   dispatch,
+  phase,
 }: {
   objectId: number;
   cost: ManaCost;
   dispatch: (action: GameAction) => Promise<unknown>;
+  phase: "reveal" | "cast";
 }) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
@@ -60,6 +78,8 @@ function MiracleRevealContent({
 
   const cardName = obj.name;
   const cardId = obj.card_id;
+
+  const isReveal = phase === "reveal";
 
   return (
     <AnimatePresence>
@@ -84,10 +104,12 @@ function MiracleRevealContent({
               Miracle
             </div>
             <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">
-              Reveal {cardName}?
+              {isReveal ? `Reveal ${cardName}?` : `Cast ${cardName}?`}
             </h2>
             <p className="mt-1 text-xs text-slate-400 lg:text-sm">
-              You may reveal this card and cast it for its miracle cost.
+              {isReveal
+                ? "You may reveal this card to cast it for its miracle cost."
+                : "You may cast this card for its miracle cost."}
             </p>
           </div>
           <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
@@ -100,7 +122,9 @@ function MiracleRevealContent({
               }
               className="rounded-[16px] border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-left transition hover:bg-amber-400/20 hover:ring-1 hover:ring-amber-400/40"
             >
-              <span className="font-semibold text-white">Reveal &amp; Cast</span>
+              <span className="font-semibold text-white">
+                {isReveal ? "Reveal" : "Cast"}
+              </span>
               <span className="ml-2">
                 <ManaCostSymbols cost={cost} />
               </span>

@@ -485,6 +485,7 @@ pub(super) fn strip_property_conditional(text: &str) -> (Option<AbilityCondition
                     Some(AbilityCondition::TargetMatchesFilter {
                         filter,
                         use_lki: *use_lki,
+                        negated: false,
                     }),
                     before.original.to_string(),
                 );
@@ -636,6 +637,7 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
             let condition = AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
                 use_lki: false,
+                negated: false,
             };
             return (
                 Some(condition),
@@ -1062,32 +1064,44 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         }
     }
 
+    // CR 400.7 + CR 608.2c: "a[n] [type] was [verb]'d this way" — references the
+    // LKI of the parent target (the object acted on by the preceding effect).
+    // Shredder's Technique: "If an enchantment was destroyed this way, you lose 2 life."
+    // "this way" here is scoped to the single parent target of the preceding
+    // imperative (Destroy target creature or enchantment). Type-resolution via
+    // LKI mirrors the "it was a [type] card" branch below.
+    if let Some((type_filter, negated)) = parse_a_type_was_verbed_this_way(&lower) {
+        return Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
+            use_lki: true,
+            negated,
+        });
+    }
+
     // CR 400.7 + CR 608.2c: Past-tense "it was a [type] card" — the card has already
     // moved zones; check its last-known information via TargetMatchesFilter { use_lki }.
     // Distinct from present-tense "it's a [type]" which uses RevealedHasCardType.
-    for prefix in ["it was not a ", "it wasn't a ", "it was a "] {
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(prefix).parse(lower.as_str()) {
-            let rest = rest.trim_end_matches(" card").trim();
-            let type_filter: Option<TypeFilter> = match rest {
-                "creature" => Some(TypeFilter::Creature),
-                "land" => Some(TypeFilter::Land),
-                "instant" => Some(TypeFilter::Instant),
-                "sorcery" => Some(TypeFilter::Sorcery),
-                "artifact" => Some(TypeFilter::Artifact),
-                "enchantment" => Some(TypeFilter::Enchantment),
-                "planeswalker" => Some(TypeFilter::Planeswalker),
-                _ => None,
-            };
-            if let Some(tf) = type_filter {
-                let negated_lki = prefix.contains("not") || prefix.contains("wasn't");
-                // Negated form: only emit the positive form since TargetMatchesFilter
-                // has no negated field — skip negated cases for now.
-                if !negated_lki {
-                    return Some(AbilityCondition::TargetMatchesFilter {
-                        filter: TargetFilter::Typed(TypedFilter::new(tf)),
-                        use_lki: true,
-                    });
-                }
+    {
+        let mut lki_prefix = alt((
+            value(true, tag::<_, _, VerboseError<&str>>("it was not a ")),
+            value(true, tag("it wasn't a ")),
+            value(false, tag("it was a ")),
+            value(false, tag("it was an ")),
+        ));
+        if let Ok((rest, negated_lki)) = lki_prefix.parse(lower.as_str()) {
+            // Strip trailing " card" / " card." before delegating to parse_type_phrase.
+            let type_text = rest
+                .trim_end_matches('.')
+                .trim()
+                .trim_end_matches(" card")
+                .trim();
+            let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase(type_text);
+            if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
+                return Some(AbilityCondition::TargetMatchesFilter {
+                    filter,
+                    use_lki: true,
+                    negated: negated_lki,
+                });
             }
         }
     }
@@ -1144,4 +1158,66 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         return None;
     }
     static_condition_to_ability_condition(&condition)
+}
+
+/// CR 400.7 + CR 608.2c: Parse "a[n] [type] was [verb]'d this way".
+///
+/// Recognized verbs: `destroyed`, `exiled`, `sacrificed`, `returned`, `discarded`,
+/// `milled`, `countered` — the set of imperative verbs that populate a tracked
+/// set from their parent effect. Returns the matched type filter plus a
+/// negation flag for `wasn't`/`was not`.
+///
+/// Used by Shredder's Technique ("if an enchantment was destroyed this way")
+/// and parallel patterns where a conditional in the same clause tests the type
+/// of the single parent target after the preceding effect resolved.
+fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("an "),
+        tag::<_, _, VerboseError<&str>>("a "),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let (rest, type_filter) = alt((
+        value(
+            TypeFilter::Creature,
+            tag::<_, _, VerboseError<&str>>("creature"),
+        ),
+        value(TypeFilter::Land, tag("land")),
+        value(TypeFilter::Artifact, tag("artifact")),
+        value(TypeFilter::Enchantment, tag("enchantment")),
+        value(TypeFilter::Planeswalker, tag("planeswalker")),
+        value(TypeFilter::Instant, tag("instant")),
+        value(TypeFilter::Sorcery, tag("sorcery")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (rest, negated) = alt((
+        value(true, tag::<_, _, VerboseError<&str>>(" wasn't ")),
+        value(true, tag(" was not ")),
+        value(false, tag(" was ")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("destroyed"),
+        tag("exiled"),
+        tag("sacrificed"),
+        tag("returned"),
+        tag("discarded"),
+        tag("milled"),
+        tag("countered"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" this way")
+        .parse(rest)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some((type_filter, negated))
 }

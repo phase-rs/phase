@@ -896,6 +896,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
                     },
+                    grantee: Default::default(),
                 },
             )
             .sub_ability(register_bending),
@@ -1440,6 +1441,7 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return parsed_clause(Effect::GrantCastingPermission {
             permission: CastingPermission::ExileWithEnergyCost,
             target: TargetFilter::ParentTarget,
+            grantee: Default::default(),
         });
     }
 
@@ -2197,9 +2199,77 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     }))
 }
 
+/// CR 611.2a + CR 108.3: Parse per-grantee grant clauses that follow a
+/// compound-exile effect. These clauses bind the resulting `PlayFromExile`
+/// permission to a player OTHER than the ability's controller — the exiled
+/// object's owner, or the parent effect's player target — via
+/// [`PermissionGrantee`]. The target is `TrackedSet` — the most recently
+/// published tracked set (i.e., the exiled cards).
+///
+/// Patterns:
+/// - `for each of those cards, its owner may play it [until the end of their next turn]`
+///   → [`PermissionGrantee::ObjectOwner`] (Suspend Aggression). The
+///   "for each of those cards" prefix is rhetorical — the resolver already
+///   iterates the target set object-by-object.
+/// - `they may play those cards [until the end of their next turn]`
+///   → [`PermissionGrantee::ParentTargetController`] (Expedited Inheritance).
+///   The pronoun "they" refers to the parent effect's player target.
+fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let lower = tp.lower;
+
+    let grantee = if alt((
+        tag::<_, _, VerboseError<&str>>("for each of those cards, its owner may play it"),
+        tag("for each of those cards, its owner may cast it"),
+        tag("its owner may play it"),
+        tag("its owner may cast it"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        crate::types::ability::PermissionGrantee::ObjectOwner
+    } else if alt((
+        tag::<_, _, VerboseError<&str>>("they may play those cards"),
+        tag("they may cast those cards"),
+        tag("they may play them"),
+        tag("they may cast them"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        crate::types::ability::PermissionGrantee::ParentTargetController
+    } else {
+        return None;
+    };
+
+    // Duration: default to UntilEndOfTurn if unspecified (matches impulse-draw default).
+    let (_, dur) = strip_trailing_duration(tp.original);
+    let duration = dur.unwrap_or(Duration::UntilEndOfTurn);
+
+    Some(parsed_clause(Effect::GrantCastingPermission {
+        permission: CastingPermission::PlayFromExile {
+            duration,
+            // Placeholder — `grant_permission::resolve` normalizes per-iteration.
+            granted_to: crate::types::player::PlayerId(0),
+        },
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        grantee,
+    }))
+}
+
 /// CR 400.7i: Parse "you may play/cast that card [this turn]" — impulse draw permission.
 fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
+
+    // CR 611.2a + CR 108.3: Per-object grant clauses from compound-exile chains.
+    // These bind the grant to a player OTHER than the ability's controller via
+    // Theme D's `granted_to` field, resolved per-iteration by
+    // `grant_permission::resolve`. The target is `TrackedSet` — the most
+    // recently published set (the exiled cards from the parent effect).
+    if let Some(clause) = try_parse_per_grantee_play_grant(tp) {
+        return Some(clause);
+    }
 
     // Try full forms first: "you may play/cast that card/it/those cards ..."
     // Then bare forms (after "you may" has been stripped): "play that card ..."
@@ -2262,6 +2332,7 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
             granted_to: crate::types::player::PlayerId(0),
         },
         target: TargetFilter::Any,
+        grantee: Default::default(),
     }))
 }
 
@@ -5740,6 +5811,17 @@ fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
             " until the end of your next turn",
             Duration::UntilYourNextTurn,
         ),
+        // CR 611.2a + CR 108.3: Third-person "their next turn" appears in grants
+        // whose grantee is not the ability's controller (Suspend Aggression:
+        // "its owner may play it"; Expedited Inheritance: "its controller may
+        // ... They may play those cards"). Theme D's `granted_to` binds to the
+        // grantee, so `UntilYourNextTurn` is semantically "until the end of the
+        // grantee's next turn" at prune time.
+        (
+            " until the end of their next turn",
+            Duration::UntilYourNextTurn,
+        ),
+        (" until their next turn", Duration::UntilYourNextTurn),
         (" until your next turn", Duration::UntilYourNextTurn),
         (
             " until ~ leaves the battlefield",
@@ -14110,8 +14192,13 @@ mod tests {
         assert!(cond.is_some(), "should extract MV ≤ 2 condition");
         assert_eq!(text, "Destroy target creature");
         match cond.unwrap() {
-            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+            AbilityCondition::TargetMatchesFilter {
+                filter,
+                use_lki,
+                negated,
+            } => {
                 assert!(!use_lki);
+                assert!(!negated);
                 if let TargetFilter::Typed(tf) = filter {
                     assert!(tf.properties.iter().any(|p| matches!(
                         p,

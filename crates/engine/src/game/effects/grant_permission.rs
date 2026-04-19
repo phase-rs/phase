@@ -1,9 +1,11 @@
 use crate::types::ability::{
-    CastingPermission, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    CastingPermission, Effect, EffectError, EffectKind, PermissionGrantee, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::TrackedSetId;
+use crate::types::player::PlayerId;
 
 /// Grant a CastingPermission to the target object (CR 604.6).
 ///
@@ -16,8 +18,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (permission, target_filter) = match &ability.effect {
-        Effect::GrantCastingPermission { permission, target } => (permission.clone(), target),
+    let (permission, target_filter, grantee) = match &ability.effect {
+        Effect::GrantCastingPermission {
+            permission,
+            target,
+            grantee,
+        } => (permission.clone(), target, *grantee),
         _ => return Err(EffectError::MissingParam("permission".to_string())),
     };
 
@@ -63,16 +69,37 @@ pub fn resolve(
             .collect()
     };
 
+    // CR 611.2a/b + CR 108.3: Resolve `grantee` to the `PlayerId` that a
+    // `PlayFromExile` permission's `granted_to` should bind to. For
+    // `ObjectOwner`, this varies per iterated object and is computed inside
+    // the loop. For the other variants it is constant across iterations.
+    let constant_grantee: Option<PlayerId> = match grantee {
+        PermissionGrantee::AbilityController => Some(ability.controller),
+        PermissionGrantee::ParentTargetController => ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .or(Some(ability.controller)),
+        PermissionGrantee::ObjectOwner => None, // per-iteration
+    };
+
     for obj_id in target_ids {
+        // Compute `granted_to` for this object. For `ObjectOwner` we read the
+        // object's owner here so each iteration binds independently (CR 108.3).
+        let granted_to_pid = constant_grantee.unwrap_or_else(|| {
+            state
+                .objects
+                .get(&obj_id)
+                .map(|o| o.owner)
+                .unwrap_or(ability.controller)
+        });
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             let mut granted = permission.clone();
-            // CR 611.2a/b: Durations on a granted permission are measured against
-            // the controller of the effect that created it. Parse/template sites
-            // cannot know the controller, so they leave `granted_to` as a
-            // placeholder and it is normalized here, at grant time, to the
-            // ability's controller.
             if let CastingPermission::PlayFromExile { granted_to, .. } = &mut granted {
-                *granted_to = ability.controller;
+                *granted_to = granted_to_pid;
             }
             obj.casting_permissions.push(granted);
         }

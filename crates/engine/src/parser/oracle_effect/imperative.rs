@@ -681,6 +681,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 constraint: None,
             },
             target,
+            grantee: Default::default(),
         },
         TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
     }
@@ -3876,6 +3877,7 @@ mod tests {
             Effect::GrantCastingPermission {
                 permission,
                 target: crate::types::ability::TargetFilter::Or { filters },
+                ..
             } => {
                 assert!(matches!(
                     permission,

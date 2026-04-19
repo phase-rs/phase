@@ -3,8 +3,9 @@ use nom::bytes::complete::tag;
 use nom::character::complete::char;
 use nom::combinator::value;
 use nom::multi::many1;
-use nom::sequence::delimited;
+use nom::sequence::{delimited, terminated};
 use nom::Parser;
+use nom_language::error::VerboseError;
 
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
@@ -323,24 +324,25 @@ pub(super) fn parse_mana_production_clause(
 }
 
 pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(QuantityExpr, &str)> {
-    let mut rest = text.trim_start();
-    let mut count = 0i32;
+    let rest = text.trim_start();
+    // Nom combinator: count consecutive {C} symbols.
+    let result: Result<(&str, Vec<()>), _> = many1(delimited(
+        tag::<_, _, VerboseError<&str>>("{"),
+        value((), alt((tag("C"), tag("c")))),
+        terminated(
+            tag("}"),
+            nom::combinator::opt(nom::character::complete::multispace0),
+        ),
+    ))
+    .parse(rest);
 
-    while rest.starts_with('{') {
-        let end = rest.find('}')?;
-        let symbol = &rest[1..end];
-        if !symbol.eq_ignore_ascii_case("C") {
-            break;
+    match result {
+        Ok((after, symbols)) => {
+            let count = symbols.len() as i32;
+            Some((QuantityExpr::Fixed { value: count }, after))
         }
-        count += 1;
-        rest = rest[end + 1..].trim_start();
+        Err(_) => None,
     }
-
-    if count == 0 {
-        return None;
-    }
-
-    Some((QuantityExpr::Fixed { value: count }, rest))
 }
 
 /// Parse a count prefix for mana amounts: "X ", "x ", or an English/digit number.

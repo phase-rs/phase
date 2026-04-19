@@ -26,6 +26,12 @@ pub fn check_spell_timing(
     allow_flash_timing: bool,
     casting_variant: CastingVariant,
 ) -> Result<(), EngineError> {
+    // CR 702.94a + CR 608.2g: Miracle casts happen during the resolution of the
+    // miracle triggered ability — timing restrictions do not apply during resolution.
+    if matches!(casting_variant, CastingVariant::Miracle) {
+        return Ok(());
+    }
+
     // CR 702.190a: Sneak alt-cost has its own timing rule — the spell is
     // castable any time its controller could cast an instant, but ONLY during
     // the declare-blockers step. This overrides both sorcery-speed and

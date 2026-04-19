@@ -323,6 +323,7 @@ pub fn room_effects(
                         granted_to: crate::types::player::PlayerId(0),
                     },
                     target: TargetFilter::Any,
+                    grantee: Default::default(),
                 },
                 source_id,
                 controller,

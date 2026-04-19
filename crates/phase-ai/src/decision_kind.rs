@@ -119,7 +119,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ParadigmCastOffer { .. }
         // CR 702.94a: Miracle reveal — opt-in cast offer, routed to the
         // ability-offer bucket so activation policies evaluate the candidates.
-        | WaitingFor::MiracleReveal { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::MiracleReveal { .. }
+        | WaitingFor::MiracleCastOffer { .. } => DecisionKind::ActivateAbility,
     }
 }
 

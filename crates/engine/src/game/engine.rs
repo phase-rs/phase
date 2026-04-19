@@ -1519,15 +1519,19 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 &mut events,
             )?
         }
-        // CR 702.94a + CR 603.11: Miracle reveal — accept path. Caster casts
-        // the revealed card for its miracle mana cost via `CastingVariant::Miracle`.
+        // CR 702.94a: Miracle reveal — accept path. The player reveals the card;
+        // this creates a triggered ability ("When you reveal this card this way,
+        // you may cast it for [miracle cost]") that goes on the stack. Opponents
+        // can respond before the cast offer resolves.
         (
             WaitingFor::MiracleReveal {
-                player, object_id, ..
+                player,
+                object_id,
+                cost,
             },
             GameAction::CastSpellAsMiracle {
                 object_id: action_obj,
-                card_id,
+                ..
             },
         ) => {
             if *object_id != action_obj {
@@ -1537,8 +1541,53 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 ));
             }
             let p = *player;
-            let obj = action_obj;
-            super::casting::handle_cast_spell_as_miracle(state, p, obj, card_id, &mut events)?
+            let source = *object_id;
+            let miracle_cost = cost.clone();
+
+            // CR 702.94a: Emit the reveal event.
+            // CR 702.94a: Emit the reveal event.
+            let card_name = state
+                .objects
+                .get(&source)
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+            events.push(crate::types::events::GameEvent::CardsRevealed {
+                player: p,
+                card_ids: vec![source],
+                card_names: vec![card_name],
+            });
+
+            // CR 702.94a: Push the miracle triggered ability onto the stack.
+            // "When you reveal this card this way, you may cast it by paying
+            // [miracle cost] rather than its mana cost."
+            let ability = crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::MiracleCast { cost: miracle_cost },
+                vec![],
+                source,
+                p,
+            );
+            let trigger = super::triggers::PendingTrigger {
+                source_id: source,
+                controller: p,
+                condition: None,
+                ability,
+                timestamp: 0,
+                target_constraints: vec![],
+                trigger_event: None,
+                modal: None,
+                mode_abilities: vec![],
+                description: Some("Miracle — you may cast this card".to_string()),
+            };
+            super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
+
+            // Return to priority so the trigger can be responded to.
+            state.waiting_for = WaitingFor::Priority { player: p };
+            super::engine_priority::run_post_action_pipeline(
+                state,
+                &mut events,
+                &WaitingFor::Priority { player: p },
+                true,
+            )?
         }
         // CR 702.94a: Miracle reveal — decline path. Reuses the generic
         // DecideOptionalEffect decline; flushes the next pending miracle
@@ -1548,6 +1597,42 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         // offer.
         (
             WaitingFor::MiracleReveal { player, .. },
+            GameAction::DecideOptionalEffect { accept: false },
+        ) => {
+            let p = *player;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            super::engine_priority::run_post_action_pipeline(
+                state,
+                &mut events,
+                &WaitingFor::Priority { player: p },
+                true,
+            )?
+        }
+        // CR 702.94a + CR 608.2g: Miracle cast offer — the miracle triggered
+        // ability has resolved. The player may now cast for the miracle cost.
+        // This cast happens during trigger resolution, so timing restrictions
+        // do not apply (CR 608.2g).
+        (
+            WaitingFor::MiracleCastOffer {
+                player, object_id, ..
+            },
+            GameAction::CastSpellAsMiracle {
+                object_id: action_obj,
+                card_id,
+            },
+        ) => {
+            if *object_id != action_obj {
+                return Err(EngineError::InvalidAction(
+                    "CastSpellAsMiracle object_id does not match miracle cast offer".to_string(),
+                ));
+            }
+            let p = *player;
+            let obj = action_obj;
+            super::casting::handle_cast_spell_as_miracle(state, p, obj, card_id, &mut events)?
+        }
+        // CR 702.94a: Miracle cast offer — decline. Resume resolution.
+        (
+            WaitingFor::MiracleCastOffer { player, .. },
             GameAction::DecideOptionalEffect { accept: false },
         ) => {
             let p = *player;

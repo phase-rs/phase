@@ -1377,7 +1377,35 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         // AI heuristic: reveal-and-cast when the miracle cost is affordable from
         // the player's current mana pool including auto-tappable lands; otherwise
         // decline so the AI isn't blocked on an unaffordable offer.
+        // CR 702.94a: Miracle reveal — AI always reveals (pushes a trigger
+        // on the stack; cost is checked at MiracleCastOffer resolution).
         WaitingFor::MiracleReveal {
+            player, object_id, ..
+        } => {
+            let card_id = state
+                .objects
+                .get(object_id)
+                .map(|o| o.card_id)
+                .unwrap_or(crate::types::identifiers::CardId(0));
+            vec![
+                candidate(
+                    GameAction::CastSpellAsMiracle {
+                        object_id: *object_id,
+                        card_id,
+                    },
+                    TacticalClass::Spell,
+                    Some(*player),
+                ),
+                candidate(
+                    GameAction::DecideOptionalEffect { accept: false },
+                    TacticalClass::Pass,
+                    Some(*player),
+                ),
+            ]
+        }
+        // CR 702.94a: Miracle cast offer — the trigger has resolved; cast if
+        // the miracle cost is affordable, otherwise decline.
+        WaitingFor::MiracleCastOffer {
             player,
             object_id,
             cost,

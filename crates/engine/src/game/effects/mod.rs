@@ -370,6 +370,15 @@ pub fn resolve_effect(
         // CR 702.85a: Cascade — synthesized from the keyword at trigger time;
         // resolver performs the exile-until loop and sets CascadeChoice.
         Effect::Cascade => cascade::resolve(state, ability, events),
+        // CR 702.94a: Miracle trigger resolution — offer the cast from hand.
+        Effect::MiracleCast { ref cost } => {
+            state.waiting_for = WaitingFor::MiracleCastOffer {
+                player: ability.controller,
+                object_id: ability.source_id,
+                cost: cost.clone(),
+            };
+            Ok(())
+        }
         Effect::PutAtLibraryPosition { .. } => put_on_top::resolve(state, ability, events),
         Effect::PutOnTopOrBottom { .. } => put_on_top_or_bottom::resolve(state, ability, events),
         Effect::GiftDelivery { .. } => gift_delivery::resolve(state, ability, events),
@@ -1467,12 +1476,16 @@ fn evaluate_condition(
             })
             .is_some_and(|obj| obj.has_keyword(keyword)),
         // CR 400.7 + CR 608.2c: "if that creature was a [type]" — check target or its LKI.
-        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+        AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki,
+            negated,
+        } => {
             let target_id = ability.targets.iter().find_map(|t| match t {
                 TargetRef::Object(id) => Some(*id),
                 _ => None,
             });
-            if let Some(id) = target_id {
+            let matched = if let Some(id) = target_id {
                 if *use_lki {
                     if let Some(GameEvent::ZoneChanged { record, .. }) =
                         state.current_trigger_event.as_ref()
@@ -1483,7 +1496,7 @@ fn evaluate_condition(
                                 record,
                                 filter,
                                 &crate::game::filter::FilterContext::from_ability(ability),
-                            );
+                            ) ^ negated;
                         }
                     }
                     // CR 400.7: Check last-known information for past-tense conditions.
@@ -1532,7 +1545,8 @@ fn evaluate_condition(
                 }
             } else {
                 false
-            }
+            };
+            matched ^ negated
         }
         // CR 608.2c: "If this creature/permanent is a [type]" — check source object.
         AbilityCondition::SourceMatchesFilter { filter } => {
@@ -2165,6 +2179,7 @@ mod tests {
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
                     },
+                    grantee: Default::default(),
                 },
                 vec![],
                 ObjectId(900),
@@ -2249,6 +2264,7 @@ mod tests {
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
                     },
+                    grantee: Default::default(),
                 },
                 vec![],
                 ObjectId(901),
@@ -2307,6 +2323,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
                 },
+                grantee: Default::default(),
             },
             vec![],
             ObjectId(902),

@@ -54,10 +54,21 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                 duration: Duration::UntilEndOfTurn,
                 ..
             } => false,
-            // All other permission variants — and PlayFromExile with a
-            // non-end-of-turn duration — are unaffected by cleanup.
-            CastingPermission::PlayFromExile { .. }
-            | CastingPermission::AdventureCreature
+            // CR 514.2: UntilEndOfCombat should have been pruned at end of combat,
+            // but if it leaked to cleanup, prune it here defensively.
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfCombat,
+                ..
+            } => false,
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilYourNextTurn | Duration::Permanent,
+                ..
+            } => true,
+            // UntilHostLeavesPlay / ForAsLongAs / UntilControllerNextUntapStep:
+            // these are pruned by their own systems (zone-exit cleanup, condition
+            // re-evaluation, untap step). Retain here — they are not end-of-turn.
+            CastingPermission::PlayFromExile { .. } => true,
+            CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
             | CastingPermission::ExileWithEnergyCost
             | CastingPermission::WarpExile { .. } => true,

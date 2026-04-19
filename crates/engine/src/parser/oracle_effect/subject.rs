@@ -1117,7 +1117,7 @@ fn try_parse_set_life_total(
     let amount =
         if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("half ").parse(lower.as_str()) {
             // "half their starting life total" / "half that player's starting life total"
-            if rest.contains("starting life total") {
+            if nom_primitives::scan_contains(rest, "starting life total") {
                 QuantityExpr::HalfRounded {
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::StartingLifeTotal,
@@ -1127,7 +1127,7 @@ fn try_parse_set_life_total(
             } else {
                 return None;
             }
-        } else if lower.contains("starting life total") {
+        } else if nom_primitives::scan_contains(&lower, "starting life total") {
             QuantityExpr::Ref {
                 qty: QuantityRef::StartingLifeTotal,
             }

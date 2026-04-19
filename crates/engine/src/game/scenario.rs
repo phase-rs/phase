@@ -1098,6 +1098,7 @@ impl GameRunner {
             WaitingFor::BlightChoice { .. } => "BlightChoice",
             WaitingFor::ParadigmCastOffer { .. } => "ParadigmCastOffer",
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
+            WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
         }
     }
 

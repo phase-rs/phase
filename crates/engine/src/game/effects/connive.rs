@@ -81,6 +81,8 @@ pub fn resolve(
                         player_id,
                         object_id: obj_id,
                     });
+                    // CR 702.94a: Connive draws count as draws for miracle tracking.
+                    super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
                         p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
                     }

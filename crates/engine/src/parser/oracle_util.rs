@@ -305,18 +305,26 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     // mill count, etc.) so every quantity-taking verb picks it up uniformly. The
     // inner count recursively delegates back to `parse_count_expr`, so "twice X"
     // and "three times five" both compose through the same types.
-    for (factor, prefix) in [(2i32, "twice "), (3, "three times ")] {
-        if lower.starts_with(prefix) {
-            let rest = &text[prefix.len()..];
-            if let Some((inner, after)) = parse_count_expr(rest) {
-                return Some((
-                    QuantityExpr::Multiply {
-                        factor,
-                        inner: Box::new(inner),
-                    },
-                    after,
-                ));
-            }
+    if let Some((factor, rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::branch::alt((
+            nom::combinator::value(
+                2i32,
+                nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>(
+                    "twice ",
+                ),
+            ),
+            nom::combinator::value(3i32, nom::bytes::complete::tag("three times ")),
+        ))
+        .parse(i)
+    }) {
+        if let Some((inner, after)) = parse_count_expr(rest) {
+            return Some((
+                QuantityExpr::Multiply {
+                    factor,
+                    inner: Box::new(inner),
+                },
+                after,
+            ));
         }
     }
     // CR 107.3a: "X" in Oracle text represents a variable determined at cast time.

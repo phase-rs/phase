@@ -658,6 +658,7 @@ pub(crate) fn create_warp_delayed_trigger(
                 castable_after_turn: state.turn_number,
             },
             target: crate::types::ability::TargetFilter::SelfRef,
+            grantee: crate::types::ability::PermissionGrantee::AbilityController,
         },
     ));
 
@@ -1207,6 +1208,7 @@ mod tests {
                     castable_after_turn: 1,
                 },
                 target: TargetFilter::SelfRef,
+                grantee: crate::types::ability::PermissionGrantee::AbilityController,
             },
             vec![],
             obj_id,

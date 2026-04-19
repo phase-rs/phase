@@ -1317,6 +1317,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 702.85a: Cascade takes no parameters — source MV is read from the
         // stack object at resolution time.
         Effect::Cascade => {}
+        // CR 702.94a: MiracleCast is an internal engine effect, not parsed from Oracle text.
+        Effect::MiracleCast { .. } => {}
         Effect::PutAtLibraryPosition { target, position } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("position".into(), format!("{position:?}")));

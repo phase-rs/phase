@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::value;
@@ -759,38 +757,51 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     }
 
     // CR 400.7 + CR 603.10: "if it was a [type]" / "if it was an [type]"
-    // Dynamic: parses type word after the prefix.
-    for prefix in &["if it was a ", "if it was an "] {
-        if let Some(pos) = tp.find(prefix) {
-            let after = &lower[pos + prefix.len()..];
-            let type_word = after.split_whitespace().next().unwrap_or("");
-            let trimmed = type_word.trim_end_matches(',').trim_end_matches('.');
-            let capitalized = format!("{}{}", &trimmed[..1].to_uppercase(), &trimmed[1..]);
-            if let Ok(card_type) = CoreType::from_str(&capitalized) {
-                let clause_len = prefix.len() + trimmed.len();
-                return (
-                    strip_condition_clause(text, pos, clause_len),
-                    Some(TriggerCondition::WasType { card_type }),
-                );
-            }
+    // Nom combinator: prefix dispatch + typed core type extraction.
+    {
+        fn was_type_combinator(i: &str) -> nom::IResult<&str, CoreType, VerboseError<&str>> {
+            let (i, _) = alt((tag("if it was an "), tag("if it was a "))).parse(i)?;
+            alt((
+                value(CoreType::Creature, tag("creature")),
+                value(CoreType::Land, tag("land")),
+                value(CoreType::Instant, tag("instant")),
+                value(CoreType::Sorcery, tag("sorcery")),
+                value(CoreType::Artifact, tag("artifact")),
+                value(CoreType::Enchantment, tag("enchantment")),
+                value(CoreType::Planeswalker, tag("planeswalker")),
+                value(CoreType::Battle, tag("battle")),
+            ))
+            .parse(i)
+        }
+        if let Some((before, card_type, rest)) = scan_preceded(&lower, was_type_combinator) {
+            let pos = before.len();
+            let clause_len = lower.len() - before.len() - rest.len();
+            return (
+                strip_condition_clause(text, pos, clause_len),
+                Some(TriggerCondition::WasType { card_type }),
+            );
         }
     }
 
     // CR 509.1a + CR 603.4: "if defending player controls no [type]"
-    // Dynamic: parses type phrase after the prefix.
-    if let Some(pos) = tp.find("if defending player controls no ") {
-        let after = &text[pos + "if defending player controls no ".len()..];
-        let (filter, rest) = crate::parser::oracle_target::parse_type_phrase(after);
-        if !matches!(filter, TargetFilter::Any) {
-            let consumed = after.len() - rest.len();
-            return (
-                strip_condition_clause(
-                    text,
-                    pos,
-                    "if defending player controls no ".len() + consumed,
-                ),
-                Some(TriggerCondition::DefendingPlayerControlsNone { filter }),
-            );
+    // Nom combinator prefix dispatch + parse_type_phrase for the remainder.
+    {
+        fn def_prefix(i: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+            let (i, _) = tag("if defending player controls no ").parse(i)?;
+            Ok((i, ()))
+        }
+        if let Some((before, _, _type_start)) = scan_preceded(&lower, def_prefix) {
+            let pos = before.len();
+            let prefix_len = "if defending player controls no ".len();
+            let after = &text[pos + prefix_len..];
+            let (filter, rest) = parse_type_phrase(after);
+            if !matches!(filter, TargetFilter::Any) {
+                let consumed = after.len() - rest.len();
+                return (
+                    strip_condition_clause(text, pos, prefix_len + consumed),
+                    Some(TriggerCondition::DefendingPlayerControlsNone { filter }),
+                );
+            }
         }
     }
 

@@ -1184,9 +1184,10 @@ fn miracle_decline_returns_to_priority() {
     );
 }
 
-/// CR 702.94a + CR 118.9a: Accepting the reveal casts the spell for its
-/// miracle mana cost via `CastingVariant::Miracle`, with the printed cost
-/// ignored.
+/// CR 702.94a + CR 118.9a: Accepting the reveal pushes a triggered ability
+/// on the stack. When that trigger resolves, the player casts the spell for
+/// the miracle cost via `CastingVariant::Miracle`, bypassing timing restrictions
+/// (CR 608.2g). The printed cost is ignored.
 #[test]
 fn miracle_accept_casts_for_miracle_cost() {
     use engine::game::zones::create_object;
@@ -1242,7 +1243,7 @@ fn miracle_accept_casts_for_miracle_cost() {
     }
     let card_id = runner.state().objects[&miracle_obj].card_id;
 
-    // Surface the reveal prompt directly.
+    // Phase 1: Surface the reveal prompt directly.
     runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
         player: P0,
         object_id: miracle_obj,
@@ -1252,12 +1253,53 @@ fn miracle_accept_casts_for_miracle_cost() {
         },
     };
 
+    // Accept the reveal — this pushes a triggered ability onto the stack.
     runner
         .act(GameAction::CastSpellAsMiracle {
             object_id: miracle_obj,
             card_id,
         })
-        .expect("CastSpellAsMiracle should succeed for an affordable miracle cost");
+        .expect("Reveal should succeed");
+
+    // The miracle trigger should be on the stack.
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "miracle trigger should be on the stack"
+    );
+    assert!(
+        matches!(
+            &runner.state().stack.last().unwrap().kind,
+            StackEntryKind::TriggeredAbility { .. }
+        ),
+        "stack entry should be a TriggeredAbility"
+    );
+
+    // Phase 2: Both players pass priority — trigger resolves, presenting the cast offer.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 pass priority");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 pass priority");
+
+    // Should now be MiracleCastOffer.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::MiracleCastOffer { .. }
+        ),
+        "should be MiracleCastOffer, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Phase 3: Accept the cast — the spell goes on the stack with CastingVariant::Miracle.
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+        })
+        .expect("Miracle cast should succeed");
 
     // Stack should have the miracle-cast spell with CastingVariant::Miracle.
     assert_eq!(
@@ -1282,5 +1324,111 @@ fn miracle_accept_casts_for_miracle_cost() {
     assert!(
         runner.state().players[0].mana_pool.mana.is_empty(),
         "miracle cost of {{W}} should have consumed the white mana"
+    );
+}
+
+/// CR 702.94a + CR 608.2g: A sorcery with Miracle can be cast during the
+/// draw step because the cast happens during trigger resolution, bypassing
+/// timing restrictions.
+#[test]
+fn miracle_sorcery_casts_during_draw_step() {
+    use engine::game::zones::create_object;
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Draw);
+    scenario.add_basic_land(P0, ManaColor::White);
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[0]
+        .mana_pool
+        .add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::White,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+
+    let miracle_obj = create_object(
+        runner.state_mut(),
+        CardId(903),
+        P0,
+        "DrawStepMiracle".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&miracle_obj).unwrap();
+        obj.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 99,
+        };
+        obj.keywords.push(Keyword::Miracle(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        }));
+        obj.base_keywords = obj.keywords.clone();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        obj.abilities.push(ability.clone());
+        obj.base_abilities.push(ability);
+    }
+    let card_id = runner.state().objects[&miracle_obj].card_id;
+
+    // Reveal prompt during draw step.
+    runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
+        player: P0,
+        object_id: miracle_obj,
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        },
+    };
+
+    // Reveal → trigger on stack.
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+        })
+        .expect("Reveal should succeed during draw step");
+
+    // Resolve trigger.
+    runner.act(GameAction::PassPriority).expect("P0 pass");
+    runner.act(GameAction::PassPriority).expect("P1 pass");
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::MiracleCastOffer { .. }
+        ),
+        "should be MiracleCastOffer during draw step"
+    );
+
+    // Cast the sorcery during draw step — should succeed (CR 608.2g bypass).
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+        })
+        .expect("Sorcery miracle cast should succeed during draw step (CR 608.2g)");
+
+    // Spell on the stack.
+    assert!(
+        matches!(
+            &runner.state().stack.last().unwrap().kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Miracle,
+                ..
+            }
+        ),
+        "sorcery should be on the stack via Miracle variant"
     );
 }
