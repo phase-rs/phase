@@ -1532,6 +1532,14 @@ pub enum QuantityRef {
     /// the actual paid amount. Distinct from `Variable { name: "X" }` which
     /// only resolves while the ability is on the stack with `chosen_x` set.
     CostXPaid,
+    /// CR 601.2h + CR 603.4: Total amount of mana actually spent to cast the
+    /// spell that caused the current trigger event. Resolves against the
+    /// spell object referenced by `trigger_event` (e.g., `SpellCast`), reading
+    /// `GameObject::mana_spent_to_cast_amount`. Used by intervening-if
+    /// comparisons like Increment ("if the amount of mana you spent is greater
+    /// than this creature's power or toughness"). Returns 0 outside a
+    /// trigger-event scope.
+    ManaSpentOnTriggeringSpell,
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.

@@ -2174,6 +2174,7 @@ pub(super) fn pay_mana_cost_with_choices(
     if !spent_units.is_empty() {
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
+            obj.mana_spent_to_cast_amount = spent_units.len() as u32;
             for unit in &spent_units {
                 obj.colors_spent_to_cast.add_unit(unit);
             }

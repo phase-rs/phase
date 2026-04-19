@@ -947,6 +947,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         obj.cast_from_zone = None;
         obj.mana_spent_to_cast = false;
         obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
+        obj.mana_spent_to_cast_amount = 0;
     }
 }
 
@@ -1584,9 +1585,25 @@ pub(crate) fn check_trigger_condition(
             comparator,
             rhs,
         } => {
+            // CR 603.4: Intervening-if check runs at both detection and resolution.
+            // At detection time `state.current_trigger_event` is not yet populated,
+            // so event-scoped refs (e.g. `ManaSpentOnTriggeringSpell`) must resolve
+            // against the explicit `trigger_event` parameter.
             let source_id = source_id.unwrap_or(ObjectId(0));
-            let lhs = crate::game::quantity::resolve_quantity(state, lhs, controller, source_id);
-            let rhs = crate::game::quantity::resolve_quantity(state, rhs, controller, source_id);
+            let lhs = crate::game::quantity::resolve_quantity_for_trigger_check(
+                state,
+                lhs,
+                controller,
+                source_id,
+                trigger_event,
+            );
+            let rhs = crate::game::quantity::resolve_quantity_for_trigger_check(
+                state,
+                rhs,
+                controller,
+                source_id,
+                trigger_event,
+            );
             comparator.evaluate(lhs, rhs)
         }
         TriggerCondition::HasMaxSpeed => has_max_speed(state, controller),
@@ -4724,5 +4741,126 @@ pub mod tests {
             PlayerId(0),
             &event,
         ));
+    }
+
+    /// CR 601.2h + CR 603.4: Increment intervening-if gates the counter-placement
+    /// trigger on the amount of mana spent to cast the triggering spell exceeding
+    /// either the source creature's power or its toughness. This is the regression
+    /// gate: before the fix, the condition was silently dropped and the trigger
+    /// always fired. Covers both Hungry Graffalon (P3/T4) and Topiary Lecturer
+    /// (P1/T2) shapes.
+    #[test]
+    fn increment_intervening_if_gates_on_mana_spent_vs_self_pt() {
+        let mut state = setup();
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hungry Graffalon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(3);
+            obj.toughness = Some(4);
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Stack,
+        );
+
+        let condition = TriggerCondition::Or {
+            conditions: vec![
+                TriggerCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                    },
+                    comparator: Comparator::GT,
+                    rhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SelfPower,
+                    },
+                },
+                TriggerCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                    },
+                    comparator: Comparator::GT,
+                    rhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SelfToughness,
+                    },
+                },
+            ],
+        };
+
+        let event = GameEvent::SpellCast {
+            card_id: CardId(2),
+            controller: PlayerId(0),
+            object_id: spell,
+        };
+
+        // 2 mana spent: 2 > 3 false, 2 > 4 false — trigger does NOT fire.
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 2;
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "Increment must not fire when mana spent (2) <= both power (3) and toughness (4)"
+        );
+
+        // 4 mana spent: 4 > 3 true — trigger fires even though 4 > 4 is false.
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 4;
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "Increment must fire when mana spent (4) > power (3), regardless of toughness"
+        );
+
+        // 5 mana spent: 5 > 3 and 5 > 4 — fires.
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 5;
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "Increment must fire when mana spent (5) exceeds both power and toughness"
+        );
+
+        // Topiary Lecturer shape — P1/T2.
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.power = Some(1);
+            obj.toughness = Some(2);
+        }
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 2;
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "Topiary Lecturer: 2 mana spent > power (1) must fire Increment"
+        );
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 1;
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "Topiary Lecturer: 1 mana spent must not exceed power (1) or toughness (2)"
+        );
     }
 }

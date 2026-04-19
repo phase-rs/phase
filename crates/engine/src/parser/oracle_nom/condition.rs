@@ -50,6 +50,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_entered_this_turn,
         parse_youve_this_turn,
         parse_event_state_conditions,
+        parse_mana_spent_vs_source_pt,
         parse_combat_context_conditions,
         parse_unless_pay_condition,
     ))
@@ -766,6 +767,67 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         parse_no_on_battlefield,
     ))
     .parse(input)
+}
+
+/// CR 601.2h + CR 603.4: Intervening-if comparing mana spent on the triggering
+/// spell against this creature's power and/or toughness.
+///
+/// Recognizes "the amount of mana you spent is [comparator] this creature's
+/// power or toughness" (SOS Increment reminder text). The natural-language
+/// "or" means *either* threshold — `A > (P or T)` is satisfied when `A > P`
+/// **or** `A > T`. Produces `StaticCondition::Or` over two
+/// `QuantityComparison`s so the existing `Or`/`QuantityComparison` bridge in
+/// `static_condition_to_trigger_condition` carries it directly to
+/// `TriggerCondition::Or`. Also accepts the single-property forms
+/// ("greater than this creature's power", "greater than this creature's
+/// toughness") so future cards using only one side compose cleanly.
+fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject: "the amount of mana you spent is "
+    let (rest, _) = tag("the amount of mana you spent is ").parse(input)?;
+    // Comparator: "greater than " / "less than " / "equal to "
+    let (rest, comparator) = alt((
+        value(Comparator::GT, tag("greater than ")),
+        value(Comparator::LT, tag("less than ")),
+        value(Comparator::EQ, tag("equal to ")),
+    ))
+    .parse(rest)?;
+    // Object: subject × property, with optional "or [other property]" disjunction.
+    let (rest, _) = alt((
+        tag("this creature's "),
+        tag("this permanent's "),
+        tag("~'s "),
+    ))
+    .parse(rest)?;
+    let (rest, first) = alt((
+        value(QuantityRef::SelfPower, tag("power")),
+        value(QuantityRef::SelfToughness, tag("toughness")),
+    ))
+    .parse(rest)?;
+    // Optional " or <other property>" disjunction — natural-language OR.
+    let (rest, second) = opt(preceded(
+        tag(" or "),
+        alt((
+            value(QuantityRef::SelfPower, tag("power")),
+            value(QuantityRef::SelfToughness, tag("toughness")),
+        )),
+    ))
+    .parse(rest)?;
+
+    let lhs = QuantityExpr::Ref {
+        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+    };
+    let build = |qty: QuantityRef| StaticCondition::QuantityComparison {
+        lhs: lhs.clone(),
+        comparator,
+        rhs: QuantityExpr::Ref { qty },
+    };
+    let result = match second {
+        Some(second) if second != first => StaticCondition::Or {
+            conditions: vec![build(first), build(second)],
+        },
+        _ => build(first),
+    };
+    Ok((rest, result))
 }
 
 /// CR 509.1b + CR 506.5: Parse combat-context conditions.
@@ -2336,6 +2398,79 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    /// CR 601.2h + CR 603.4: Increment intervening-if parses as `Or` over two
+    /// `QuantityComparison`s — mana spent vs self power, mana spent vs self toughness.
+    #[test]
+    fn test_parse_condition_increment_mana_spent_vs_self_pt() {
+        let (rest, c) = parse_condition(
+            "if the amount of mana you spent is greater than this creature's power or toughness",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::Or { conditions } => {
+                assert_eq!(conditions.len(), 2, "expected two disjuncts");
+                let expected_lhs = QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                };
+                let pt_refs: Vec<QuantityRef> = conditions
+                    .iter()
+                    .filter_map(|cond| match cond {
+                        StaticCondition::QuantityComparison {
+                            lhs,
+                            comparator,
+                            rhs,
+                        } => {
+                            assert_eq!(*lhs, expected_lhs);
+                            assert_eq!(*comparator, Comparator::GT);
+                            match rhs {
+                                QuantityExpr::Ref { qty } => Some(qty.clone()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert!(pt_refs.contains(&QuantityRef::SelfPower));
+                assert!(pt_refs.contains(&QuantityRef::SelfToughness));
+            }
+            other => panic!("expected Or, got {other:?}"),
+        }
+    }
+
+    /// Single-property form ("greater than this creature's power") parses as
+    /// a single `QuantityComparison`, not an `Or`.
+    #[test]
+    fn test_parse_condition_mana_spent_vs_self_power_only() {
+        let (rest, c) = parse_condition(
+            "if the amount of mana you spent is greater than this creature's power",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentOnTriggeringSpell
+                    }
+                );
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(
+                    rhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::SelfPower
+                    }
+                );
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
         }
     }
 }

@@ -370,6 +370,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "ColoredManaCount::is_empty")]
     pub colors_spent_to_cast: ColoredManaCount,
 
+    /// CR 601.2h: Total amount of mana actually spent to cast this object
+    /// (sum across all colors and generic). Populated during casting
+    /// finalization alongside `mana_spent_to_cast` and `colors_spent_to_cast`.
+    /// Consumed by `QuantityRef::ManaSpentOnTriggeringSpell` for intervening-if
+    /// comparisons like Increment (CR 603.4). Cleared in lockstep with
+    /// `mana_spent_to_cast` (see `triggers::clear_transient_cast_state`).
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub mana_spent_to_cast_amount: u32,
+
     /// CR 702.26b / CR 702.26d: Phasing status. A phased-out permanent stays
     /// on the battlefield but is treated as though it doesn't exist for almost
     /// all rules queries. Defaults to `PhasedIn` for replay compatibility.
@@ -532,6 +541,7 @@ impl GameObject {
             cast_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
+            mana_spent_to_cast_amount: 0,
             phase_status: PhaseStatus::PhasedIn,
         }
     }
@@ -697,6 +707,11 @@ impl GameObject {
                 .map(|t| t.as_subtype_str().to_string()),
         }
     }
+}
+
+/// Serde helper: skip serialization when a `u32` field is zero.
+fn is_zero_u32_field(n: &u32) -> bool {
+    *n == 0
 }
 
 #[cfg(test)]

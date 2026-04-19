@@ -49,6 +49,54 @@ pub fn resolve_quantity(
     }
 }
 
+/// CR 603.4: Resolve a `QuantityExpr` for an intervening-if check using an
+/// explicit `trigger_event` override. `state.current_trigger_event` is not
+/// populated at trigger-detection time (it is only set at resolution via
+/// `stack::resolve_top`), so event-scoped refs like
+/// `QuantityRef::ManaSpentOnTriggeringSpell` would otherwise resolve to 0
+/// during the detection-time condition check. This function substitutes the
+/// event-scoped value from the passed `event` before delegating to
+/// `resolve_quantity` for everything else.
+pub(crate) fn resolve_quantity_for_trigger_check(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    event: Option<&crate::types::events::GameEvent>,
+) -> i32 {
+    // Fast path: when current_trigger_event is already set (resolution-time
+    // re-check in stack::resolve_top), the default resolver reads it directly.
+    if state.current_trigger_event.is_some() {
+        return resolve_quantity(state, expr, controller, source_id);
+    }
+    if let Some(event) = event {
+        if let Some(value) = resolve_event_scoped_ref(state, expr, event) {
+            return value;
+        }
+    }
+    resolve_quantity(state, expr, controller, source_id)
+}
+
+/// Substitute an event-scoped `QuantityRef` (currently only
+/// `ManaSpentOnTriggeringSpell`) using an explicit event, returning `None`
+/// when the expression does not reference an event-scoped quantity.
+fn resolve_event_scoped_ref(
+    state: &GameState,
+    expr: &QuantityExpr,
+    event: &crate::types::events::GameEvent,
+) -> Option<i32> {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentOnTriggeringSpell,
+        } => {
+            let id = crate::game::targeting::extract_source_from_event(event)?;
+            let obj = state.objects.get(&id)?;
+            Some(obj.mana_spent_to_cast_amount as i32)
+        }
+        _ => None,
+    }
+}
+
 /// Resolve a QuantityExpr with access to the ability's targets.
 ///
 /// Required for TargetPower which needs to look up the targeted permanent.
@@ -502,6 +550,18 @@ fn resolve_ref(
                     .map(|obj| obj.mana_cost.mana_value() as i32)
                     .or_else(|| state.lki_cache.get(&id).map(|lki| lki.mana_value as i32))
             })
+            .unwrap_or(0),
+        // CR 601.2h + CR 603.4: Total mana actually spent to cast the triggering
+        // spell. Reads `GameObject::mana_spent_to_cast_amount` on the spell
+        // object referenced by `current_trigger_event`. Distinct from
+        // `EventContextSourceManaValue` which reads the printed mana value —
+        // the two differ for X spells, alternative costs, and cost reduction.
+        QuantityRef::ManaSpentOnTriggeringSpell => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| state.objects.get(&id))
+            .map(|obj| obj.mana_spent_to_cast_amount as i32)
             .unwrap_or(0),
         // CR 305.6: Count distinct basic land types among lands the controller controls.
         QuantityRef::BasicLandTypeCount => {
