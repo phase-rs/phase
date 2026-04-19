@@ -137,6 +137,8 @@ pub enum KeywordKind {
     Station,
     /// CR 702.xxx: Paradigm (Strixhaven) — see `Keyword::Paradigm`.
     Paradigm,
+    /// CR 702.94: Miracle — see `Keyword::Miracle`.
+    Miracle,
     Unknown,
 }
 
@@ -411,6 +413,15 @@ pub enum Keyword {
     Morph(ManaCost),
     Megamorph(ManaCost),
     Madness(ManaCost),
+    /// CR 702.94a: Miracle {cost} — static ability linked (CR 603.11) to a
+    /// triggered ability. Static: "You may reveal this card from your hand as
+    /// you draw it if it's the first card you've drawn this turn." Linked
+    /// trigger: "When you reveal this card this way, you may cast it by paying
+    /// [cost] rather than its mana cost." Runtime support: draw event populates
+    /// `first_card_drawn_this_turn`; on that event a `WaitingFor::MiracleReveal`
+    /// prompt is offered for miracle-keyworded cards. Casting uses
+    /// `CastingVariant::Miracle` with the miracle mana cost.
+    Miracle(ManaCost),
     Dash(ManaCost),
     Emerge(ManaCost),
     /// CR 702.138: Escape — cast from graveyard for an alternative cost,
@@ -690,6 +701,7 @@ impl Keyword {
             Keyword::Blitz(_) => KeywordKind::Blitz,
             Keyword::Disturb(_) => KeywordKind::Disturb,
             Keyword::Foretell(_) => KeywordKind::Foretell,
+            Keyword::Miracle(_) => KeywordKind::Miracle,
             Keyword::Plot(_) => KeywordKind::Plot,
             Keyword::Gift(_) => KeywordKind::Gift,
             Keyword::Outlast(_) => KeywordKind::Outlast,
@@ -963,6 +975,7 @@ impl FromStr for Keyword {
                 "morph" => return Ok(Keyword::Morph(parse_keyword_mana_cost(p))),
                 "megamorph" => return Ok(Keyword::Megamorph(parse_keyword_mana_cost(p))),
                 "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
+                "miracle" => return Ok(Keyword::Miracle(parse_keyword_mana_cost(p))),
                 "dash" => return Ok(Keyword::Dash(parse_keyword_mana_cost(p))),
                 "emerge" => return Ok(Keyword::Emerge(parse_keyword_mana_cost(p))),
                 "harmonize" => return Ok(Keyword::Harmonize(parse_keyword_mana_cost(p))),
@@ -1447,6 +1460,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Morph" => Ok(Keyword::Morph(mana(data)?)),
         "Megamorph" => Ok(Keyword::Megamorph(mana(data)?)),
         "Madness" => Ok(Keyword::Madness(mana(data)?)),
+        "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
         "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
         // CR 702.138: MTGJSON provides bare "Escape" with no structured cost data.
@@ -2068,5 +2082,29 @@ mod tests {
             non_unknown >= 50,
             "Expected 50+ known keywords, got {non_unknown}"
         );
+    }
+
+    /// CR 702.94: Miracle — FromStr accepts "miracle {cost}" and produces
+    /// `Keyword::Miracle(ManaCost)` with the parsed cost.
+    #[test]
+    fn miracle_from_str_parses_cost() {
+        let parsed = Keyword::from_str("Miracle:{1}{W}").unwrap();
+        let expected_cost = parse_keyword_mana_cost("{1}{W}");
+        match parsed {
+            Keyword::Miracle(cost) => {
+                assert_eq!(cost, expected_cost, "Miracle cost mismatch");
+            }
+            other => panic!("expected Keyword::Miracle, got {other:?}"),
+        }
+    }
+
+    /// CR 702.94: Miracle keyword discriminant and serde round-trip.
+    #[test]
+    fn miracle_kind_and_round_trip() {
+        let kw = Keyword::Miracle(parse_keyword_mana_cost("{1}{W}"));
+        assert_eq!(kw.kind(), KeywordKind::Miracle);
+        let json = serde_json::to_value(&kw).unwrap();
+        let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(kw, deserialized, "round-trip failed for {json}");
     }
 }

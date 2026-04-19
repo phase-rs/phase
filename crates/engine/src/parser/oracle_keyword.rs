@@ -608,6 +608,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Morph(_) => "morph".to_string(),
         Keyword::Megamorph(_) => "megamorph".to_string(),
         Keyword::Madness(_) => "madness".to_string(),
+        Keyword::Miracle(_) => "miracle".to_string(),
         Keyword::Dash(_) => "dash".to_string(),
         Keyword::Emerge(_) => "emerge".to_string(),
         Keyword::Escape { .. } => "escape".to_string(),
