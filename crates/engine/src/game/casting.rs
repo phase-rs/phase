@@ -3076,10 +3076,7 @@ fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
                     // CR 117.1: "can cast spells only any time they could cast a sorcery"
                     // Blocked when NOT at sorcery speed: active player's main phase + empty stack.
                     let at_sorcery_speed = state.active_player == caster
-                        && matches!(
-                            state.phase,
-                            Phase::PreCombatMain | Phase::PostCombatMain
-                        )
+                        && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
                         && state.stack.is_empty();
                     !at_sorcery_speed
                 }

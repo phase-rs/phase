@@ -1270,7 +1270,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 
     // CR 117.1: "can cast spells only any time they could cast a sorcery"
     // E.g., Teferi, Time Raveler; Teferi, Mage of Zhalfir.
-    if nom_primitives::scan_contains(tp.lower, "can cast spells only any time they could cast a sorcery") {
+    if nom_primitives::scan_contains(
+        tp.lower,
+        "can cast spells only any time they could cast a sorcery",
+    ) {
         let who = strip_casting_prohibition_subject(tp.lower)
             .map(|(scope, _)| scope)
             .unwrap_or(ProhibitionScope::Opponents);
