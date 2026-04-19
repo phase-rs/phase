@@ -2155,7 +2155,6 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
     let trigger_registry = build_trigger_registry();
     let static_registry = build_static_registry();
     let valid_subtypes = collect_valid_subtypes(card_db);
-    let handled_features = resolver_handled_features();
 
     // Count distinct keyword variants across all cards (excluding Unknown)
     let keyword_count = {
@@ -2212,7 +2211,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
 
         // Flag cards whose parsed features have no runtime resolver. Without
         // this, a card can parse cleanly yet silently do nothing on resolution.
-        check_resolver_features(face, &handled_features, &mut missing);
+        check_resolver_features(face, &mut missing);
 
         // Flag cards where the parser consumed Oracle text without producing
         // a corresponding parse item. Uses the parse tree computed above.
@@ -2788,15 +2787,11 @@ fn check_silent_drops(
 /// no runtime handler — the card reads as supported yet silently does
 /// nothing on resolution. Folding this into the supported predicate catches
 /// those resolver gaps at coverage time.
-fn check_resolver_features(
-    face: &CardFace,
-    handled: &HashSet<&'static str>,
-    missing: &mut Vec<String>,
-) {
-    let mut features = HashSet::new();
+fn check_resolver_features(face: &CardFace, missing: &mut Vec<String>) {
+    let mut features = HashMap::new();
     extract_card_features(face, &mut features);
-    for feat in features {
-        if !handled.contains(feat.as_str()) {
+    for (feat, support) in features {
+        if support == FeatureSupport::Unhandled {
             let label = format!("ResolverFeature:{feat}");
             if !missing.contains(&label) {
                 missing.push(label);
@@ -3312,10 +3307,11 @@ pub struct ResolverAuditSummary {
 pub fn audit_resolver_features(card_db: &CardDatabase) -> ResolverAuditSummary {
     let trigger_registry = build_trigger_registry();
     let static_registry = build_static_registry();
-    let handled = resolver_handled_features();
 
-    // Collect per-card features, only for supported cards
-    let mut feature_freq: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    // Feature frequency: tag -> (count, example_cards, is_handled).
+    // `is_handled` is derived from the compiler-checked classifier functions
+    // (`condition_feature`, `quantity_ref_feature`, ...) at extraction time.
+    let mut feature_freq: HashMap<String, (usize, Vec<String>, bool)> = HashMap::new();
     let mut flagged_cards = Vec::new();
     let mut total_audited = 0;
 
@@ -3326,14 +3322,15 @@ pub fn audit_resolver_features(card_db: &CardDatabase) -> ResolverAuditSummary {
         }
         total_audited += 1;
 
-        let mut features = HashSet::new();
+        let mut features: HashMap<String, FeatureSupport> = HashMap::new();
         extract_card_features(face, &mut features);
 
         // Record frequency for ALL features
-        for feat in &features {
+        for (feat, support) in &features {
+            let handled = *support == FeatureSupport::Handled;
             let entry = feature_freq
                 .entry(feat.clone())
-                .or_insert_with(|| (0, Vec::new()));
+                .or_insert_with(|| (0, Vec::new(), handled));
             entry.0 += 1;
             if entry.1.len() < 3 {
                 entry.1.push(key.to_string());
@@ -3343,8 +3340,8 @@ pub fn audit_resolver_features(card_db: &CardDatabase) -> ResolverAuditSummary {
         // Flag unhandled features
         let unhandled: Vec<String> = features
             .iter()
-            .filter(|f| !handled.contains(f.as_str()))
-            .cloned()
+            .filter(|(_, s)| **s == FeatureSupport::Unhandled)
+            .map(|(f, _)| f.clone())
             .collect();
 
         if !unhandled.is_empty() {
@@ -3358,10 +3355,10 @@ pub fn audit_resolver_features(card_db: &CardDatabase) -> ResolverAuditSummary {
     // Build frequency tables
     let mut all_features: Vec<FeatureUsage> = feature_freq
         .iter()
-        .map(|(feat, (count, examples))| FeatureUsage {
+        .map(|(feat, (count, examples, handled))| FeatureUsage {
             feature: feat.clone(),
             card_count: *count,
-            handled: handled.contains(feat.as_str()),
+            handled: *handled,
             example_cards: examples.clone(),
         })
         .collect();
@@ -3456,8 +3453,80 @@ fn is_ability_supported(def: &AbilityDefinition) -> bool {
     true
 }
 
+/// Whether the resolver currently handles a given parsed feature.
+///
+/// The classification is produced by exhaustive `match` arms on the underlying
+/// AST enums (`AbilityCondition`, `QuantityRef`, `PlayerFilter`, `StaticCondition`)
+/// and on the closed set of structural ability-tree sites. Adding a new enum
+/// variant is a compile error until the variant is classified here, which
+/// prevents the silent drift that the old hand-maintained string registry
+/// suffered from: a newly-parsed feature must be explicitly marked `Handled`
+/// or `Unhandled` before the code builds.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+enum FeatureSupport {
+    Handled,
+    Unhandled,
+}
+
+/// Structural ability-tree sites — non-enum-variant features emitted during
+/// feature extraction. Adding a variant here forces `structural_feature()` to
+/// classify it, and any new emit site must route through this enum.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+enum StructuralFeature {
+    Condition,
+    ElseAbility,
+    RepeatFor,
+    ForwardResult,
+    Duration,
+    OptionalFor,
+    MultiTarget,
+    Distribute,
+    AbilityModal,
+    SpellModal,
+    AdditionalCost,
+    CostReduction,
+    TriggerCondition,
+}
+
+impl StructuralFeature {
+    fn tag(self) -> &'static str {
+        use StructuralFeature::*;
+        match self {
+            Condition => "structural:condition",
+            ElseAbility => "structural:else_ability",
+            RepeatFor => "structural:repeat_for",
+            ForwardResult => "structural:forward_result",
+            Duration => "structural:duration",
+            OptionalFor => "structural:optional_for",
+            MultiTarget => "structural:multi_target",
+            Distribute => "structural:distribute",
+            AbilityModal => "structural:ability_modal",
+            SpellModal => "structural:spell_modal",
+            AdditionalCost => "structural:additional_cost",
+            CostReduction => "structural:cost_reduction",
+            TriggerCondition => "structural:trigger_condition",
+        }
+    }
+
+    /// All existing structural sites are handled by `resolve_ability_chain`
+    /// and related resolver entry points. New variants must classify here
+    /// before they compile.
+    fn support(self) -> FeatureSupport {
+        use StructuralFeature::*;
+        match self {
+            Condition | ElseAbility | RepeatFor | ForwardResult | Duration | OptionalFor
+            | MultiTarget | Distribute | AbilityModal | SpellModal | AdditionalCost
+            | CostReduction | TriggerCondition => FeatureSupport::Handled,
+        }
+    }
+}
+
 /// Extract structural feature tags from a card's entire parsed data.
-fn extract_card_features(face: &CardFace, features: &mut HashSet<String>) {
+///
+/// Each tag is mapped to `FeatureSupport::Handled` or `FeatureSupport::Unhandled`
+/// via exhaustive matches on the source enum, so adding a new variant is a
+/// compile error until it is explicitly classified.
+fn extract_card_features(face: &CardFace, features: &mut HashMap<String, FeatureSupport>) {
     for def in &face.abilities {
         extract_ability_features(def, features);
     }
@@ -3467,7 +3536,7 @@ fn extract_card_features(face: &CardFace, features: &mut HashSet<String>) {
         }
         // Trigger-level condition (intervening-if)
         if trig.condition.is_some() {
-            features.insert("structural:trigger_condition".into());
+            emit_structural(features, StructuralFeature::TriggerCondition);
         }
     }
     for repl in &face.replacements {
@@ -3482,18 +3551,28 @@ fn extract_card_features(face: &CardFace, features: &mut HashSet<String>) {
         }
     }
     if face.additional_cost.is_some() {
-        features.insert("structural:additional_cost".into());
+        emit_structural(features, StructuralFeature::AdditionalCost);
     }
     if face.modal.is_some() {
-        features.insert("structural:spell_modal".into());
+        emit_structural(features, StructuralFeature::SpellModal);
     }
 }
 
+fn emit_structural(features: &mut HashMap<String, FeatureSupport>, s: StructuralFeature) {
+    features.insert(s.tag().to_string(), s.support());
+}
+
 /// Extract features from a static condition.
-fn extract_static_condition_features(cond: &StaticCondition, features: &mut HashSet<String>) {
+fn extract_static_condition_features(
+    cond: &StaticCondition,
+    features: &mut HashMap<String, FeatureSupport>,
+) {
+    // Compound conditions recurse; every other variant emits a single tag with
+    // its compiler-checked handled/unhandled classification.
     match cond {
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
-            features.insert("static_condition:QuantityComparison".into());
+            let (name, support) = static_condition_feature(cond);
+            features.insert(format!("static_condition:{name}"), support);
             extract_quantity_features(lhs, features);
             extract_quantity_features(rhs, features);
         }
@@ -3503,82 +3582,78 @@ fn extract_static_condition_features(cond: &StaticCondition, features: &mut Hash
             }
         }
         _ => {
-            // Use debug formatting to capture variant name for less common conditions
-            let variant = format!("{cond:?}");
-            let name = variant
-                .split(&[' ', '(', '{'][..])
-                .next()
-                .unwrap_or("Unknown");
-            features.insert(format!("static_condition:{name}"));
+            // All other variants (including `Not`) emit a single tag. The
+            // classifier carries compiler-enforced handled/unhandled status.
+            let (name, support) = static_condition_feature(cond);
+            features.insert(format!("static_condition:{name}"), support);
         }
     }
 }
 
 /// Recursively extract structural feature tags from an ability definition tree.
-fn extract_ability_features(def: &AbilityDefinition, features: &mut HashSet<String>) {
+fn extract_ability_features(
+    def: &AbilityDefinition,
+    features: &mut HashMap<String, FeatureSupport>,
+) {
     // Condition
     if let Some(ref cond) = def.condition {
-        features.insert("structural:condition".into());
-        let variant = condition_variant_name(cond);
-        features.insert(format!("condition:{variant}"));
+        emit_structural(features, StructuralFeature::Condition);
+        let (name, support) = condition_feature(cond);
+        features.insert(format!("condition:{name}"), support);
         extract_condition_quantity_features(cond, features);
     }
 
     // Else ability
     if let Some(ref else_ab) = def.else_ability {
-        features.insert("structural:else_ability".into());
+        emit_structural(features, StructuralFeature::ElseAbility);
         extract_ability_features(else_ab, features);
     }
 
     // Repeat-for
     if let Some(ref qty) = def.repeat_for {
-        features.insert("structural:repeat_for".into());
+        emit_structural(features, StructuralFeature::RepeatFor);
         extract_quantity_features(qty, features);
     }
 
     // Forward result
     if def.forward_result {
-        features.insert("structural:forward_result".into());
+        emit_structural(features, StructuralFeature::ForwardResult);
     }
 
     // Player scope
     if let Some(ref scope) = def.player_scope {
-        let variant = format!("{scope:?}");
-        let name = variant
-            .split(&[' ', '(', '{'][..])
-            .next()
-            .unwrap_or("Unknown");
-        features.insert(format!("player_scope:{name}"));
+        let (name, support) = player_filter_feature(scope);
+        features.insert(format!("player_scope:{name}"), support);
     }
 
     // Optional-for (opponent may)
     if def.optional_for.is_some() {
-        features.insert("structural:optional_for".into());
+        emit_structural(features, StructuralFeature::OptionalFor);
     }
 
     // Multi-target
     if def.multi_target.is_some() {
-        features.insert("structural:multi_target".into());
+        emit_structural(features, StructuralFeature::MultiTarget);
     }
 
     // Distribute
     if def.distribute.is_some() {
-        features.insert("structural:distribute".into());
+        emit_structural(features, StructuralFeature::Distribute);
     }
 
     // Modal (on ability, not spell-level)
     if def.modal.is_some() {
-        features.insert("structural:ability_modal".into());
+        emit_structural(features, StructuralFeature::AbilityModal);
     }
 
     // Cost reduction
     if def.cost_reduction.is_some() {
-        features.insert("structural:cost_reduction".into());
+        emit_structural(features, StructuralFeature::CostReduction);
     }
 
     // Duration (continuous effects from spells/abilities)
     if def.duration.is_some() {
-        features.insert("structural:duration".into());
+        emit_structural(features, StructuralFeature::Duration);
     }
 
     // Effect-level quantity refs (e.g., DealDamage with dynamic amount)
@@ -3594,7 +3669,10 @@ fn extract_ability_features(def: &AbilityDefinition, features: &mut HashSet<Stri
 }
 
 /// Extract QuantityRef variants from within conditions.
-fn extract_condition_quantity_features(cond: &AbilityCondition, features: &mut HashSet<String>) {
+fn extract_condition_quantity_features(
+    cond: &AbilityCondition,
+    features: &mut HashMap<String, FeatureSupport>,
+) {
     if let AbilityCondition::QuantityCheck { lhs, rhs, .. } = cond {
         extract_quantity_features(lhs, features);
         extract_quantity_features(rhs, features);
@@ -3602,12 +3680,12 @@ fn extract_condition_quantity_features(cond: &AbilityCondition, features: &mut H
 }
 
 /// Extract QuantityRef variant tags from a QuantityExpr.
-fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashSet<String>) {
+fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, FeatureSupport>) {
     match qty {
         QuantityExpr::Fixed { .. } => {}
         QuantityExpr::Ref { qty: qref } => {
-            let variant = quantity_ref_variant_name(qref);
-            features.insert(format!("quantity_ref:{variant}"));
+            let (name, support) = quantity_ref_feature(qref);
+            features.insert(format!("quantity_ref:{name}"), support);
         }
         QuantityExpr::Offset { inner, .. } | QuantityExpr::Multiply { inner, .. } => {
             extract_quantity_features(inner, features);
@@ -3619,7 +3697,10 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashSet<String>)
 }
 
 /// Extract QuantityRef variants from effect parameters (DealDamage amount, etc.).
-fn extract_effect_quantity_features(effect: &Effect, features: &mut HashSet<String>) {
+fn extract_effect_quantity_features(
+    effect: &Effect,
+    features: &mut HashMap<String, FeatureSupport>,
+) {
     match effect {
         Effect::DealDamage { amount, .. } => extract_quantity_features(amount, features),
         Effect::Draw { count, .. } => extract_quantity_features(count, features),
@@ -3644,194 +3725,165 @@ fn extract_effect_quantity_features(effect: &Effect, features: &mut HashSet<Stri
     }
 }
 
-/// Map an AbilityCondition to its variant name string.
-fn condition_variant_name(cond: &AbilityCondition) -> &'static str {
-    match cond {
-        AbilityCondition::AdditionalCostPaid => "AdditionalCostPaid",
-        AbilityCondition::AdditionalCostPaidInstead => "AdditionalCostPaidInstead",
-        AbilityCondition::AdditionalCostNotPaid => "AdditionalCostNotPaid",
-        AbilityCondition::IfYouDo => "IfYouDo",
-        AbilityCondition::WhenYouDo => "WhenYouDo",
-        AbilityCondition::CastFromZone { .. } => "CastFromZone",
-        AbilityCondition::RevealedHasCardType { .. } => "RevealedHasCardType",
-        AbilityCondition::SourceDidNotEnterThisTurn => "SourceDidNotEnterThisTurn",
-        AbilityCondition::CastVariantPaid { .. } => "CastVariantPaid",
-        AbilityCondition::CastVariantPaidInstead { .. } => "CastVariantPaidInstead",
-        AbilityCondition::IfAPlayerDoes => "IfAPlayerDoes",
-        AbilityCondition::QuantityCheck { .. } => "QuantityCheck",
-        AbilityCondition::HasMaxSpeed => "HasMaxSpeed",
-        AbilityCondition::TargetHasKeywordInstead { .. } => "TargetHasKeywordInstead",
-        AbilityCondition::TargetMatchesFilter { .. } => "TargetMatchesFilter",
-        AbilityCondition::SourceMatchesFilter { .. } => "SourceMatchesFilter",
-        AbilityCondition::IsYourTurn { .. } => "IsYourTurn",
-        AbilityCondition::ZoneChangedThisWay { .. } => "ZoneChangedThisWay",
-        AbilityCondition::SourceIsTapped { .. } => "SourceIsTapped",
-        AbilityCondition::ConditionInstead { .. } => "ConditionInstead",
-        AbilityCondition::And { .. } => "And",
-    }
-}
-
-/// Map a QuantityRef to its variant name string.
-fn quantity_ref_variant_name(qref: &QuantityRef) -> &'static str {
-    match qref {
-        QuantityRef::HandSize => "HandSize",
-        QuantityRef::LifeTotal => "LifeTotal",
-        QuantityRef::GraveyardSize => "GraveyardSize",
-        QuantityRef::LifeAboveStarting => "LifeAboveStarting",
-        QuantityRef::StartingLifeTotal => "StartingLifeTotal",
-        QuantityRef::Speed => "Speed",
-        QuantityRef::ObjectCount { .. } => "ObjectCount",
-        QuantityRef::PlayerCount { .. } => "PlayerCount",
-        QuantityRef::CountersOnSelf { .. } => "CountersOnSelf",
-        QuantityRef::CountersOnTarget { .. } => "CountersOnTarget",
-        QuantityRef::CountersOnObjects { .. } => "CountersOnObjects",
-        QuantityRef::Variable { .. } => "Variable",
-        QuantityRef::SelfPower => "SelfPower",
-        QuantityRef::SelfToughness => "SelfToughness",
-        QuantityRef::Aggregate { .. } => "Aggregate",
-        QuantityRef::TargetPower => "TargetPower",
-        QuantityRef::TargetLifeTotal => "TargetLifeTotal",
-        QuantityRef::Devotion { .. } => "Devotion",
-        QuantityRef::DistinctCardTypesInZone { .. } => "DistinctCardTypesInZone",
-        QuantityRef::DistinctCardTypesExiledBySource => "DistinctCardTypesExiledBySource",
-        QuantityRef::ZoneCardCount { .. } => "ZoneCardCount",
-        QuantityRef::BasicLandTypeCount => "BasicLandTypeCount",
-        QuantityRef::PreviousEffectAmount => "PreviousEffectAmount",
-        QuantityRef::TrackedSetSize => "TrackedSetSize",
-        QuantityRef::ExiledFromHandThisResolution => "ExiledFromHandThisResolution",
-        QuantityRef::LifeLostThisTurn => "LifeLostThisTurn",
-        QuantityRef::EventContextAmount => "EventContextAmount",
-        QuantityRef::EventContextSourcePower => "EventContextSourcePower",
-        QuantityRef::EventContextSourceToughness => "EventContextSourceToughness",
-        QuantityRef::EventContextSourceManaValue => "EventContextSourceManaValue",
-        QuantityRef::SpellsCastThisTurn { .. } => "SpellsCastThisTurn",
-        QuantityRef::EnteredThisTurn { .. } => "EnteredThisTurn",
-        QuantityRef::CrimesCommittedThisTurn => "CrimesCommittedThisTurn",
-        QuantityRef::LifeGainedThisTurn => "LifeGainedThisTurn",
-        QuantityRef::PermanentsLeftBattlefieldThisTurn => "PermanentsLeftBattlefieldThisTurn",
-        QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn => {
-            "NonlandPermanentsLeftBattlefieldThisTurn"
-        }
-        QuantityRef::TurnsTaken => "TurnsTaken",
-        QuantityRef::ChosenNumber => "ChosenNumber",
-        QuantityRef::CreaturesDiedThisTurn => "CreaturesDiedThisTurn",
-        QuantityRef::AttackedThisTurn => "AttackedThisTurn",
-        QuantityRef::DescendedThisTurn => "DescendedThisTurn",
-        QuantityRef::SpellsCastLastTurn => "SpellsCastLastTurn",
-        QuantityRef::OpponentLifeLostThisTurn => "OpponentLifeLostThisTurn",
-        QuantityRef::CounterAddedThisTurn => "CounterAddedThisTurn",
-        QuantityRef::OpponentLifeTotal => "OpponentLifeTotal",
-        QuantityRef::OpponentHandSize => "OpponentHandSize",
-        QuantityRef::DungeonsCompleted => "DungeonsCompleted",
-        QuantityRef::TargetZoneCardCount { .. } => "TargetZoneCardCount",
-        QuantityRef::CostXPaid => "CostXPaid",
-        QuantityRef::ManaSpentOnTriggeringSpell => "ManaSpentOnTriggeringSpell",
-        QuantityRef::ManaSpentOnSelf => "ManaSpentOnSelf",
-    }
-}
-
-/// Registry of resolver features that are known to be handled.
-/// Any feature tag NOT in this set is flagged as potentially unhandled.
+/// Map an `AbilityCondition` variant to its tag name and resolver-support class.
 ///
-/// When you add resolver support for a new feature, add its tag here.
-fn resolver_handled_features() -> HashSet<&'static str> {
-    [
-        // -- Structural features handled by resolve_ability_chain --
-        "structural:condition",
-        "structural:else_ability",
-        "structural:repeat_for",
-        "structural:forward_result",
-        "structural:duration",
-        "structural:optional_for",
-        "structural:multi_target",
-        "structural:distribute",
-        "structural:ability_modal",
-        "structural:spell_modal",
-        "structural:additional_cost",
-        "structural:cost_reduction",
-        "structural:trigger_condition",
-        // -- AbilityCondition variants handled by evaluate_condition --
-        "condition:AdditionalCostPaid",
-        "condition:AdditionalCostPaidInstead",
-        "condition:AdditionalCostNotPaid",
-        "condition:IfYouDo",
-        "condition:IfAPlayerDoes",
-        "condition:WhenYouDo",
-        "condition:CastFromZone",
-        "condition:RevealedHasCardType",
-        "condition:SourceDidNotEnterThisTurn",
-        "condition:CastVariantPaid",
-        "condition:CastVariantPaidInstead",
-        "condition:QuantityCheck",
-        "condition:HasMaxSpeed",
-        "condition:TargetHasKeywordInstead",
-        // "If it's your turn" — handled by `evaluate_condition` in
-        // `crates/engine/src/game/effects/mod.rs` (matches active player).
-        "condition:IsYourTurn",
-        // CR 614.1a: "instead" wraps a general condition with swap-on-true semantics.
-        // Resolved by `evaluate_condition` (effects/mod.rs) which delegates to the
-        // inner condition, and by `resolve_ability_chain` which swaps parent/sub on
-        // ConditionInstead.
-        "condition:ConditionInstead",
-        // -- Player scope variants handled by resolve_ability_chain --
-        "player_scope:All",
-        "player_scope:Opponent",
-        "player_scope:OpponentLostLife",
-        "player_scope:OpponentGainedLife",
-        "player_scope:HighestSpeed",
-        // -- QuantityRef variants handled by resolve_quantity --
-        "quantity_ref:HandSize",
-        "quantity_ref:LifeTotal",
-        "quantity_ref:GraveyardSize",
-        "quantity_ref:LifeAboveStarting",
-        "quantity_ref:Speed",
-        "quantity_ref:ObjectCount",
-        "quantity_ref:PlayerCount",
-        "quantity_ref:CountersOnSelf",
-        "quantity_ref:CountersOnTarget",
-        "quantity_ref:CountersOnObjects",
-        "quantity_ref:Variable",
-        "quantity_ref:SelfPower",
-        "quantity_ref:SelfToughness",
-        "quantity_ref:Aggregate",
-        "quantity_ref:TargetPower",
-        "quantity_ref:TargetLifeTotal",
-        "quantity_ref:Devotion",
-        "quantity_ref:DistinctCardTypesInZone",
-        "quantity_ref:ZoneCardCount",
-        "quantity_ref:BasicLandTypeCount",
-        "quantity_ref:PreviousEffectAmount",
-        "quantity_ref:TrackedSetSize",
-        "quantity_ref:ExiledFromHandThisResolution",
-        "quantity_ref:LifeLostThisTurn",
-        "quantity_ref:EventContextAmount",
-        "quantity_ref:EventContextSourcePower",
-        "quantity_ref:EventContextSourceToughness",
-        "quantity_ref:EventContextSourceManaValue",
-        "quantity_ref:ManaSpentOnTriggeringSpell",
-        "quantity_ref:ManaSpentOnSelf",
-        "quantity_ref:SpellsCastThisTurn",
-        "quantity_ref:EnteredThisTurn",
-        "quantity_ref:CrimesCommittedThisTurn",
-        "quantity_ref:LifeGainedThisTurn",
-        "quantity_ref:CostXPaid",
-        // -- Static conditions handled by static_abilities / layers --
-        "static_condition:QuantityComparison",
-        "static_condition:DevotionGE",
-        "static_condition:IsPresent",
-        "static_condition:ChosenColorIs",
-        "static_condition:HasCounters",
-        "static_condition:ClassLevelGE",
-        "static_condition:DuringYourTurn",
-        "static_condition:SourceEnteredThisTurn",
-        "static_condition:IsRingBearer",
-        "static_condition:RingLevelAtLeast",
-        "static_condition:SourceIsTapped",
-        "static_condition:Unrecognized",
-        "static_condition:None",
-    ]
-    .into_iter()
-    .collect()
+/// Adding a new variant to `AbilityCondition` produces a compile error here
+/// until the variant is explicitly classified — this is what replaces the
+/// hand-maintained `resolver_handled_features` string set.
+fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) {
+    use FeatureSupport::*;
+    match cond {
+        // Handled by `evaluate_condition` / `resolve_ability_chain`
+        // (crates/engine/src/game/effects/mod.rs).
+        AbilityCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
+        AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
+        AbilityCondition::AdditionalCostNotPaid => ("AdditionalCostNotPaid", Handled),
+        AbilityCondition::IfYouDo => ("IfYouDo", Handled),
+        AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
+        AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
+        AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
+        AbilityCondition::SourceDidNotEnterThisTurn => ("SourceDidNotEnterThisTurn", Handled),
+        AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
+        AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
+        AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
+        AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
+        AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
+        AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
+        // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::IsYourTurn { .. } => ("IsYourTurn", Handled),
+        // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
+        AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
+        // Variants below are parsed but have no runtime resolver today.
+        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
+        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
+        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Unhandled),
+        AbilityCondition::SourceIsTapped { .. } => ("SourceIsTapped", Unhandled),
+        AbilityCondition::And { .. } => ("And", Unhandled),
+    }
+}
+
+/// Map a `QuantityRef` variant to its tag name and resolver-support class.
+/// Handled variants are resolved by `game::quantity::resolve_quantity`.
+fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
+    use FeatureSupport::*;
+    match qref {
+        QuantityRef::HandSize => ("HandSize", Handled),
+        QuantityRef::LifeTotal => ("LifeTotal", Handled),
+        QuantityRef::GraveyardSize => ("GraveyardSize", Handled),
+        QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
+        QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
+        QuantityRef::Speed => ("Speed", Handled),
+        QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
+        QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
+        QuantityRef::CountersOnSelf { .. } => ("CountersOnSelf", Handled),
+        QuantityRef::CountersOnTarget { .. } => ("CountersOnTarget", Handled),
+        QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
+        QuantityRef::Variable { .. } => ("Variable", Handled),
+        QuantityRef::SelfPower => ("SelfPower", Handled),
+        QuantityRef::SelfToughness => ("SelfToughness", Handled),
+        QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
+        QuantityRef::TargetPower => ("TargetPower", Handled),
+        QuantityRef::TargetLifeTotal => ("TargetLifeTotal", Handled),
+        QuantityRef::Devotion { .. } => ("Devotion", Handled),
+        QuantityRef::DistinctCardTypesInZone { .. } => ("DistinctCardTypesInZone", Handled),
+        QuantityRef::DistinctCardTypesExiledBySource => {
+            ("DistinctCardTypesExiledBySource", Unhandled)
+        }
+        QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
+        QuantityRef::BasicLandTypeCount => ("BasicLandTypeCount", Handled),
+        QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
+        QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
+        QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
+        QuantityRef::LifeLostThisTurn => ("LifeLostThisTurn", Handled),
+        QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
+        QuantityRef::EventContextSourcePower => ("EventContextSourcePower", Handled),
+        QuantityRef::EventContextSourceToughness => ("EventContextSourceToughness", Handled),
+        QuantityRef::EventContextSourceManaValue => ("EventContextSourceManaValue", Handled),
+        QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
+        QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
+        QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::LifeGainedThisTurn => ("LifeGainedThisTurn", Handled),
+        QuantityRef::PermanentsLeftBattlefieldThisTurn => {
+            ("PermanentsLeftBattlefieldThisTurn", Unhandled)
+        }
+        QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn => {
+            ("NonlandPermanentsLeftBattlefieldThisTurn", Unhandled)
+        }
+        QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
+        QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
+        QuantityRef::CreaturesDiedThisTurn => ("CreaturesDiedThisTurn", Unhandled),
+        QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Unhandled),
+        QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
+        QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
+        QuantityRef::OpponentLifeLostThisTurn => ("OpponentLifeLostThisTurn", Unhandled),
+        QuantityRef::CounterAddedThisTurn => ("CounterAddedThisTurn", Unhandled),
+        QuantityRef::OpponentLifeTotal => ("OpponentLifeTotal", Unhandled),
+        QuantityRef::OpponentHandSize => ("OpponentHandSize", Unhandled),
+        QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
+        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Unhandled),
+        QuantityRef::CostXPaid => ("CostXPaid", Handled),
+        QuantityRef::ManaSpentOnTriggeringSpell => ("ManaSpentOnTriggeringSpell", Handled),
+        QuantityRef::ManaSpentOnSelf => ("ManaSpentOnSelf", Handled),
+    }
+}
+
+/// Map a `PlayerFilter` variant to its tag name and resolver-support class.
+/// Handled variants are consumed by `resolve_ability_chain`'s player-scope expansion.
+fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport) {
+    use FeatureSupport::*;
+    match scope {
+        PlayerFilter::All => ("All", Handled),
+        PlayerFilter::Opponent => ("Opponent", Handled),
+        PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
+        PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
+        PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
+        // Previously emitted via Debug formatting; never appeared in the handled set.
+        PlayerFilter::Controller => ("Controller", Unhandled),
+        PlayerFilter::ZoneChangedThisWay => ("ZoneChangedThisWay", Unhandled),
+    }
+}
+
+/// Map a `StaticCondition` variant to its tag name and resolver-support class.
+/// Handled variants are consumed by `static_abilities` / `layers` evaluation.
+fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSupport) {
+    use FeatureSupport::*;
+    match cond {
+        StaticCondition::QuantityComparison { .. } => ("QuantityComparison", Handled),
+        StaticCondition::DevotionGE { .. } => ("DevotionGE", Handled),
+        StaticCondition::IsPresent { .. } => ("IsPresent", Handled),
+        StaticCondition::ChosenColorIs { .. } => ("ChosenColorIs", Handled),
+        StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
+        StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
+        StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
+        StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
+        StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
+        StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),
+        StaticCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        StaticCondition::Unrecognized { .. } => ("Unrecognized", Handled),
+        StaticCondition::None => ("None", Handled),
+        // Variants below are parsed but not classified as handled by the prior registry.
+        StaticCondition::HasMaxSpeed => ("HasMaxSpeed", Unhandled),
+        StaticCondition::SpeedGE { .. } => ("SpeedGE", Unhandled),
+        StaticCondition::And { .. } => ("And", Unhandled),
+        StaticCondition::Or { .. } => ("Or", Unhandled),
+        StaticCondition::Not { .. } => ("Not", Unhandled),
+        StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Unhandled),
+        StaticCondition::SourceAttackingAlone => ("SourceAttackingAlone", Unhandled),
+        StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Unhandled),
+        StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Unhandled),
+        StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Unhandled),
+        StaticCondition::IsMonarch => ("IsMonarch", Unhandled),
+        StaticCondition::HasCityBlessing => ("HasCityBlessing", Unhandled),
+        StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
+        StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
+        StaticCondition::UnlessPay { .. } => ("UnlessPay", Unhandled),
+        StaticCondition::ControlsCommander => ("ControlsCommander", Unhandled),
+        StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Unhandled),
+        StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Unhandled),
+        StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),
+        StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
+        StaticCondition::SourceInZone { .. } => ("SourceInZone", Unhandled),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6950,17 +7002,21 @@ mod tests {
             .player_scope(PlayerFilter::HighestSpeed),
         );
 
-        let mut features = HashSet::new();
+        let mut features: HashMap<String, FeatureSupport> = HashMap::new();
         extract_card_features(&face, &mut features);
 
-        assert!(features.contains("condition:HasMaxSpeed"));
-        assert!(features.contains("player_scope:HighestSpeed"));
-        assert!(features.contains("quantity_ref:Speed"));
-
-        let handled = resolver_handled_features();
-        assert!(handled.contains("condition:HasMaxSpeed"));
-        assert!(handled.contains("player_scope:HighestSpeed"));
-        assert!(handled.contains("quantity_ref:Speed"));
+        assert_eq!(
+            features.get("condition:HasMaxSpeed"),
+            Some(&FeatureSupport::Handled)
+        );
+        assert_eq!(
+            features.get("player_scope:HighestSpeed"),
+            Some(&FeatureSupport::Handled)
+        );
+        assert_eq!(
+            features.get("quantity_ref:Speed"),
+            Some(&FeatureSupport::Handled)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -7179,15 +7235,17 @@ mod tests {
     }
 
     /// Regression: `AbilityCondition::IsYourTurn` is handled at runtime by
-    /// `evaluate_condition`; it must appear in the resolver-handled feature
-    /// set so cards like Rapier Wit aren't flagged as having an unhandled
-    /// resolver feature.
+    /// `evaluate_condition`; the compiler-checked classifier must report it
+    /// as `Handled` so cards like Rapier Wit aren't flagged as having an
+    /// unhandled resolver feature.
     #[test]
     fn is_your_turn_condition_is_marked_handled() {
-        let handled = resolver_handled_features();
-        assert!(
-            handled.contains("condition:IsYourTurn"),
-            "condition:IsYourTurn must be in resolver_handled_features",
+        let (name, support) = condition_feature(&AbilityCondition::IsYourTurn { negated: false });
+        assert_eq!(name, "IsYourTurn");
+        assert_eq!(
+            support,
+            FeatureSupport::Handled,
+            "AbilityCondition::IsYourTurn must classify as Handled",
         );
     }
 }
