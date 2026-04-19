@@ -4060,6 +4060,61 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
     }
 }
 
+/// CR 702.xxx: Prepare (Strixhaven) — ETB-rider combinator for the
+/// `"<self> enters prepared"` shorthand. Structurally analogous to other
+/// enters-rider shorthand (`enters tapped`, `enters transformed`), except
+/// prepared is a triggered-ability shorthand rather than a replacement effect:
+/// it synthesizes a self-ETB trigger whose effect is
+/// `BecomePrepared { target: SelfRef }`.
+///
+/// Accepts three self-subject forms: `"~ enters prepared"`,
+/// `"this creature enters prepared"`, and `"it enters prepared"` — composed
+/// as a nom `alt` over the subject prefix, followed by the shared
+/// `" enters prepared"` tail and an optional trailing period. Returns
+/// `Some(def)` only when the line is exactly this shorthand, so normal
+/// trigger parsing handles `"When ~ enters, ..."` forms unchanged. Assign
+/// when WotC publishes SOS CR update.
+pub fn try_parse_enters_prepared_rider(line: &str) -> Option<TriggerDefinition> {
+    use crate::types::ability::{AbilityDefinition, Effect};
+    use nom::combinator::{eof, opt};
+    use nom::sequence::{preceded, terminated};
+
+    let lower = line.to_lowercase();
+    // Compose from nom primitives: subject-prefix alt + shared suffix + eof.
+    let parser_fn = |input| -> OracleResult<'_, ()> {
+        value(
+            (),
+            terminated(
+                preceded(
+                    alt((
+                        tag::<_, _, VerboseError<&str>>("~"),
+                        tag("this creature"),
+                        tag("it"),
+                    )),
+                    (tag(" enters prepared"), opt(tag("."))),
+                ),
+                eof,
+            ),
+        )
+        .parse(input)
+    };
+    parser_fn(lower.trim()).ok()?;
+
+    let effect_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::BecomePrepared {
+            target: TargetFilter::SelfRef,
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .trigger_zones(vec![Zone::Battlefield])
+        .execute(effect_def)
+        .description(line.to_string());
+    Some(trigger)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4078,6 +4133,51 @@ mod tests {
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.execute.is_some());
+    }
+
+    // B1: ETB-rider combinator for "~ enters prepared.". Must synthesize the
+    // same TriggerDefinition the old verbatim-match block produced; must NOT
+    // match when extra trailing content is present (so normal trigger parsing
+    // still handles "When ~ enters, ...").
+    #[test]
+    fn enters_prepared_rider_builds_self_etb_trigger() {
+        let def =
+            try_parse_enters_prepared_rider("~ enters prepared.").expect("rider should match");
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let exec = def.execute.as_deref().expect("execute set");
+        assert!(matches!(
+            exec.effect.as_ref(),
+            Effect::BecomePrepared {
+                target: TargetFilter::SelfRef
+            }
+        ));
+    }
+
+    #[test]
+    fn enters_prepared_rider_tolerates_missing_period() {
+        assert!(try_parse_enters_prepared_rider("~ enters prepared").is_some());
+        // Whitespace is trimmed before dispatch.
+        assert!(try_parse_enters_prepared_rider("  ~ enters prepared.  ").is_some());
+    }
+
+    #[test]
+    fn enters_prepared_rider_accepts_all_subject_forms() {
+        // Raw Oracle text uses "This creature enters prepared." (Adventurous
+        // Eater); the ETB-rider combinator must accept this without relying
+        // on `normalize_self_refs` having run first (the dispatch site in
+        // `oracle.rs` operates on pre-normalized lines).
+        assert!(try_parse_enters_prepared_rider("This creature enters prepared.").is_some());
+        assert!(try_parse_enters_prepared_rider("It enters prepared.").is_some());
+        assert!(try_parse_enters_prepared_rider("~ enters prepared.").is_some());
+    }
+
+    #[test]
+    fn enters_prepared_rider_rejects_non_rider_shapes() {
+        assert!(try_parse_enters_prepared_rider("when ~ enters, draw a card.").is_none());
+        assert!(try_parse_enters_prepared_rider("~ enters tapped.").is_none());
+        assert!(try_parse_enters_prepared_rider("~ enters prepared and tapped.").is_none());
     }
 
     #[test]
