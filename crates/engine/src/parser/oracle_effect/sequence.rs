@@ -437,6 +437,19 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("you untap ")),
         value((), tag("that player ")),
     )))
+    .or(alt((
+        // CR 608.2k: "it [conjugated-verb]" is always subject + predicate, never a
+        // noun phrase. "doesn't"/"can't"/"cannot" are restriction predicates; "gains"/
+        // "gets"/"has" are continuous modification predicates. Safe to split because
+        // a bare pronoun followed by a conjugated verb cannot be part of a noun phrase.
+        value((), tag::<_, _, VerboseError<&str>>("it doesn't ")),
+        value((), tag("it can't ")),
+        value((), tag("it cannot ")),
+        value((), tag("it gains ")),
+        value((), tag("it gets ")),
+        value((), tag("it has ")),
+        value((), tag("it loses ")),
+    )))
     .parse(s)
     .is_ok();
     if has_verb_prefix {

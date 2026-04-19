@@ -700,6 +700,40 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(filter, false);
     }
 
+    // CR 119.5: Life-total possessive subjects — "your life total",
+    // "each player's life total", etc. Map to the player filter so that
+    // try_parse_set_life_total can produce the correct SetLifeTotal target.
+    if alt((
+        tag::<_, _, VerboseError<&str>>("your life total"),
+        tag("your life totals"),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return subject_filter_application(TargetFilter::Controller, false);
+    }
+    if alt((
+        tag::<_, _, VerboseError<&str>>("each player's life total"),
+        tag("all players' life totals"),
+        tag("all players' life total"),
+        tag("each player's life totals"),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return subject_filter_application(TargetFilter::Any, false);
+    }
+    if alt((
+        tag::<_, _, VerboseError<&str>>("that player's life total"),
+        tag("the player's life total"),
+        tag("their life total"),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return subject_filter_application(TargetFilter::ParentTarget, false);
+    }
+
     None
 }
 
