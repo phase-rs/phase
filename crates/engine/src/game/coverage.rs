@@ -602,6 +602,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::ManaSpentOnTriggeringSpell => "mana spent on triggering spell".into(),
         QuantityRef::ManaSpentOnSelf => "mana spent on self".into(),
+        QuantityRef::ColorsSpentOnSelf => "colors of mana spent on self".into(),
     }
 }
 
@@ -3827,6 +3828,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::ManaSpentOnTriggeringSpell => ("ManaSpentOnTriggeringSpell", Handled),
         QuantityRef::ManaSpentOnSelf => ("ManaSpentOnSelf", Handled),
+        QuantityRef::ColorsSpentOnSelf => ("ColorsSpentOnSelf", Handled),
     }
 }
 

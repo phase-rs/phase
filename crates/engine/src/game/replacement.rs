@@ -1679,10 +1679,19 @@ enum ReplacementBranch {
 
 /// Extract ETB counter data from a replacement ability's effect.
 /// Handles `PutCounter` and `AddCounter` effects, returning (counter_type, count) pairs.
+///
+/// `event` scopes the quantity resolution: for a `ZoneChange` to the battlefield
+/// the entering object is threaded through `QuantityContext::entering`, so
+/// self-scoped spell refs (`ColorsSpentOnSelf`, `ManaSpentOnTriggeringSpell`-style
+/// lookups) resolve against the spell that is ETB'ing rather than the static
+/// replacement source. CR 614.1c treats these as replacement effects; CR 601.2h
+/// guarantees `colors_spent_to_cast` is still populated at this point (the clear
+/// happens later in `process_triggers`).
 fn extract_etb_counters(
     ability: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
+    event: &ProposedEvent,
 ) -> Vec<(String, u32)> {
     let exec = match ability {
         Some(e) => e,
@@ -1700,8 +1709,22 @@ fn extract_etb_counters(
             ..
         } => {
             // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
-            // object. `CostXPaid` reads the spell's paid X (stashed by
-            // `finalize_cast`); other dynamic refs resolve against current state.
+            // object for ETB replacements. `CostXPaid` reads the spell's paid X
+            // (stashed by `finalize_cast`); `ColorsSpentOnSelf` reads the spell's
+            // per-color mana tally; other dynamic refs resolve against current
+            // state.
+            let entering = match event {
+                ProposedEvent::ZoneChange {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } => Some(*object_id),
+                _ => None,
+            };
+            let ctx = crate::game::quantity::QuantityContext {
+                entering,
+                source: source_id,
+            };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
                 other => {
@@ -1710,7 +1733,7 @@ fn extract_etb_counters(
                         .get(&source_id)
                         .map(|obj| obj.controller)
                         .unwrap_or(PlayerId(0));
-                    crate::game::quantity::resolve_quantity(state, other, controller, source_id)
+                    crate::game::quantity::resolve_quantity_with_ctx(state, other, controller, ctx)
                         .max(0) as u32
                 }
             };
@@ -1761,6 +1784,7 @@ fn event_modifiers_for_ability(
     ability: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
+    event: &ProposedEvent,
 ) -> EventModifiers {
     let tapped = ability.is_some_and(|def| {
         matches!(
@@ -1770,7 +1794,7 @@ fn event_modifiers_for_ability(
             }
         )
     });
-    let counters = extract_etb_counters(ability, state, source_id);
+    let counters = extract_etb_counters(ability, state, source_id, event);
     let redirect = ability.and_then(|def| match &*def.effect {
         Effect::ChangeZone { destination, .. } => Some(*destination),
         _ => None,
@@ -1826,7 +1850,7 @@ fn optional_decline_is_noop(
         return false;
     }
 
-    let mods = event_modifiers_for_ability(Some(def), state, source_id);
+    let mods = event_modifiers_for_ability(Some(def), state, source_id, event);
     let tap_already = !mods.enters_tapped || *enter_tapped;
     let counters_already = mods.etb_counters.iter().all(|(ct, n)| {
         enter_with_counters
@@ -1902,7 +1926,7 @@ fn apply_single_replacement(
             };
             (
                 repl_def.event.clone(),
-                event_modifiers_for_ability(ability, state, rid.source),
+                event_modifiers_for_ability(ability, state, rid.source, &proposed),
                 post_effect,
             )
         }
@@ -4044,5 +4068,109 @@ mod tests {
         assert_eq!(after.get(ManaColor::Red), 1);
         assert_eq!(after.get(ManaColor::Black), 0);
         assert_eq!(after.get(ManaColor::Green), 0);
+    }
+
+    /// CR 614.1c + CR 601.2h + CR 202.2: Wildgrowth Archaic's replacement places
+    /// `N` P1P1 counters on the entering creature, where N is the number of
+    /// distinct colors of mana spent to cast it. The replacement source is the
+    /// Archaic itself (static permanent on battlefield); the quantity must
+    /// resolve against the *entering* object's `colors_spent_to_cast`, not the
+    /// source's. This test builds that exact scenario and asserts the resulting
+    /// `ZoneChange.enter_with_counters` carries `("P1P1", 3)` for a 3-color cast.
+    #[test]
+    fn colors_spent_on_self_resolves_against_entering_object() {
+        use crate::types::ability::{AbilityKind, Effect, QuantityExpr, QuantityRef, TargetFilter};
+        use crate::types::mana::ManaColor;
+
+        let archaic_id = ObjectId(10);
+        let creature_id = ObjectId(20);
+
+        let etb_counter_ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: "P1P1".to_string(),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ColorsSpentOnSelf,
+                },
+            },
+        );
+
+        let creature_filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You),
+        );
+
+        let repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(etb_counter_ability)
+            .valid_card(creature_filter);
+
+        let mut state = test_state_with_object(archaic_id, Zone::Battlefield, vec![repl]);
+
+        // Entering creature spell with 3 distinct colors tallied.
+        let mut spell = crate::game::game_object::GameObject::new(
+            creature_id,
+            CardId(99),
+            PlayerId(0),
+            "3-color creature".to_string(),
+            Zone::Stack,
+        );
+        spell
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        spell.colors_spent_to_cast.add(ManaColor::White, 1);
+        spell.colors_spent_to_cast.add(ManaColor::Blue, 1);
+        spell.colors_spent_to_cast.add(ManaColor::Red, 1);
+        state.objects.insert(creature_id, spell);
+
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(creature_id, Zone::Stack, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ZoneChange {
+                enter_with_counters,
+                ..
+            }) => {
+                assert_eq!(
+                    enter_with_counters,
+                    vec![("P1P1".to_string(), 3u32)],
+                    "expected 3 P1P1 counters (3 distinct colors spent)"
+                );
+            }
+            other => panic!("expected Execute(ZoneChange), got {:?}", other),
+        }
+    }
+
+    /// Regression: when `QuantityRef::ColorsSpentOnSelf` is used outside an ETB
+    /// context (no entering object), it resolves against the static source. This
+    /// keeps `CountersOnSelf`-style refs working for static abilities that inspect
+    /// their own source without reach-around via the replacement pipeline.
+    #[test]
+    fn colors_spent_on_self_falls_back_to_source_without_entering() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(10);
+        let mut obj = crate::game::game_object::GameObject::new(
+            source,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        obj.colors_spent_to_cast.add(ManaColor::Green, 1);
+        obj.colors_spent_to_cast.add(ManaColor::Red, 1);
+        state.objects.insert(source, obj);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ColorsSpentOnSelf,
+        };
+        // No entering object — resolves against `source` directly.
+        let n = crate::game::quantity::resolve_quantity(&state, &expr, PlayerId(0), source);
+        assert_eq!(n, 2);
     }
 }

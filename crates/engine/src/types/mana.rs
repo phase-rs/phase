@@ -615,6 +615,13 @@ impl ColoredManaCount {
     pub fn is_empty(&self) -> bool {
         self.white == 0 && self.blue == 0 && self.black == 0 && self.red == 0 && self.green == 0
     }
+
+    /// CR 202.2: Number of distinct colors with a non-zero tally.
+    /// Used by `QuantityRef::ColorsSpentOnSelf` for "X is the number of colors
+    /// of mana spent to cast it" patterns (Wildgrowth Archaic family).
+    pub fn distinct_colors(&self) -> usize {
+        ManaColor::ALL.iter().filter(|c| self.get(**c) > 0).count()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -21,6 +21,31 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+/// Scope information for quantity resolution.
+///
+/// Some `QuantityRef` variants need to distinguish between "the static ability
+/// source" and "the object entering the battlefield" — e.g., Wildgrowth
+/// Archaic's `ColorsSpentOnSelf` during an ETB replacement refers to the
+/// *entering* creature's paid colors, not the Archaic itself. Most callers
+/// resolve against the source only and go through `resolve_quantity`; the
+/// replacement pipeline threads a richer context via `resolve_quantity_with_ctx`.
+#[derive(Debug, Clone, Copy)]
+pub struct QuantityContext {
+    /// The object entering the battlefield, when in an ETB-scoped replacement.
+    /// `None` outside that context.
+    pub entering: Option<ObjectId>,
+    /// The static ability source (always set).
+    pub source: ObjectId,
+}
+
+impl QuantityContext {
+    /// Object to resolve "self"-scoped spell refs (e.g., colors spent to cast)
+    /// against: the entering object when in ETB scope, else the static source.
+    fn self_object(&self) -> ObjectId {
+        self.entering.unwrap_or(self.source)
+    }
+}
+
 /// Resolve a QuantityExpr to a concrete integer value.
 ///
 /// `controller` is the player who controls the ability (used for relative filters).
@@ -31,20 +56,38 @@ pub fn resolve_quantity(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> i32 {
+    resolve_quantity_with_ctx(
+        state,
+        expr,
+        controller,
+        QuantityContext {
+            entering: None,
+            source: source_id,
+        },
+    )
+}
+
+/// Resolve a QuantityExpr with an explicit `QuantityContext` so variants like
+/// `ColorsSpentOnSelf` can distinguish entering-object scope from static-source
+/// scope. Used by the replacement pipeline for ETB-counter effects.
+pub fn resolve_quantity_with_ctx(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    ctx: QuantityContext,
+) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => {
-            resolve_ref(state, qty, controller, source_id, &[], None, None)
-        }
+        QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, ctx, &[], None, None),
         QuantityExpr::HalfRounded { inner, rounding } => {
-            let base = resolve_quantity(state, inner, controller, source_id);
+            let base = resolve_quantity_with_ctx(state, inner, controller, ctx);
             half_rounded(base, *rounding)
         }
         QuantityExpr::Offset { inner, offset } => {
-            resolve_quantity(state, inner, controller, source_id) + offset
+            resolve_quantity_with_ctx(state, inner, controller, ctx) + offset
         }
         QuantityExpr::Multiply { factor, inner } => {
-            factor * resolve_quantity(state, inner, controller, source_id)
+            factor * resolve_quantity_with_ctx(state, inner, controller, ctx)
         }
     }
 }
@@ -111,7 +154,10 @@ pub fn resolve_quantity_with_targets(
             state,
             qty,
             ability.controller,
-            ability.source_id,
+            QuantityContext {
+                entering: None,
+                source: ability.source_id,
+            },
             &ability.targets,
             ability.chosen_x,
             Some(ability),
@@ -143,9 +189,18 @@ pub(crate) fn resolve_quantity_scoped(
 ) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => {
-            resolve_ref(state, qty, scope_player, source_id, &[], None, None)
-        }
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            scope_player,
+            QuantityContext {
+                entering: None,
+                source: source_id,
+            },
+            &[],
+            None,
+            None,
+        ),
         QuantityExpr::HalfRounded { inner, rounding } => {
             let base = resolve_quantity_scoped(state, inner, source_id, scope_player);
             half_rounded(base, *rounding)
@@ -176,11 +231,12 @@ fn resolve_ref(
     state: &GameState,
     qty: &QuantityRef,
     controller: PlayerId,
-    source_id: ObjectId,
+    ctx: QuantityContext,
     targets: &[TargetRef],
     chosen_x: Option<u32>,
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    let source_id = ctx.source;
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
     // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
@@ -567,11 +623,23 @@ fn resolve_ref(
         // object. Used by spell effects that reference their own cost at
         // resolution time (Molten Note). The `mana_spent_to_cast_amount`
         // field persists through resolution (not cleared by
-        // `clear_transient_cast_state`).
+        // `clear_transient_cast_state`). Resolves against the entering object
+        // when in an ETB-replacement context, else the static source.
         QuantityRef::ManaSpentOnSelf => state
             .objects
-            .get(&source_id)
+            .get(&ctx.self_object())
             .map(|obj| obj.mana_spent_to_cast_amount as i32)
+            .unwrap_or(0),
+        // CR 601.2h + CR 202.2: Number of distinct colors of mana spent to cast
+        // the "self" object. Resolves against the entering object when in an
+        // ETB-replacement context (threaded by `extract_etb_counters`), else
+        // the static source. Reads `GameObject::colors_spent_to_cast`, which
+        // is populated by `pay_mana_cost` during casting and survives until
+        // `process_triggers` clears it after trigger collection.
+        QuantityRef::ColorsSpentOnSelf => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| obj.colors_spent_to_cast.distinct_colors() as i32)
             .unwrap_or(0),
         // CR 305.6: Count distinct basic land types among lands the controller controls.
         QuantityRef::BasicLandTypeCount => {

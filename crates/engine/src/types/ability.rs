@@ -1585,6 +1585,16 @@ pub enum QuantityRef {
     /// ability on a permanent, this returns the cost paid to cast the
     /// permanent — typically useful only for self-referential spell effects.
     ManaSpentOnSelf,
+    /// CR 601.2h + CR 202.2: Number of distinct colors of mana spent to cast
+    /// the source object itself. Counts colors of `GameObject::colors_spent_to_cast`
+    /// with a non-zero tally. Used by Wildgrowth Archaic ("that creature enters
+    /// with X additional +1/+1 counters on it, where X is the number of colors
+    /// of mana spent to cast it") and similar patterns.
+    ///
+    /// Resolution scope: when used inside an ETB-counter replacement effect,
+    /// resolves against the entering object (via `QuantityContext::entering`);
+    /// otherwise resolves against the static source.
+    ColorsSpentOnSelf,
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
