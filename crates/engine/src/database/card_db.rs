@@ -221,6 +221,9 @@ fn map_layout_str(s: &str) -> Option<LayoutKind> {
         "split" => Some(LayoutKind::Split),
         "flip" => Some(LayoutKind::Flip),
         "omen" => Some(LayoutKind::Omen),
+        // CR 702.xxx: Prepare (Strixhaven) — Adventure-family frame. Assign
+        // when WotC publishes SOS CR update.
+        "prepare" => Some(LayoutKind::Prepare),
         _ => None,
     }
 }

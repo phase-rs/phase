@@ -53,6 +53,8 @@ fn build_export_layout(
             LayoutKind::Meld => CardLayout::Meld(face_a, face_b),
             LayoutKind::Adventure => CardLayout::Adventure(face_a, face_b),
             LayoutKind::Modal => CardLayout::Modal(face_a, face_b),
+            // CR 702.xxx: Prepare (Strixhaven) — Adventure-family frame layout.
+            LayoutKind::Prepare => CardLayout::Prepare(face_a, face_b),
             LayoutKind::Single => CardLayout::Single(face_a),
         }
     } else {

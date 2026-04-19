@@ -17,6 +17,17 @@ use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+/// CR 702.xxx: Prepared-permanent marker payload (Strixhaven).
+///
+/// Carried as `GameObject::prepared: Option<PreparedState>`. `Some(_)` means
+/// the permanent is currently prepared and its controller may cast a copy of
+/// its prepare-spell face; `None` means not prepared. The struct is
+/// intentionally empty — extensibility (e.g. "prepared since turn N" for
+/// future card support) is preserved without promoting the current encoding
+/// to a bool. Assign full CR number when WotC publishes SOS CR update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PreparedState;
+
 /// CR 702.26b / CR 702.26c: Whether a permanent is phased in (normal) or
 /// phased out (treated as though it doesn't exist). CR 702.26d: the phasing
 /// event doesn't change the object's zone — status is the sole encoding.
@@ -297,6 +308,19 @@ pub struct GameObject {
     #[serde(default)]
     pub monstrous: bool,
 
+    /// CR 702.xxx: Prepared (Strixhaven) designation. Present only on a
+    /// permanent whose printed-card layout is `CardLayout::Prepare(a, b)`.
+    /// While prepared, the controller may activate a synthesized priority-time
+    /// cast-offer that creates a token spell-copy of face `b` on the stack
+    /// (CR 707.10 copy semantics); casting unprepares (reminder text: "Doing
+    /// so unprepares it."). Cleared by `reset_for_battlefield_exit` (CR 400.7 —
+    /// a permanent that leaves the battlefield becomes a new object with no
+    /// memory of its previous existence). `Option<PreparedState>` over a bool
+    /// per project idiom (no bool flags). Assign when WotC publishes SOS CR
+    /// update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared: Option<PreparedState>,
+
     /// CR 702.171b: Saddled designation. A permanent stays saddled until the end
     /// of the turn or it leaves the battlefield. Not a copiable value — purely
     /// a marker for saddle-triggered abilities and "saddled Mount" filters.
@@ -498,6 +522,7 @@ impl GameObject {
             detained_by: std::collections::HashSet::new(),
             is_suspected: false,
             monstrous: false,
+            prepared: None,
             is_saddled: false,
             assigns_damage_from_toughness: false,
             assigns_damage_as_though_unblocked: false,
@@ -523,6 +548,10 @@ impl GameObject {
         self.is_suspected = false;
         self.is_renowned = false;
         self.monstrous = false;
+        // CR 702.xxx: Prepared (Strixhaven) is a new-object-on-entry reset, per
+        // CR 400.7. A re-entering permanent has no memory of a prior prepared
+        // state. Assign when WotC publishes SOS CR update.
+        self.prepared = None;
         self.is_saddled = false;
         self.chosen_attributes.clear();
         self.cast_variant_paid = None;
@@ -553,6 +582,11 @@ impl GameObject {
         self.is_renowned = false;
         // CR 702.171b: Saddled clears when the Mount leaves the battlefield.
         self.is_saddled = false;
+        // CR 702.xxx: Prepared (Strixhaven) is a battlefield-only designation —
+        // clears on BF exit, paralleling monstrous/suspected. CR 400.7: a
+        // re-entering permanent is a new object with no memory of its previous
+        // prepared state. Assign when WotC publishes SOS CR update.
+        self.prepared = None;
         // CR 107.3m: The paid-X value is tied to the spell-resolution that brought
         // this permanent to the battlefield. When the permanent leaves, the value
         // is no longer meaningful; a re-cast will re-populate it via `finalize_cast`.

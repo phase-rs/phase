@@ -34,6 +34,9 @@ pub enum LayoutKind {
     Meld,
     Adventure,
     Modal,
+    /// CR 702.xxx: Prepare (Strixhaven) — Adventure-family two-face layout.
+    /// Assign when WotC publishes SOS CR update.
+    Prepare,
 }
 
 pub fn map_layout(layout_str: &str) -> LayoutKind {
@@ -45,6 +48,9 @@ pub fn map_layout(layout_str: &str) -> LayoutKind {
         "meld" => LayoutKind::Meld,
         "adventure" => LayoutKind::Adventure,
         "modal_dfc" => LayoutKind::Modal,
+        // CR 702.xxx: Prepare frame (Strixhaven) — two-face card whose face `b`
+        // is a "prepare spell". Assign when WotC publishes SOS CR update.
+        "prepare" => LayoutKind::Prepare,
         _ => LayoutKind::Single,
     }
 }
@@ -95,7 +101,8 @@ pub fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
         | CardLayout::Meld(a, b)
         | CardLayout::Adventure(a, b)
         | CardLayout::Modal(a, b)
-        | CardLayout::Omen(a, b) => vec![a, b],
+        | CardLayout::Omen(a, b)
+        | CardLayout::Prepare(a, b) => vec![a, b],
         CardLayout::Specialize(base, variants) => {
             let mut faces = vec![base];
             faces.extend(variants);

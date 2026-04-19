@@ -116,6 +116,11 @@ pub enum LayoutKind {
     Adventure,
     Modal,
     Omen,
+    /// CR 702.xxx: Prepare (Strixhaven) frame mechanic — a two-face card whose
+    /// face `b` is a "prepare spell" (Sorcery/Instant). When face `a` is
+    /// prepared, a copy of face `b` can be cast. Structurally an Adventure
+    /// analog. Assign when WotC publishes SOS CR update.
+    Prepare,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +133,11 @@ pub enum CardLayout {
     Adventure(CardFace, CardFace),
     Modal(CardFace, CardFace),
     Omen(CardFace, CardFace),
+    /// CR 702.xxx: Prepare (Strixhaven) — face `a` is the creature, face `b` is
+    /// the prepare-spell (Sorcery/Instant). When the creature is prepared, its
+    /// controller may cast a copy of face `b`. Assign when WotC publishes SOS
+    /// CR update.
+    Prepare(CardFace, CardFace),
     Specialize(CardFace, Vec<CardFace>),
 }
 
@@ -148,6 +158,7 @@ impl CardRules {
             | CardLayout::Adventure(face, _)
             | CardLayout::Modal(face, _)
             | CardLayout::Omen(face, _)
+            | CardLayout::Prepare(face, _)
             | CardLayout::Specialize(face, _) => &face.name,
         }
     }
@@ -161,7 +172,8 @@ impl CardRules {
             | CardLayout::Meld(a, b)
             | CardLayout::Adventure(a, b)
             | CardLayout::Modal(a, b)
-            | CardLayout::Omen(a, b) => vec![&a.name, &b.name],
+            | CardLayout::Omen(a, b)
+            | CardLayout::Prepare(a, b) => vec![&a.name, &b.name],
             CardLayout::Specialize(base, variants) => {
                 let mut names = vec![base.name.as_str()];
                 for v in variants {

@@ -305,6 +305,9 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                             CardLayout::Modal(..) => Some(LayoutKind::Modal),
                             CardLayout::Meld(..) => Some(LayoutKind::Meld),
                             CardLayout::Omen(..) => Some(LayoutKind::Omen),
+                            // CR 702.xxx: Prepare (Strixhaven) — treat like Adventure for
+                            // back-face layout tracking. Assign when WotC publishes SOS CR update.
+                            CardLayout::Prepare(..) => Some(LayoutKind::Prepare),
                             _ => None,
                         })
                         .or_else(|| {
@@ -331,6 +334,9 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                         CardLayout::Modal(_, back) => Some((LayoutKind::Modal, back)),
                         CardLayout::Meld(_, back) => Some((LayoutKind::Meld, back)),
                         CardLayout::Omen(_, back) => Some((LayoutKind::Omen, back)),
+                        // CR 702.xxx: Prepare (Strixhaven) — face `b` is the prepare spell
+                        // (Sorcery/Instant), held in back_face for runtime copy-cast access.
+                        CardLayout::Prepare(_, back) => Some((LayoutKind::Prepare, back)),
                         _ => None,
                     })
                     .or_else(|| {

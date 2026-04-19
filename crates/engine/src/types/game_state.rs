@@ -279,6 +279,15 @@ pub enum ExileLinkKind {
     UntilSourceLeaves { return_zone: Zone },
     /// Track cards "exiled with" a source without creating an automatic return.
     TrackedBySource,
+    /// CR 702.xxx: Paradigm (Strixhaven) — this exile entry marks the card as a
+    /// paradigm source. The identified `player` is the one for whom Paradigm
+    /// armed at first resolution; at the start of each of that player's first
+    /// main phases, a turn-based offer lets them cast a copy of this card
+    /// without paying its mana cost (CR 601.2h + CR 707.10). The exiled card
+    /// itself stays in exile across turns — the offer produces a token spell
+    /// copy on the stack (CR 707.10f), not a re-cast of the original. Assign
+    /// when WotC publishes SOS CR update.
+    ParadigmSource { player: PlayerId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +295,20 @@ pub struct ExileLink {
     pub exiled_id: ObjectId,
     pub source_id: ObjectId,
     pub kind: ExileLinkKind,
+}
+
+/// CR 702.xxx: Paradigm (Strixhaven) first-resolution record.
+///
+/// Stored in `GameState::paradigm_primed`. Each entry gates "first" against
+/// the `(player, card_name)` pair: subsequent resolutions of the same card
+/// name by the same player never re-arm Paradigm (the reminder text says
+/// "After you **first** resolve a spell with this name"). Name, not ObjectId,
+/// is the key per reminder wording — a different physical card with the same
+/// printed name still counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParadigmPrime {
+    pub player: PlayerId,
+    pub card_name: String,
 }
 
 /// Tracks commander damage dealt to a specific player by a specific commander.
@@ -1776,6 +1799,17 @@ pub struct GameState {
     #[serde(default)]
     pub exile_links: Vec<ExileLink>,
 
+    /// CR 702.xxx: Paradigm (Strixhaven) — first-resolution gate.
+    ///
+    /// Each entry records the `(player, card_name)` pair for which Paradigm
+    /// has already armed. Subsequent resolutions of any spell with the same
+    /// name by the same player do NOT re-arm (reminder: "After you **first**
+    /// resolve a spell with this name"). Entries are never cleared — Paradigm
+    /// is a once-per-name-per-player gate for the game. Assign when WotC
+    /// publishes SOS CR update.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paradigm_primed: Vec<ParadigmPrime>,
+
     /// CR 603.7: Delayed triggered abilities waiting to fire.
     #[serde(default)]
     pub delayed_triggers: Vec<DelayedTrigger>,
@@ -2203,6 +2237,7 @@ impl GameState {
             spells_cast_last_turn: None,
             pending_trigger: None,
             exile_links: Vec::new(),
+            paradigm_primed: Vec::new(),
             delayed_triggers: Vec::new(),
             tracked_object_sets: HashMap::new(),
             next_tracked_set_id: 1,
@@ -2363,6 +2398,7 @@ impl PartialEq for GameState {
             && self.spells_cast_last_turn == other.spells_cast_last_turn
             && self.pending_trigger == other.pending_trigger
             && self.exile_links == other.exile_links
+            && self.paradigm_primed == other.paradigm_primed
             && self.delayed_triggers == other.delayed_triggers
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id
