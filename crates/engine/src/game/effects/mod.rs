@@ -352,6 +352,7 @@ pub fn resolve_effect(
         Effect::WinTheGame => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
         Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
+        Effect::FlipCoins { .. } => flip_coin::resolve_flip_coins(state, ability, events),
         Effect::FlipCoinUntilLose { .. } => flip_coin::resolve_until_lose(state, ability, events),
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),

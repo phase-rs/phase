@@ -301,6 +301,13 @@ pub(super) enum ImperativeFamilyAst {
     },
     /// CR 705: Flip a coin.
     FlipCoin,
+    /// CR 705: Flip N coins. `count` is the number of flips; consolidation
+    /// passes may attach `win_effect`/`lose_effect` from a following sentence
+    /// (e.g., "for each heads …"). Emitted for "flip N coins" / "flip X coins"
+    /// where N > 1.
+    FlipCoins {
+        count: crate::types::ability::QuantityExpr,
+    },
     /// CR 705: Flip a coin until you lose a flip.
     FlipCoinUntilLose,
     /// CR 506.4: Remove a creature from combat.

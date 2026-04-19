@@ -1756,20 +1756,110 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
     })
 }
 
-/// CR 614.10: Parse "you skip your next turn" / "skip your next turn" — temporal penalty effect.
+/// CR 614.10: Parse "[subject] skip[s] [their|your] next [N] turn[s]" — temporal
+/// penalty effect. Handles:
+///   - "you skip your next turn" / "skip your next turn" → Controller, 1
+///   - "target opponent skips their next turn" → Opponent-target, 1
+///   - "target player skips their next turn" → Player-target, 1
+///   - "target opponent skips their next N turns" → Opponent-target, N
+///   - "target opponent skips their next X turns, where X is the number of
+///     coins that came up heads" → Opponent-target, 1 (the heads-count
+///     multiplier is supplied by the outer `Effect::FlipCoins` loop, which
+///     invokes this handler once per heads).
 fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
-    let _ = nom_on_lower(tp.original, tp.lower, |input| {
+    // Bare subjectless form (controller skips).
+    if nom_on_lower(tp.original, tp.lower, |input| {
         alt((
-            value((), tag("you skip your next turn")),
+            value(
+                (),
+                tag::<_, _, VerboseError<&str>>("you skip your next turn"),
+            ),
             value((), tag("skip your next turn")),
         ))
         .parse(input)
-    })?;
+    })
+    .is_some()
+    {
+        return Some(parsed_clause(Effect::SkipNextTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+        }));
+    }
 
-    Some(parsed_clause(Effect::SkipNextTurn {
-        target: TargetFilter::Controller,
-        count: QuantityExpr::Fixed { value: 1 },
-    }))
+    // Targeted form: "target {opponent|player} skips their next [N|X] turn[s]".
+    // Guard on the lowercase prefix before delegating to `parse_target`.
+    nom::combinator::peek(alt((
+        tag::<_, _, VerboseError<&str>>("target opponent "),
+        tag("target player "),
+    )))
+    .parse(tp.lower)
+    .ok()?;
+
+    // Delegate the target extraction to the canonical parser so any future
+    // target shape ("target opponent of your choice", etc.) picks it up.
+    let (target, after_target_orig) = super::oracle_target::parse_target(tp.original);
+    let after_target_lower = &tp.lower[tp.lower.len() - after_target_orig.len()..];
+
+    // Verb: " skips " / " skip " (surrounding spaces keep word boundary safe).
+    let (after_verb_lower, _) = alt((tag::<_, _, VerboseError<&str>>(" skips "), tag(" skip ")))
+        .parse(after_target_lower)
+        .ok()?;
+
+    // Possessive: "their next " / "your next ".
+    let (after_next_lower, _) = alt((
+        tag::<_, _, VerboseError<&str>>("their next "),
+        tag("your next "),
+    ))
+    .parse(after_verb_lower)
+    .ok()?;
+
+    // Optional count between "next " and "turn[s]". Default to 1 if the very
+    // next token is "turn"/"turns" (e.g. "skips their next turn"). When
+    // `parse_count_expr` succeeds it trims leading whitespace on the remainder,
+    // so match "turn[s]" without a leading-space prefix below.
+    let after_next_orig = &tp.original[tp.lower.len() - after_next_lower.len()..];
+    let (count, after_count_orig) = if let Some((expr, after_num_orig)) =
+        super::oracle_util::parse_count_expr(after_next_orig)
+    {
+        (expr, after_num_orig)
+    } else {
+        (QuantityExpr::Fixed { value: 1 }, after_next_orig)
+    };
+    let after_count_lower = &tp.lower[tp.lower.len() - after_count_orig.len()..];
+
+    // Require "turn[s]" with word-boundary termination.
+    let (after_turn_lower, _) = alt((tag::<_, _, VerboseError<&str>>("turns"), tag("turn")))
+        .parse(after_count_lower)
+        .ok()?;
+    if after_turn_lower
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric())
+    {
+        return None;
+    }
+
+    // CR 705: "where X is the number of coins that came up heads" — the heads
+    // multiplier is supplied by the outer `Effect::FlipCoins` loop (one
+    // invocation per heads), so normalize the count to 1.
+    let trailing = after_turn_lower.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+    let is_heads_tail =
+        tag::<_, _, VerboseError<&str>>("where x is the number of coins that came up heads")
+            .parse(trailing)
+            .is_ok();
+    let count = if matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { ref name },
+        } if name == "X"
+    ) && is_heads_tail
+    {
+        QuantityExpr::Fixed { value: 1 }
+    } else {
+        count
+    };
+
+    Some(parsed_clause(Effect::SkipNextTurn { target, count }))
 }
 
 /// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.6).
@@ -5349,6 +5439,29 @@ fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: Abili
             *defs[i].effect = Effect::FlipCoinUntilLose {
                 win_effect: Box::new(next),
             };
+        }
+
+        // CR 705: Consolidate FlipCoins with its following effect clause — the
+        // "for each heads …" / "skips their next X turns where X is the number of
+        // coins that came up heads" sentence. The next def is attached as the
+        // win_effect (runs once per heads). Only consolidates when the parent
+        // `FlipCoins` has no branches already set (i.e., came straight from the
+        // imperative lowering, not from a prior consolidation pass).
+        if let Effect::FlipCoins {
+            win_effect: None,
+            lose_effect: None,
+            count,
+        } = &*defs[i].effect
+        {
+            if i + 1 < defs.len() {
+                let count = count.clone();
+                let next = defs.remove(i + 1);
+                *defs[i].effect = Effect::FlipCoins {
+                    count,
+                    win_effect: Some(Box::new(next)),
+                    lose_effect: None,
+                };
+            }
         }
 
         i += 1;
@@ -14094,5 +14207,101 @@ mod tests {
             super::try_parse_named_choice("choose a creature card name"),
             Some(ChoiceType::CardName)
         );
+    }
+
+    /// CR 705 + CR 614.10: Ral Zarek, Guest Lecturer [-7] — "Flip five coins.
+    /// Target opponent skips their next X turns, where X is the number of coins
+    /// that came up heads." parses into a single `FlipCoins { count: 5,
+    /// win_effect: SkipNextTurn { opponent, 1 } }`. The heads-count multiplier
+    /// comes from the outer `FlipCoins` loop invoking the win_effect once per
+    /// heads — the inner SkipNextTurn.count is normalized to 1.
+    #[test]
+    fn ral_zarek_flip_five_coins_skip_turn_per_heads() {
+        let def = parse_effect_chain(
+            "Flip five coins. Target opponent skips their next X turns, where X is the number of coins that came up heads.",
+            AbilityKind::Activated,
+        );
+
+        let Effect::FlipCoins {
+            count,
+            win_effect,
+            lose_effect,
+        } = &*def.effect
+        else {
+            panic!("expected FlipCoins, got {:?}", def.effect);
+        };
+
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 5 },
+            "expected 5-flip count",
+        );
+        assert!(lose_effect.is_none(), "no lose_effect expected");
+
+        let win = win_effect
+            .as_ref()
+            .expect("win_effect should carry the SkipNextTurn")
+            .as_ref();
+        let Effect::SkipNextTurn {
+            target: skip_target,
+            count: skip_count,
+        } = &*win.effect
+        else {
+            panic!("expected SkipNextTurn as win_effect, got {:?}", win.effect);
+        };
+        // count normalized to 1 because outer FlipCoins already loops per heads.
+        assert_eq!(
+            skip_count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            "inner skip count must be normalized to 1",
+        );
+        assert!(
+            matches!(
+                skip_target,
+                TargetFilter::Typed(tf)
+                    if tf.controller == Some(ControllerRef::Opponent)
+            ),
+            "target must be an opponent, got {:?}",
+            skip_target
+        );
+    }
+
+    /// CR 705.1: "flip two coins" / "flips five coins" are recognized as
+    /// `FlipCoins` with the correct count; no win/lose branch when no
+    /// following clause consolidates with them.
+    #[test]
+    fn flip_n_coins_emits_flip_coins_variant() {
+        let def = parse_effect_chain("Flip two coins.", AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::FlipCoins {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                    win_effect: None,
+                    lose_effect: None,
+                }
+            ),
+            "expected FlipCoins count=2, got {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 614.10: "Target opponent skips their next turn." (no X, no flip)
+    /// parses as a standalone SkipNextTurn with count=1 and opponent target.
+    #[test]
+    fn target_opponent_skips_next_turn_parses() {
+        let def = parse_effect_chain("Target opponent skips their next turn.", AbilityKind::Spell);
+        let Effect::SkipNextTurn { target, count } = &*def.effect else {
+            panic!("expected SkipNextTurn, got {:?}", def.effect);
+        };
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+        assert!(matches!(
+            target,
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::Opponent)
+        ));
     }
 }

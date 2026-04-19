@@ -283,6 +283,7 @@ fn redundancy_delta(
         | Effect::WinTheGame
         | Effect::RollDie { .. }
         | Effect::FlipCoin { .. }
+        | Effect::FlipCoins { .. }
         | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
