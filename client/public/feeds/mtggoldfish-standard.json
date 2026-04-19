@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-05-02T00:00:00Z",
+  "updated": "2026-05-03T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -1105,32 +1105,32 @@
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Ashling, Rekindled"
+          "count": 3,
+          "name": "Breeding Pool"
         },
         {
           "count": 2,
           "name": "Bounce Off"
         },
         {
-          "count": 2,
-          "name": "Breeding Pool"
+          "count": 3,
+          "name": "Burst Lightning"
         },
         {
           "count": 4,
-          "name": "Vibrance"
+          "name": "Cavern of Souls"
         },
         {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Cori Mountain Monastery"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Deceit"
+        },
+        {
+          "count": 1,
+          "name": "Restless Vinestalk"
+        },
+        {
+          "count": 4,
+          "name": "Secluded Courtyard"
         },
         {
           "count": 4,
@@ -1141,7 +1141,7 @@
           "name": "Ill-Timed Explosion"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Island"
         },
         {
@@ -1149,7 +1149,7 @@
           "name": "Pit of Offerings"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Roaming Throne"
         },
         {
@@ -1158,10 +1158,10 @@
         },
         {
           "count": 4,
-          "name": "Secluded Courtyard"
+          "name": "Steam Vents"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Spirebluff Canal"
         },
         {
@@ -1169,44 +1169,28 @@
           "name": "Starting Town"
         },
         {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
           "count": 2,
           "name": "Sunderflock"
         },
         {
           "count": 4,
-          "name": "Cavern of Souls"
+          "name": "Vibrance"
         },
         {
-          "count": 4,
-          "name": "Burst Lightning"
+          "count": 1,
+          "name": "Stomping Ground"
         },
         {
           "count": 3,
           "name": "Winternight Stories"
         },
         {
-          "count": 2,
+          "count": 4,
           "name": "Wistfulness"
         },
         {
-          "count": 2,
+          "count": 4,
           "name": "Ashling, Rekindled"
-        },
-        {
-          "count": 1,
-          "name": "Deceit"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Wistfulness"
         }
       ],
       "sideboard": [
@@ -1220,19 +1204,15 @@
         },
         {
           "count": 1,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 1,
           "name": "Ill-Timed Explosion"
         },
         {
           "count": 1,
-          "name": "Pit of Offerings"
-        },
-        {
-          "count": 2,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
+          "name": "Catharsis"
         },
         {
           "count": 2,
@@ -1240,19 +1220,31 @@
         },
         {
           "count": 1,
-          "name": "Disdainful Stroke"
+          "name": "Sear"
+        },
+        {
+          "count": 1,
+          "name": "Ygra, Eater of All"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
         },
         {
           "count": 1,
           "name": "Spell Snare"
         },
         {
-          "count": 2,
-          "name": "Ygra, Eater of All"
+          "count": 1,
+          "name": "Spider-Sense"
         },
         {
           "count": 1,
-          "name": "Spell Pierce"
+          "name": "Sunderflock"
+        },
+        {
+          "count": 1,
+          "name": "Beza, the Bounding Spring"
         }
       ]
     },
