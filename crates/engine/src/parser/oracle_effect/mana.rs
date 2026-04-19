@@ -286,10 +286,12 @@ pub(super) fn parse_mana_production_clause(
         return None;
     }
 
-    if let Some((count, remainder)) = parse_colorless_mana_production(text) {
+    if let Some((colorless_count, remainder)) = parse_colorless_mana_production(text) {
         let remainder = remainder.trim().trim_end_matches(['.', '"']).trim();
         if remainder.is_empty() {
-            return Some(ManaProduction::Colorless { count });
+            return Some(ManaProduction::Colorless {
+                count: colorless_count,
+            });
         }
         // CR 106.1: "{C} for each [filter]" -> dynamic colorless mana count
         let remainder_lower = remainder.to_lowercase();
@@ -300,6 +302,19 @@ pub(super) fn parse_mana_production_clause(
             return Some(ManaProduction::Colorless {
                 count: QuantityExpr::Ref { qty },
             });
+        }
+        // CR 106.1: Mixed colorless + colored: {C}{W}, {C}{C}{R}, etc.
+        // (e.g. Karoo, Azorius Chancery, Grinning Ignus)
+        if let Some((colors, after_colors)) = parse_mana_production(remainder) {
+            let after_colors = after_colors.trim().trim_end_matches(['.', '"']).trim();
+            if after_colors.is_empty() {
+                if let QuantityExpr::Fixed { value: n } = colorless_count {
+                    return Some(ManaProduction::Mixed {
+                        colorless_count: n as u32,
+                        colors,
+                    });
+                }
+            }
         }
         return None;
     }

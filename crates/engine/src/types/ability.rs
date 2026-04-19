@@ -539,6 +539,12 @@ pub enum ManaProduction {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
+    /// CR 106.1: Produce a mix of colorless and colored mana (e.g. `{C}{W}`, `{C}{C}{R}`).
+    /// Used by Ravnica bounce lands (Karoo, Azorius Chancery) and similar.
+    Mixed {
+        colorless_count: u32,
+        colors: Vec<ManaColor>,
+    },
     /// Produce N mana of one chosen color from the provided set.
     AnyOneColor {
         #[serde(default = "default_quantity_one")]

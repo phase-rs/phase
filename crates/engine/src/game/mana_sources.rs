@@ -352,6 +352,23 @@ fn mana_options_from_production(
             }
             out
         }
+        // CR 106.1: Mixed colorless + colored (e.g. {C}{W}, {C}{C}{R}).
+        ManaProduction::Mixed {
+            colorless_count,
+            colors,
+        } => {
+            let mut out = Vec::new();
+            if *colorless_count > 0 {
+                out.push(ManaType::Colorless);
+            }
+            for color in colors {
+                let mana_type = mana_color_to_type(color);
+                if !out.contains(&mana_type) {
+                    out.push(mana_type);
+                }
+            }
+            out
+        }
     }
 }
 

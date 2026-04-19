@@ -238,6 +238,15 @@ fn resolve_mana_types_impl(
             .first()
             .map(|combo| combo.iter().map(mana_color_to_type).collect())
             .unwrap_or_default(),
+        // CR 106.1: Mixed colorless + colored production (e.g. {C}{W}, {C}{C}{R}).
+        ManaProduction::Mixed {
+            colorless_count,
+            colors,
+        } => {
+            let mut mana = vec![ManaType::Colorless; *colorless_count as usize];
+            mana.extend(colors.iter().map(mana_color_to_type));
+            mana
+        }
     }
 }
 

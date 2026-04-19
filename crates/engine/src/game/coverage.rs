@@ -692,6 +692,17 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
                 .collect();
             format!("one of: {}", rendered.join(", "))
         }
+        ManaProduction::Mixed {
+            colorless_count,
+            colors,
+        } => {
+            let colorless: String = (0..*colorless_count).map(|_| "{C}").collect();
+            let colored: String = colors
+                .iter()
+                .map(|c| format!("{{{}}}", fmt_mana_color_short(c)))
+                .collect();
+            format!("{colorless}{colored}")
+        }
     }
 }
 
