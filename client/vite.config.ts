@@ -46,6 +46,39 @@ function workspaceVersion(): string {
   }
 }
 
+// Single source of truth: ../data-files.json lists every shared JSON the
+// frontend fetches at runtime. Generate one `__<NAME>_URL__` define per
+// filename so adding a new file is one line in data-files.json + one line
+// in vite-env.d.ts. The same manifest drives the upload + verify loops in
+// .github/workflows/{deploy,release}.yml — see those files.
+//
+// Resolution: at deploy time, set DATA_BASE_URL to the R2 prefix; defines
+// resolve to `${BASE}/<filename>`. Local dev with no env defaults to
+// site-root paths.
+//
+// Exception: __CARD_DATA_URL__ honors a CARD_DATA_URL env override so
+// deploys can pin the WASM bundle to a content-addressed
+// `card-data-<hash>.json` URL forever.
+function dataFileDefines(): Record<string, string> {
+  const manifest = JSON.parse(
+    readFileSync(path.resolve(__dirname, "../data-files.json"), "utf-8"),
+  ) as string[];
+  const base = process.env.DATA_BASE_URL || "";
+  const defines: Record<string, string> = {
+    __APP_VERSION__: JSON.stringify(workspaceVersion()),
+    __BUILD_HASH__: JSON.stringify(gitHash()),
+    __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
+    __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
+  };
+  for (const filename of manifest) {
+    // "card-data.json" → "__CARD_DATA_URL__"
+    const token = `__${filename.replace(/\.json$/, "").replace(/-/g, "_").toUpperCase()}_URL__`;
+    const envOverride = filename === "card-data.json" ? process.env.CARD_DATA_URL : undefined;
+    defines[token] = JSON.stringify(envOverride || `${base}/${filename}`);
+  }
+  return defines;
+}
+
 export default defineConfig({
   resolve: {
     alias: {
@@ -95,45 +128,7 @@ export default defineConfig({
     }),
     compression({ algorithms: ["brotliCompress"] }),
   ],
-  define: {
-    __APP_VERSION__: JSON.stringify(workspaceVersion()),
-    __BUILD_HASH__: JSON.stringify(gitHash()),
-    // Single source of truth: DATA_BASE_URL points at the directory holding
-    // every shared JSON data file. Each `__*_URL__` resolves to a filename
-    // under that base. Default empty string = served from site root (local
-    // dev). At deploy time, set DATA_BASE_URL to the R2 staging/prod prefix.
-    //
-    // Exception: __CARD_DATA_URL__ is content-addressed (card-data-<hash>.json)
-    // so the WASM bundle pins to the exact card-data it was built against.
-    // Set CARD_DATA_URL explicitly at deploy time; otherwise falls back to
-    // the unhashed file under DATA_BASE_URL for local dev.
-    __CARD_DATA_URL__: JSON.stringify(
-      process.env.CARD_DATA_URL ||
-        `${process.env.DATA_BASE_URL || ""}/card-data.json`,
-    ),
-    __COVERAGE_DATA_URL__: JSON.stringify(
-      `${process.env.DATA_BASE_URL || ""}/coverage-data.json`,
-    ),
-    __COVERAGE_SUMMARY_URL__: JSON.stringify(
-      `${process.env.DATA_BASE_URL || ""}/coverage-summary.json`,
-    ),
-    __CARD_DATA_META_URL__: JSON.stringify(
-      `${process.env.DATA_BASE_URL || ""}/card-data-meta.json`,
-    ),
-    __SET_LIST_URL__: JSON.stringify(
-      `${process.env.DATA_BASE_URL || ""}/set-list.json`,
-    ),
-    __DECKS_URL__: JSON.stringify(
-      `${process.env.DATA_BASE_URL || ""}/decks.json`,
-    ),
-    __SCRYFALL_DATA_URL__: JSON.stringify(
-      `${process.env.DATA_BASE_URL || ""}/scryfall-data.json`,
-    ),
-    __AUDIO_BASE_URL__: JSON.stringify(
-      process.env.AUDIO_BASE_URL || "",
-    ),
-    __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
-  },
+  define: dataFileDefines(),
   worker: {
     plugins: () => [wasmEnvShim()],
   },

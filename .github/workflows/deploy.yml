@@ -126,9 +126,10 @@ jobs:
           ./scripts/gen-badge-endpoints.sh data/coverage-stats.json data/badges
 
       - name: Upload data to R2 (staging)
-        # Single source of truth: DATA_FILES lists every JSON the frontend
-        # fetches at runtime. Add a file here and it's automatically uploaded
-        # AND verified below — no separate config to forget.
+        # Single source of truth: data-files.json at the repo root lists every
+        # shared JSON the frontend fetches. Add a filename there and it is
+        # automatically picked up by vite.config.ts (defines), this upload
+        # loop, and the verify step below.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -139,25 +140,14 @@ jobs:
           # keep resolving the old hash after this deploy publishes a new one.
           npx wrangler r2 object put "phase-rs-data/staging/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
 
-          # Mutable shared JSONs. Short cache so a fresh deploy is visible
-          # immediately. Loop over a single source-of-truth list.
-          DATA_FILES=(
-            card-data.json
-            card-data-meta.json
-            card-names.json
-            coverage-data.json
-            coverage-summary.json
-            decks.json
-            scryfall-data.json
-            set-list.json
-          )
-          for f in "${DATA_FILES[@]}"; do
+          # Mutable shared JSONs. Loop over the manifest.
+          while IFS= read -r f; do
             if [ ! -f "client/public/$f" ]; then
               echo "::error::Expected data file client/public/$f was not generated"
               exit 1
             fi
             npx wrangler r2 object put "phase-rs-data/staging/$f" --file "client/public/$f" --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          done
+          done < <(jq -r '.[]' data-files.json)
 
           for f in data/badges/*.json; do
             name=$(basename "$f")
@@ -167,24 +157,15 @@ jobs:
       - name: Verify R2 uploads landed
         # Wrangler v4 silently writes to a local emulator unless --remote is
         # passed. Fail the deploy if any file the frontend will fetch is not
-        # actually reachable. Mirrors the DATA_FILES list above.
+        # actually reachable. Reads from data-files.json — same source as upload.
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
           BASE="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging"
-          VERIFY=(
-            "$CARD_DATA_FILENAME"
-            card-data.json
-            card-data-meta.json
-            card-names.json
-            coverage-data.json
-            coverage-summary.json
-            decks.json
-            scryfall-data.json
-            set-list.json
-          )
           fail=0
-          for f in "${VERIFY[@]}"; do
+          check() {
+            local f="$1"
+            local status
             status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$f")
             if [ "$status" != "200" ]; then
               echo "::error::R2 upload verification failed: $BASE/$f returned $status"
@@ -192,7 +173,9 @@ jobs:
             else
               echo "Verified $BASE/$f ($status)"
             fi
-          done
+          }
+          check "$CARD_DATA_FILENAME"
+          while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           [ "$fail" = "0" ]
 
       - name: Build WASM

@@ -110,6 +110,8 @@ jobs:
           pnpm build
 
       - name: Upload data to R2
+        # Single source of truth: data-files.json at the repo root drives this
+        # loop, the verify step below, and vite.config.ts URL defines.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -118,43 +120,24 @@ jobs:
           # Content-addressed card-data: immutable, year-long cache.
           npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
 
-          # Mutable shared JSONs. Single-source list mirrors deploy.yml.
-          DATA_FILES=(
-            card-data.json
-            card-data-meta.json
-            card-names.json
-            coverage-data.json
-            coverage-summary.json
-            decks.json
-            scryfall-data.json
-            set-list.json
-          )
-          for f in "${DATA_FILES[@]}"; do
+          # Mutable shared JSONs. Loop over the manifest.
+          while IFS= read -r f; do
             if [ ! -f "client/public/$f" ]; then
               echo "::error::Expected data file client/public/$f was not generated"
               exit 1
             fi
             npx wrangler r2 object put "phase-rs-data/$f" --file "client/public/$f" --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          done
+          done < <(jq -r '.[]' data-files.json)
 
       - name: Verify R2 uploads landed
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
           BASE="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
-          VERIFY=(
-            "$CARD_DATA_FILENAME"
-            card-data.json
-            card-data-meta.json
-            card-names.json
-            coverage-data.json
-            coverage-summary.json
-            decks.json
-            scryfall-data.json
-            set-list.json
-          )
           fail=0
-          for f in "${VERIFY[@]}"; do
+          check() {
+            local f="$1"
+            local status
             status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$f")
             if [ "$status" != "200" ]; then
               echo "::error::R2 upload verification failed: $BASE/$f returned $status"
@@ -162,7 +145,9 @@ jobs:
             else
               echo "Verified $BASE/$f ($status)"
             fi
-          done
+          }
+          check "$CARD_DATA_FILENAME"
+          while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           [ "$fail" = "0" ]
       - name: Remove large data files from dist (served from R2)
         # Hex glob keeps `card-data-meta.json` (consumed by `useCardDataMeta`).
