@@ -637,8 +637,11 @@ pub(super) fn parse_subject_application(
             });
         }
     }
-    // Explicit self-reference — always SelfRef
-    if matches!(lower.as_str(), "~" | "this")
+    // Explicit self-reference — always SelfRef.
+    // CR 109.3 + CR 201.4b: Gendered pronouns ("he", "she") used as a subject
+    // in a card's Oracle text refer to the card itself (modern TMNT/UB cards
+    // and legacy flip/legendary cards use humanoid pronouns in place of "it").
+    if matches!(lower.as_str(), "~" | "this" | "he" | "she")
         || SELF_REF_PARSE_ONLY_PHRASES.iter().any(|p| lower == *p)
         || SELF_REF_TYPE_PHRASES.iter().any(|p| lower == *p)
     {
@@ -1583,6 +1586,11 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             value((), tag("those ")),
             value((), tag("up to ")),
             value((), tag("you ")),
+            // CR 109.3: Gendered self-ref pronouns (e.g., Metalhead's
+            // "He gains menace and haste"). Always resolve to SelfRef in
+            // `parse_subject_application`.
+            value((), tag("he ")),
+            value((), tag("she ")),
         )),
     ))
     .parse(lower)

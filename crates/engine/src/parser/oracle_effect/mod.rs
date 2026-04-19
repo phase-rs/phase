@@ -5913,6 +5913,23 @@ fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerCondition>) 
                 },
                 tag("at the beginning of the next upkeep, "),
             ),
+            // CR 505.1 + CR 603.7a: "your next" binds the phase to the ability's
+            // controller. `PlayerId(0)` is a placeholder rewritten at resolution
+            // time in `effects::delayed_trigger::resolve`.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::Upkeep,
+                    player: crate::types::player::PlayerId(0),
+                },
+                tag("at the beginning of your next upkeep, "),
+            ),
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: crate::types::player::PlayerId(0),
+                },
+                tag("at the beginning of your next end step, "),
+            ),
         ))
         .parse(i)
     }) {
