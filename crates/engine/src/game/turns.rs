@@ -280,6 +280,10 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 514.2: Prune "until your next turn" transient effects for the active player.
     super::layers::prune_until_next_turn_effects(state, active);
+    // CR 514.2 + CR 611.2a/b: Expire `PlayFromExile` permissions granted to
+    // the active player with `UntilYourNextTurn` duration (impulse draws that
+    // last "until your next turn").
+    super::layers::prune_until_next_turn_casting_permissions(state, active);
     state.restrictions.retain(|restriction| {
         use crate::types::ability::{GameRestriction, RestrictionExpiry};
 
@@ -484,6 +488,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
+    // CR 514.2 + CR 611.2a: Expire `PlayFromExile` permissions whose duration
+    // was `UntilEndOfTurn` (impulse-draw "you may play it this turn").
+    super::layers::prune_end_of_turn_casting_permissions(state);
 
     // CR 514.2: Remove end-of-turn game restrictions (e.g., "this turn" damage prevention disabled).
     state.restrictions.retain(|r| {
