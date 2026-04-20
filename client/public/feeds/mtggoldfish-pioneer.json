@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-03T00:00:00Z",
+  "updated": "2026-05-04T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -956,8 +956,8 @@
           "name": "Forest"
         },
         {
-          "count": 4,
-          "name": "Ancient Cornucopia"
+          "count": 2,
+          "name": "Hushwood Verge"
         },
         {
           "count": 1,
@@ -1012,10 +1012,6 @@
           "name": "Fabled Passage"
         },
         {
-          "count": 2,
-          "name": "Hushwood Verge"
-        },
-        {
           "count": 1,
           "name": "Putrefy"
         },
@@ -1030,6 +1026,10 @@
         {
           "count": 4,
           "name": "Leyline Binding"
+        },
+        {
+          "count": 4,
+          "name": "Ancient Cornucopia"
         }
       ],
       "sideboard": [
