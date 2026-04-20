@@ -2183,13 +2183,30 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 /// `rest` is the lowercase text after the leading `"pay "` token. Returns the
 /// resolved `QuantityExpr` on success — literal (`"3 life"`), X variable
 /// (`"X life"`), or a dynamic reference (`"life equal to its power"`,
-/// `"life equal to <quantity-ref>"`). All dispatch is nom-combinator based.
+/// `"life equal to <quantity-ref>"`). All dispatch is nom-combinator based,
+/// with a shared `life_with_boundary` combinator that guards `"life"` against
+/// accidental alpha-suffix matches (e.g., `"x lifelink"`).
 fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
+    use crate::parser::oracle_nom::error::OracleResult;
+    use nom::character::complete::one_of;
+    use nom::combinator::{eof, peek, recognize};
+    use nom::sequence::terminated;
+
+    // Shared word-boundary guard: the token just consumed must be followed by
+    // end-of-input or punctuation/whitespace — not another alpha char. This
+    // blocks false matches like "lifelink" when we only want "life".
+    fn word_boundary(i: &str) -> OracleResult<'_, ()> {
+        peek(alt((value((), eof), value((), recognize(one_of(" .,")))))).parse(i)
+    }
+
     // CR 118.8: "pay life equal to <quantity-ref>" — delegates to the shared
     // event-context / named-quantity resolvers so every dynamic amount pattern
-    // already recognized for gain/lose life composes here too.
+    // already recognized for gain/lose life composes here too. The quantity
+    // helpers are not nom-based, so content cleanup (trailing period + space)
+    // happens on the already-dispatched remainder — nom owns the dispatch,
+    // not the content normalization.
     if let Ok((tail, _)) = tag::<_, _, VerboseError<&str>>("life equal to ").parse(rest) {
-        let qty_text = tail.trim_end_matches('.').trim();
+        let qty_text = tail.trim_end().trim_end_matches('.').trim_end();
         if let Some(expr) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
             return Some(expr);
         }
@@ -2200,24 +2217,27 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
     }
 
     // CR 107.1b: "pay X life" — variable amount resolved from `chosen_x`.
-    if let Ok((tail, _)) = tag::<_, _, VerboseError<&str>>("x life").parse(rest) {
-        // structural: not dispatch — word-boundary guard so "x lifelink" etc.
-        // cannot false-match.
-        if tail.is_empty() || tail.starts_with(['.', ',', ' ']) {
-            return Some(QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            });
-        }
+    if terminated(tag::<_, _, VerboseError<&str>>("x life"), word_boundary)
+        .parse(rest)
+        .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
     }
 
     // CR 118.8: "pay N life" — literal amount via `parse_number` (digit words
-    // or numerals, never "X" — handled above).
-    if let Ok((tail, n)) = nom_primitives::parse_number.parse(rest) {
-        if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>(" life").parse(tail) {
-            return Some(QuantityExpr::Fixed { value: n as i32 });
-        }
+    // or numerals, never "X" — handled above). Same word-boundary guard so
+    // hypothetical phrases like "3 lifelink" cannot false-match.
+    if let Ok((_, (n, _))) = (
+        nom_primitives::parse_number,
+        terminated(tag::<_, _, VerboseError<&str>>(" life"), word_boundary),
+    )
+        .parse(rest)
+    {
+        return Some(QuantityExpr::Fixed { value: n as i32 });
     }
 
     None
