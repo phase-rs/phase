@@ -5989,6 +5989,18 @@ pub enum ContinuousModification {
     SetDynamicToughness {
         value: QuantityExpr,
     },
+    /// CR 613.4b: Set base power to a dynamically computed value (layer 7b).
+    /// Distinct from `SetDynamicPower` (layer 7a, CDA): this variant models
+    /// one-shot or non-CDA set effects like Biomass Mutation's "base power
+    /// and toughness X/X" where X is resolved at application time.
+    SetPowerDynamic {
+        value: QuantityExpr,
+    },
+    /// CR 613.4b: Set base toughness to a dynamically computed value (layer 7b).
+    /// Distinct from `SetDynamicToughness` (layer 7a, CDA).
+    SetToughnessDynamic {
+        value: QuantityExpr,
+    },
     /// CR 613.4c: Add dynamic +X to power (layer 7c), where X is computed at application time.
     AddDynamicPower {
         value: QuantityExpr,

@@ -456,6 +456,72 @@ mod tests {
         assert_eq!(state.objects[&obj_id].toughness, Some(5));
     }
 
+    /// CR 613.4b: `SetPowerDynamic`/`SetToughnessDynamic` apply at layer 7b
+    /// using the spell source's `cost_x_paid`. Biomass Mutation shape:
+    /// creatures you control have base power and toughness X/X.
+    /// Ensures +1/+1 counters (layer 7e) remain additive after the set.
+    #[test]
+    fn base_pt_dynamic_sets_power_from_cost_x_paid_and_counters_add() {
+        use crate::types::ability::{ContinuousModification, QuantityExpr, QuantityRef};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let b22 = make_creature(&mut state, "Bear 2/2", 2, 2, PlayerId(0));
+        let b44 = make_creature(&mut state, "Bear 4/4", 4, 4, PlayerId(0));
+        let b11 = make_creature(&mut state, "Bear 1/1", 1, 1, PlayerId(0));
+        // Add a +1/+1 counter on b22 to verify layered addition (7e after 7b).
+        state
+            .objects
+            .get_mut(&b22)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        // Source = Biomass Mutation-like spell with X=3 paid.
+        let source = create_object(
+            &mut state,
+            CardId(999),
+            PlayerId(0),
+            "Biomass Mutation".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&source).unwrap().cost_x_paid = Some(3);
+
+        // Register the transient effect for each matching creature — this
+        // mirrors what `GenericEffect` resolution does for a broadcast filter.
+        for id in [b22, b44, b11] {
+            state.add_transient_continuous_effect(
+                source,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id },
+                vec![
+                    ContinuousModification::SetPowerDynamic {
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::CostXPaid,
+                        },
+                    },
+                    ContinuousModification::SetToughnessDynamic {
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::CostXPaid,
+                        },
+                    },
+                ],
+                None,
+            );
+        }
+        evaluate_layers(&mut state);
+
+        // b22 had a +1/+1 counter: base becomes 3/3, counter adds 1 → 4/4.
+        assert_eq!(state.objects[&b22].power, Some(4));
+        assert_eq!(state.objects[&b22].toughness, Some(4));
+        // b44 and b11 become 3/3 exactly.
+        assert_eq!(state.objects[&b44].power, Some(3));
+        assert_eq!(state.objects[&b44].toughness, Some(3));
+        assert_eq!(state.objects[&b11].power, Some(3));
+        assert_eq!(state.objects[&b11].toughness, Some(3));
+    }
+
     /// Verify pump expires at end of turn cleanup.
     #[test]
     fn pump_expires_at_end_of_turn() {

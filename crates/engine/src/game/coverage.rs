@@ -1643,6 +1643,8 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         }
         ContinuousModification::SetDynamicPower { .. } => "dynamic power".into(),
         ContinuousModification::SetDynamicToughness { .. } => "dynamic toughness".into(),
+        ContinuousModification::SetPowerDynamic { .. } => "set base power dynamic".into(),
+        ContinuousModification::SetToughnessDynamic { .. } => "set base toughness dynamic".into(),
         ContinuousModification::AddDynamicPower { .. } => "add dynamic power".into(),
         ContinuousModification::AddDynamicToughness { .. } => "add dynamic toughness".into(),
         ContinuousModification::AddDynamicKeyword { kind, .. } => {

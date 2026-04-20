@@ -80,7 +80,9 @@ impl ContinuousModification {
             | ContinuousModification::AddDynamicPower { .. }
             | ContinuousModification::AddDynamicToughness { .. } => Layer::ModifyPT,
             ContinuousModification::SetPower { .. }
-            | ContinuousModification::SetToughness { .. } => Layer::SetPT,
+            | ContinuousModification::SetToughness { .. }
+            | ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. } => Layer::SetPT,
             ContinuousModification::SetDynamicPower { .. }
             | ContinuousModification::SetDynamicToughness { .. } => Layer::CharDef,
             ContinuousModification::AddKeyword { .. }

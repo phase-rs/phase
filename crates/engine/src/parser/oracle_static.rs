@@ -5147,7 +5147,15 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.extend(dynamic_mods);
     }
 
-    if let Some((power, toughness)) = parse_base_pt_mod(text_stripped) {
+    // CR 613.4b + CR 107.3m: "have base power and toughness X/X" — dynamic set
+    // at layer 7b. Checked before the fixed-literal parser so X-bearing patterns
+    // are not mis-parsed as literal integers.
+    if let Some((power, toughness)) =
+        parse_base_pt_dynamic(text_stripped, where_x_expression.as_deref())
+    {
+        modifications.push(ContinuousModification::SetPowerDynamic { value: power });
+        modifications.push(ContinuousModification::SetToughnessDynamic { value: toughness });
+    } else if let Some((power, toughness)) = parse_base_pt_mod(text_stripped) {
         modifications.push(ContinuousModification::SetPower { value: power });
         modifications.push(ContinuousModification::SetToughness { value: toughness });
     }
@@ -5324,6 +5332,90 @@ fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     let tp = TextPair::new(text, &lower);
     let pt_text = tp.strip_after("base power and toughness ")?.original.trim();
     parse_pt_mod(pt_text)
+}
+
+/// One side of a dynamic base-P/T value token like `X/X` or `-X/2`.
+/// Dynamic sides carry the sign (`+X` vs `-X`); fixed sides carry the literal.
+#[derive(Clone, Copy)]
+enum BasePtSide {
+    Dynamic { sign: i32 },
+    Fixed { value: i32 },
+}
+
+fn parse_base_pt_side(
+    input: &str,
+) -> nom::IResult<&str, BasePtSide, nom_language::error::VerboseError<&str>> {
+    let (rest, sign) = opt(alt((value(-1i32, tag("-")), value(1i32, tag("+"))))).parse(input)?;
+    let sign = sign.unwrap_or(1);
+    if let Ok((rest2, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("x")(rest) {
+        return Ok((rest2, BasePtSide::Dynamic { sign }));
+    }
+    let (rest, n) = nom_primitives::parse_number.parse(rest)?;
+    Ok((
+        rest,
+        BasePtSide::Fixed {
+            value: sign * (n as i32),
+        },
+    ))
+}
+
+/// CR 613.4b + CR 107.3: Parse "base power and toughness X/X" (dynamic form).
+/// Returns a `(power_expr, toughness_expr)` pair when the P/T token contains X
+/// on either side; otherwise returns `None` (literal N/N is handled by
+/// `parse_base_pt_mod`). The X-ref is resolved via the provided
+/// `where_x_expression` (for patterns like "base power and toughness X/X,
+/// where X is the number of …"), falling back to `CostXPaid` for spell-cast
+/// contexts where X is the cost X (e.g., Biomass Mutation).
+fn parse_base_pt_dynamic(
+    text: &str,
+    where_x_expression: Option<&str>,
+) -> Option<(QuantityExpr, QuantityExpr)> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let pt_tp = tp.strip_after("base power and toughness ")?;
+    let (_, (p, _, t)) = (parse_base_pt_side, tag("/"), parse_base_pt_side)
+        .parse(pt_tp.lower)
+        .ok()?;
+    match (p, t) {
+        (BasePtSide::Fixed { .. }, BasePtSide::Fixed { .. }) => None,
+        (p_side, t_side) => {
+            let x_ref = resolve_base_pt_x_ref(where_x_expression)?;
+            Some((
+                base_pt_side_to_expr(p_side, &x_ref),
+                base_pt_side_to_expr(t_side, &x_ref),
+            ))
+        }
+    }
+}
+
+/// Build a `QuantityExpr` for one side of a dynamic base-P/T pattern.
+fn base_pt_side_to_expr(side: BasePtSide, x_ref: &QuantityRef) -> QuantityExpr {
+    match side {
+        BasePtSide::Fixed { value } => QuantityExpr::Fixed { value },
+        BasePtSide::Dynamic { sign } => {
+            let inner = QuantityExpr::Ref { qty: x_ref.clone() };
+            if sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(inner),
+                }
+            } else {
+                inner
+            }
+        }
+    }
+}
+
+/// Resolve the `QuantityRef` that X binds to for a dynamic base-P/T effect.
+/// Spell-cast contexts (Biomass Mutation) have no explicit "where X is" clause:
+/// X is the cost X paid when the spell was cast, so fall back to `CostXPaid`.
+/// When a "where X is …" expression is present, parse it via `parse_quantity_ref`.
+fn resolve_base_pt_x_ref(where_x_expression: Option<&str>) -> Option<QuantityRef> {
+    if let Some(expr) = where_x_expression {
+        return parse_quantity_ref(expr);
+    }
+    // CR 107.3m: In a spell-cast context, X refers to the value paid for {X}.
+    Some(QuantityRef::CostXPaid)
 }
 
 fn parse_base_power_mod(text: &str) -> Option<i32> {
@@ -12032,6 +12124,49 @@ mod tests {
             def.active_zones.is_empty(),
             "plain anthem must remain battlefield-default, got {:?}",
             def.active_zones,
+        );
+    }
+
+    /// CR 613.4b + CR 107.3m: "have base power and toughness X/X" produces
+    /// dynamic set-P/T at layer 7b (not static layer 7a CDA, and not pump 7c).
+    /// Biomass Mutation shape. With no "where X is" clause, X binds to
+    /// `CostXPaid` (the spell's {X} cost value).
+    #[test]
+    fn base_pt_dynamic_x_x_emits_set_power_dynamic() {
+        let mods =
+            parse_continuous_modifications("have base power and toughness X/X until end of turn");
+        let has_p = mods.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                }
+            )
+        });
+        let has_t = mods.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                }
+            )
+        });
+        assert!(has_p, "missing SetPowerDynamic(CostXPaid) in {mods:?}");
+        assert!(has_t, "missing SetToughnessDynamic(CostXPaid) in {mods:?}");
+        assert_eq!(
+            mods.iter()
+                .filter(|m| matches!(
+                    m,
+                    ContinuousModification::SetPower { .. }
+                        | ContinuousModification::SetToughness { .. }
+                ))
+                .count(),
+            0,
+            "literal SetPower/SetToughness must not be emitted for X/X"
         );
     }
 }

@@ -5767,6 +5767,53 @@ mod tests {
     }
 
     #[test]
+    fn biomass_mutation_parses_as_generic_effect_with_dynamic_set_pt() {
+        // CR 613.4b + CR 107.3m: "Creatures you control have base power and
+        // toughness X/X until end of turn" is a one-shot layer-7b set effect.
+        // The spell is an instant with {X} in cost, so X resolves to CostXPaid.
+        use crate::types::ability::{ContinuousModification, Effect, QuantityExpr, QuantityRef};
+        let r = parse(
+            "Creatures you control have base power and toughness X/X until end of turn.",
+            "Biomass Mutation",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "expected one spell ability");
+        let eff = &*r.abilities[0].effect;
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = eff
+        else {
+            panic!("expected GenericEffect, got {eff:?}");
+        };
+        assert_eq!(static_abilities.len(), 1);
+        let mods = &static_abilities[0].modifications;
+        let has_p = mods.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                }
+            )
+        });
+        let has_t = mods.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                }
+            )
+        });
+        assert!(has_p, "missing SetPowerDynamic(CostXPaid) in {mods:?}");
+        assert!(has_t, "missing SetToughnessDynamic(CostXPaid) in {mods:?}");
+    }
+
+    #[test]
     fn spell_pump_all_with_duration_not_static() {
         // CR 611.2a: Spell lines with subject + pump + duration are one-shot
         // continuous effects, not permanent static abilities.

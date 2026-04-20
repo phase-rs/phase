@@ -1010,6 +1010,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     let dynamic_pt = match &effect.modification {
         ContinuousModification::SetDynamicPower { value }
         | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
         | ContinuousModification::AddDynamicPower { value }
         | ContinuousModification::AddDynamicToughness { value }
         | ContinuousModification::AddDynamicKeyword { value, .. } => {
@@ -1136,6 +1138,18 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 }
             }
             ContinuousModification::SetDynamicToughness { .. } => {
+                if let Some(val) = dynamic_pt {
+                    obj.toughness = Some(val);
+                }
+            }
+            // CR 613.4b: Layer 7b — set base power to dynamic value (e.g., Biomass Mutation).
+            ContinuousModification::SetPowerDynamic { .. } => {
+                if let Some(val) = dynamic_pt {
+                    obj.power = Some(val);
+                }
+            }
+            // CR 613.4b: Layer 7b — set base toughness to dynamic value.
+            ContinuousModification::SetToughnessDynamic { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.toughness = Some(val);
                 }
