@@ -1,4 +1,4 @@
-mod animation;
+pub(crate) mod animation;
 mod conditions;
 pub(crate) mod counter;
 pub(crate) mod imperative;

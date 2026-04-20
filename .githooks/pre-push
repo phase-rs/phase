@@ -10,6 +10,9 @@ cargo fmt --all -- --check
 echo "  [rust] cargo clippy"
 cargo clippy --all-targets -- -D warnings
 
+echo "  [rust] parser combinator gate"
+./scripts/check-parser-combinators.sh
+
 # Frontend
 echo "  [client] pnpm lint"
 (cd client && pnpm lint)

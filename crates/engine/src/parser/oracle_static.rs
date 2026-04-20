@@ -5293,10 +5293,12 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         }
     }
 
-    // CR 205.1a: "becomes a [Type] in addition to its other creature types"
-    if let Some(subtype) = parse_becomes_type_addition(lower) {
-        modifications.push(ContinuousModification::AddSubtype { subtype });
-    }
+    // CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
+    // [core-type]+ in addition to its other types" — delegates to the shared
+    // animation type-sequence combinator so one CR-205 type-line decomposes
+    // into one AddType/AddSubtype modification per token (not a single
+    // whole-phrase AddSubtype string).
+    modifications.extend(parse_becomes_type_addition_modifications(&tp));
 
     modifications
 }
@@ -5362,18 +5364,54 @@ fn parse_dynamic_pt_in_text(
     Some(mods)
 }
 
-/// CR 205.1a: Parse "becomes a [Type] in addition to its other creature types"
-/// Returns the canonical subtype name if the pattern matches.
-fn parse_becomes_type_addition(lower: &str) -> Option<String> {
-    let rest = lower.split("becomes a ").nth(1)?;
-    let subtype_end = rest.find(" in addition to")?;
-    let subtype_word = rest[..subtype_end].trim();
-    // Capitalize the subtype
-    let mut chars = subtype_word.chars();
-    let first = chars.next()?;
-    let mut capitalized = first.to_uppercase().collect::<String>();
-    capitalized.push_str(chars.as_str());
-    Some(capitalized)
+/// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: Scan text for a "becomes a
+/// [subtype]* [core-type]+ in addition to its other types" descriptor and
+/// decompose it into typed `ContinuousModification`s.
+///
+/// Uses nom combinators (`tag`, `alt`, `take_until`) to locate the descriptor
+/// slice on the lowered text, then hands the original-cased slice to
+/// [`super::oracle_effect::animation::parse_becomes_type_modifications`] which
+/// reuses the existing animation type-sequence combinator for CR-205
+/// token-by-token classification. One `AddType` per CR 205.2 core type and
+/// one `AddSubtype` per CR 205.3 subtype are emitted; CR 205.4 supertypes are
+/// recognized-and-discarded (animations don't grant supertypes).
+fn parse_becomes_type_addition_modifications(tp: &TextPair<'_>) -> Vec<ContinuousModification> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    // Scan for the "becomes a"/"becomes an" phrase anywhere in the lowered
+    // text, then locate the terminating "in addition to its other types"
+    // clause. `scan_split_at_phrase` returns the lowered slice beginning at
+    // the matched phrase.
+    let Some((_, tail_lower)) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        alt((
+            tag::<_, _, VE>("becomes a "),
+            tag::<_, _, VE>("becomes an "),
+        ))
+        .parse(i)
+    }) else {
+        return Vec::new();
+    };
+    let Ok::<_, nom::Err<VE<'_>>>((after_article_lower, _consumed)) =
+        alt((tag("becomes a "), tag("becomes an "))).parse(tail_lower)
+    else {
+        return Vec::new();
+    };
+
+    // Extract the descriptor up to the first " in addition to" clause.
+    let Ok::<_, nom::Err<VE<'_>>>((_, descriptor_lower)) =
+        take_until(" in addition to")(after_article_lower)
+    else {
+        return Vec::new();
+    };
+
+    // Map the lowered descriptor back onto the original-cased text so the CR
+    // 205.3 subtype grammar (which requires capitalized proper nouns) sees the
+    // correct case.
+    let start = tp.lower.len() - after_article_lower.len();
+    let end = start + descriptor_lower.len();
+    let descriptor_original = &tp.original[start..end];
+
+    super::oracle_effect::animation::parse_becomes_type_modifications(descriptor_original)
 }
 
 fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
@@ -6712,6 +6750,41 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{CountScope, TypeFilter, ZoneRef};
+
+    /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
+    /// [core-type]+ in addition to its other types" must decompose into
+    /// typed `AddType`/`AddSubtype` modifications. Jump Scare regression.
+    #[test]
+    fn continuous_mods_decompose_becomes_compound_type_phrase() {
+        let mods = parse_continuous_modifications(
+            "get +2/+2, gains flying, and becomes a Horror enchantment creature in addition to its other types",
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Horror".into()
+            }),
+            "expected AddSubtype(Horror) in {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Enchantment
+            }),
+            "expected AddType(Enchantment) in {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }),
+            "expected AddType(Creature) in {mods:?}"
+        );
+        // Must not regress to the single-string whole-phrase subtype.
+        assert!(
+            !mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Horror enchantment creature".into()
+            }),
+            "must not emit whole-phrase AddSubtype"
+        );
+    }
 
     #[test]
     fn static_merfolk_lord() {

@@ -73,7 +73,7 @@ This is the universe of cards to consider.
 
 ## Phase 2 — Gap Analysis (Typed, not Opaque)
 
-**Do not** treat unsupported cards as opaquely broken. `client/public/coverage-data.json` has per-card `parse_details` with typed failure labels (`trigger:Phase`, `ability:unknown`, etc.) and `gap_bundles` ranking handler-combinations by format-wide unlock count. Use them.
+**Do not** treat unsupported cards as opaquely broken. `client/public/coverage-data.json` has per-card `parse_details` with typed failure labels (`trigger:Phase`, `ability:unknown`, etc.) and `gap_bundles` ranking handler-combinations by format-wide unlock count. Use them — **but be aware `parse_details` is only half the signal** (see Phase 2.5).
 
 ```bash
 # Intersect the set list with the unsupported-card set:
@@ -94,7 +94,127 @@ while IFS= read -r name; do
 done < /tmp/set_unsupported.txt > /tmp/set_oracles.txt
 ```
 
-You now have: (a) the set's unsupported cards, (b) their typed failure categories, (c) their full Oracle text.
+You now have: (a) the set's unsupported cards, (b) their **parser-side** failure categories, (c) their full Oracle text.
+
+### ⚠️ `supported: false` + `gap_count: 0` = hidden gap
+
+**Any card where `supported: false` AND `gap_count: 0` AND `gap_details` is empty/null is invisible to the above pipeline.** These cards parse cleanly but fail one of the non-`parse_details` checks (resolver feature, silent drop, target-fallback warning, subtype lexicon). If you skip Phase 2.5, you will cluster the *parser* gaps correctly and then spawn an `engine-implementer` to fix a parser that is already fine — wasting a review cycle. Count these cards BEFORE proceeding:
+
+```bash
+jq --slurpfile names <(jq -R . /tmp/set_unsupported.txt | jq -s .) \
+   '[.cards[] | select(.card_name as $n | $names[0] | index($n))
+              | select(.supported==false and .gap_count==0)] | length' \
+   client/public/coverage-data.json
+```
+
+If the count is >0, Phase 2.5 is mandatory for those cards.
+
+---
+
+## Phase 2.5 — Resolver Audit + AST Walk (Mandatory When Phase 2 Signal Is Partial)
+
+Parser gaps are only one failure path. `crates/engine/src/game/coverage.rs::compute_card_coverage` also runs:
+
+- `check_resolver_features` → `ResolverFeature:X` for AST nodes the resolver classifies `Unhandled` (coverage.rs ~line 3640+ Handled/Unhandled tables).
+- `check_silent_drops` → Oracle text consumed without emitting a parse item.
+- `check_parse_warnings` → target-fallback degradation (`TargetFilter::Any` instead of a specific filter).
+- `check_subtype_lexicon` → `AddSubtype` strings that aren't real subtypes (e.g. parser emits `"Horror enchantment creature"` as a single subtype string).
+
+None of these append to the per-card `gap_details` array. They're only visible via the resolver audit and direct AST inspection.
+
+### 2.5a — Resolver audit cross-reference
+
+```bash
+# The --audit flag prints the Unhandled feature map + flagged cards to stderr.
+cargo run --quiet --bin coverage-report -- data --audit 2>/tmp/resolver_audit.txt 1>/dev/null
+
+# Unhandled feature list (what resolver classifications fail):
+sed -n '/Unhandled features/,/Top handled features/p' /tmp/resolver_audit.txt
+
+# Flagged cards for the target set:
+grep -A 10000 "^Flagged cards" /tmp/resolver_audit.txt | \
+  grep -iFf /tmp/set_unsupported.txt > /tmp/set_resolver_flags.txt
+cat /tmp/set_resolver_flags.txt
+```
+
+**Note.** The resolver audit currently prints only the first 20 flagged cards by default (coverage_report.rs `.take(20)`). If your set has >20 hidden-gap cards, either (a) bump the take limit temporarily, or (b) skip to the AST walk — it catches the same cards without needing a code patch.
+
+### 2.5b — AST walk for unhandled markers
+
+Walk every unsupported card's full parse tree looking for the specific AST tags that the resolver classifies as `Unhandled`. Bucket cards by their sorted tuple of unhandled features — identical tuples = same cluster.
+
+```python
+#!/usr/bin/env python3
+# /tmp/ast_cluster.py — run from repo root
+import json
+data = json.load(open('client/public/card-data.json'))
+unsup = [l.strip() for l in open('/tmp/set_unsupported.txt') if l.strip()]
+
+# Pull these sets from the current coverage.rs Unhandled classification tables
+# (AbilityCondition, StaticCondition, QuantityRef arms marked Unhandled).
+# Refresh these lists when coverage.rs changes.
+UNH_ABILITY_COND = {"And","Or","Not","SourceMatchesFilter","TargetMatchesFilter",
+                    "ZoneChangedThisWay","SourceIsTapped"}
+UNH_STATIC_COND  = {"Not","DefendingPlayerControls","SourceIsEquipped","UnlessPay",
+                    "HasMaxSpeed","SourceIsMonstrous","SourceInZone",
+                    "OpponentPoisonAtLeast","ControlsCommander","CompletedADungeon",
+                    "SourceIsAttacking","SourceAttachedToCreature",
+                    "SourceAttackingAlone","IsMonarch","SourceMatchesFilter",
+                    "SpeedGE","Unrecognized"}
+UNH_QTY_REFS     = {"CreaturesDiedThisTurn","TargetZoneCardCount","AttackedThisTurn",
+                    "OpponentHandSize","StartingLifeTotal","OpponentLifeTotal",
+                    "DistinctCardTypesExiledBySource"}
+
+def walk(o):
+    if isinstance(o, dict):
+        yield o
+        for v in o.values(): yield from walk(v)
+    elif isinstance(o, list):
+        for v in o: yield from walk(v)
+
+def features(name):
+    card = data.get(name.lower())
+    if not card: return ["(card-data missing)"]
+    feats = []
+    for node in walk(card):
+        t = node.get("type")
+        if t == "Unimplemented":
+            feats.append(f"unimpl:{node.get('name','?')}")
+        if t in UNH_ABILITY_COND and ("conditions" in node or "filter" in node):
+            feats.append(f"ability_cond:{t}")
+        if t in UNH_QTY_REFS:
+            feats.append(f"qty_ref:{t}")
+    # Trigger mode Unknown(text):
+    for trig in (card.get("triggers") or []):
+        m = trig.get("mode")
+        if isinstance(m, dict) and "Unknown" in m:
+            feats.append(f"trigger:Unknown:{m['Unknown']}")
+    # Static condition Unrecognized(text) and other unhandled StaticCondition tags:
+    for stat in (card.get("static_abilities") or []):
+        cond = stat.get("condition")
+        if isinstance(cond, dict):
+            ct = cond.get("type")
+            if ct == "Unrecognized":
+                feats.append(f"static_cond:Unrecognized:{cond.get('text','')}")
+            elif ct in UNH_STATIC_COND:
+                feats.append(f"static_cond:{ct}")
+    return sorted(set(feats))
+
+buckets = {}
+for n in unsup:
+    key = tuple(features(n)) or ("(no-unhandled-marker)",)
+    buckets.setdefault(key, []).append(n)
+
+for feats, cards in sorted(buckets.items(), key=lambda x: -len(x[1])):
+    print(f"\n[{len(cards)}] {feats}")
+    for c in cards: print(f"  - {c}")
+```
+
+Run `python3 /tmp/ast_cluster.py`. The output is the cluster table — cards with identical feature tuples share a primitive. Use this as the ground truth for Phase 3 clustering; treat the Phase 2 parse-details output as a sanity cross-check, not as the primary signal.
+
+### 2.5c — Cards with NO unhandled marker
+
+If a card is in the `(no-unhandled-marker)` bucket but still `supported: false`, it's either (a) caught by `check_silent_drops` (rare), (b) caught by `check_subtype_lexicon` — check `AddSubtype` values for multi-word concatenations (`"Horror enchantment creature"` is a misparse that should decompose into multiple `AddType`/`AddSubtype` modifications), or (c) its static ability has an unhandled `condition: {type: "Unrecognized", text}` that my walk missed. Inspect the card's JSON manually.
 
 ---
 
@@ -287,6 +407,11 @@ These are the findings that repeat. Brief agents to look for them first.
 | Latent merge bug | A new trigger-level condition overwrites an intervening-if instead of And-composing | Grep for `def.condition = ...`; should be `condition.or(def.condition.take())` or And-merge |
 | Number word not parsed | "ten or more +1/+1 counters" treated as Unrecognized | `oracle_nom/primitives.rs::parse_english_number` should cover one–twenty; extend if missing |
 | CR number hallucinated | Code annotated with CR 701.33 for manifest (it's 701.40) | Grep `docs/MagicCompRules.txt` BEFORE writing any CR annotation |
+| Parser double-emits identical condition | `AbilityCondition::And { conditions: [X, X] }` with structurally identical children | Ability-word prefix seeds a condition AND the rephrased "If …" clause re-emits it. Dedup on merge: if a newly-parsed condition is structurally equal to an existing one, return existing rather than wrap in And. Delirium spells are the canonical case. |
+| Hidden-gap card: `supported:false`, `gap_count:0` | Card parses cleanly but `check_resolver_features` / `check_silent_drops` / `check_parse_warnings` / `check_subtype_lexicon` flagged it in `missing` without populating `gap_details` | Use Phase 2.5 resolver audit + AST walk. The parse_details-only view misses these entirely. |
+| Multi-word subtype misparse | `AddSubtype: "Horror enchantment creature"` (single string of three words) | Parser should decompose "becomes a X Y creature" into `AddType::Enchantment, AddType::Creature, AddSubtype::Horror`. `check_subtype_lexicon` catches these. |
+| StaticCondition::Unrecognized leak | `{type: "Unrecognized", text: "..."}` instead of a typed variant | A recurring Oracle phrase got stored verbatim instead of canonicalized to a typed `StaticCondition` arm. Add the typed variant + classify as Handled. |
+| TriggerMode::Unknown leak | `{Unknown: "Whenever you fully unlock a Room"}` | Parser fell back. Map the phrase to a typed `TriggerMode` arm; verify a matcher + event emission site exist before considering the trigger functional. A typed arm without a matcher is worse than Unknown because the coverage classifier marks the card supported. |
 
 ---
 

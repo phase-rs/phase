@@ -28,6 +28,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the parser-combinator gate can diff against origin/main.
+          fetch-depth: 0
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -43,6 +46,16 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+
+      - name: Parser combinator gate
+        # Diff-based gate: new parser code must use nom combinators, not
+        # string-matching methods. See crates/engine/src/parser/oracle_nom/PATTERNS.md.
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="origin/main"
+          fi
+          ./scripts/check-parser-combinators.sh "$BASE"
 
       - name: Run tests
         run: cargo nextest run --workspace --exclude phase-tauri --features engine/proptest

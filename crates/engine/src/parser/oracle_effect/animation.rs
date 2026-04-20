@@ -1,11 +1,11 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag_no_case;
-use nom::character::complete::{multispace1, satisfy};
-use nom::combinator::{peek, recognize, value};
+use nom::bytes::complete::{tag, tag_no_case};
+use nom::character::complete::{multispace0, multispace1, satisfy};
+use nom::combinator::{opt, peek, recognize, value};
 use nom::multi::{many0, separated_list1};
-use nom::sequence::pair;
+use nom::sequence::{pair, preceded};
 use nom::Parser;
 
 use super::super::oracle_nom::error::OracleResult;
@@ -330,6 +330,81 @@ fn parse_animation_type_sequence(input: &str) -> OracleResult<'_, Vec<AnimationT
     separated_list1(multispace1, parse_animation_type_token).parse(input)
 }
 
+/// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: Decompose a "becomes a
+/// [subtype]* [core-type]+ [in addition to its other types]?" descriptor into
+/// a list of typed `ContinuousModification`s.
+///
+/// Built on the shared `parse_animation_type_sequence` combinator so callers
+/// outside the effect-animation path (e.g., static-ability parsing of
+/// "target creature ... becomes a Horror enchantment creature in addition to
+/// its other types") get the same type-line decomposition: one `AddType` per
+/// CR 205.2 core type, one `AddSubtype` per CR 205.3 subtype, supertypes
+/// discarded (CR 205.4 — animations never grant supertypes).
+///
+/// The descriptor is the noun phrase *after* the "becomes a"/"becomes an"
+/// article and *before* any trailing "in addition to its other types" clause.
+/// Input must preserve original casing because the CR 205.3 subtype grammar
+/// requires capitalized proper nouns.
+pub(crate) fn parse_becomes_type_modifications(
+    descriptor: &str,
+) -> Vec<crate::types::ability::ContinuousModification> {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::card_type::CoreType;
+
+    let trimmed = descriptor
+        .trim()
+        .trim_end_matches('.')
+        .trim_end_matches(',')
+        .trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // Forward-parse: type-token sequence (halts at first non-classifying word
+    // such as "in"), then optionally consume a trailing "in addition to its
+    // other [creature] types" clause. The longer alternative is tried first
+    // because nom's alt() is short-circuit. See oracle_nom/PATTERNS.md
+    // ("Optional trailing clause after a token sequence").
+    let mut parser = (
+        parse_animation_type_sequence,
+        opt(preceded(
+            multispace0,
+            alt((
+                tag("in addition to its other creature types"),
+                tag("in addition to its other types"),
+            )),
+        )),
+    );
+    let tokens = match parser.parse(trimmed) {
+        Ok((_, (tokens, _))) => tokens,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut modifications = Vec::new();
+    for token in tokens {
+        match token {
+            AnimationTypeToken::CoreType(name) => {
+                if let Ok(ct) = CoreType::from_str(name) {
+                    let modification = ContinuousModification::AddType { core_type: ct };
+                    if !modifications.contains(&modification) {
+                        modifications.push(modification);
+                    }
+                }
+            }
+            AnimationTypeToken::Subtype(name) => {
+                let modification = ContinuousModification::AddSubtype {
+                    subtype: title_case_word(&name),
+                };
+                if !modifications.contains(&modification) {
+                    modifications.push(modification);
+                }
+            }
+            AnimationTypeToken::Supertype => {}
+        }
+    }
+    modifications
+}
+
 /// Parse the "becomes a [type expression]" noun phrase into core types +
 /// subtypes. Built on nom combinators: tokenizes a sequence of type/subtype
 /// words separated by whitespace, halting at the first token that doesn't
@@ -339,17 +414,25 @@ fn parse_animation_type_sequence(input: &str) -> OracleResult<'_, Vec<AnimationT
 /// and gains flying"* from sweeping `Gets`, `And`, `Gains`, `Flying` in as
 /// AddSubtype modifications — a common coverage false-positive pattern.
 fn parse_animation_types(text: &str, infer_creature: bool) -> Vec<String> {
-    let descriptor = text
-        .trim()
-        .trim_end_matches(',')
-        .trim_end_matches(" in addition to its other types")
-        .trim();
+    let descriptor = text.trim().trim_end_matches(',').trim();
     if descriptor.is_empty() {
         return Vec::new();
     }
 
-    let tokens = match parse_animation_type_sequence(descriptor) {
-        Ok((_, tokens)) => tokens,
+    // See parse_becomes_type_modifications for the same forward-parse pattern.
+    // oracle_nom/PATTERNS.md ("Optional trailing clause after a token sequence").
+    let mut parser = (
+        parse_animation_type_sequence,
+        opt(preceded(
+            multispace0,
+            alt((
+                tag("in addition to its other creature types"),
+                tag("in addition to its other types"),
+            )),
+        )),
+    );
+    let tokens = match parser.parse(descriptor) {
+        Ok((_, (tokens, _))) => tokens,
         Err(_) => return Vec::new(),
     };
 
@@ -386,6 +469,10 @@ fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
 
     let pos = before.len();
     let prefix = text[..pos].trim_end_matches(',').trim();
+    // allow-noncombinator: structural post-processing of an already-chunked
+    // keyword phrase (split at the first `"` above); this is not parsing
+    // dispatch. A nom-combinator rewrite would add a word-boundary scan
+    // helper without improving correctness.
     let keyword_text = text[pos + NEEDLE.len()..]
         .split('"')
         .next()
@@ -487,5 +574,104 @@ mod test_den_bugbear {
         // Valid hyphenated subtype still parses.
         let (_, token) = parse_animation_subtype("Power-Plant").expect("hyphenated subtype");
         assert_eq!(token, AnimationTypeToken::Subtype("Power-Plant".into()));
+    }
+
+    /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a ..." descriptor
+    /// must decompose into one AddType per core type and one AddSubtype per
+    /// canonical subtype, rather than collapsing the whole phrase into a
+    /// single AddSubtype string. This guards the Jump Scare pattern and the
+    /// general class of compound type grants.
+    #[test]
+    fn becomes_type_modifications_decomposes_subtype_and_core_types() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::card_type::CoreType;
+
+        // Pure core type.
+        assert_eq!(
+            parse_becomes_type_modifications("creature"),
+            vec![ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }]
+        );
+
+        // Two core types.
+        assert_eq!(
+            parse_becomes_type_modifications("artifact creature"),
+            vec![
+                ContinuousModification::AddType {
+                    core_type: CoreType::Artifact
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                },
+            ]
+        );
+
+        // Jump Scare: subtype + two core types.
+        assert_eq!(
+            parse_becomes_type_modifications("Horror enchantment creature"),
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Horror".into()
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Enchantment
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                },
+            ]
+        );
+
+        // Vehicle is a CR 205.3 artifact subtype, not a core type.
+        assert_eq!(
+            parse_becomes_type_modifications("Vehicle artifact creature"),
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Vehicle".into()
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Artifact
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                },
+            ]
+        );
+
+        // Trailing "in addition to its other types" clause is stripped.
+        assert_eq!(
+            parse_becomes_type_modifications(
+                "Horror enchantment creature in addition to its other types"
+            ),
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Horror".into()
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Enchantment
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                },
+            ]
+        );
+
+        // Supertype (CR 205.4) is recognized and discarded.
+        assert_eq!(
+            parse_becomes_type_modifications("legendary Angel creature"),
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Angel".into()
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                },
+            ]
+        );
+
+        // Empty / malformed input produces no modifications.
+        assert!(parse_becomes_type_modifications("").is_empty());
+        assert!(parse_becomes_type_modifications("   ").is_empty());
     }
 }
