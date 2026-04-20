@@ -3,6 +3,10 @@
 //! Validates that multiple landfall triggers fire correctly, including:
 //! - DoublePT effects from Mightform Harmonizer
 //! - Conditional reflexive triggers from Earthbender Ascension (quest counters → +1/+1 + trample)
+//! - Graveyard-active landfall (Bloodghast): CR 113.6b / CR 603.6 — trigger declares
+//!   `trigger_zones = [Graveyard]` because its self-referential effect returns the
+//!   source from the graveyard to the battlefield, so the ability functions while
+//!   the card is in its owner's graveyard.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
@@ -11,6 +15,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 /// Helper: resolve all triggers and target selections until we reach Priority
 /// with an empty stack. Returns the list of object IDs selected as targets.
@@ -390,6 +395,174 @@ fn earthbender_ascension_no_bonus_below_threshold() {
     assert!(
         !creature.keywords.contains(&Keyword::Trample),
         "Creature should NOT have trample (condition not met)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bloodghast: graveyard-active landfall ("may return this card from your
+// graveyard to the battlefield"). CR 113.6b + CR 603.6: the trigger's declared
+// `trigger_zones = [Graveyard]` makes the ability function while the source is
+// in its owner's graveyard. The "a land you control enters" event filter keeps
+// opponent land-drops from firing the trigger.
+// ---------------------------------------------------------------------------
+
+const BLOODGHAST_ORACLE: &str = "This creature can't block.\nThis creature has haste as long as an opponent has 10 or less life.\nLandfall — Whenever a land you control enters, you may return this card from your graveyard to the battlefield.";
+
+/// Move a battlefield object to its owner's graveyard so we can exercise the
+/// graveyard-active landfall path without having to cast and kill Bloodghast.
+fn relocate_to_graveyard(
+    runner: &mut engine::game::scenario::GameRunner,
+    id: ObjectId,
+    owner: engine::types::PlayerId,
+) {
+    let state = runner.state_mut();
+    state.battlefield.retain(|o| *o != id);
+    state
+        .players
+        .iter_mut()
+        .find(|p| p.id == owner)
+        .expect("owner exists")
+        .graveyard
+        .push(id);
+    state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+}
+
+/// Resolve optional-effect prompts by accepting, and pass priority otherwise,
+/// until the stack empties.
+fn resolve_accepting_optional(runner: &mut engine::game::scenario::GameRunner) {
+    for _ in 0..100 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept optional");
+            }
+            _ => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bloodghast_parser_trigger_is_graveyard_active() {
+    // Verify the parser itself wires the Landfall trigger with trigger_zones =
+    // [Graveyard]. This guards the self-recursion zone-derivation heuristic in
+    // oracle_trigger.rs from silent regressions.
+    use engine::parser::oracle::parse_oracle_text;
+    use engine::types::ability::{Effect, TargetFilter};
+
+    let parsed = parse_oracle_text(BLOODGHAST_ORACLE, "Bloodghast", &[], &[], &[]);
+    assert!(
+        !parsed.triggers.is_empty(),
+        "Bloodghast should parse a triggered ability"
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| matches!(t.mode, engine::types::triggers::TriggerMode::ChangesZone))
+        .expect("Landfall is a ChangesZone (land enters) trigger");
+
+    assert_eq!(
+        trigger.trigger_zones,
+        vec![Zone::Graveyard],
+        "Landfall with 'return from graveyard' effect must activate from graveyard"
+    );
+    assert!(trigger.optional, "Bloodghast's trigger is optional (may)");
+
+    let exec = trigger.execute.as_deref().expect("trigger has effect");
+    match exec.effect.as_ref() {
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } => {
+            assert_eq!(*origin, Some(Zone::Graveyard));
+            assert_eq!(*destination, Zone::Battlefield);
+            assert!(matches!(target, TargetFilter::SelfRef));
+        }
+        other => panic!("expected ChangeZone effect, got {other:?}"),
+    }
+}
+
+#[test]
+fn bloodghast_returns_when_controller_plays_a_land() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let bloodghast_id = scenario
+        .add_creature_from_oracle(P0, "Bloodghast", 2, 1, BLOODGHAST_ORACLE)
+        .id();
+    let forest_id = scenario.add_land_to_hand(P0, "Forest").id();
+
+    let mut runner = scenario.build();
+    relocate_to_graveyard(&mut runner, bloodghast_id, P0);
+
+    assert_eq!(
+        runner.state().objects[&bloodghast_id].zone,
+        Zone::Graveyard,
+        "precondition: Bloodghast is in P0's graveyard"
+    );
+
+    let card_id = runner.state().objects[&forest_id].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest_id,
+            card_id,
+        })
+        .expect("P0 plays Forest");
+
+    resolve_accepting_optional(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&bloodghast_id].zone,
+        Zone::Battlefield,
+        "Bloodghast should return to the battlefield after accepting its landfall trigger"
+    );
+}
+
+#[test]
+fn bloodghast_does_not_trigger_on_opponent_land() {
+    // "a land you control enters" — P1 playing a land must not offer P0 the
+    // graveyard-return option.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let bloodghast_id = scenario
+        .add_creature_from_oracle(P0, "Bloodghast", 2, 1, BLOODGHAST_ORACLE)
+        .id();
+    let mountain_id = scenario.add_land_to_hand(P1, "Mountain").id();
+
+    let mut runner = scenario.build();
+    relocate_to_graveyard(&mut runner, bloodghast_id, P0);
+    // Hand priority/activity to P1 so they can play their land drop.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+
+    let card_id = runner.state().objects[&mountain_id].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: mountain_id,
+            card_id,
+        })
+        .expect("P1 plays Mountain");
+
+    // There should be no optional-effect prompt for P0. Drive whatever is on
+    // the stack to completion and assert Bloodghast is still in the graveyard.
+    resolve_accepting_optional(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&bloodghast_id].zone,
+        Zone::Graveyard,
+        "Bloodghast must NOT return from opponent's land drop"
     );
 }
 
