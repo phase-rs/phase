@@ -697,6 +697,18 @@ pub(super) enum ZoneCounterImperativeAst {
         count: QuantityExpr,
         target: TargetFilter,
     },
+    /// CR 122.1: "Put a X counter, a Y counter[, and a Z counter] on TARGET" —
+    /// a list of typed counters placed on one shared target. Lowered to a
+    /// `PutCounter` chain where the first entry carries the resolved target
+    /// and each remaining entry uses `TargetFilter::ParentTarget` so the
+    /// target is chosen once and reused. Covers Abigale, Unexpected Fangs,
+    /// Gift of the Viper, Qarsi Revenant, Nezumi Prowler, Arwen, Champion of
+    /// Dusan, Quicksilver.
+    PutCounterList {
+        entries: Vec<(String, QuantityExpr)>,
+        target: TargetFilter,
+        multi_target: Option<MultiTargetSpec>,
+    },
     /// CR 122.1: "Put counters on each/all" — mass counter placement without targeting.
     PutCounterAll {
         counter_type: String,

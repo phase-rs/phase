@@ -1,7 +1,8 @@
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
+use nom_language::error::VerboseError;
 
 use crate::types::ability::{
     DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr, TargetFilter,
@@ -30,6 +31,156 @@ fn is_it_pronoun(text: &str) -> bool {
             value((), alt((tag("itself"), tag("it ")))).parse(i)
         })
         .is_some()
+}
+
+/// CR 122.1: Parse "put a X counter, a Y counter[, and a Z counter] on TARGET"
+/// — a list of counters of distinct types placed on a shared target. Covers
+/// Abigale, Unexpected Fangs, Gift of the Viper, Qarsi Revenant, Nezumi
+/// Prowler, Arwen, Champion of Dusan, Quicksilver, and any future card that
+/// stacks multiple typed counters on one target in a single clause.
+///
+/// Returns `None` for single-counter phrases (handled by the usual
+/// `try_parse_put_counter` path) or when the list pattern doesn't match.
+/// Returned `Vec` always has `len() >= 2`.
+pub(super) fn try_parse_put_counter_chain<'a>(
+    lower: &str,
+    text: &'a str,
+    ctx: &ParseContext,
+) -> Option<(
+    Vec<(String, QuantityExpr)>,
+    TargetFilter,
+    &'a str,
+    Option<MultiTargetSpec>,
+)> {
+    let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
+    let mut remaining = after_put.trim_start();
+    let mut entries: Vec<(String, QuantityExpr)> = Vec::new();
+
+    loop {
+        let (count_expr, rest) = parse_count_expr(remaining)?;
+        // Counter types can be multi-word (e.g., "first strike", "double strike"),
+        // so use `take_until(" counter")` to consume the full type phrase rather
+        // than splitting on the first whitespace.
+        let (at_counter, raw_type) = take_until::<_, _, VerboseError<&str>>(" counter")
+            .parse(rest)
+            .ok()?;
+        if raw_type.is_empty() {
+            return None;
+        }
+        let counter_type = normalize_counter_type(raw_type);
+        let ((), after_space) =
+            nom_on_lower(at_counter, at_counter, |i| value((), tag(" ")).parse(i))?;
+        let ((), after_counter_word) = nom_on_lower(after_space, after_space, |i| {
+            value((), alt((tag("counters"), tag("counter")))).parse(i)
+        })?;
+        entries.push((counter_type, count_expr));
+
+        // After the counter noun we expect either:
+        //   - a list separator (", a ", ", and a ", " and a ", + "an" variants)
+        //     followed by another "<count> <type> counter(s)" tuple, or
+        //   - " on " beginning the shared-target clause.
+        if let Some(next) = try_consume_counter_list_separator(after_counter_word) {
+            remaining = next;
+            continue;
+        }
+        remaining = after_counter_word;
+        break;
+    }
+
+    if entries.len() < 2 {
+        return None;
+    }
+
+    let ((), on_rest) = nom_on_lower(remaining, remaining, |i| {
+        value((), alt((tag(" on "), tag("on ")))).parse(i)
+    })?;
+
+    let (target, remainder_text, multi_target) =
+        resolve_counter_placement_target(on_rest, lower, text, ctx);
+
+    Some((entries, target, remainder_text, multi_target))
+}
+
+/// Resolve the target of a `put counter ... on <target>` clause. `on_rest` is
+/// the lowercase remainder after the literal `on `; `lower`/`text` are the
+/// full lowercase/original inputs so byte offsets can map back to original-
+/// case slices for `parse_target`. Extracted so the single-counter and
+/// list-counter paths share one target-resolution building block.
+fn resolve_counter_placement_target<'a>(
+    on_rest: &str,
+    lower: &str,
+    text: &'a str,
+    ctx: &ParseContext,
+) -> (TargetFilter, &'a str, Option<MultiTargetSpec>) {
+    // The byte-offset math below (`lower.len() - on_rest.len()` → `&text[offset..]`)
+    // requires that `text` and `lower` are byte-for-byte length-equal. That holds
+    // when `lower` was produced by `to_lowercase()` on ASCII-only input — true for
+    // all Oracle text in current MTG card data. Guard against a future Unicode
+    // regression.
+    debug_assert_eq!(
+        text.len(),
+        lower.len(),
+        "counter target offset math requires ASCII-equal-length lower/original pair"
+    );
+    if is_self_ref(on_rest) {
+        return (TargetFilter::SelfRef, "", None);
+    }
+    if is_it_pronoun(on_rest) {
+        return (resolve_it_pronoun(ctx), "", None);
+    }
+    // CR 115.1d: "up to N" (and "each of up to N") modifies the target count,
+    // not the counter count. Strip it and emit a MultiTargetSpec.
+    let (target_text, multi) = if let Some(((), after_up_to)) =
+        nom_on_lower(on_rest, on_rest, |i| {
+            value((), alt((tag("each of up to "), tag("up to ")))).parse(i)
+        }) {
+        if let Some((n, after_n)) = parse_number(after_up_to) {
+            let on_offset = lower.len() - after_n.len();
+            (
+                &text[on_offset..],
+                Some(MultiTargetSpec {
+                    min: 0,
+                    max: Some(n as usize),
+                }),
+            )
+        } else {
+            let on_offset = lower.len() - on_rest.len();
+            (&text[on_offset..], None)
+        }
+    } else {
+        let on_offset = lower.len() - on_rest.len();
+        (&text[on_offset..], None)
+    };
+    let (target, rem) = parse_target(target_text);
+    (target, rem, multi)
+}
+
+/// Consume a comma / "and" separator between items in a counter list —
+/// leaves the leading article ("a"/"an") so the next iteration's
+/// `parse_count_expr` consumes it uniformly. Returns `None` unless the
+/// separator is immediately followed by `(a|an) <word> counter(s)` to
+/// avoid stealing a compound connector from a different clause.
+fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
+    let ((), after_sep) = nom_on_lower(input, input, |i| {
+        value((), alt((tag(", and "), tag(" and "), tag(", ")))).parse(i)
+    })?;
+    let ((), after_article) = nom_on_lower(after_sep, after_sep, |i| {
+        value((), alt((tag("an "), tag("a ")))).parse(i)
+    })?;
+    // Peek ahead: after the article there must be "<type> counter(s)". The
+    // counter-type phrase may be multi-word ("first strike"), so delimit it
+    // with `take_until(" counter")` instead of splitting on whitespace.
+    let (at_counter, raw_type) = take_until::<_, _, VerboseError<&str>>(" counter")
+        .parse(after_article)
+        .ok()?;
+    if raw_type.is_empty() {
+        return None;
+    }
+    let ((), after_space) = nom_on_lower(at_counter, at_counter, |i| value((), tag(" ")).parse(i))?;
+    nom_on_lower(after_space, after_space, |i| {
+        value((), alt((tag("counters"), tag("counter")))).parse(i)
+    })?;
+    Some(after_sep)
 }
 
 pub(super) fn try_parse_put_counter<'a>(
@@ -92,48 +243,17 @@ pub(super) fn try_parse_put_counter<'a>(
         (count_expr, after_counter_word)
     };
 
-    let (target, remainder, multi_target) = if let Some(((), on_rest)) =
-        nom_on_lower(after_counter_word, after_counter_word, |i| {
-            value((), tag("on ")).parse(i)
-        }) {
-        if is_self_ref(on_rest) {
-            // Explicit self-reference — always SelfRef
-            (TargetFilter::SelfRef, "", None)
-        } else if is_it_pronoun(on_rest) {
-            // CR 608.2k: Bare pronoun — context-dependent
-            (resolve_it_pronoun(ctx), "", None)
-        } else {
-            // CR 115.1d: Strip "up to N" quantifier before target parsing.
-            // "put a +1/+1 counter on up to one target creature" — the "up to N"
-            // modifies the target count, not the counter count.
-            let (target_text, multi) = if let Some(((), after_up_to)) =
-                nom_on_lower(on_rest, on_rest, |i| {
-                    value((), alt((tag("each of up to "), tag("up to ")))).parse(i)
-                }) {
-                if let Some((n, after_n)) = parse_number(after_up_to) {
-                    let on_offset = lower.len() - after_n.len();
-                    (
-                        &text[on_offset..],
-                        Some(MultiTargetSpec {
-                            min: 0,
-                            max: Some(n as usize),
-                        }),
-                    )
-                } else {
-                    let on_offset = lower.len() - on_rest.len();
-                    (&text[on_offset..], None)
-                }
-            } else {
-                let on_offset = lower.len() - on_rest.len();
-                (&text[on_offset..], None)
-            };
-
-            let (target, rem) = parse_target(target_text);
-            (target, rem, multi)
-        }
-    } else {
-        (TargetFilter::SelfRef, "", None)
-    };
+    // CR 122.1: The placement clause MUST begin with "on <target>" — MTG never
+    // prints a bare "put a counter" without a zone/target. Falling back to
+    // SelfRef on a missed "on " silently swallows unconsumed tails (this was
+    // the root cause of the Abigale multi-counter misparse before the list
+    // path was added). Propagate parse failure instead so upstream dispatch
+    // can try another handler or produce Unimplemented.
+    let ((), on_rest) = nom_on_lower(after_counter_word, after_counter_word, |i| {
+        value((), tag("on ")).parse(i)
+    })?;
+    let (target, remainder, multi_target) =
+        resolve_counter_placement_target(on_rest, lower, text, ctx);
 
     Some((
         Effect::PutCounter {

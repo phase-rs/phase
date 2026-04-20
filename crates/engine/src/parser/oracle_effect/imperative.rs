@@ -2022,6 +2022,48 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
     }
 }
 
+/// CR 122.1 + CR 608.2c: Lower a multi-typed counter list to a ParsedEffectClause
+/// whose primary effect carries the resolved target and whose `sub_ability`
+/// chain re-applies each remaining counter via `TargetFilter::ParentTarget`.
+/// Because `ParentTarget` is a context-ref filter (see
+/// `TargetFilter::is_context_ref`), the sub-ability chain does not surface
+/// additional target-selection slots — the player chooses the target once
+/// on the primary effect and every chained `PutCounter` inherits it.
+pub(super) fn lower_put_counter_list(
+    entries: Vec<(String, QuantityExpr)>,
+    target: TargetFilter,
+    multi_target: Option<MultiTargetSpec>,
+) -> ParsedEffectClause {
+    let mut iter = entries.into_iter();
+    let (first_type, first_count) = iter
+        .next()
+        .expect("PutCounterList must have at least one entry");
+
+    // Build the sub_ability chain right-to-left so each link owns the next.
+    let mut sub_ability: Option<Box<AbilityDefinition>> = None;
+    for (counter_type, count) in iter.collect::<Vec<_>>().into_iter().rev() {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target: TargetFilter::ParentTarget,
+            },
+        );
+        def.sub_ability = sub_ability;
+        sub_ability = Some(Box::new(def));
+    }
+
+    let mut clause = parsed_clause(Effect::PutCounter {
+        counter_type: first_type,
+        count: first_count,
+        target,
+    });
+    clause.sub_ability = sub_ability;
+    clause.multi_target = multi_target;
+    clause
+}
+
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
     let shuffle = AbilityDefinition::new(
@@ -3334,6 +3376,15 @@ pub(crate) fn try_parse_coin_flip_branch(text: &str) -> Option<(bool, &str)> {
 
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEffectClause {
     match ast {
+        // CR 122.1 + CR 608.2c: Multi-typed counter list → PutCounter chain.
+        // Intercepted here (rather than in lower_zone_counter_ast which returns
+        // a bare Effect) because the chain requires a sub_ability linkage that
+        // only ParsedEffectClause can express.
+        ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::PutCounterList {
+            entries,
+            target,
+            multi_target,
+        }) => lower_put_counter_list(entries, target, multi_target),
         ImperativeFamilyAst::Shuffle(ast) => lower_shuffle_ast(ast),
         // CR 701.41a: Support N → PutCounter with multi-target "up to N".
         // On permanents (is_other=true): "up to N other target creatures"
@@ -3504,6 +3555,20 @@ pub(super) fn parse_zone_counter_ast(
                 target,
             });
         }
+        // CR 122.1: Multi-typed counter list ("put a flying counter, a first
+        // strike counter, and a lifelink counter on that creature"). Must run
+        // before the single-counter path — `try_parse_put_counter_chain` only
+        // returns `Some` when it consumed >=2 entries, so single-counter cases
+        // fall through untouched.
+        if let Some((entries, target, _rem, multi_target)) =
+            super::counter::try_parse_put_counter_chain(lower, text, ctx)
+        {
+            return Some(ZoneCounterImperativeAst::PutCounterList {
+                entries,
+                target,
+                multi_target,
+            });
+        }
         // Then fixed-count put ("put N counter(s) on ...")
         // Detect "each"/"all" to route to PutCounterAll (mass placement without targeting).
         // CR 122.1: "on each" and "on all" indicate mass application. The "counter(s)"
@@ -3644,6 +3709,30 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         },
+        // CR 122.1: PutCounterList is always intercepted upstream in
+        // `lower_imperative_family_ast` because it lowers to a sub_ability
+        // chain that a bare Effect can't express. If execution reaches here
+        // (e.g., via `TargetedImperativeAst::ZoneCounterProxy` in a compound
+        // action, which only carries single-counter variants), degrade
+        // gracefully to the first entry rather than panicking.
+        ZoneCounterImperativeAst::PutCounterList {
+            mut entries,
+            target,
+            ..
+        } => {
+            if let Some((counter_type, count)) = entries.drain(..).next() {
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target,
+                }
+            } else {
+                Effect::Unimplemented {
+                    name: "put_counter_list_empty".to_string(),
+                    description: None,
+                }
+            }
+        }
         ZoneCounterImperativeAst::PutCounterAll {
             counter_type,
             count,
