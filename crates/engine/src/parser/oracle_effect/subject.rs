@@ -188,10 +188,11 @@ fn try_parse_subject_restriction_clause(
     if let Some((before, _)) = tp.split_around(" must be blocked") {
         let subject = before.original.trim();
         let application = parse_subject_application(subject, ctx)?;
+        let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
-                    .affected(application.affected)
+                    .affected(affected)
                     .modifications(vec![ContinuousModification::AddStaticMode {
                         mode: StaticMode::MustBeBlocked,
                     }])],
@@ -244,10 +245,11 @@ fn try_parse_subject_restriction_clause(
         } else {
             Duration::UntilEndOfTurn
         };
+        let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::AssignNoCombatDamage)
-                    .affected(application.affected)
+                    .affected(affected)
                     .modifications(vec![ContinuousModification::AssignNoCombatDamage])],
                 duration: Some(duration.clone()),
                 target: application.target,
@@ -300,10 +302,11 @@ fn try_parse_can_attack_with_defender(
     } else {
         None
     };
+    let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
-                .affected(application.affected)
+                .affected(affected)
                 .description(text.to_string())],
             duration: duration.clone(),
             target: application.target,
@@ -773,6 +776,24 @@ fn subject_filter_application(filter: TargetFilter, targeted: bool) -> Option<Su
     })
 }
 
+/// CR 113.3 + CR 611.2: When a `GenericEffect` carries a target slot
+/// (`target: Some(...)`), the embedded static's `affected` filter is the
+/// *application* spec, not the *selection* spec. The runtime resolver
+/// (`game/effects/effect.rs`) short-circuits on `ability.targets` and binds
+/// each transient continuous effect to the chosen object via
+/// `SpecificObject`, so the typed selection filter is dead code on that
+/// path. Encoding `ParentTarget` here makes the parser output
+/// self-documenting and matches the convention used by sibling counter
+/// sub_abilities (`PutCounter { target: ParentTarget }`) and the
+/// `LastCreated` rewrite for token anaphors.
+pub(super) fn static_affected_for_application(application: &SubjectApplication) -> TargetFilter {
+    if application.target.is_some() {
+        TargetFilter::ParentTarget
+    } else {
+        application.affected.clone()
+    }
+}
+
 fn merge_partial_type_phrase_filter(filter: TargetFilter, remainder: &str) -> TargetFilter {
     if remainder.is_empty() {
         return filter;
@@ -952,10 +973,11 @@ fn build_continuous_clause(
         });
     }
 
+    let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
-                .affected(application.affected)
+                .affected(affected)
                 .modifications(modifications)
                 .description(predicate_text.to_string())],
             duration: duration.clone(),
@@ -1086,10 +1108,11 @@ fn build_become_clause(
         return None;
     }
 
+    let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
-                .affected(application.affected)
+                .affected(affected)
                 .modifications(modifications)
                 .description(predicate.to_string())],
             duration: duration.clone(),
@@ -1213,9 +1236,10 @@ fn try_parse_become_choice(
     };
 
     // Two-step: Choose (prompts player) → GenericEffect (applies chosen subtype).
+    let affected = static_affected_for_application(application);
     let apply_effect = Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous()
-            .affected(application.affected.clone())
+            .affected(affected)
             .modifications(vec![modification])
             .description(become_text.to_string())],
         duration: duration.clone(),
@@ -1320,11 +1344,12 @@ fn build_restriction_clause(
         duration
     };
 
+    let affected = static_affected_for_application(&application);
     let static_abilities = modes
         .into_iter()
         .map(|mode| {
             let mut def = StaticDefinition::new(mode.clone())
-                .affected(application.affected.clone())
+                .affected(affected.clone())
                 .description(predicate.to_string());
             // CR 613.2 layer 6: Combat/untap restriction modes with a duration are enforced
             // via active_static_definitions() — inject AddStaticMode so the layer system
