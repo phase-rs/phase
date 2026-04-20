@@ -1341,6 +1341,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), fmt_quantity(count)));
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::LoseAllPlayerCounters { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::ExileFromTopUntil { filter } => {
             d.push(("until".into(), fmt_target(filter)));
         }

@@ -339,7 +339,10 @@ fn redundancy_delta(
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         // CR 702.94a: MiracleCast is an internal engine trigger effect — no redundancy.
-        | Effect::MiracleCast { .. } => None,
+        | Effect::MiracleCast { .. }
+        // CR 122.1: LoseAllPlayerCounters is redundant only if no player in scope
+        // has any counters. Not worth a dedicated predicate — fall through to None.
+        | Effect::LoseAllPlayerCounters { .. } => None,
     }
 }
 

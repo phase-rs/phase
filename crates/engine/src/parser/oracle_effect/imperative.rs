@@ -2947,10 +2947,20 @@ pub(super) fn parse_imperative_family_ast(
             }
         }
 
-        // "lose" → "lose the game" (step 6) → "lose life" (step 3) → keyword (step 7)
+        // "lose" → "lose the game" (step 6) → "lose all counters" (step 6.5)
+        //       → "lose life" (step 3) → keyword (step 7)
         "lose" | "loses" => {
             if nom_primitives::scan_contains(lower, "the game") {
                 Some(ImperativeFamilyAst::LoseTheGame)
+            } else if let Some(effect) = try_parse_lose_all_player_counters(text, lower) {
+                // CR 122.1: Player-scoped "lose all counters" —
+                // Suncleanser ("target opponent loses all counters") and
+                // Final Act mode 5 ("each opponent loses all counters"). The
+                // `each opponent` subject is already stripped upstream via
+                // `strip_each_player_subject`, leaving `lose all counters` to
+                // dispatch here; `target opponent loses all counters` retains
+                // its target for the parse_target call below.
+                Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if nom_primitives::scan_contains(lower, "life") {
                 parse_numeric_imperative_ast(text, lower)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
@@ -3108,6 +3118,56 @@ fn parse_exchange_slot(phrase: &str) -> Option<TargetFilter> {
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return Some(filter);
     }
+    None
+}
+
+/// CR 122.1: Parse "lose(s) all counters" / "target opponent loses
+/// all counters" / "lose all counters" into an `Effect::LoseAllPlayerCounters`.
+///
+/// Two shapes are handled here:
+/// 1. Bare predicate: "lose all counters" / "loses all counters" — the
+///    "each opponent" / "each player" subject has already been stripped by
+///    `strip_each_player_subject`, and the outer `player_scope` drives
+///    per-player iteration. Target defaults to `Controller` so the iterator
+///    addresses the iterating player (CR 608.2 player_scope rebinding).
+/// 2. Explicit target: "target opponent loses all counters" /
+///    "target player loses all counters" — `parse_target` lifts the typed
+///    filter out of the subject; the effect resolves against that chosen
+///    player.
+fn try_parse_lose_all_player_counters(text: &str, lower: &str) -> Option<Effect> {
+    // Case 1: bare predicate after subject-strip — "lose all counters" /
+    // "loses all counters" (trailing period already stripped by the dispatch).
+    let bare = lower.trim().trim_end_matches('.').trim();
+    let bare_tail = alt((
+        tag::<_, _, VerboseError<&str>>("loses all counters"),
+        tag("lose all counters"),
+    ))
+    .parse(bare);
+    if let Ok((rest, _)) = bare_tail {
+        if rest.trim().is_empty() {
+            return Some(Effect::LoseAllPlayerCounters {
+                target: TargetFilter::Controller,
+            });
+        }
+    }
+
+    // Case 2: explicit subject — "target opponent loses all counters" /
+    // "target player loses all counters". Strip the " loses all counters" /
+    // " lose all counters" suffix (structural slice of a known trailing
+    // literal, not parsing dispatch), then hand the subject prefix to
+    // `parse_target`.
+    let trimmed = text.trim_end_matches('.').trim();
+    let trimmed_lower = trimmed.to_lowercase();
+    let subject_len = trimmed_lower
+        .strip_suffix(" loses all counters")
+        .or_else(|| trimmed_lower.strip_suffix(" lose all counters"))
+        .map(str::len)?;
+    let subject = trimmed[..subject_len].trim();
+    let (filter, remainder) = parse_target(subject);
+    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        return Some(Effect::LoseAllPlayerCounters { target: filter });
+    }
+
     None
 }
 

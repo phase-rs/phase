@@ -4013,6 +4013,10 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::GivePlayerCounter { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;
         }
+        // CR 122.1: "target opponent loses all counters" — inject subject target
+        Effect::LoseAllPlayerCounters { target } if *target == TargetFilter::Controller => {
+            *target = subject_filter;
+        }
         // CR 500.8: "target player gets an additional combat phase" — inject subject target
         Effect::AdditionalCombatPhase { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;

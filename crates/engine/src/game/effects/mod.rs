@@ -370,6 +370,9 @@ pub fn resolve_effect(
         Effect::Exploit { .. } => exploit::resolve(state, ability, events),
         Effect::GainEnergy { .. } => energy::resolve_gain(state, ability, events),
         Effect::GivePlayerCounter { .. } => player_counter::resolve(state, ability, events),
+        Effect::LoseAllPlayerCounters { .. } => {
+            player_counter::resolve_lose_all(state, ability, events)
+        }
         Effect::AdditionalCombatPhase { .. } => additional_combat::resolve(state, ability, events),
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
         Effect::RevealUntil { .. } => reveal_until::resolve(state, ability, events),
@@ -655,6 +658,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Mill { target, .. }
         | Effect::Shuffle { target, .. }
         | Effect::GivePlayerCounter { target, .. }
+        | Effect::LoseAllPlayerCounters { target, .. }
         // Additional player-targeted effects: when chained off a "that player"
         // subject in trigger context, their target is an event-context ref
         // (e.g., TriggeringPlayer) rather than a fresh target prompt.

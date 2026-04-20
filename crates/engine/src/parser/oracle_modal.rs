@@ -827,4 +827,75 @@ mod tests {
             );
         }
     }
+
+    // ---- Final Act (SOC / M3C) — "Choose one or more —" modal spell ----
+
+    const FINAL_ACT_ORACLE: &str = "Choose one or more —\n\
+• Destroy all creatures.\n\
+• Destroy all planeswalkers.\n\
+• Destroy all battles.\n\
+• Exile all graveyards.\n\
+• Each opponent loses all counters.";
+
+    #[test]
+    fn final_act_parses_as_one_or_more_modal_with_five_modes() {
+        // CR 700.2 + CR 700.2d: "Choose one or more —" produces a modal with
+        // min_choices = 1 and max_choices = mode_count (all five). Each mode
+        // lowers to a concrete, supported effect — no Unimplemented fallbacks.
+        let parsed = parse_oracle_text(FINAL_ACT_ORACLE, "Final Act", &[], &[], &[]);
+        let modal = parsed.modal.as_ref().expect("Final Act is modal");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 5);
+        assert_eq!(modal.mode_count, 5);
+        assert!(!modal.allow_repeat_modes);
+        assert_eq!(parsed.abilities.len(), 5);
+
+        // Mode 1: Destroy all creatures
+        assert!(matches!(
+            &*parsed.abilities[0].effect,
+            Effect::DestroyAll { .. }
+        ));
+        // Mode 2: Destroy all planeswalkers
+        assert!(matches!(
+            &*parsed.abilities[1].effect,
+            Effect::DestroyAll { .. }
+        ));
+        // Mode 3: Destroy all battles
+        assert!(matches!(
+            &*parsed.abilities[2].effect,
+            Effect::DestroyAll { .. }
+        ));
+        // Mode 4: Exile all graveyards (ChangeZoneAll from graveyard to exile)
+        assert!(matches!(
+            &*parsed.abilities[3].effect,
+            Effect::ChangeZoneAll { .. }
+        ));
+        // Mode 5: Each opponent loses all counters
+        assert!(
+            matches!(
+                &*parsed.abilities[4].effect,
+                Effect::LoseAllPlayerCounters { .. }
+            ),
+            "mode 5 should parse as LoseAllPlayerCounters, got {:?}",
+            parsed.abilities[4].effect
+        );
+    }
+
+    #[test]
+    fn final_act_mode5_is_player_scoped_to_each_opponent() {
+        // CR 608.2: "Each opponent loses all counters" — the outer
+        // `player_scope = Opponent` drives per-opponent iteration; the inner
+        // target is `TargetFilter::Controller` so the iterating player is
+        // addressed.
+        use crate::types::ability::PlayerFilter;
+        let parsed = parse_oracle_text(FINAL_ACT_ORACLE, "Final Act", &[], &[], &[]);
+        let mode5 = &parsed.abilities[4];
+        assert_eq!(mode5.player_scope, Some(PlayerFilter::Opponent));
+        assert!(matches!(
+            &*mode5.effect,
+            Effect::LoseAllPlayerCounters {
+                target: TargetFilter::Controller,
+            }
+        ));
+    }
 }

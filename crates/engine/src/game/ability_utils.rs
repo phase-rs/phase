@@ -48,6 +48,15 @@ pub fn build_resolved_from_def(
 
 /// CR 700.2: For modal spells/abilities, build a chained resolved ability from the
 /// selected mode indices, linking them via the sub_ability chain.
+///
+/// CR 608.2c: "The controller of the spell or ability follows its instructions
+/// in the order written." For modes chosen from a "Choose one or more —" /
+/// "Choose up to N —" list, the printed (source) order is the ascending
+/// ordering of the mode indices — independent of the order the player
+/// announced them in. We sort the input indices here so the resulting
+/// sub_ability chain always resolves in printed order. Duplicate indices are
+/// preserved (CR 700.2d: "You may choose the same mode more than once"
+/// repeats the mode in sequence).
 pub fn build_chained_resolved(
     abilities: &[AbilityDefinition],
     indices: &[usize],
@@ -58,8 +67,11 @@ pub fn build_chained_resolved(
         return Err(EngineError::InvalidAction("No modes selected".to_string()));
     }
 
+    let mut ordered: Vec<usize> = indices.to_vec();
+    ordered.sort();
+
     let mut result: Option<ResolvedAbility> = None;
-    for &idx in indices.iter().rev() {
+    for &idx in ordered.iter().rev() {
         let def = abilities
             .get(idx)
             .ok_or_else(|| EngineError::InvalidAction(format!("Mode index {idx} out of range")))?;
@@ -1730,6 +1742,60 @@ mod tests {
             .as_ref()
             .expect("Draw sub must survive multi-mode chaining");
         assert!(matches!(draw_node.effect, Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn build_chained_resolved_sorts_indices_to_printed_order() {
+        // CR 608.2c: Modes resolve in printed order regardless of the order
+        // the player announced them in. Feeding [2, 0, 1] must still produce
+        // a chain in order [0 → 1 → 2] (Destroy → Draw → Discard).
+        let mode_destroy = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+        );
+        let mode_draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let mode_discard = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                random: false,
+                up_to: false,
+                unless_filter: None,
+            },
+        );
+        let abilities = vec![mode_destroy, mode_draw, mode_discard];
+
+        let resolved =
+            build_chained_resolved(&abilities, &[2, 0, 1], ObjectId(1), PlayerId(0)).unwrap();
+        assert!(
+            matches!(resolved.effect, Effect::Destroy { .. }),
+            "Root should be mode 0 (Destroy) — printed first"
+        );
+        let draw_node = resolved
+            .sub_ability
+            .as_ref()
+            .expect("mode 1 should follow mode 0");
+        assert!(
+            matches!(draw_node.effect, Effect::Draw { .. }),
+            "Second link should be mode 1 (Draw)"
+        );
+        let discard_node = draw_node
+            .sub_ability
+            .as_ref()
+            .expect("mode 2 should follow mode 1");
+        assert!(
+            matches!(discard_node.effect, Effect::Discard { .. }),
+            "Third link should be mode 2 (Discard) — printed last"
+        );
     }
 
     #[test]

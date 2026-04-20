@@ -3499,6 +3499,16 @@ pub enum Effect {
         count: QuantityExpr,
         target: TargetFilter,
     },
+    /// CR 122.1: Remove every counter of every kind from a player.
+    /// Covers "target opponent loses all counters" (Suncleanser) and
+    /// "each opponent loses all counters" (Final Act mode 5). Clears the
+    /// dedicated poison field and every entry in `player_counters` for the
+    /// resolving target player. When `player_scope` iterates (e.g., "each
+    /// opponent"), the controller is rebound per iteration and `target`
+    /// resolves to the iterating player via `TargetFilter::Controller`.
+    LoseAllPlayerCounters {
+        target: TargetFilter,
+    },
     /// CR 702.84a: Exile cards from the top of your library one at a time until you
     /// exile a card matching the filter. The hit card is passed to the sub_ability chain
     /// as an injected target.
@@ -3990,6 +4000,7 @@ impl Effect {
             | Effect::PreventDamage { target, .. }
             | Effect::Exploit { target, .. }
             | Effect::GivePlayerCounter { target, .. }
+            | Effect::LoseAllPlayerCounters { target, .. }
             | Effect::PutAtLibraryPosition { target, .. }
             | Effect::PutOnTopOrBottom { target, .. }
             | Effect::Goad { target, .. }
@@ -4203,6 +4214,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Exploit { .. } => "Exploit",
         Effect::GainEnergy { .. } => "GainEnergy",
         Effect::GivePlayerCounter { .. } => "GivePlayerCounter",
+        Effect::LoseAllPlayerCounters { .. } => "LoseAllPlayerCounters",
         Effect::ExileFromTopUntil { .. } => "ExileFromTopUntil",
         Effect::RevealUntil { .. } => "RevealUntil",
         Effect::Discover { .. } => "Discover",
@@ -4356,6 +4368,7 @@ pub enum EffectKind {
     Exploit,
     GainEnergy,
     GivePlayerCounter,
+    LoseAllPlayerCounters,
     ExileFromTopUntil,
     RevealUntil,
     Discover,
@@ -4513,6 +4526,7 @@ impl From<&Effect> for EffectKind {
             Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,
             Effect::GivePlayerCounter { .. } => EffectKind::GivePlayerCounter,
+            Effect::LoseAllPlayerCounters { .. } => EffectKind::LoseAllPlayerCounters,
             Effect::ExileFromTopUntil { .. } => EffectKind::ExileFromTopUntil,
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
