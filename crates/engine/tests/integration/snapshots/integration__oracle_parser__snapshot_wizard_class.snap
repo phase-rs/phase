@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
-assertion_line: 154
 expression: result
 ---
 {
@@ -190,6 +189,7 @@ expression: result
       "condition": null,
       "affected_zone": null,
       "effect_zone": null,
+      "active_zones": [],
       "characteristic_defining": false,
       "description": "You have no maximum hand size."
     }

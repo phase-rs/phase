@@ -317,7 +317,49 @@ enum InvertedAsLongAs {
 /// "Creatures you control get +N/+M", etc.
 #[tracing::instrument(level = "debug")]
 pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
-    parse_static_line_inner(text, InvertedAsLongAs::Allow)
+    let mut def = parse_static_line_inner(text, InvertedAsLongAs::Allow)?;
+    populate_active_zones_from_condition(&mut def);
+    Some(def)
+}
+
+/// CR 113.6 + CR 113.6b: When a static ability's condition asserts the source
+/// is in a non-battlefield zone (e.g., "as long as this card is in your
+/// graveyard"), that zone is an opt-in functional zone for the static. This
+/// mirrors `self_recursion_trigger_zone` for `TriggerDefinition.trigger_zones`.
+///
+/// Walks the `StaticCondition` tree and collects every `SourceInZone { zone }`
+/// where `zone != Zone::Battlefield`, populating `StaticDefinition.active_zones`.
+/// The battlefield is NOT included (battlefield is the CR 113.6 default and
+/// does not need opt-in). If the condition does not reference a
+/// non-battlefield zone, `active_zones` is left empty (battlefield-only).
+fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
+    let mut zones: Vec<crate::types::zones::Zone> = Vec::new();
+    if let Some(cond) = def.condition.as_ref() {
+        collect_source_in_zones(cond, &mut zones);
+    }
+    // Deduplicate while preserving order.
+    zones.dedup();
+    if !zones.is_empty() {
+        def.active_zones = zones;
+    }
+}
+
+fn collect_source_in_zones(cond: &StaticCondition, out: &mut Vec<crate::types::zones::Zone>) {
+    use crate::types::zones::Zone;
+    match cond {
+        StaticCondition::SourceInZone { zone }
+            if *zone != Zone::Battlefield && !out.contains(zone) =>
+        {
+            out.push(*zone);
+        }
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            for c in conditions {
+                collect_source_in_zones(c, out);
+            }
+        }
+        StaticCondition::Not { condition } => collect_source_in_zones(condition, out),
+        _ => {}
+    }
 }
 
 fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<StaticDefinition> {
@@ -1596,6 +1638,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 /// (one `MustAttack`, one `MustBlock`). Callers that push into a `Vec`
 /// should prefer this over `parse_static_line` to avoid silently dropping modes.
 pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
+    let mut defs = parse_static_line_multi_inner(text);
+    for def in defs.iter_mut() {
+        populate_active_zones_from_condition(def);
+    }
+    defs
+}
+
+fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     // Check compound must-attack/block first — may return multiple.
@@ -11929,5 +11979,59 @@ mod tests {
             panic!("expected TypedFilter");
         };
         assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+    }
+
+    /// CR 113.6 + CR 113.6b: Anger (Onslaught / Incarnation cycle). The static
+    /// "As long as this card is in your graveyard and you control a Mountain,
+    /// creatures you control have haste" must parse with
+    /// `active_zones = [Graveyard]` so the layers pipeline collects it from
+    /// the graveyard. Also verifies the compound condition combines
+    /// `SourceInZone(Graveyard)` AND `IsPresent(Mountain you control)`.
+    #[test]
+    fn anger_incarnation_static_declares_graveyard_active_zone() {
+        let def = parse_static_line(
+            "As long as this card is in your graveyard and you control a Mountain, \
+             creatures you control have haste.",
+        )
+        .expect("Anger static should parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.active_zones,
+            vec![crate::types::zones::Zone::Graveyard],
+            "Anger must declare Graveyard in active_zones (CR 113.6b opt-in), got {:?}",
+            def.active_zones,
+        );
+        // Compound condition: source-in-graveyard AND controller-has-Mountain.
+        let Some(StaticCondition::And { conditions }) = def.condition.as_ref() else {
+            panic!("expected compound And condition, got {:?}", def.condition);
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(conditions.iter().any(|c| matches!(
+            c,
+            StaticCondition::SourceInZone { zone } if *zone == crate::types::zones::Zone::Graveyard
+        )));
+        assert!(conditions
+            .iter()
+            .any(|c| matches!(c, StaticCondition::IsPresent { .. })));
+        // Grants Haste to creatures you control.
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }
+        )));
+    }
+
+    /// Statics with no zone-location condition keep `active_zones` empty so
+    /// they remain battlefield-only (CR 113.6 default).
+    #[test]
+    fn ordinary_static_keeps_empty_active_zones() {
+        let def = parse_static_line("Creatures you control get +1/+1.")
+            .expect("anthem static should parse");
+        assert!(
+            def.active_zones.is_empty(),
+            "plain anthem must remain battlefield-default, got {:?}",
+            def.active_zones,
+        );
     }
 }

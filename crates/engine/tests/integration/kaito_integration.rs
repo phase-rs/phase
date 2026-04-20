@@ -58,6 +58,7 @@ fn ninja_pump_static() -> StaticDefinition {
         condition: None,
         affected_zone: None,
         effect_zone: None,
+        active_zones: vec![],
         characteristic_defining: false,
         description: None,
     }

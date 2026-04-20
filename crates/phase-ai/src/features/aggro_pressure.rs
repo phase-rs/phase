@@ -474,6 +474,7 @@ mod tests {
             condition: None,
             affected_zone: None,
             effect_zone: None,
+            active_zones: vec![],
             characteristic_defining: false,
             description: None,
         };
@@ -560,6 +561,7 @@ mod tests {
             condition: None,
             affected_zone: None,
             effect_zone: None,
+            active_zones: vec![],
             characteristic_defining: false,
             description: None,
         };

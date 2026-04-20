@@ -771,6 +771,7 @@ pub fn room_effects(
                         condition: None,
                         affected_zone: None,
                         effect_zone: None,
+                        active_zones: vec![],
                         characteristic_defining: false,
                         description: Some(
                             "Creatures you control get +2/+2 and have trample.".to_string(),

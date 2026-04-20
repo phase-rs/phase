@@ -611,6 +611,37 @@ pub(crate) fn collect_shared_active_continuous_effects(
         }
     }
 
+    // CR 113.6 + CR 113.6b: Statics that opt into non-battlefield functional
+    // zones (Incarnation cycle — Anger/Filth/Brawn/Wonder/Valor — "as long as
+    // this card is in your graveyard, ...") must be collected from wherever the
+    // source currently lives. `active_continuous_effects_from_static_definitions`
+    // applies the zone-of-function gate per-static, so scanning every object
+    // outside the battlefield / command-zone passes already covered above is
+    // safe: battlefield-default statics filter themselves out.
+    for obj in state.objects.values() {
+        // Battlefield objects were already processed above (phased-out gate
+        // included). Command-zone emblems were handled above; non-emblem
+        // command-zone objects never function (CR 114.4).
+        match obj.zone {
+            crate::types::zones::Zone::Battlefield | crate::types::zones::Zone::Command => continue,
+            _ => {}
+        }
+        if obj.is_phased_out() {
+            continue;
+        }
+        // Cheap pre-check: only scan objects that carry at least one
+        // opt-in-zone static. Avoids iterating libraries/hands full of
+        // ordinary cards on every layer recomputation.
+        if !obj
+            .static_definitions
+            .iter_all()
+            .any(|def| !def.active_zones.is_empty())
+        {
+            continue;
+        }
+        effects.extend(active_continuous_effects_from_static_source(state, obj));
+    }
+
     gather_transient_continuous_effects(state, &mut effects);
     effects
 }
@@ -660,9 +691,24 @@ fn active_continuous_effects_from_static_definitions(
     static_definitions: &[StaticDefinition],
 ) -> Vec<ActiveContinuousEffect> {
     let mut effects = Vec::new();
+    // CR 113.6 + CR 113.6b: A static's functional zone is the battlefield by
+    // default (empty `active_zones`). A non-empty `active_zones` lists the
+    // non-battlefield zones in which the static functions (e.g., Incarnation
+    // cycle: "as long as this card is in your graveyard, ..."). If the source
+    // is currently outside every declared zone, the static contributes no
+    // effects.
+    let source_zone = state.objects.get(&source_id).map(|o| o.zone);
     for (def_idx, def) in static_definitions.iter().enumerate() {
         if def.mode != StaticMode::Continuous {
             continue;
+        }
+
+        // CR 113.6 + CR 113.6b: Zone-of-function gate.
+        if !def.active_zones.is_empty() {
+            let Some(zone) = source_zone else { continue };
+            if !def.active_zones.contains(&zone) {
+                continue;
+            }
         }
 
         if let Some(ref condition) = def.condition {
@@ -3434,6 +3480,212 @@ mod tests {
             state.objects[&exiled].casting_permissions.len(),
             1,
             "UntilEndOfTurn permissions are pruned by the cleanup step, not untap"
+        );
+    }
+
+    /// CR 113.6 + CR 113.6b: Anger (Onslaught / Incarnation cycle) —
+    /// "As long as this card is in your graveyard and you control a Mountain,
+    /// creatures you control have haste." The static's `active_zones` opts
+    /// into Graveyard, so when Anger is in its controller's graveyard and that
+    /// controller also controls a Mountain, the anthem grants Haste to every
+    /// creature they control.
+    #[test]
+    fn incarnation_anger_grants_haste_from_graveyard_when_mountain_controlled() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+
+        // Anger in player 0's graveyard.
+        let anger = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Anger".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&anger).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::SourceInZone {
+                                zone: Zone::Graveyard,
+                            },
+                            StaticCondition::IsPresent {
+                                filter: Some(TargetFilter::Typed(TypedFilter {
+                                    type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+                                    controller: Some(ControllerRef::You),
+                                    properties: vec![],
+                                })),
+                            },
+                        ],
+                    })
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+        }
+        state.players[0].graveyard.push(anger);
+
+        // Mountain on player 0's battlefield.
+        let mountain = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mountain).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Mountain".to_string());
+        }
+
+        // Bear (creature you control), no intrinsic haste.
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert!(
+            bear_obj.has_keyword(&Keyword::Haste),
+            "Anger in graveyard + Mountain controlled must grant Haste to creatures you control"
+        );
+    }
+
+    /// CR 604.1 / CR 613.1: Anger's compound `IsPresent(Mountain)` side must
+    /// evaluate false when the controller has no Mountain, so no anthem
+    /// applies even though Anger is in the graveyard and the zone gate passes.
+    #[test]
+    fn incarnation_anger_without_mountain_grants_no_haste() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let anger = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Anger".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&anger).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::SourceInZone {
+                                zone: Zone::Graveyard,
+                            },
+                            StaticCondition::IsPresent {
+                                filter: Some(TargetFilter::Typed(TypedFilter {
+                                    type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+                                    controller: Some(ControllerRef::You),
+                                    properties: vec![],
+                                })),
+                            },
+                        ],
+                    })
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+        }
+        state.players[0].graveyard.push(anger);
+
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert!(
+            !bear_obj.has_keyword(&Keyword::Haste),
+            "Without a Mountain, the compound condition fails and Haste is not granted"
+        );
+    }
+
+    /// CR 113.6 + CR 113.6b: Sanity check for the zone-of-function gate.
+    /// When Anger is on the battlefield (not in the graveyard), the compound
+    /// `SourceInZone(Graveyard)` arm evaluates false, so the anthem must not
+    /// apply — verifying the condition check correctly dis-applies the static
+    /// even though it would otherwise function on the battlefield default.
+    #[test]
+    fn incarnation_anger_on_battlefield_does_not_grant_haste() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        // Mountain on player 0's battlefield.
+        let mountain = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mountain).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Mountain".to_string());
+        }
+
+        // Anger on battlefield (not graveyard). Its active_zones lists only
+        // Graveyard, so the per-static zone gate drops its effects regardless
+        // of the condition.
+        let anger = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Anger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anger).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::SourceInZone {
+                                zone: Zone::Graveyard,
+                            },
+                            StaticCondition::IsPresent {
+                                filter: Some(TargetFilter::Typed(TypedFilter {
+                                    type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+                                    controller: Some(ControllerRef::You),
+                                    properties: vec![],
+                                })),
+                            },
+                        ],
+                    })
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+        }
+
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert!(
+            !bear_obj.has_keyword(&Keyword::Haste),
+            "Anger on battlefield (outside its active_zones) must not grant Haste"
         );
     }
 }

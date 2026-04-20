@@ -5552,6 +5552,16 @@ pub struct StaticDefinition {
     pub affected_zone: Option<Zone>,
     #[serde(default)]
     pub effect_zone: Option<Zone>,
+    /// CR 113.6 + CR 113.6b: Non-battlefield zones in which this static
+    /// ability functions. An empty vec means the default — battlefield only
+    /// (CR 113.6). A non-empty vec lists the non-battlefield zones the
+    /// source must currently occupy for the static to contribute its
+    /// continuous effects (e.g., Incarnation cycle — Anger, Filth, Brawn,
+    /// Wonder, Valor — function from the graveyard). The battlefield is NOT
+    /// implicitly included; callers that want both battlefield + graveyard
+    /// must list both explicitly, matching `TriggerDefinition.trigger_zones`.
+    #[serde(default)]
+    pub active_zones: Vec<Zone>,
     #[serde(default)]
     pub characteristic_defining: bool,
     #[serde(default)]
@@ -5567,6 +5577,7 @@ impl StaticDefinition {
             condition: None,
             affected_zone: None,
             effect_zone: None,
+            active_zones: vec![],
             characteristic_defining: false,
             description: None,
         }
@@ -5598,6 +5609,14 @@ impl StaticDefinition {
 
     pub fn effect_zone(mut self, zone: Zone) -> Self {
         self.effect_zone = Some(zone);
+        self
+    }
+
+    /// CR 113.6 + CR 113.6b: Declare the non-battlefield zones this static
+    /// functions in. Mirrors `TriggerDefinition::trigger_zones`. The
+    /// battlefield is not implicitly included.
+    pub fn active_zones(mut self, zones: Vec<Zone>) -> Self {
+        self.active_zones = zones;
         self
     }
 
@@ -6411,6 +6430,7 @@ mod tests {
             condition: None,
             affected_zone: None,
             effect_zone: None,
+            active_zones: vec![],
             characteristic_defining: false,
             description: Some("Other creatures you control get +1/+1.".to_string()),
         };
@@ -6642,6 +6662,7 @@ mod tests {
                 condition: None,
                 affected_zone: None,
                 effect_zone: None,
+                active_zones: vec![],
                 characteristic_defining: false,
                 description: None,
             }],

@@ -1,5 +1,5 @@
 ---
-source: crates/engine/tests/oracle_parser.rs
+source: crates/engine/tests/integration/oracle_parser.rs
 expression: result
 ---
 {
@@ -65,6 +65,7 @@ expression: result
       "condition": null,
       "affected_zone": null,
       "effect_zone": null,
+      "active_zones": [],
       "characteristic_defining": false,
       "description": "Equipped creature gets +2/+0."
     }
