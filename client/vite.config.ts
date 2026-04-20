@@ -56,9 +56,13 @@ function workspaceVersion(): string {
 // resolve to `${BASE}/<filename>`. Local dev with no env defaults to
 // site-root paths.
 //
-// Exception: __CARD_DATA_URL__ honors a CARD_DATA_URL env override so
-// deploys can pin the WASM bundle to a content-addressed
-// `card-data-<hash>.json` URL forever.
+// `__CARD_DATA_URL__` is NOT manifest-driven — the WASM bundle is pinned to
+// a content-addressed `card-data-<hash>.json` URL via CARD_DATA_URL at build
+// time (see release.yml / deploy.yml). That hashed file lives on R2 only;
+// uploading an additional non-hashed `card-data.json` to R2 would be dead
+// weight since no frontend code fetches it. Local dev falls back to the
+// public/ copy served at `/card-data.json` (also used by Tauri bundles and
+// phase-server via `data/card-data.json`).
 function dataFileDefines(): Record<string, string> {
   const manifest = JSON.parse(
     readFileSync(path.resolve(__dirname, "../data-files.json"), "utf-8"),
@@ -69,12 +73,12 @@ function dataFileDefines(): Record<string, string> {
     __BUILD_HASH__: JSON.stringify(gitHash()),
     __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
+    __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
   };
   for (const filename of manifest) {
-    // "card-data.json" → "__CARD_DATA_URL__"
+    // "card-names.json" → "__CARD_NAMES_URL__"
     const token = `__${filename.replace(/\.json$/, "").replace(/-/g, "_").toUpperCase()}_URL__`;
-    const envOverride = filename === "card-data.json" ? process.env.CARD_DATA_URL : undefined;
-    defines[token] = JSON.stringify(envOverride || `${base}/${filename}`);
+    defines[token] = JSON.stringify(`${base}/${filename}`);
   }
   return defines;
 }

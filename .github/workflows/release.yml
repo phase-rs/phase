@@ -150,15 +150,31 @@ jobs:
           check "$CARD_DATA_FILENAME"
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           [ "$fail" = "0" ]
-      - name: Remove large data files from dist (served from R2)
-        # Hex glob keeps `card-data-meta.json` (consumed by `useCardDataMeta`).
+      - name: Remove R2-hosted data files from dist (Pages ships only the shell)
+        # Single source of truth: data-files.json lists every JSON the frontend
+        # fetches from R2. The same manifest drives the R2 upload loop above —
+        # this step is its inverse, stripping those files from the Pages
+        # bundle so we never double-ship bytes. Adding a new data file is
+        # now one line in data-files.json and nothing else.
+        #
+        # Separately handled:
+        #   - card-data.json (non-manifest; kept in public/ for Tauri + server
+        #     bundles + local dev, but never deployed to Pages)
+        #   - card-data-<16hex>.json[.br] (content-addressed, lives on R2;
+        #     glob matches only 16-hex suffixes, cannot match the 4-char
+        #     `meta` suffix). This replaces the previous `find -regex` which
+        #     used GNU find's default "emacs" regex flavor where `?` is a
+        #     literal — so `\(\.br\)?` matched nothing and the 80 MiB hashed
+        #     file slipped through, exceeding Pages' 25 MiB per-file cap.
+        shell: bash
         run: |
+          shopt -s nullglob
+          while IFS= read -r f; do
+            rm -f "client/dist/$f" "client/dist/$f.br"
+          done < <(jq -r '.[]' data-files.json)
           rm -f client/dist/card-data.json client/dist/card-data.json.br \
-            client/dist/coverage-data.json client/dist/coverage-data.json.br \
-            client/dist/coverage-summary.json client/dist/coverage-summary.json.br \
-            client/dist/scryfall-data.json client/dist/scryfall-data.json.br
-          find client/dist -maxdepth 1 \
-            -regex '.*/card-data-[0-9a-f]\{16\}\.json\(\.br\)?' -delete
+            client/dist/card-data-????????????????.json \
+            client/dist/card-data-????????????????.json.br
 
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v4
