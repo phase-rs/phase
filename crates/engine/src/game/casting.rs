@@ -884,15 +884,15 @@ fn prepare_spell_cast_with_variant_override(
         None
     };
 
-    // CR 702.34a: Split flashback into mana vs non-mana components.
-    let flashback_mana_cost = flashback_cost.as_ref().and_then(|c| match c {
-        FlashbackCost::Mana(mana) => Some(mana.clone()),
-        FlashbackCost::NonMana(_) => None,
-    });
-    let flashback_non_mana_cost = flashback_cost.as_ref().and_then(|c| match c {
-        FlashbackCost::NonMana(cost) => Some(cost.clone()),
-        FlashbackCost::Mana(_) => None,
-    });
+    // CR 702.34a + CR 118.8 + CR 601.2f: Split flashback into mana vs non-mana
+    // components for the payment pipeline. Compound flashback costs
+    // ("Flashback—{1}{U}, Pay 3 life") are stored as
+    // `FlashbackCost::NonMana(AbilityCost::Composite([Mana, ...]))`; we extract
+    // the mana sub-cost so the spell pays its mana through the normal mana-payment
+    // flow while the residual non-mana sub-costs are routed through
+    // `pay_additional_cost`. Mirrors `extract_x_mana_cost` (casting_costs.rs).
+    let (flashback_mana_cost, flashback_non_mana_cost) =
+        split_flashback_cost_components(flashback_cost.as_ref());
 
     // Precedence: Escape > Harmonize > Flashback > GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
@@ -955,10 +955,17 @@ fn prepare_spell_cast_with_variant_override(
     } else {
         None
     };
+    // CR 702.34a: When the flashback cost is purely non-mana (e.g. Battle Screech's
+    // "tap three white creatures"), the spell pays no mana through the normal flow.
+    // For compound flashback costs ("{1}{U}, Pay 3 life") we still want the mana
+    // sub-cost paid normally — `flashback_mana_cost` is `Some` in that case and is
+    // selected by the `else` branch below.
+    let pure_non_mana_flashback =
+        flashback_non_mana_cost.is_some() && flashback_mana_cost.is_none();
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || is_hand_permission_variant
-        || flashback_non_mana_cost.is_some()
+        || pure_non_mana_flashback
     {
         crate::types::mana::ManaCost::NoCost
     } else {
@@ -2693,6 +2700,59 @@ fn find_non_self_sacrifice(cost: &AbilityCost) -> Option<&TargetFilter> {
         }
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_sacrifice),
         _ => None,
+    }
+}
+
+/// CR 702.34a + CR 118.8: Partition a flashback cost into its mana sub-cost (paid
+/// through the normal mana-payment flow) and its residual non-mana sub-cost (paid
+/// as an additional cost via `pay_additional_cost`).
+///
+/// Compound flashback costs ("Flashback—{1}{U}, Pay 3 life") are stored by the
+/// parser as `FlashbackCost::NonMana(AbilityCost::Composite([Mana, PayLife, ...]))`.
+/// This helper extracts the embedded `Mana` sub-cost so both halves of the cost
+/// are paid through their proper pipelines. Mirrors `extract_x_mana_cost` in
+/// casting_costs.rs.
+///
+/// Returns `(mana_sub_cost, non_mana_residual)`. Either may be `None`:
+///   - Pure-mana flashback     → `(Some(mana), None)`
+///   - Pure non-mana           → `(None, Some(cost))`
+///   - Compound mana+non-mana  → `(Some(mana), Some(residual))`
+pub(super) fn split_flashback_cost_components(
+    flashback: Option<&FlashbackCost>,
+) -> (Option<crate::types::mana::ManaCost>, Option<AbilityCost>) {
+    let Some(fb) = flashback else {
+        return (None, None);
+    };
+    match fb {
+        FlashbackCost::Mana(mana) => (Some(mana.clone()), None),
+        FlashbackCost::NonMana(AbilityCost::Mana { cost }) => (Some(cost.clone()), None),
+        FlashbackCost::NonMana(AbilityCost::Composite { costs }) => {
+            // Find the (single) Mana sub-cost and partition the rest.
+            let mana_idx = costs
+                .iter()
+                .position(|sub| matches!(sub, AbilityCost::Mana { .. }));
+            match mana_idx {
+                None => (
+                    None,
+                    Some(AbilityCost::Composite {
+                        costs: costs.clone(),
+                    }),
+                ),
+                Some(idx) => {
+                    let mut remaining = costs.clone();
+                    let AbilityCost::Mana { cost: extracted } = remaining.remove(idx) else {
+                        unreachable!("position() guarantees Mana variant")
+                    };
+                    let residual = match remaining.len() {
+                        0 => None,
+                        1 => Some(remaining.into_iter().next().unwrap()),
+                        _ => Some(AbilityCost::Composite { costs: remaining }),
+                    };
+                    (Some(extracted), residual)
+                }
+            }
+        }
+        FlashbackCost::NonMana(other) => (None, Some(other.clone())),
     }
 }
 
@@ -8010,6 +8070,128 @@ mod tests {
                 generic: 2,
                 shards: vec![ManaCostShard::Green],
             }
+        );
+    }
+
+    /// CR 702.34a + CR 118.8 + CR 118.3b: Compound flashback cost
+    /// ("Flashback—{1}{U}, Pay 3 life") — Deep Analysis class. The mana
+    /// sub-cost is paid through the normal mana flow; the residual life
+    /// sub-cost is paid as an additional cost via `pay_additional_cost`.
+    /// Both sides must succeed for the spell to be cast.
+    #[test]
+    fn compound_flashback_pays_mana_and_life() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = add_flashback_instant_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            ManaCost::NoCost, // unused — overwritten below
+            ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue],
+            },
+        );
+        // Replace the keyword with a compound flashback cost: {1}{U} + Pay 3 life.
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.base_keywords.clear();
+        obj.keywords.clear();
+        let compound = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        generic: 1,
+                        shards: vec![ManaCostShard::Blue],
+                    },
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+            ],
+        };
+        obj.base_keywords
+            .push(Keyword::Flashback(FlashbackCost::NonMana(compound)));
+        obj.keywords = obj.base_keywords.clone();
+        let card_id = obj.card_id;
+
+        // The prepared spell pays only the mana sub-cost through the normal flow.
+        let prepared = prepare_spell_cast(&state, PlayerId(0), obj_id).unwrap();
+        assert_eq!(prepared.casting_variant, CastingVariant::Flashback);
+        assert_eq!(
+            prepared.mana_cost,
+            ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue],
+            },
+            "compound flashback's mana sub-cost should be the spell's mana cost"
+        );
+
+        // Provide {1}{U} of mana.
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let life_before = state.players[0].life;
+        handle_cast_spell(&mut state, PlayerId(0), obj_id, card_id, &mut Vec::new())
+            .expect("compound flashback with payable mana + life should be castable");
+
+        assert_eq!(
+            state.players[0].life,
+            life_before - 3,
+            "Pay 3 life sub-cost must be paid as additional cost"
+        );
+        assert_eq!(state.stack.len(), 1, "spell should be on the stack");
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "{{1}}{{U}} mana sub-cost must be drained from the pool"
+        );
+    }
+
+    /// CR 702.34a + CR 119.8: Compound flashback cost is not castable when the
+    /// caster lacks life to pay the additional cost — even with sufficient mana.
+    #[test]
+    fn compound_flashback_filtered_when_life_insufficient() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = add_flashback_instant_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            ManaCost::NoCost,
+            ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue],
+            },
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.base_keywords.clear();
+        obj.keywords.clear();
+        obj.base_keywords
+            .push(Keyword::Flashback(FlashbackCost::NonMana(
+                AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                generic: 1,
+                                shards: vec![ManaCostShard::Blue],
+                            },
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ],
+                },
+            )));
+        obj.keywords = obj.base_keywords.clone();
+
+        // CR 118.3: a player can't pay a cost without sufficient resources;
+        // CR 119.4: paying life requires life total >= amount.
+        // Drop life to 2 so paying 3 is unpayable.
+        state.players[0].life = 2;
+
+        // Provide {1}{U} of mana so mana side is fine.
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), obj_id),
+            "compound flashback must be filtered when life is insufficient to pay the residual cost"
         );
     }
 

@@ -680,11 +680,17 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     }
 
-    // CR 702.34a: Flashback with non-mana cost requires paying the cost as an additional cost.
+    // CR 702.34a + CR 118.8: Flashback with a non-mana additional cost (Battle
+    // Screech's "tap three white creatures") or a compound cost (Deep Analysis's
+    // "{1}{U}, Pay 3 life") routes the residual non-mana sub-cost through
+    // `pay_additional_cost`. The mana sub-cost (if any) was already extracted
+    // into `cost` upstream by `split_flashback_cost_components` and is paid via
+    // the normal mana-payment flow inside `pay_additional_cost`'s fall-through.
     if casting_variant == CastingVariant::Flashback {
-        if let Some(crate::types::keywords::FlashbackCost::NonMana(non_mana_cost)) =
-            super::keywords::effective_flashback_cost(state, object_id)
-        {
+        let flashback_cost = super::keywords::effective_flashback_cost(state, object_id);
+        let (_mana, residual) =
+            super::casting::split_flashback_cost_components(flashback_cost.as_ref());
+        if let Some(non_mana_cost) = residual {
             let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
             pending.casting_variant = casting_variant;
             pending.distribute = distribute;

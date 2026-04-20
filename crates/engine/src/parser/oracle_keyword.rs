@@ -253,22 +253,37 @@ fn split_outside_braces(text: &str) -> Vec<&str> {
     parts
 }
 
-/// Parse a keyword from Oracle text format (natural language) into a `Keyword`.
-/// CR 702.34a: Parse a non-mana flashback cost.
-/// Handles "tap N untapped [color] creatures you control" patterns.
-/// Delegates to `parse_single_cost` for the actual parsing.
-fn parse_flashback_non_mana_cost(cost_text: &str) -> Option<AbilityCost> {
+/// CR 702.34a: Parse a flashback cost following the em-dash separator.
+/// Handles every shape the Oracle prints after `Flashback—`:
+///   - Pure mana                     (degenerate: `Flashback—{2}{R}` is rare; standard "Flashback {cost}" goes through FromStr)
+///   - Single non-mana cost          ("tap N untapped white creatures you control", "sacrifice a creature")
+///   - Compound (mana + non-mana)    ("{1}{U}, Pay 3 life", "{R}{R}, Discard X cards")
+///   - Compound (multiple non-mana)  (none in current data, but composes naturally)
+///
+/// Delegates to `parse_oracle_cost`, which already splits comma-separated parts into
+/// `AbilityCost::Composite`. Dispatches into `FlashbackCost::Mana` only when the result
+/// is a single `Mana` sub-cost; otherwise wraps the whole `AbilityCost` in `NonMana`,
+/// letting the runtime split (see `split_flashback_cost` in casting.rs) extract the
+/// mana sub-cost from a Composite for normal mana payment while routing the residual
+/// non-mana sub-costs through `pay_additional_cost`.
+fn parse_flashback_cost(cost_text: &str) -> Option<FlashbackCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
-    // Strip reminder text in parentheses
+    // Strip reminder text in parentheses (structural punctuation, not parser dispatch).
     let clean = if let Some(paren_idx) = trimmed.find(" (") {
         trimmed[..paren_idx].trim()
     } else {
         trimmed
     };
-    let cost = super::oracle_cost::parse_single_cost(clean);
-    match &cost {
-        AbilityCost::TapCreatures { .. } => Some(cost),
-        _ => None,
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(FlashbackCost::Mana(mana_cost)),
+        // Filter out parse failures: parse_oracle_cost returns AbilityCost::Unimplemented
+        // for unrecognized text. Don't manufacture a meaningless flashback ability.
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(FlashbackCost::NonMana(other)),
     }
 }
 
@@ -349,16 +364,16 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return parse_ward_cost(rest);
     }
 
-    // CR 702.34a: Flashback with non-mana cost — "flashback—tap N untapped [color] creatures you control"
+    // CR 702.34a: Flashback with em-dash cost — covers single non-mana costs
+    // ("flashback—tap N untapped white creatures you control"), single mana costs
+    // ("flashback—{2}{R}"), and compound costs ("flashback—{1}{U}, Pay 3 life").
+    // `parse_flashback_cost` delegates to `parse_oracle_cost`, which composes
+    // comma-separated parts into `AbilityCost::Composite` so the runtime split
+    // (`split_flashback_cost` in casting.rs) can route mana sub-costs through the
+    // mana-payment flow and residual sub-costs through `pay_additional_cost`.
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("flashback\u{2014}").parse(text) {
-        if let Some(cost) = parse_flashback_non_mana_cost(rest) {
-            return Some(Keyword::Flashback(FlashbackCost::NonMana(cost)));
-        }
-        // If non-mana cost parsing fails, try as mana cost
-        let cost_str = rest.trim();
-        if !cost_str.is_empty() {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::Flashback(FlashbackCost::Mana(cost)));
+        if let Some(fb_cost) = parse_flashback_cost(rest) {
+            return Some(Keyword::Flashback(fb_cost));
         }
     }
 
@@ -1341,5 +1356,69 @@ mod tests {
     fn parse_keyword_from_oracle_paradigm() {
         let kw = parse_keyword_from_oracle("paradigm").unwrap();
         assert_eq!(kw, Keyword::Paradigm);
+    }
+
+    /// CR 702.34a: Compound flashback cost ("Flashback—{1}{U}, Pay 3 life") —
+    /// Deep Analysis class. Parses to FlashbackCost::NonMana wrapping a
+    /// Composite of Mana + PayLife sub-costs. The runtime split
+    /// (`split_flashback_cost_components` in casting.rs) routes the mana piece
+    /// through the normal mana-payment flow and the life piece through
+    /// `pay_additional_cost`.
+    #[test]
+    fn parse_keyword_from_oracle_flashback_compound_mana_and_life() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::mana::ManaCostShard;
+
+        // Lowercased Oracle text passed through `parse_keyword_from_oracle` after
+        // reminder text is stripped by the upstream pipeline.
+        let kw = parse_keyword_from_oracle("flashback\u{2014}{1}{u}, pay 3 life").unwrap();
+        let Keyword::Flashback(FlashbackCost::NonMana(AbilityCost::Composite { costs })) = kw
+        else {
+            panic!("expected NonMana(Composite), got {:?}", kw);
+        };
+        assert_eq!(costs.len(), 2);
+        let AbilityCost::Mana { cost: mana } = &costs[0] else {
+            panic!("expected Mana sub-cost, got {:?}", costs[0]);
+        };
+        assert_eq!(
+            mana,
+            &ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue],
+            }
+        );
+        assert_eq!(
+            costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 }
+            }
+        );
+    }
+
+    /// CR 702.34a regression: Battle Screech's tap-creatures flashback shape
+    /// must continue to parse to `FlashbackCost::NonMana(TapCreatures)`.
+    #[test]
+    fn parse_keyword_from_oracle_flashback_tap_creatures_unchanged() {
+        let kw = parse_keyword_from_oracle(
+            "flashback\u{2014}tap three untapped white creatures you control",
+        )
+        .unwrap();
+        let Keyword::Flashback(FlashbackCost::NonMana(AbilityCost::TapCreatures { count, .. })) =
+            kw
+        else {
+            panic!("expected NonMana(TapCreatures), got {:?}", kw);
+        };
+        assert_eq!(count, 3);
+    }
+
+    /// CR 702.34a regression: simple `Flashback {cost}` (Cackling Counterpart,
+    /// Roar of the Wurm) goes through the FromStr direct-parse branch and
+    /// produces `FlashbackCost::Mana`.
+    #[test]
+    fn parse_keyword_from_oracle_flashback_simple_mana_unchanged() {
+        let kw = parse_keyword_from_oracle("flashback {3}{g}").unwrap();
+        let Keyword::Flashback(FlashbackCost::Mana(_)) = kw else {
+            panic!("expected FlashbackCost::Mana, got {:?}", kw);
+        };
     }
 }

@@ -1288,6 +1288,25 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        // CR 702.34a: Flashback em-dash form — "Flashback—{cost}", "Flashback—Tap N
+        // creatures...", or compound "Flashback—{mana}, Pay N life." The comma in
+        // compound costs prevents `extract_keyword_line` (priority 1b) from
+        // recognising the line as a keyword-only line, and Priority 9 would
+        // otherwise route it to the spell-effect catch-all and produce
+        // `Unimplemented`. Intercept it here, before the spell catch-all, and
+        // delegate to `parse_keyword_from_oracle`'s em-dash dispatcher.
+        if lower_starts_with(&lower, "flashback") && line.contains('\u{2014}') {
+            // Strip trailing punctuation so the em-dash dispatcher sees a clean
+            // cost string. Reminder text was already removed by `strip_reminder_text`
+            // upstream, but the trailing period from "Pay 3 life." remains.
+            let lower_clean = lower.trim_end_matches('.').trim();
+            if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+                result.extracted_keywords.push(kw);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
             // B7: Strip ability-word prefix and attach condition for spell effects.
