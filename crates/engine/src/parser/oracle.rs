@@ -376,6 +376,65 @@ fn ability_word_to_ability_condition(
     }
 }
 
+/// Single-authority merge for composing a freshly-parsed `AbilityCondition` onto an
+/// existing one on an `AbilityDefinition`.
+///
+/// CR 608.2c: Compound condition — a spell's resolution gate is the conjunction of
+/// every condition that applies. Two independent parser paths can emit the same
+/// condition (e.g. the "Delirium —" ability-word prefix and the literal
+/// "If there are four or more card types..." phrase both yield the same
+/// `QuantityCheck`). Structural dedup keeps the AST flat and prevents
+/// `And(X, X)` wrappers that would be semantically identical but waste work.
+///
+/// Invariants:
+/// - Structural equality (`==`) is the dedup criterion.
+/// - Results never nest: `And` children are always leaves, never `And`.
+/// - Empty-conjunction not produced — at least one operand is always retained.
+fn merge_ability_condition(
+    existing: Option<crate::types::ability::AbilityCondition>,
+    incoming: crate::types::ability::AbilityCondition,
+) -> crate::types::ability::AbilityCondition {
+    use crate::types::ability::AbilityCondition;
+    match existing {
+        None => incoming,
+        Some(existing) if existing == incoming => existing,
+        Some(AbilityCondition::And { mut conditions }) => {
+            // Flatten: if incoming is itself an And, absorb its children.
+            let new_children: Vec<AbilityCondition> = match incoming {
+                AbilityCondition::And { conditions: inner } => inner,
+                other => vec![other],
+            };
+            for child in new_children {
+                if !conditions.contains(&child) {
+                    conditions.push(child);
+                }
+            }
+            // If dedup collapsed everything to a single child, unwrap.
+            if conditions.len() == 1 {
+                conditions.into_iter().next().unwrap()
+            } else {
+                AbilityCondition::And { conditions }
+            }
+        }
+        Some(existing) => match incoming {
+            AbilityCondition::And { mut conditions } => {
+                // Existing is a leaf; prepend it to the incoming And (deduped).
+                if !conditions.contains(&existing) {
+                    conditions.insert(0, existing);
+                }
+                if conditions.len() == 1 {
+                    conditions.into_iter().next().unwrap()
+                } else {
+                    AbilityCondition::And { conditions }
+                }
+            }
+            other => AbilityCondition::And {
+                conditions: vec![existing, other],
+            },
+        },
+    }
+}
+
 /// Convert an ability-word condition to a `TriggerCondition`.
 /// All known ability words use `StaticCondition::QuantityComparison`, which maps
 /// directly to `TriggerCondition::QuantityComparison`.
@@ -1339,24 +1398,20 @@ pub fn parse_oracle_text(
             );
             def.description = Some(line.to_string());
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
-            // When both exist (e.g., Revolt + MV ≤ 4), compose with And so the
-            // ConditionInstead inner encodes the full resolution gate.
-            match (
-                ability_word_to_ability_condition(&aw_condition),
-                def.condition.take(),
-            ) {
-                (Some(aw), Some(chain)) => {
-                    def.condition = Some(AbilityCondition::And {
-                        conditions: vec![aw, chain],
-                    });
-                }
-                (Some(aw), None) => {
-                    def.condition = Some(aw);
-                }
-                (None, chain) => {
-                    def.condition = chain;
-                }
-            }
+            // When both exist (e.g., Revolt + MV ≤ 4), compose through
+            // `merge_ability_condition` which dedupes structurally-equal conditions
+            // (e.g., "Delirium —" ability word + literal "if there are four or more
+            // card types..." phrase both emit the same `QuantityCheck`) and flattens
+            // nested `And` trees.
+            // Ability-word condition (if any) is the "existing" baseline —
+            // the chain-extracted condition is merged onto it, preserving the
+            // historical `[ability_word, chain]` ordering when both are distinct.
+            let chain = def.condition.take();
+            def.condition = match (ability_word_to_ability_condition(&aw_condition), chain) {
+                (Some(aw), Some(chain)) => Some(merge_ability_condition(Some(aw), chain)),
+                (Some(aw), None) => Some(aw),
+                (None, chain) => chain,
+            };
             i += 1;
             // CR 706: If the parsed chain ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
@@ -6846,5 +6901,117 @@ mod tests {
             parsed.statics,
             parsed.abilities,
         );
+    }
+
+    // ------------------------------------------------------------------
+    // merge_ability_condition — single-authority merge for ability-word
+    // plus literal-if condition composition.
+    // ------------------------------------------------------------------
+
+    fn cond_delirium() -> AbilityCondition {
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCardTypesInZone {
+                    zone: crate::types::ability::ZoneRef::Graveyard,
+                    scope: crate::types::ability::CountScope::Controller,
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        }
+    }
+
+    fn cond_your_turn() -> AbilityCondition {
+        AbilityCondition::IsYourTurn { negated: false }
+    }
+
+    fn cond_max_speed() -> AbilityCondition {
+        AbilityCondition::HasMaxSpeed
+    }
+
+    #[test]
+    fn merge_ability_condition_dedups_structural_equal() {
+        // Delirium ability-word + literal "if there are four or more card types..."
+        // both emit the same `QuantityCheck` — the merge should collapse to a single
+        // leaf condition, not `And(X, X)`.
+        let merged = merge_ability_condition(Some(cond_delirium()), cond_delirium());
+        assert_eq!(merged, cond_delirium());
+    }
+
+    #[test]
+    fn merge_ability_condition_wraps_distinct_in_and() {
+        let merged = merge_ability_condition(Some(cond_your_turn()), cond_delirium());
+        match merged {
+            AbilityCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert_eq!(conditions[0], cond_your_turn());
+                assert_eq!(conditions[1], cond_delirium());
+            }
+            other => panic!("expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_ability_condition_flattens_nested_and() {
+        // Existing is already `And`: appending a third distinct condition must not
+        // produce `And(And(X, Y), Z)` — the result stays flat.
+        let existing = AbilityCondition::And {
+            conditions: vec![cond_your_turn(), cond_delirium()],
+        };
+        let merged = merge_ability_condition(Some(existing), cond_max_speed());
+        match merged {
+            AbilityCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 3);
+                assert_eq!(conditions[0], cond_your_turn());
+                assert_eq!(conditions[1], cond_delirium());
+                assert_eq!(conditions[2], cond_max_speed());
+            }
+            other => panic!("expected flat And(3), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_ability_condition_dedups_against_and_children() {
+        // Appending a condition that already exists in an `And` is a no-op (no duplicate).
+        let existing = AbilityCondition::And {
+            conditions: vec![cond_your_turn(), cond_delirium()],
+        };
+        let merged = merge_ability_condition(Some(existing.clone()), cond_delirium());
+        assert_eq!(merged, existing);
+    }
+
+    #[test]
+    fn merge_ability_condition_none_returns_incoming() {
+        let merged = merge_ability_condition(None, cond_delirium());
+        assert_eq!(merged, cond_delirium());
+    }
+
+    /// End-to-end: parse actual Violent Urge Oracle text and assert the 2nd ability's
+    /// condition is a single `QuantityCheck`, not `And(X, X)`. Guards against the
+    /// ability-word/literal-if duplication bug at the dispatch layer.
+    #[test]
+    fn delirium_spell_condition_is_single_leaf_not_and() {
+        let parsed = parse(
+            "Target creature gets +1/+0 and gains first strike until end of turn.\n\
+             Delirium — If there are four or more card types among cards in your graveyard, \
+             that creature gains double strike until end of turn.",
+            "Violent Urge",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 2, "expected two spell abilities");
+        let second = &parsed.abilities[1];
+        match &second.condition {
+            Some(AbilityCondition::QuantityCheck { .. }) => {}
+            Some(AbilityCondition::And { conditions }) => {
+                panic!(
+                    "delirium condition must not be wrapped in And, got And with \
+                     {} children: {conditions:?}",
+                    conditions.len()
+                );
+            }
+            other => panic!("expected QuantityCheck, got {other:?}"),
+        }
     }
 }

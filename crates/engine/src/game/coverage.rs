@@ -3879,7 +3879,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Unhandled),
         AbilityCondition::SourceIsTapped { .. } => ("SourceIsTapped", Unhandled),
-        AbilityCondition::And { .. } => ("And", Unhandled),
+        // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
+        // (effects/mod.rs), which short-circuits on the first false child.
+        AbilityCondition::And { .. } => ("And", Handled),
         // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
     }
