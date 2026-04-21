@@ -1,0 +1,65 @@
+name: Clear Caches
+
+# Manually clear GitHub Actions caches when upstream data has changed
+# (e.g. MTGJSON published a new AtomicCards.json) and the weekly cache key
+# would otherwise keep serving stale data via the `mtgjson-` restore-keys
+# fallback in ci.yml / deploy.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which cache family to clear
+        type: choice
+        required: true
+        default: mtgjson
+        options:
+          - mtgjson
+          - binaryen
+          - rust
+          - pnpm
+          - all
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  clear:
+    name: Delete matching caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Resolve cache key prefixes
+        id: prefixes
+        run: |
+          case "${{ inputs.target }}" in
+            mtgjson)  echo "patterns=mtgjson-" >> "$GITHUB_OUTPUT" ;;
+            binaryen) echo "patterns=binaryen-version_" >> "$GITHUB_OUTPUT" ;;
+            rust)     echo "patterns=rust-" >> "$GITHUB_OUTPUT" ;;
+            pnpm)     echo "patterns=node-cache-Linux-pnpm-" >> "$GITHUB_OUTPUT" ;;
+            all)      echo "patterns=mtgjson- binaryen-version_ rust- node-cache-Linux-pnpm-" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Delete caches
+        run: |
+          set -euo pipefail
+          deleted=0
+          for prefix in ${{ steps.prefixes.outputs.patterns }}; do
+            echo "::group::Caches matching '$prefix'"
+            # gh cache list prints: ID  KEY  SIZE  REF  LAST_ACCESSED
+            keys=$(gh cache list --limit 100 --key "$prefix" --json key --jq '.[].key' || true)
+            if [ -z "$keys" ]; then
+              echo "(none)"
+            else
+              while IFS= read -r key; do
+                echo "Deleting: $key"
+                gh cache delete "$key" && deleted=$((deleted + 1)) || echo "  (already gone)"
+              done <<< "$keys"
+            fi
+            echo "::endgroup::"
+          done
+          echo "Deleted $deleted cache entr$([ $deleted -eq 1 ] && echo y || echo ies)."
