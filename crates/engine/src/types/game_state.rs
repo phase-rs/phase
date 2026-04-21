@@ -232,6 +232,12 @@ pub struct ZoneChangeRecord {
     /// leaves the battlefield.
     #[serde(default)]
     pub attachments: Vec<AttachmentSnapshot>,
+    /// CR 111.1: Token identity at the moment of the zone change. Token-ness is a
+    /// stable property of the object (not ephemeral battlefield state), so filters
+    /// like "whenever a creature token dies" (Grismold) evaluate against this
+    /// snapshot after the object has left the battlefield.
+    #[serde(default)]
+    pub is_token: bool,
 }
 
 /// CR 603.10a: Snapshot of a single attachment on a leaving-battlefield object
@@ -270,6 +276,7 @@ impl ZoneChangeRecord {
             from_zone: from,
             to_zone: to,
             attachments: Vec::new(),
+            is_token: false,
         }
     }
 }

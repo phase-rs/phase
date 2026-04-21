@@ -419,6 +419,10 @@ impl GameObject {
             from_zone: from,
             to_zone: to,
             attachments: Vec::new(),
+            // CR 111.1: Token-ness is a stable identity of the object,
+            // snapshotted for post-LTB trigger-filter evaluation (e.g.,
+            // "whenever a creature token dies").
+            is_token: self.is_token,
         }
     }
 

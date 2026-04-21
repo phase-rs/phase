@@ -1041,11 +1041,11 @@ fn matches_filter_prop(
     source: &SourceContext<'_>,
 ) -> bool {
     match prop {
-        FilterProp::Token => {
-            // A token has no card_id (card_id.0 == 0) in typical token creation
-            // For now, permissive true -- tokens will be marked more explicitly later
-            true
-        }
+        // CR 111.1: Token identity of the live object.
+        FilterProp::Token => state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| obj.is_token),
         FilterProp::Attacking => state.combat.as_ref().is_some_and(|combat| {
             combat
                 .attackers
@@ -1425,6 +1425,12 @@ fn zone_change_record_matches_property(
         FilterProp::Colorless => record.colors.is_empty(),
         // CR 208.1 / CR 107.2: `toughness > power` comparison on the snapshot.
         FilterProp::ToughnessGTPower => record.toughness.unwrap_or(0) > record.power.unwrap_or(0),
+        // CR 111.1: Token identity as of the zone change. Token-ness is a
+        // stable property of the object, captured in the snapshot so that
+        // "whenever a creature token dies" (Grismold) and similar LTB
+        // triggers evaluate correctly after the token has moved to the
+        // graveyard (and then ceased to exist per CR 111.7).
+        FilterProp::Token => record.is_token,
 
         // -------- Group 2: source/event relational --------
         // CR 109.1 "another": same-object check against the triggering source.
@@ -1492,8 +1498,7 @@ fn zone_change_record_matches_property(
         | FilterProp::HasAttachment { .. }
         | FilterProp::FaceDown
         | FilterProp::CountersGE { .. }
-        | FilterProp::HasAnyCounter
-        | FilterProp::Token => false,
+        | FilterProp::HasAnyCounter => false,
 
         // Disjunctive composite: recurse into inner props under the same record.
         FilterProp::AnyOf { props } => props
@@ -3175,5 +3180,48 @@ mod tests {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Modified]));
         assert!(!matches_target_filter(&state, cre, &filter, source));
+    }
+
+    /// CR 111.1: `FilterProp::Token` on a zone-change snapshot must read the
+    /// captured `is_token` bit, not the live battlefield state (which no longer
+    /// exists once the token has moved to the graveyard). Grismold-style
+    /// "whenever a creature token dies" triggers depend on this.
+    #[test]
+    fn zone_change_record_token_property_matches_snapshot() {
+        use crate::types::game_state::ZoneChangeRecord;
+
+        let state = GameState::default();
+        let source_ctx = SourceContext {
+            id: ObjectId(1),
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+        };
+
+        let token_record = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            is_token: true,
+            ..ZoneChangeRecord::test_minimal(ObjectId(42), Zone::Battlefield, Zone::Graveyard)
+        };
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Token,
+            &state,
+            &token_record,
+            &source_ctx,
+        ));
+
+        let nontoken_record = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            is_token: false,
+            ..ZoneChangeRecord::test_minimal(ObjectId(43), Zone::Battlefield, Zone::Graveyard)
+        };
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::Token,
+            &state,
+            &nontoken_record,
+            &source_ctx,
+        ));
     }
 }
