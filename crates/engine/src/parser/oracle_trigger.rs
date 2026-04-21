@@ -2372,6 +2372,12 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some(result);
     }
 
+    // Non-"another" variant: "whenever a/an [subtype] you control enters".
+    // Must follow the "another" variant so its stricter match wins first.
+    if let Some(result) = try_parse_controlled_subtype_enters(lower) {
+        return Some(result);
+    }
+
     if let Some(result) = try_parse_controlled_subtype_attacks(lower) {
         return Some(result);
     }
@@ -3142,6 +3148,65 @@ fn try_parse_self_or_another_controlled_subtype_enters(
     }
 
     None
+}
+
+/// Parse "whenever a/an [subtype] you control enters [the battlefield]" (no
+/// "another" prefix). Covers Bat Colony's "Whenever a Cave you control enters"
+/// pattern and similar — the source itself is permitted to match if its subtype
+/// is the same, unlike the "another" variant which excludes self.
+///
+/// Composed from nom combinators: prefix `alt`, subtype extraction via
+/// `take_until`, `you control enters` sentinel, and optional ` the battlefield`
+/// trailing token. Fails fast on unknown trailing input rather than silently
+/// truncating.
+fn try_parse_controlled_subtype_enters(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    use nom::bytes::complete::take_until;
+
+    let (after_prefix, ()) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("whenever a ")),
+        value((), tag("whenever an ")),
+        value((), tag("when a ")),
+        value((), tag("when an ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let (after_subtype, subtype_text) =
+        take_until::<_, _, VerboseError<&str>>(" you control enters")
+            .parse(after_prefix)
+            .ok()?;
+
+    let (after_sentinel, ()) = value((), tag::<_, _, VerboseError<&str>>(" you control enters"))
+        .parse(after_subtype)
+        .ok()?;
+
+    // Accept either bare "enters" or "enters the battlefield".
+    let (tail, ()) = alt((
+        value((), tag::<_, _, VerboseError<&str>>(" the battlefield")),
+        value((), tag("")),
+    ))
+    .parse(after_sentinel)
+    .ok()?;
+
+    if !tail.is_empty() {
+        return None;
+    }
+
+    let (_, remainder) = parse_type_phrase(subtype_text);
+    if remainder.len() < subtype_text.len() {
+        return None;
+    }
+    if !is_subtype_phrase(subtype_text) {
+        return None;
+    }
+
+    let valid_card = build_controlled_subtype_filter(subtype_text, false, ControllerRef::You)?;
+
+    let mut def = make_base();
+    def.mode = TriggerMode::ChangesZone;
+    def.destination = Some(Zone::Battlefield);
+    def.valid_card = Some(valid_card);
+    Some((TriggerMode::ChangesZone, def))
 }
 
 fn try_parse_another_controlled_subtype_enters(
