@@ -2,11 +2,14 @@ import { useMemo, useRef, useState } from "react";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { detectAndParseDeck, exportDeck, resolveCommander } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
-import type { DeckCompatibilityResult, UnsupportedCard, ParsedItem } from "../../services/deckCompatibility";
+import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
+
+import { MoveList } from "./MoveList";
 
 interface DeckListProps {
   deck: ParsedDeck;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
   onCardHover?: (cardName: string | null) => void;
   warnings?: string[];
@@ -36,137 +39,6 @@ function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, e) => sum + e.count, 0);
 }
 
-const CATEGORY_COLORS: Record<string, string> = {
-  keyword: "text-sky-400",
-  ability: "text-violet-400",
-  trigger: "text-amber-400",
-  static: "text-teal-400",
-  replacement: "text-pink-400",
-  cost: "text-orange-400",
-};
-
-function ParseItemPill({ item, depth = 0 }: { item: ParsedItem; depth?: number }) {
-  return (
-    <>
-      <span
-        className={`inline-flex items-center gap-1 rounded px-1 py-px text-[9px] leading-tight ${
-          item.supported
-            ? "bg-emerald-500/15 text-emerald-300"
-            : "bg-rose-500/15 text-rose-300"
-        }`}
-        title={item.source_text ?? item.label}
-      >
-        <span className={`font-semibold uppercase ${CATEGORY_COLORS[item.category] ?? "text-gray-400"}`}>
-          {item.category.slice(0, 3)}
-        </span>
-        <span>{item.label}</span>
-        {!item.supported && <span className="text-rose-400">&#x2717;</span>}
-      </span>
-      {item.children?.map((child, i) => (
-        <ParseItemPill key={`${depth}-${i}`} item={child} depth={depth + 1} />
-      ))}
-    </>
-  );
-}
-
-function CardEntryRow({
-  entry,
-  section,
-  onRemove,
-  onCardHover,
-  unsupported,
-}: {
-  entry: DeckEntry;
-  section: "main" | "sideboard";
-  onRemove: (name: string, section: "main" | "sideboard") => void;
-  onCardHover?: (cardName: string | null) => void;
-  unsupported?: UnsupportedCard;
-}) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div>
-      <div
-        className="group flex items-center justify-between py-0.5 text-sm"
-        onMouseEnter={() => onCardHover?.(entry.name)}
-        onMouseLeave={() => onCardHover?.(null)}
-      >
-        <span className={unsupported ? "text-amber-200/80" : "text-gray-300"}>
-          <span className="mr-1 text-gray-500">{entry.count}x</span>
-          {entry.name}
-          {unsupported && (
-            <button
-              onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
-              className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-amber-500/80 text-[8px] font-bold leading-none text-black"
-              title={`${unsupported.gaps.length} unsupported mechanic(s) — click to expand`}
-            >
-              !
-            </button>
-          )}
-        </span>
-        <button
-          onClick={() => onRemove(entry.name, section)}
-          className="invisible ml-2 h-5 w-5 rounded text-xs text-red-400 hover:bg-red-900/40 group-hover:visible"
-          title={`Remove one ${entry.name}`}
-        >
-          -
-        </button>
-      </div>
-      {expanded && unsupported && (
-        <div className="mb-1.5 ml-4 mt-0.5 rounded-lg border border-white/6 bg-black/30 px-2 py-1.5">
-          {unsupported.oracle_text && (
-            <div className="mb-1.5 font-mono text-[10px] leading-snug text-slate-400 italic">
-              {unsupported.oracle_text}
-            </div>
-          )}
-          <div className="flex flex-wrap gap-1">
-            {(unsupported.parse_details ?? []).map((item, i) => (
-              <ParseItemPill key={i} item={item} />
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SectionList({
-  title,
-  entries,
-  section,
-  onRemove,
-  onCardHover,
-  unsupportedMap,
-}: {
-  title: string;
-  entries: DeckEntry[];
-  section: "main" | "sideboard";
-  onRemove: (name: string, section: "main" | "sideboard") => void;
-  onCardHover?: (cardName: string | null) => void;
-  unsupportedMap?: Map<string, UnsupportedCard>;
-}) {
-  if (entries.length === 0) return null;
-  const count = totalCards(entries);
-
-  return (
-    <div className="mb-2">
-      <div className="mb-1 flex justify-between text-xs font-semibold uppercase text-gray-500">
-        <span>{title}</span>
-        <span>({count})</span>
-      </div>
-      {entries.map((entry) => (
-        <CardEntryRow
-          key={entry.name}
-          entry={entry}
-          section={section}
-          onRemove={onRemove}
-          onCardHover={onCardHover}
-          unsupported={unsupportedMap?.get(entry.name)}
-        />
-      ))}
-    </div>
-  );
-}
 
 const FORMAT_DISPLAY_ORDER = ["standard", "pioneer", "modern", "legacy", "vintage", "pauper", "commander"] as const;
 
@@ -189,6 +61,7 @@ const LEGALITY_STYLES: Record<string, string> = {
 export function DeckList({
   deck,
   onRemoveCard,
+  onMoveCard,
   onImport,
   onCardHover,
   warnings = [],
@@ -353,30 +226,32 @@ export function DeckList({
       {/* Main deck grouped by type */}
       <div>
         {(["Creatures", "Spells", "Lands"] as const).map((group) => (
-          <SectionList
+          <MoveList
             key={group}
             title={group}
             entries={mainGroups[group]}
             section="main"
             onRemove={onRemoveCard}
+            onMove={onMoveCard}
             onCardHover={onCardHover}
             unsupportedMap={unsupportedMap}
           />
         ))}
 
-        {/* Sideboard */}
-        {deck.sideboard.length > 0 && (
-          <div className="mt-3 border-t border-white/8 pt-2">
-            <SectionList
-              title={`Sideboard (${sideTotal})`}
-              entries={deck.sideboard}
-              section="sideboard"
-              onRemove={onRemoveCard}
-              onCardHover={onCardHover}
-              unsupportedMap={unsupportedMap}
-            />
-          </div>
-        )}
+        {/* Sideboard — always visible so users can discover and target it */}
+        <div className="mt-3 border-t border-white/8 pt-2">
+          <MoveList
+            title={`Sideboard (${sideTotal})`}
+            entries={deck.sideboard}
+            section="sideboard"
+            onRemove={onRemoveCard}
+            onMove={onMoveCard}
+            onCardHover={onCardHover}
+            unsupportedMap={unsupportedMap}
+            alwaysShow
+            emptyHint="Hover a main-deck card and click → to move it here."
+          />
+        </div>
       </div>
 
       {/* Paste import modal */}

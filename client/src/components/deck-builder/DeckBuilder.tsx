@@ -168,6 +168,48 @@ export function DeckBuilder({
     [],
   );
 
+  const handleMoveCard = useCallback(
+    (name: string, from: "main" | "sideboard") => {
+      const to: "main" | "sideboard" = from === "main" ? "sideboard" : "main";
+      setDeck((prev) => {
+        const source = prev[from];
+        const target = prev[to];
+        const sourceEntry = source.find((e) => e.name === name);
+        if (!sourceEntry) return prev;
+
+        const targetEntry = target.find((e) => e.name === name);
+        if (
+          to === "main" &&
+          targetEntry &&
+          targetEntry.count >= maxCopies &&
+          !BASIC_LANDS.has(name)
+        ) {
+          return prev;
+        }
+
+        const nextSource =
+          sourceEntry.count <= 1
+            ? source.filter((e) => e.name !== name)
+            : source.map((e) =>
+                e.name === name ? { ...e, count: e.count - 1 } : e,
+              );
+
+        const nextTarget = targetEntry
+          ? target.map((e) =>
+              e.name === name ? { ...e, count: e.count + 1 } : e,
+            )
+          : [...target, { count: 1, name }];
+
+        return {
+          ...prev,
+          [from]: nextSource,
+          [to]: nextTarget,
+        };
+      });
+    },
+    [maxCopies],
+  );
+
   const handleImport = useCallback((imported: ParsedDeck) => {
     setDeck(imported);
     // Auto-detect commanders from sideboard in commander format
@@ -388,6 +430,7 @@ export function DeckBuilder({
             <DeckList
               deck={deck}
               onRemoveCard={handleRemoveCard}
+              onMoveCard={handleMoveCard}
               onImport={handleImport}
               onCardHover={onCardHover}
               warnings={warnings}
