@@ -377,7 +377,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "Return a land you control to its owner's hand" — bounce cost
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("return ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        if let Some(filter_and_zone) = try_parse_return_to_hand_cost(&rest_lower, rest) {
+        if let Some(filter_and_zone) = try_parse_return_to_hand_cost(&rest_lower) {
             return filter_and_zone;
         }
     }
@@ -652,7 +652,7 @@ fn try_parse_energy_cost(lower: &str) -> Option<u32> {
 }
 
 /// Parse "return a land you control to its owner's hand" style bounce costs.
-fn try_parse_return_to_hand_cost(rest_lower: &str, _rest_original: &str) -> Option<AbilityCost> {
+fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     // Must end with "to its owner's hand" or "to your hand"
     if !scan_contains(rest_lower, "to its owner's hand")
         && !scan_contains(rest_lower, "to your hand")
@@ -669,7 +669,13 @@ fn try_parse_return_to_hand_cost(rest_lower: &str, _rest_original: &str) -> Opti
         .map(|((), rest)| rest)
         .unwrap_or(filter_text);
     let target_text = format!("target {filter_text}");
-    let (filter, _) = parse_target(&target_text);
+    let (filter, rem) = parse_target(&target_text);
+    let filter = if rem.trim().is_empty() {
+        filter
+    } else {
+        let (filter, _) = parse_type_phrase(filter_text);
+        filter
+    };
     Some(AbilityCost::ReturnToHand {
         count: 1,
         filter: Some(filter),
@@ -753,7 +759,7 @@ fn parse_life_equal_to_quantity_nom(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
     use crate::types::mana::{ManaCost, ManaCostShard};
 
     #[test]
@@ -1119,6 +1125,23 @@ mod tests {
                 assert!(filter.is_some());
             }
             other => panic!("Expected ReturnToHand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_return_forest_to_hand() {
+        match parse_oracle_cost("Return a Forest you control to its owner's hand") {
+            AbilityCost::ReturnToHand {
+                count,
+                filter: Some(TargetFilter::Typed(filter)),
+            } => {
+                assert_eq!(count, 1);
+                assert_eq!(filter.get_subtype(), Some("Forest"));
+                // "you control" must be captured — parse_type_phrase delegates to
+                // parse_controller_suffix which handles this suffix.
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+            }
+            other => panic!("Expected ReturnToHand Forest filter, got {:?}", other),
         }
     }
 

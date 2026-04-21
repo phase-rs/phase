@@ -6,7 +6,6 @@ import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
 import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
-import { CommanderDisplay } from "./CommanderDisplay.tsx";
 import { CommanderDamage } from "./CommanderDamage.tsx";
 import { CommanderCardZone } from "../zone/CommanderCardZone.tsx";
 import { CommandZone } from "../zone/CommandZone.tsx";
@@ -95,15 +94,9 @@ export function PlayerArea({
     const obj = gameState.objects[id];
     return obj?.is_emblem && obj.controller === playerId;
   });
-  // In "full" mode (perspective player), show the full commander card in the
-  // support zone. For opponents, show the compact badge instead.
   const commanderSection = isCommander ? (
     <div className="flex shrink-0 flex-col items-end gap-1">
-      {mode === "full" ? (
-        <CommanderCardZone playerId={playerId} />
-      ) : (
-        <CommanderDisplay playerId={playerId} compact={mode === "focused"} />
-      )}
+      <CommanderCardZone playerId={playerId} />
       <CommanderDamage playerId={playerId} />
     </div>
   ) : null;

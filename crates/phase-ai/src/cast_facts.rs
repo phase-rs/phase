@@ -453,6 +453,7 @@ mod tests {
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            additional_token_spec: None,
         });
         object.replacement_definitions.push(ReplacementDefinition {
             destination_zone: None,

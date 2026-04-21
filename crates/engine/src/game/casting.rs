@@ -2703,6 +2703,35 @@ fn find_non_self_sacrifice(cost: &AbilityCost) -> Option<&TargetFilter> {
     }
 }
 
+fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
+    match cost {
+        AbilityCost::ReturnToHand { count, filter } => Some((*count, filter.as_ref())),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_return_to_hand_cost),
+        _ => None,
+    }
+}
+
+pub(crate) fn find_eligible_return_to_hand_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source(state, source);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            state.objects.get(&id).is_some_and(|obj| {
+                obj.controller == player
+                    && filter
+                        .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            })
+        })
+        .collect()
+}
+
 /// CR 702.34a + CR 118.8: Partition a flashback cost into its mana sub-cost (paid
 /// through the normal mana-payment flow) and its residual non-mana sub-cost (paid
 /// as an additional cost via `pay_additional_cost`).
@@ -3068,6 +3097,28 @@ pub fn handle_activate_ability(
             });
         }
 
+        // CR 118.3: Pre-check for ReturnToHand costs — same WaitingFor detour pattern as
+        // Sacrifice above. Ordering matters for Composite costs: Sacrifice wins if both are
+        // present, but no real cards combine them.
+        if let Some((count, filter)) = find_return_to_hand_cost(cost) {
+            let eligible = find_eligible_return_to_hand_targets(state, player, source_id, filter);
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "No eligible permanents to return".into(),
+                ));
+            }
+            let mut pending_return =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_return.activation_cost = Some(cost.clone());
+            pending_return.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::ReturnToHandForCost {
+                player,
+                count: count as usize,
+                permanents: eligible,
+                pending_cast: Box::new(pending_return),
+            });
+        }
+
         // Waterbend cost: detour to ManaPayment with Waterbend mode.
         if let Some(wb_cost) = find_waterbend_cost(cost) {
             let mut pending_wb = PendingCast::new(source_id, CardId(0), resolved, wb_cost.clone());
@@ -3244,7 +3295,9 @@ pub fn handle_cancel_cast(
 }
 
 // Cost payment handlers are in casting_costs module.
-pub(crate) use super::casting_costs::{handle_discard_for_cost, handle_sacrifice_for_cost};
+pub(crate) use super::casting_costs::{
+    handle_discard_for_cost, handle_return_to_hand_for_cost, handle_sacrifice_for_cost,
+};
 
 /// CR 601.2f: Reduce the generic mana component of an ability cost.
 /// Walks Composite costs to find Mana variants. Floors generic at 0.
@@ -3622,9 +3675,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        BasicLandType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        GameRestriction, ManaContribution, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ActivationRestriction, BasicLandType, ChosenAttribute, ChosenSubtypeKind,
+        ContinuousModification, ControllerRef, GameRestriction, ManaContribution, QuantityExpr,
+        RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -5095,6 +5149,69 @@ mod tests {
         let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
 
         assert!(second.is_err());
+    }
+
+    #[test]
+    fn return_to_hand_cost_moves_selected_permanent_before_activation() {
+        use crate::game::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(71),
+            PlayerId(0),
+            "Quirion Ranger".to_string(),
+            Zone::Battlefield,
+        );
+        let forest = add_basic_land(&mut state, CardId(72), "Forest", "Forest");
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Untap {
+                        target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                    },
+                )
+                .cost(AbilityCost::ReturnToHand {
+                    count: 1,
+                    filter: Some(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Subtype("Forest".to_string()))
+                            .controller(ControllerRef::You),
+                    )),
+                })
+                .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
+            );
+        }
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
+        assert!(matches!(waiting, WaitingFor::ReturnToHandForCost { .. }));
+        state.waiting_for = waiting;
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![forest],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&forest].zone, Zone::Hand);
+        assert!(state.players[0].hand.contains(&forest));
+        assert!(!state.battlefield.contains(&forest));
+        // After cost payment the forest is gone, leaving only the Ranger itself as a
+        // valid "target creature". auto_select_targets_for_ability picks the sole
+        // legal target and pushes the ability to the stack without a TargetSelection
+        // round-trip, which is why activated_abilities_this_turn is already incremented.
+        assert_eq!(
+            state
+                .activated_abilities_this_turn
+                .get(&(source, 0))
+                .copied(),
+            Some(1)
+        );
     }
 
     #[test]

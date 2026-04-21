@@ -31,6 +31,7 @@ function getPendingCastObjectId(
     case "DefilerPayment":
     case "DiscardForCost":
     case "SacrificeForCost":
+    case "ReturnToHandForCost":
     case "BlightChoice":
     case "TapCreaturesForSpellCost":
     case "ExileFromGraveyardForCost":

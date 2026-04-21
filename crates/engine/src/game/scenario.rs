@@ -1065,6 +1065,7 @@ impl GameRunner {
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::DiscardForCost { .. } => "DiscardForCost",
             WaitingFor::SacrificeForCost { .. } => "SacrificeForCost",
+            WaitingFor::ReturnToHandForCost { .. } => "ReturnToHandForCost",
             WaitingFor::TapCreaturesForSpellCost { .. } => "TapCreaturesForSpellCost",
             WaitingFor::TapCreaturesForManaAbility { .. } => "TapCreaturesForManaAbility",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",

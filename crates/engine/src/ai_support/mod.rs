@@ -200,6 +200,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::SelectCards { cards: chosen },
         )
         | (
+            WaitingFor::ReturnToHandForCost {
+                player: _,
+                permanents: cards,
+                count,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        )
+        | (
             WaitingFor::BlightChoice {
                 player: _,
                 creatures: cards,

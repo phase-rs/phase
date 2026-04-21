@@ -856,6 +856,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::ReturnToHandForCost {
+            player,
+            count,
+            permanents,
+            ..
+        } => combinations(permanents, *count)
+            .into_iter()
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // Blight: AI selects creatures to put -1/-1 counters on as cost
         WaitingFor::BlightChoice {
             player,

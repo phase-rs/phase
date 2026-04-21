@@ -197,6 +197,61 @@ pub(crate) fn handle_sacrifice_for_cost(
     }
 }
 
+/// CR 118.3 + CR 601.2b: Complete return-to-hand-as-cost after player selection.
+pub(crate) fn handle_return_to_hand_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    count: usize,
+    legal_permanents: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Must return exactly {} permanent(s), got {}",
+            count,
+            chosen.len()
+        )));
+    }
+    for id in chosen {
+        if !legal_permanents.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected permanent not eligible to return".to_string(),
+            ));
+        }
+    }
+
+    for &id in chosen {
+        super::zones::move_to_zone(state, id, Zone::Hand, events);
+    }
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        push_activated_ability_to_stack(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
+            events,
+        )
+    } else {
+        pay_and_push(
+            state,
+            player,
+            pending.object_id,
+            pending.card_id,
+            pending.ability,
+            &pending.cost,
+            pending.casting_variant,
+            pending.distribute,
+            pending.origin_zone,
+            events,
+        )
+    }
+}
+
 /// Blight cost — put -1/-1 counters on chosen creatures after player selection.
 pub(crate) fn handle_blight_choice(
     state: &mut GameState,
@@ -391,8 +446,8 @@ pub(super) fn push_activated_ability_to_stack(
     remaining_cost: Option<&crate::types::ability::AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // Pay remaining sub-costs (Tap, Mana, etc.) — the Sacrifice arm in pay_ability_cost
-    // is a no-op for non-SelfRef targets, so the already-paid sacrifice is idempotent.
+    // Pay remaining sub-costs (Tap, Mana, etc.) — choice-based costs already paid
+    // by a WaitingFor flow are no-ops here, so resuming with the full cost is idempotent.
     if let Some(cost) = remaining_cost {
         if super::casting::variable_speed_payment_range(
             cost,
@@ -993,6 +1048,25 @@ fn pay_additional_cost(
                     pending_cast: Box::new(pending),
                 });
             }
+        }
+        AbilityCost::ReturnToHand { count, ref filter } => {
+            let eligible = super::casting::find_eligible_return_to_hand_targets(
+                state,
+                player,
+                pending.object_id,
+                filter.as_ref(),
+            );
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible permanents to return".into(),
+                ));
+            }
+            return Ok(WaitingFor::ReturnToHandForCost {
+                player,
+                count: count as usize,
+                permanents: eligible,
+                pending_cast: Box::new(pending),
+            });
         }
         AbilityCost::PayEnergy { amount } => {
             // CR 107.14: A player can pay {E} only if they have enough energy.

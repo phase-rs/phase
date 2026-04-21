@@ -145,9 +145,7 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
 /// Whether Oracle text explicitly permits this card to be a commander.
 pub fn oracle_text_allows_commander(oracle_text: &str, card_name: &str) -> bool {
     let normalized = normalize_card_name_refs(oracle_text, card_name);
-    normalized
-        .lines()
-        .any(|line| is_commander_permission_sentence(line))
+    normalized.lines().any(is_commander_permission_sentence)
         || scan_contains(&oracle_text.to_ascii_lowercase(), "can be your commander")
 }
 
@@ -1831,6 +1829,7 @@ pub(super) fn find_activated_colon(line: &str) -> Option<usize> {
         "pay",
         "remove",
         "exile",
+        "return",
         "tap",
         "untap",
         "put",
@@ -3110,6 +3109,36 @@ mod tests {
         let r = parse("{T}: Add {W}.", "Mox Pearl", &[], &["Artifact"], &[]);
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
+    }
+
+    #[test]
+    fn parses_return_forest_cost_untap_activated_ability() {
+        let r = parse(
+            "Return a Forest you control to its owner's hand: Untap target creature. Activate only once each turn.",
+            "Quirion Ranger",
+            &[],
+            &["Creature"],
+            &["Elf", "Ranger"],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert!(matches!(*ability.effect, Effect::Untap { .. }));
+        assert!(ability
+            .activation_restrictions
+            .iter()
+            .any(|restriction| matches!(restriction, ActivationRestriction::OnlyOnceEachTurn)));
+        match ability.cost.as_ref() {
+            Some(AbilityCost::ReturnToHand {
+                count,
+                filter: Some(TargetFilter::Typed(filter)),
+            }) => {
+                assert_eq!(*count, 1);
+                assert_eq!(filter.get_subtype(), Some("Forest"));
+            }
+            other => panic!("expected Forest ReturnToHand cost, got {other:?}"),
+        }
     }
 
     #[test]

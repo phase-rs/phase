@@ -1164,6 +1164,15 @@ pub enum WaitingFor {
         /// The pending cast to resume after the sacrifice is complete.
         pending_cast: Box<PendingCast>,
     },
+    /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to return to hand as cost.
+    ReturnToHandForCost {
+        player: PlayerId,
+        count: usize,
+        /// Pre-filtered eligible permanents on the battlefield.
+        permanents: Vec<ObjectId>,
+        /// The pending cast to resume after the return is complete.
+        pending_cast: Box<PendingCast>,
+    },
     /// Blight N — player must choose creature(s) to put -1/-1 counters on as cost.
     BlightChoice {
         player: PlayerId,
@@ -1512,6 +1521,7 @@ impl WaitingFor {
             | WaitingFor::ChooseDungeonRoom { player, .. }
             | WaitingFor::DiscardForCost { player, .. }
             | WaitingFor::SacrificeForCost { player, .. }
+            | WaitingFor::ReturnToHandForCost { player, .. }
             | WaitingFor::BlightChoice { player, .. }
             | WaitingFor::TapCreaturesForSpellCost { player, .. }
             | WaitingFor::TapCreaturesForManaAbility { player, .. }
@@ -1575,6 +1585,7 @@ impl WaitingFor {
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::DiscardForCost { pending_cast, .. }
             | WaitingFor::SacrificeForCost { pending_cast, .. }
+            | WaitingFor::ReturnToHandForCost { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
             | WaitingFor::ExileFromGraveyardForCost { pending_cast, .. }
@@ -2869,6 +2880,12 @@ mod tests {
             permanents: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));
+        variants.push(Box::new(WaitingFor::ReturnToHandForCost {
+            player: PlayerId(0),
+            count: 1,
+            permanents: vec![ObjectId(1)],
+            pending_cast: dummy_pending(),
+        }));
         variants.push(Box::new(WaitingFor::BlightChoice {
             player: PlayerId(0),
             count: 1,
@@ -2917,7 +2934,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 27);
+        assert_eq!(variants.len(), 28);
     }
 
     #[test]

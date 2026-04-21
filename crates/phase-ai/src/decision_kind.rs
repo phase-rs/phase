@@ -89,6 +89,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseDungeonRoom { .. }
         | WaitingFor::DiscardForCost { .. }
         | WaitingFor::SacrificeForCost { .. }
+        | WaitingFor::ReturnToHandForCost { .. }
         | WaitingFor::BlightChoice { .. }
         | WaitingFor::TapCreaturesForSpellCost { .. }
         | WaitingFor::TapCreaturesForManaAbility { .. }

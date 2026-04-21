@@ -183,20 +183,13 @@ impl AbilityCost {
             // CR 601.2b: Returning N permanents to hand requires N permanents
             // controlled by player matching filter.
             AbilityCost::ReturnToHand { count, filter } => {
-                let ctx = FilterContext::from_source(state, source);
-                state
-                    .battlefield
-                    .iter()
-                    .copied()
-                    .filter(|&id| {
-                        state.objects.get(&id).is_some_and(|o| {
-                            o.controller == player
-                                && filter
-                                    .as_ref()
-                                    .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
-                        })
-                    })
-                    .count()
+                super::casting::find_eligible_return_to_hand_targets(
+                    state,
+                    player,
+                    source,
+                    filter.as_ref(),
+                )
+                .len()
                     >= *count as usize
             }
             // CR 701.13b: A player can mill fewer than N cards if their library

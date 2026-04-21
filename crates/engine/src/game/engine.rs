@@ -695,6 +695,32 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 118.3: Player selected permanents to return to hand as cost.
+        (
+            WaitingFor::ReturnToHandForCost {
+                player,
+                count,
+                permanents,
+                pending_cast,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => engine_casting::handle_return_to_hand_for_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *count,
+            permanents,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::ReturnToHandForCost {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         // Blight: player selected creature(s) to put -1/-1 counters on as cost.
         (
             WaitingFor::BlightChoice {

@@ -201,6 +201,19 @@ export function select_action_from_scores(scores_json: string, difficulty: strin
 export function set_multiplayer_mode(enabled: boolean): void;
 
 /**
+ * CR 100.4a: Returns the sideboard policy for a given game format as a
+ * tagged union: `{"type": "Forbidden"}`, `{"type": "Limited", "data": 15}`,
+ * or `{"type": "Unlimited"}`.
+ *
+ * The frontend must exhaustive-switch on `.type` — unit variants (`Forbidden`,
+ * `Unlimited`) emit no `data` field under `#[serde(tag, content)]`.
+ *
+ * The engine is the single authority for format sideboard rules; the frontend
+ * never hardcodes 15 or any other cap.
+ */
+export function sideboardPolicyForFormat(format: any): any;
+
+/**
  * Submit a game action on behalf of `actor` and return the ActionResult
  * (events + waiting_for).
  *
@@ -237,6 +250,7 @@ export interface InitOutput {
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
+    readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;

@@ -110,6 +110,26 @@ pub(super) fn handle_sacrifice_for_cost(
     )
 }
 
+pub(super) fn handle_return_to_hand_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: PendingCast,
+    count: usize,
+    permanents: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting::handle_return_to_hand_for_cost(
+        state,
+        player,
+        pending_cast,
+        count,
+        permanents,
+        chosen,
+        events,
+    )
+}
+
 pub(super) fn handle_blight_choice(
     state: &mut GameState,
     player: PlayerId,

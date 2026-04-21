@@ -538,6 +538,7 @@ export type WaitingFor =
   | { type: "MiracleCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
   | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "SacrificeForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
+  | { type: "ReturnToHandForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "ChooseManaColor"; data: { player: PlayerId; choice: ManaChoicePrompt; pending_mana_ability: unknown } }

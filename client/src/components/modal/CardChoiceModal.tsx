@@ -24,6 +24,7 @@ type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }
 type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
+type ReturnToHandForCost = Extract<WaitingFor, { type: "ReturnToHandForCost" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type ExileFromGraveyardForCost = Extract<WaitingFor, { type: "ExileFromGraveyardForCost" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
@@ -122,6 +123,9 @@ export function CardChoiceModal() {
     case "SacrificeForCost":
       if (!canActForWaitingState) return null;
       return <SacrificeModal data={waitingFor.data} />;
+    case "ReturnToHandForCost":
+      if (!canActForWaitingState) return null;
+      return <ReturnToHandModal data={waitingFor.data} />;
     case "BlightChoice":
       if (!canActForWaitingState) return null;
       return <BlightModal data={waitingFor.data} />;
@@ -809,6 +813,50 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
 // ── Sacrifice Modal ──────────────────────────────────────────────────────────
 
 function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
+  return (
+    <PermanentCostModal
+      data={data}
+      title="Sacrifice"
+      subtitle={`Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`}
+      label="Sacrifice"
+      selectedClassName="z-10 ring-2 ring-red-400/80"
+      overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20"
+      badgeClassName="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white"
+    />
+  );
+}
+
+function ReturnToHandModal({ data }: { data: ReturnToHandForCost["data"] }) {
+  return (
+    <PermanentCostModal
+      data={data}
+      title="Return"
+      subtitle={`Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to return`}
+      label="Return"
+      selectedClassName="z-10 ring-2 ring-sky-300/80"
+      overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-sky-500/20"
+      badgeClassName="rounded-full bg-sky-500/90 px-3 py-1 text-xs font-bold text-white"
+    />
+  );
+}
+
+function PermanentCostModal({
+  data,
+  title,
+  subtitle,
+  label,
+  selectedClassName,
+  overlayClassName,
+  badgeClassName,
+}: {
+  data: SacrificeForCost["data"] | ReturnToHandForCost["data"];
+  title: string;
+  subtitle: string;
+  label: string;
+  selectedClassName: string;
+  overlayClassName: string;
+  badgeClassName: string;
+}) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const inspectObject = useUiStore((s) => s.inspectObject);
@@ -842,9 +890,9 @@ function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
 
   return (
     <ChoiceOverlay
-      title="Sacrifice"
-      subtitle={`Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Sacrifice (${selected.size}/${data.count})`} />}
+      title={title}
+      subtitle={subtitle}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`${label} (${selected.size}/${data.count})`} />}
     >
       <ScrollableCardStrip>
         {data.permanents.map((id, index) => {
@@ -856,7 +904,7 @@ function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
               key={id}
               className={`relative rounded-lg transition ${
                 isSelected
-                  ? "z-10 ring-2 ring-red-400/80"
+                  ? selectedClassName
                   : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               }`}
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
@@ -873,10 +921,8 @@ function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
               {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
-                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
-                    Sacrifice
-                  </span>
+                <div className={overlayClassName}>
+                  <span className={badgeClassName}>{label}</span>
                 </div>
               )}
             </motion.button>
