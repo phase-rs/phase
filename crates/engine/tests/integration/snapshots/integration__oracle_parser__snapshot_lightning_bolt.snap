@@ -1,5 +1,5 @@
 ---
-source: crates/engine/tests/oracle_parser.rs
+source: crates/engine/tests/integration/oracle_parser.rs
 expression: result
 ---
 {
@@ -19,7 +19,7 @@ expression: result
       "cost": null,
       "sub_ability": null,
       "duration": null,
-      "description": "Lightning Bolt deals 3 damage to any target.",
+      "description": "~ deals 3 damage to any target.",
       "target_prompt": null,
       "sorcery_speed": false,
       "condition": null,

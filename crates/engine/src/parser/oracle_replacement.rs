@@ -35,6 +35,10 @@ use crate::types::zones::Zone;
 /// Parse a replacement effect line into a ReplacementDefinition.
 /// Handles: "If ~ would die", "Prevent all combat damage",
 /// "~ enters the battlefield tapped", etc.
+///
+/// Accepts raw card Oracle text; internally normalizes self-references via
+/// `normalize_card_name_refs`. When invoked via [`parse_oracle_text`] the
+/// text is already normalized and the internal call is an idempotent no-op.
 #[tracing::instrument(level = "debug", skip(card_name))]
 pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<ReplacementDefinition> {
     let text = strip_reminder_text(text);

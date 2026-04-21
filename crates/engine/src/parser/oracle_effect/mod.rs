@@ -4897,6 +4897,13 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
 /// textual `replace(", then ", ". ").split(". ")` logic with a boundary-aware
 /// splitter that preserves whether a chunk ended a sentence or was linked by
 /// `, then`.
+///
+/// **Self-reference precondition:** this entry point takes no `card_name`
+/// and performs no normalization. Callers must pass text whose card-name
+/// self-references have already been rewritten to `~` — which is always the
+/// case when reached via [`parse_oracle_text`] or any of the wrapper parsers
+/// that invoke `normalize_card_name_refs` internally. External test callers
+/// must pre-normalize via `normalize_card_name_refs` before invoking.
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     parse_effect_chain_impl(text, kind, &ParseContext::default())
 }

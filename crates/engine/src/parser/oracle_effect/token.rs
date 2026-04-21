@@ -515,13 +515,14 @@ fn extract_token_static_abilities(text: &str) -> Vec<crate::types::ability::Stat
 fn extract_token_where_x_expression(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    Some(
-        tp.strip_after("where x is ")?
-            .original
-            .trim()
-            .trim_end_matches('.')
-            .to_string(),
-    )
+    // The X-expression is a single sentence terminated by the next period.
+    // `trim_end_matches('.')` only strips the tail period, which lets trailing
+    // sentences ("It gains haste until end of turn.") leak into the extracted
+    // expression and poison downstream quantity parsing. Split at the first
+    // period instead so multi-sentence suffixes terminate cleanly.
+    let after = tp.strip_after("where x is ")?.original.trim();
+    let end = after.find('.').unwrap_or(after.len());
+    Some(after[..end].trim().to_string())
 }
 
 fn extract_token_count_expression(text: &str) -> Option<String> {

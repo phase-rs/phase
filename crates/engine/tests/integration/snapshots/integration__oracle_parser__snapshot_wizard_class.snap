@@ -116,7 +116,7 @@ expression: result
       "secondary": false,
       "valid_target": null,
       "valid_source": null,
-      "description": "When this Class becomes level 2",
+      "description": "When ~ becomes level 2",
       "constraint": {
         "type": "AtClassLevel",
         "level": 2

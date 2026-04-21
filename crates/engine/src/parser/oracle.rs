@@ -56,7 +56,9 @@ use super::oracle_static::{
     parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::parse_trigger_lines;
-use super::oracle_util::{parse_mana_symbols, parse_number, strip_reminder_text, TextPair};
+use super::oracle_util::{
+    normalize_card_name_refs, parse_mana_symbols, parse_number, strip_reminder_text, TextPair,
+};
 
 /// Collected parsed abilities from Oracle text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,6 +468,21 @@ fn ability_word_to_trigger_condition(
 /// `mtgjson_keyword_names` are the raw lowercased keyword names from MTGJSON
 /// (e.g. `["flying", "protection"]`). Used to identify keyword-only lines
 /// and to avoid re-extracting keywords MTGJSON already provides.
+///
+/// # Self-reference normalization
+///
+/// This function is the **single normalization entry point** for the parser.
+/// It invokes [`normalize_card_name_refs`] once on the raw Oracle text (CR
+/// 201.4b) so every downstream block parser — saga chapters, class levels,
+/// leveler blocks, modal mode bodies, triggers, statics, effects, replacements,
+/// spacecraft thresholds — receives text with the card's self-references
+/// rewritten to `~`.
+///
+/// The `pub fn` wrappers exposed for direct testing
+/// (`parse_replacement_line`, `parse_trigger_line`, `parse_trigger_lines`,
+/// `parse_class_oracle_text`, etc.) re-invoke `normalize_card_name_refs`
+/// internally; when called via this function the re-invocation is an
+/// idempotent no-op.
 #[tracing::instrument(
     level = "info",
     skip(oracle_text, mtgjson_keyword_names, types, subtypes)
@@ -495,7 +512,16 @@ pub fn parse_oracle_text(
         parse_warnings: Vec::new(),
     };
 
-    let lines: Vec<&str> = oracle_text.split('\n').collect();
+    // CR 201.4b: A card's Oracle text uses its name to refer to itself.
+    // Normalize self-references to `~` once, at the single parser entry point,
+    // so every downstream block parser (saga, class, leveler, modal, trigger,
+    // static, effect, replacement, spacecraft) receives already-normalized
+    // text. The `pub fn` wrappers retained for test-facing API re-invoke
+    // `normalize_card_name_refs` on this pre-normalized text; strategies 1-4
+    // find nothing to replace and strategy 5 is short-circuited by its
+    // `!result.contains('~')` guard, making re-entry an idempotent no-op.
+    let oracle_text_owned = normalize_card_name_refs(oracle_text, card_name);
+    let lines: Vec<&str> = oracle_text_owned.split('\n').collect();
 
     // CR 714: Pre-parse Saga chapter lines into triggers + ETB replacement.
     let saga_consumed = if subtypes.iter().any(|s| s == "Saga") {

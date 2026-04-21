@@ -403,66 +403,77 @@ pub fn ws_tag(
     preceded(opt(space0), tag(t))
 }
 
+/// Canonical registry of evergreen keyword names in longest-match-first order
+/// (e.g. "first strike" before "flash"). Used both by `parse_keyword_name` for
+/// Oracle-text dispatch and by `is_keyword_word` for vocabulary-guard checks
+/// in self-reference normalization.
+pub(crate) const KEYWORDS: &[&str] = &[
+    "first strike",
+    "double strike",
+    "trample over planeswalkers",
+    "trample",
+    "flying",
+    "deathtouch",
+    "lifelink",
+    "vigilance",
+    "haste",
+    "reach",
+    "defender",
+    "menace",
+    "indestructible",
+    "hexproof",
+    "shroud",
+    "flash",
+    "fear",
+    "intimidate",
+    "skulk",
+    "shadow",
+    "horsemanship",
+    "wither",
+    "infect",
+    "prowess",
+    "undying",
+    "persist",
+    "cascade",
+    "exalted",
+    "flanking",
+    "evolve",
+    "extort",
+    "exploit",
+    "explore",
+    "ascend",
+    "convoke",
+    "delve",
+    "devoid",
+    "changeling",
+    "phasing",
+    "decayed",
+    "unleash",
+    "riot",
+    "ward",
+    "protection",
+    "landwalk",
+    "islandwalk",
+    "swampwalk",
+    "mountainwalk",
+    "forestwalk",
+    "plainswalk",
+];
+
+/// Test whether a lowercased candidate word matches a registered evergreen
+/// keyword name. Used by `normalize_card_name_refs` strategy-5 guard to reject
+/// card-name first-word replacements that would corrupt keyword recognition
+/// (e.g. `Changeling Berserker` must not replace `changeling` in its own text).
+pub(crate) fn is_keyword_word(candidate_lower: &str) -> bool {
+    KEYWORDS.contains(&candidate_lower)
+}
+
 /// Parse an evergreen keyword name from Oracle text.
 ///
 /// Uses a table lookup (longest-match-first within shared prefixes) to avoid
 /// deep nom `alt` nesting which causes stack overflow in debug builds.
 /// Returns the keyword string as matched (lowercase).
 pub fn parse_keyword_name(input: &str) -> OracleResult<'_, &str> {
-    // Longest-match-first within shared prefixes (e.g. "first strike" before "flash").
-    static KEYWORDS: &[&str] = &[
-        "first strike",
-        "double strike",
-        "trample over planeswalkers",
-        "trample",
-        "flying",
-        "deathtouch",
-        "lifelink",
-        "vigilance",
-        "haste",
-        "reach",
-        "defender",
-        "menace",
-        "indestructible",
-        "hexproof",
-        "shroud",
-        "flash",
-        "fear",
-        "intimidate",
-        "skulk",
-        "shadow",
-        "horsemanship",
-        "wither",
-        "infect",
-        "prowess",
-        "undying",
-        "persist",
-        "cascade",
-        "exalted",
-        "flanking",
-        "evolve",
-        "extort",
-        "exploit",
-        "explore",
-        "ascend",
-        "convoke",
-        "delve",
-        "devoid",
-        "changeling",
-        "phasing",
-        "decayed",
-        "unleash",
-        "riot",
-        "ward",
-        "protection",
-        "landwalk",
-        "islandwalk",
-        "swampwalk",
-        "mountainwalk",
-        "forestwalk",
-        "plainswalk",
-    ];
-
     for &kw in KEYWORDS {
         if let Some(rest) = input.strip_prefix(kw) {
             // Require word boundary after keyword

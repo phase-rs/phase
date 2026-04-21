@@ -1024,6 +1024,65 @@ const SUBTYPES: &[&str] = &[
     "Zariel",
 ];
 
+/// Test whether a lowercased candidate word names an MTG core type.
+/// CR 205.2: Core types are artifact, battle, creature, enchantment, instant,
+/// land, planeswalker, sorcery, tribal. `card`, `permanent`, and `spell` are
+/// Oracle-text collective nouns covered here because they appear as subject
+/// phrases in the same grammatical slots.
+pub(crate) fn is_core_type_name(text: &str) -> bool {
+    matches!(
+        text,
+        "creature"
+            | "artifact"
+            | "enchantment"
+            | "land"
+            | "planeswalker"
+            | "spell"
+            | "card"
+            | "permanent"
+    )
+}
+
+/// Test whether a lowercased candidate word is a subject token that is NOT an
+/// MTG subtype (e.g. `ability`, `commander`, `opponent`, `player`, `source`,
+/// `token`). These words appear in Oracle text as object references but never
+/// as creature/spell/artifact subtypes.
+pub(crate) fn is_non_subtype_subject_name(text: &str) -> bool {
+    matches!(
+        text,
+        "ability"
+            | "card"
+            | "commander"
+            | "opponent"
+            | "permanent"
+            | "player"
+            | "source"
+            | "spell"
+            | "token"
+    )
+}
+
+/// Test whether a lowercased candidate word matches a registered MTG subtype.
+/// Used by `normalize_card_name_refs` strategy-5 guard to reject card-name
+/// first-word replacements that would corrupt subtype recognition (e.g.
+/// `Cleric Class`, `Druid Arcanist`, `Coward` must not replace the bare
+/// subtype word in their own Oracle text).
+pub(crate) fn is_subtype_word(candidate_lower: &str) -> bool {
+    SUBTYPES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(candidate_lower))
+}
+
+/// Test whether a lowercased candidate word matches an MTG supertype.
+/// CR 205.4: Supertypes are basic, legendary, ongoing, snow, world. `tribal`
+/// was historically a type but is included here for Oracle-text coverage.
+pub(crate) fn is_supertype_word(candidate_lower: &str) -> bool {
+    matches!(
+        candidate_lower,
+        "basic" | "legendary" | "snow" | "world" | "tribal" | "ongoing"
+    )
+}
+
 /// Check if `text` starts with `prefix` using ASCII case-insensitive comparison,
 /// followed by a word boundary (non-alphanumeric or end of string).
 fn starts_with_word_ci(text: &str, prefix: &str) -> bool {
@@ -1287,10 +1346,17 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                 // not a reference to the card.
                 if len == 1 {
                     let lower_candidate = candidate.to_lowercase();
+                    // Ordered cheapest-first: small matches! sets short-circuit
+                    // before the ~430-entry SUBTYPES linear scan.
                     if matches!(
                         lower_candidate.as_str(),
                         "the" | "a" | "an" | "of" | "in" | "on" | "to" | "for" | "at" | "by"
-                    ) {
+                    ) || is_core_type_name(&lower_candidate)
+                        || is_non_subtype_subject_name(&lower_candidate)
+                        || is_supertype_word(&lower_candidate)
+                        || super::oracle_nom::primitives::is_keyword_word(&lower_candidate)
+                        || is_subtype_word(&lower_candidate)
+                    {
                         continue;
                     }
                 }

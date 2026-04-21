@@ -15,9 +15,9 @@ use super::oracle_nom::primitives::{
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_target::{parse_type_phrase, starts_with_type_word};
 use super::oracle_util::{
-    canonicalize_subtype_name, merge_or_filters, normalize_card_name_refs, parse_number,
-    parse_ordinal, parse_subtype, strip_after, strip_reminder_text, TextPair,
-    SELF_REF_PARSE_ONLY_PHRASES,
+    canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
+    normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
+    strip_reminder_text, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
 };
 use crate::parser::oracle_warnings::{push_warning, take_warnings};
 use crate::types::ability::{
@@ -77,6 +77,10 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
 /// CR 603.2: A triggered ability may have multiple triggering events. Each event
 /// is independently evaluated, producing separate trigger instances that share
 /// the same effect.
+///
+/// Accepts raw card Oracle text; internally normalizes self-references via
+/// `normalize_card_name_refs`. When invoked via [`parse_oracle_text`] the
+/// text is already normalized and the internal call is an idempotent no-op.
 pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition> {
     let stripped = strip_reminder_text(text);
     let normalized = normalize_self_refs(&stripped, card_name);
@@ -164,6 +168,10 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
+///
+/// Accepts raw card Oracle text; internally normalizes self-references via
+/// `normalize_card_name_refs`. When invoked via [`parse_oracle_text`] the
+/// text is already normalized and the internal call is an idempotent no-op.
 #[tracing::instrument(level = "debug", skip(card_name))]
 pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     let text = strip_reminder_text(text);
@@ -3283,35 +3291,6 @@ fn try_parse_controlled_subtype_attacks(lower: &str) -> Option<(TriggerMode, Tri
     None
 }
 
-fn is_core_type_name(text: &str) -> bool {
-    matches!(
-        text,
-        "creature"
-            | "artifact"
-            | "enchantment"
-            | "land"
-            | "planeswalker"
-            | "spell"
-            | "card"
-            | "permanent"
-    )
-}
-
-fn is_non_subtype_subject_name(text: &str) -> bool {
-    matches!(
-        text,
-        "ability"
-            | "card"
-            | "commander"
-            | "opponent"
-            | "permanent"
-            | "player"
-            | "source"
-            | "spell"
-            | "token"
-    )
-}
-
 fn is_subtype_phrase(text: &str) -> bool {
     text.split(" or ").all(|part| {
         let trimmed = part.trim();
@@ -5081,10 +5060,11 @@ mod tests {
                 target: TargetFilter::SelfRef
             }
         ));
-        assert_eq!(
-            trigger.description.as_deref(),
-            Some("Lluwen enters prepared.")
-        );
+        // Description is set from the normalized line — `parse_oracle_text`
+        // pre-normalizes self-refs at the single entry point, so descriptions
+        // uniformly use `~` for the card's self-reference (matching the
+        // codebase-wide trigger description convention).
+        assert_eq!(trigger.description.as_deref(), Some("~ enters prepared."));
     }
 
     #[test]

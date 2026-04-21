@@ -288,7 +288,9 @@ fn spelunking_order_can_leave_tapland_untapped() {
             card_id,
         })
         .expect("play land should succeed");
-    let tapland_first = replacement_choice_index(&runner, "This land enters tapped.");
+    // Description normalized at the parser entry point (CR 201.4b): `this land`
+    // → `~`, matching the codebase-wide self-reference convention.
+    let tapland_first = replacement_choice_index(&runner, "~ enters tapped.");
     runner
         .act(GameAction::ChooseReplacement {
             index: tapland_first,
@@ -327,7 +329,9 @@ fn archelos_untapped_makes_other_taplands_enter_untapped() {
             card_id,
         })
         .expect("play land should succeed");
-    let tapland_first = replacement_choice_index(&runner, "This land enters tapped.");
+    // Description normalized at the parser entry point (CR 201.4b): `this land`
+    // → `~`, matching the codebase-wide self-reference convention.
+    let tapland_first = replacement_choice_index(&runner, "~ enters tapped.");
     runner
         .act(GameAction::ChooseReplacement {
             index: tapland_first,

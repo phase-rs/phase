@@ -1564,6 +1564,24 @@ fn strip_subject_clause(text: &str) -> Option<String> {
         return None;
     }
 
+    // Narrow predicate check for the single-token `~` subject (CR 201.4b).
+    // `~ <verb>` is a legitimate subject-predicate only when the immediate
+    // next word is a recognized predicate verb (e.g. `~ phases out`,
+    // `~ gains haste`). Without this guard, `find_predicate_start` scans
+    // forward past non-predicate tokens and matches a later PREDICATE_VERB —
+    // e.g. "~ enters with a token copy of Pacifism attached to it." stripping
+    // to "copy of Pacifism attached to it." and mis-matching CopySpell.
+    // Multi-word subject tags (`each `, `an opponent `, `target `) still rely
+    // on forward scanning because their subject phrases extend beyond the tag.
+    if let Some(after_tilde) = lower.strip_prefix("~ ") {
+        let first_word_end = after_tilde.find(' ').unwrap_or(after_tilde.len());
+        let first_word = &after_tilde[..first_word_end];
+        let normalized = super::normalize_verb_token(first_word);
+        if !PREDICATE_VERBS.contains(&normalized.as_str()) {
+            return None;
+        }
+    }
+
     let verb_start = find_predicate_start(text)?;
     let predicate = text[verb_start..].trim();
     if predicate.is_empty() {
@@ -1616,6 +1634,12 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             // `parse_subject_application`.
             value((), tag("he ")),
             value((), tag("she ")),
+            // CR 201.4b: After `parse_oracle_text` normalizes self-references
+            // to `~`, predicates like "~ phases out" / "~ gains haste" reach
+            // here with `~` as the subject token. Dispatch the same way as
+            // "this creature ..." / "he ..." so imperative parsing sees only
+            // the verb tail.
+            value((), tag("~ ")),
         )),
     ))
     .parse(lower)

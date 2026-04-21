@@ -230,13 +230,17 @@ pub(crate) fn parse_class_oracle_text(
     result
 }
 
-/// Check if a line matches "when this class becomes level N" pattern.
+/// Check if a line matches "when ~ becomes level N" pattern.
+///
+/// Subject is `~` after `parse_oracle_text` normalizes self-references
+/// (CR 201.4b) — `this class` and the bare card name both fold to `~`.
+/// The `this class` / card-name fallbacks remain for callers that bypass the
+/// parser entry point (e.g. direct tests passing pre-normalization text).
 pub(crate) fn is_class_level_trigger(lower: &str, card_name: &str) -> bool {
     let card_lower = card_name.to_lowercase();
-    // "When this Class becomes level N" or "When CARDNAME becomes level N"
     lower.starts_with("when ")
         && lower.contains("becomes level ")
-        && (lower.contains("this class") || lower.contains(&card_lower))
+        && (lower.contains('~') || lower.contains("this class") || lower.contains(&card_lower))
 }
 
 /// Parse a "When this Class becomes level N, {effect}" trigger.
@@ -271,7 +275,7 @@ fn parse_class_level_trigger(line: &str, card_name: &str, level: u8) -> Option<T
             .execute(execute)
             .trigger_zones(vec![Zone::Battlefield])
             .constraint(TriggerConstraint::AtClassLevel { level })
-            .description(format!("When this Class becomes level {level}")),
+            .description(format!("When ~ becomes level {level}")),
     )
 }
 

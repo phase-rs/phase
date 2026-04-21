@@ -41,7 +41,7 @@ expression: result
       "secondary": false,
       "valid_target": null,
       "valid_source": null,
-      "description": "When Rancor is put into a graveyard from the battlefield, return Rancor to its owner's hand.",
+      "description": "When ~ is put into a graveyard from the battlefield, return ~ to its owner's hand.",
       "constraint": null,
       "condition": null,
       "batched": false

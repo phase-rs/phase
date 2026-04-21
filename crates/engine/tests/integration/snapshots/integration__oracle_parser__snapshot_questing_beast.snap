@@ -79,7 +79,7 @@ expression: result
       "valid_source": {
         "type": "SelfRef"
       },
-      "description": "Whenever Questing Beast deals combat damage to a planeswalker, it deals that much damage to target planeswalker that player controls.",
+      "description": "Whenever ~ deals combat damage to a planeswalker, it deals that much damage to target planeswalker that player controls.",
       "constraint": null,
       "condition": null,
       "batched": false

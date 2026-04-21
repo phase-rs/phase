@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
-assertion_line: 140
 expression: result
 ---
 {
@@ -66,7 +65,7 @@ expression: result
       "secondary": false,
       "valid_target": null,
       "valid_source": null,
-      "description": "When Goblin Chainwhirler enters the battlefield, it deals 1 damage to each opponent and each creature and planeswalker they control.",
+      "description": "When ~ enters the battlefield, it deals 1 damage to each opponent and each creature and planeswalker they control.",
       "constraint": null,
       "condition": null,
       "batched": false
