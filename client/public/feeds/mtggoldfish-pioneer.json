@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-04T00:00:00Z",
+  "updated": "2026-05-05T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -151,36 +151,16 @@
       "name": "Izzet Prowess",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "R"
+        "R",
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Academic Dispute"
-        },
-        {
           "count": 3,
           "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 3,
-          "name": "Experimental Synthesizer"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Impulse"
         },
         {
           "count": 4,
@@ -191,20 +171,20 @@
           "name": "Spirebluff Canal"
         },
         {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Den of the Bugbear"
+        },
+        {
+          "count": 4,
+          "name": "Academic Dispute"
+        },
+        {
           "count": 3,
           "name": "Shivan Reef"
-        },
-        {
-          "count": 2,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Mountain"
         },
         {
           "count": 4,
@@ -212,7 +192,27 @@
         },
         {
           "count": 4,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 4,
           "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Experimental Synthesizer"
+        },
+        {
+          "count": 4,
+          "name": "Cori-Steel Cutter"
+        },
+        {
+          "count": 2,
+          "name": "Reckless Rage"
         },
         {
           "count": 4,
@@ -220,29 +220,17 @@
         },
         {
           "count": 4,
-          "name": "Stormchaser's Talent"
+          "name": "Steam Vents"
         },
         {
           "count": 4,
-          "name": "Cori-Steel Cutter"
+          "name": "Riverpyre Verge"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Annul"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Combustion Technique"
+          "name": "Iroh's Demonstration"
         },
         {
           "count": 1,
@@ -250,7 +238,11 @@
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
+          "name": "Octopus Form"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
         },
         {
           "count": 1,
@@ -258,23 +250,27 @@
         },
         {
           "count": 1,
-          "name": "Octopus Form"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
           "name": "Pyroclasm"
+        },
+        {
+          "count": 3,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Annul"
+        },
+        {
+          "count": 2,
+          "name": "Abrade"
         },
         {
           "count": 2,
           "name": "Scorching Shot"
         },
         {
-          "count": 3,
-          "name": "Spell Pierce"
+          "count": 1,
+          "name": "Soul-Guide Lantern"
         }
       ]
     },
@@ -1357,32 +1353,16 @@
       "author": "MTGGoldfish",
       "colors": [
         "W",
-        "G",
-        "B"
+        "B",
+        "G"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Bitter Triumph"
-        },
-        {
           "count": 4,
           "name": "Thoughtseize"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 3,
-          "name": "Cache Grab"
         },
         {
           "count": 1,
@@ -1390,23 +1370,19 @@
         },
         {
           "count": 3,
-          "name": "Darkbore Pathway"
+          "name": "Bitter Triumph"
         },
         {
           "count": 1,
-          "name": "Emptiness"
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Godless Shrine"
         },
         {
           "count": 4,
-          "name": "Esika's Chariot"
-        },
-        {
-          "count": 3,
           "name": "Formidable Speaker"
-        },
-        {
-          "count": 1,
-          "name": "Godless Shrine"
         },
         {
           "count": 4,
@@ -1414,69 +1390,77 @@
         },
         {
           "count": 4,
-          "name": "Iron-Shield Elf"
+          "name": "Concealed Courtyard"
         },
         {
-          "count": 1,
-          "name": "Lush Portico"
-        },
-        {
-          "count": 2,
-          "name": "Overlord of the Balemurk"
+          "count": 4,
+          "name": "Esika's Chariot"
         },
         {
           "count": 4,
           "name": "Parhelion II"
         },
         {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 1,
-          "name": "Starting Town"
-        },
-        {
-          "count": 1,
-          "name": "Brushland"
-        },
-        {
           "count": 1,
           "name": "Takenuma, Abandoned Mire"
         },
         {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 3,
-          "name": "Blooming Marsh"
+          "count": 4,
+          "name": "Raffine's Informant"
         },
         {
           "count": 2,
-          "name": "Thundering Broodwagon"
+          "name": "Brushland"
         },
         {
-          "count": 1,
-          "name": "Voice of Victory"
+          "count": 2,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 4,
+          "name": "Razorverge Thicket"
+        },
+        {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 3,
+          "name": "Cache Grab"
         },
         {
           "count": 3,
           "name": "Witherbloom Command"
+        },
+        {
+          "count": 1,
+          "name": "Emptiness"
+        },
+        {
+          "count": 1,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Broodwagon"
+        },
+        {
+          "count": 1,
+          "name": "Yathan Roadwatcher"
+        },
+        {
+          "count": 1,
+          "name": "Selfless Savior"
+        },
+        {
+          "count": 1,
+          "name": "Overlord of the Balemurk"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
+          "count": 2,
           "name": "Duress"
-        },
-        {
-          "count": 2,
-          "name": "Ashiok, Dream Render"
-        },
-        {
-          "count": 2,
-          "name": "Abrupt Decay"
         },
         {
           "count": 2,
@@ -1484,15 +1468,11 @@
         },
         {
           "count": 1,
-          "name": "Knight of Autumn"
-        },
-        {
-          "count": 2,
-          "name": "Pest Control"
+          "name": "Ashiok, Dream Render"
         },
         {
           "count": 1,
-          "name": "Sheoldred, the Apocalypse"
+          "name": "Surrak, Elusive Hunter"
         },
         {
           "count": 1,
@@ -1500,7 +1480,23 @@
         },
         {
           "count": 1,
-          "name": "Vanishing Verse"
+          "name": "Loran of the Third Path"
+        },
+        {
+          "count": 3,
+          "name": "Pest Control"
+        },
+        {
+          "count": 2,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 1,
+          "name": "Voice of Victory"
+        },
+        {
+          "count": 1,
+          "name": "Kaervek, the Spiteful"
         }
       ]
     }

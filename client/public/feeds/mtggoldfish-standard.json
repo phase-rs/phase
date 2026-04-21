@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-05-04T00:00:00Z",
+  "updated": "2026-05-05T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -417,121 +417,6 @@
       ]
     },
     {
-      "name": "Dimir Excruciator",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 3,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 4,
-          "name": "Doomsday Excruciator"
-        },
-        {
-          "count": 4,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 2,
-          "name": "Insatiable Avarice"
-        },
-        {
-          "count": 4,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 3,
-          "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "Superior Spider-Man"
-        },
-        {
-          "count": 4,
-          "name": "Deceit"
-        },
-        {
-          "count": 2,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 1,
-          "name": "Deadly Cover-Up"
-        },
-        {
-          "count": 2,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 2,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 10,
-          "name": "Swamp"
-        },
-        {
-          "count": 3,
-          "name": "Duress"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Cruelclaw's Heist"
-        },
-        {
-          "count": 2,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Deadly Cover-Up"
-        },
-        {
-          "count": 1,
-          "name": "Intimidation Tactics"
-        },
-        {
-          "count": 4,
-          "name": "Oildeep Gearhulk"
-        },
-        {
-          "count": 2,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 2,
-          "name": "Flashfreeze"
-        }
-      ]
-    },
-    {
       "name": "Izzet Spellementals",
       "author": "MTGGoldfish",
       "colors": [
@@ -659,6 +544,121 @@
         {
           "count": 2,
           "name": "Slagstorm"
+        }
+      ]
+    },
+    {
+      "name": "Dimir Excruciator",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 3,
+          "name": "Day of Black Sun"
+        },
+        {
+          "count": 4,
+          "name": "Doomsday Excruciator"
+        },
+        {
+          "count": 4,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 2,
+          "name": "Insatiable Avarice"
+        },
+        {
+          "count": 4,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 3,
+          "name": "Stock Up"
+        },
+        {
+          "count": 4,
+          "name": "Superior Spider-Man"
+        },
+        {
+          "count": 4,
+          "name": "Deceit"
+        },
+        {
+          "count": 2,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 1,
+          "name": "Deadly Cover-Up"
+        },
+        {
+          "count": 2,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 2,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 10,
+          "name": "Swamp"
+        },
+        {
+          "count": 3,
+          "name": "Duress"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Cruelclaw's Heist"
+        },
+        {
+          "count": 2,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Deadly Cover-Up"
+        },
+        {
+          "count": 1,
+          "name": "Intimidation Tactics"
+        },
+        {
+          "count": 4,
+          "name": "Oildeep Gearhulk"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 2,
+          "name": "Flashfreeze"
         }
       ]
     },
@@ -916,17 +916,17 @@
       "name": "5c Elementals",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
+        "R",
         "G",
-        "R"
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Breeding Pool"
+          "count": 4,
+          "name": "Ashling, Rekindled"
         },
         {
           "count": 2,
@@ -934,23 +934,15 @@
         },
         {
           "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 4,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 3,
-          "name": "Deceit"
+          "name": "Winternight Stories"
         },
         {
           "count": 1,
-          "name": "Restless Vinestalk"
+          "name": "Stomping Ground"
         },
         {
-          "count": 4,
-          "name": "Secluded Courtyard"
+          "count": 2,
+          "name": "Sunderflock"
         },
         {
           "count": 4,
@@ -961,12 +953,16 @@
           "name": "Ill-Timed Explosion"
         },
         {
-          "count": 2,
-          "name": "Island"
+          "count": 4,
+          "name": "Steam Vents"
         },
         {
           "count": 1,
           "name": "Pit of Offerings"
+        },
+        {
+          "count": 1,
+          "name": "Spirebluff Canal"
         },
         {
           "count": 4,
@@ -978,11 +974,11 @@
         },
         {
           "count": 4,
-          "name": "Steam Vents"
+          "name": "Secluded Courtyard"
         },
         {
           "count": 1,
-          "name": "Spirebluff Canal"
+          "name": "Restless Vinestalk"
         },
         {
           "count": 4,
@@ -990,41 +986,45 @@
         },
         {
           "count": 2,
-          "name": "Sunderflock"
+          "name": "Island"
+        },
+        {
+          "count": 3,
+          "name": "Burst Lightning"
         },
         {
           "count": 4,
           "name": "Vibrance"
         },
         {
-          "count": 1,
-          "name": "Stomping Ground"
+          "count": 3,
+          "name": "Breeding Pool"
         },
         {
           "count": 3,
-          "name": "Winternight Stories"
+          "name": "Deceit"
         },
         {
           "count": 4,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 3,
           "name": "Wistfulness"
         },
         {
-          "count": 4,
-          "name": "Ashling, Rekindled"
+          "count": 1,
+          "name": "Wistfulness"
         }
       ],
       "sideboard": [
-        {
-          "count": 2,
-          "name": "Pyroclasm"
-        },
         {
           "count": 1,
           "name": "Bounce Off"
         },
         {
-          "count": 1,
-          "name": "Disdainful Stroke"
+          "count": 2,
+          "name": "Ygra, Eater of All"
         },
         {
           "count": 1,
@@ -1032,31 +1032,19 @@
         },
         {
           "count": 1,
-          "name": "Catharsis"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
+          "name": "Spell Pierce"
         },
         {
           "count": 1,
           "name": "Sear"
         },
         {
-          "count": 1,
-          "name": "Ygra, Eater of All"
+          "count": 2,
+          "name": "Soul-Guide Lantern"
         },
         {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 1,
-          "name": "Spider-Sense"
+          "count": 2,
+          "name": "Pyroclasm"
         },
         {
           "count": 1,
@@ -1065,6 +1053,14 @@
         {
           "count": 1,
           "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 1,
+          "name": "Pit of Offerings"
         }
       ]
     },
@@ -1212,7 +1208,7 @@
       ]
     },
     {
-      "name": "4c Ouroboroid",
+      "name": "Bant Ouroboroid",
       "author": "MTGGoldfish",
       "colors": [
         "G",
@@ -1229,10 +1225,6 @@
         },
         {
           "count": 1,
-          "name": "Willowrush Verge"
-        },
-        {
-          "count": 1,
           "name": "Forest"
         },
         {
@@ -1244,16 +1236,20 @@
           "name": "Starting Town"
         },
         {
-          "count": 1,
-          "name": "Bounce Off"
-        },
-        {
           "count": 4,
           "name": "Temple Garden"
         },
         {
-          "count": 4,
+          "count": 1,
+          "name": "Keen-Eyed Curator"
+        },
+        {
+          "count": 3,
           "name": "Seam Rip"
+        },
+        {
+          "count": 1,
+          "name": "Hallowed Fountain"
         },
         {
           "count": 4,
@@ -1264,12 +1260,12 @@
           "name": "Badgermole Cub"
         },
         {
-          "count": 4,
-          "name": "Gene Pollinator"
+          "count": 2,
+          "name": "Brightglass Gearhulk"
         },
         {
-          "count": 1,
-          "name": "Brightglass Gearhulk"
+          "count": 4,
+          "name": "Gene Pollinator"
         },
         {
           "count": 4,
@@ -1281,77 +1277,61 @@
         },
         {
           "count": 1,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 2,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 1,
           "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 4,
+          "name": "Multiversal Passage"
         },
         {
           "count": 4,
           "name": "Hushwood Verge"
         },
         {
+          "count": 1,
+          "name": "Unable to Scream"
+        },
+        {
           "count": 4,
           "name": "Spider Manifestation"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 2,
-          "name": "Botanical Sanctum"
         },
         {
           "count": 2,
           "name": "Ouroboroid"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Quantum Riddler"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Surrak, Elusive Hunter"
+          "name": "Disdainful Stroke"
         },
         {
           "count": 1,
-          "name": "Get Lost"
+          "name": "Unable to Scream"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Oko, Lorwyn Liege"
-        },
-        {
-          "count": 1,
-          "name": "Leatherhead, Swamp Stalker"
         },
         {
           "count": 1,
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Sage of the Skies"
-        },
-        {
-          "count": 1,
-          "name": "Chomping Changeling"
-        },
-        {
-          "count": 1,
-          "name": "Champion of the Weird"
         },
         {
           "count": 2,
           "name": "Spider-Sense"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
         },
         {
           "count": 1,
