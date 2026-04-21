@@ -762,6 +762,80 @@ pub fn synthesize_entwine(face: &mut CardFace) {
     }
 }
 
+/// CR 702.35a: Madness is a static ability with a replacement effect plus a
+/// linked triggered ability. If the player discards the card, they exile it
+/// instead of putting it into their graveyard; when they do, they may cast it
+/// for its madness cost or put it into their graveyard.
+pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
+    let Some(cost) = face.keywords.iter().find_map(|kw| match kw {
+        Keyword::Madness(cost) => Some(cost.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    let already_has_replacement = face.replacements.iter().any(|r| {
+        matches!(r.event, ReplacementEvent::Discard)
+            && matches!(r.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                r.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    });
+    if !already_has_replacement {
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Discard);
+        replacement.valid_card = Some(TargetFilter::SelfRef);
+        replacement.description = Some(
+            "CR 702.35a: If you discard this card, exile it instead of putting it into your graveyard."
+                .to_string(),
+        );
+        replacement.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+        )));
+        face.replacements.push(replacement);
+    }
+
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::Discarded)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && t.trigger_zones.contains(&Zone::Exile)
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::MadnessCast { .. })
+            )
+    });
+    if !already_has_trigger {
+        let trigger = TriggerDefinition::new(TriggerMode::Discarded)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Exile])
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::MadnessCast { cost },
+            ))
+            .description(
+                "CR 702.35a: When this card is exiled this way, its owner may cast it for its madness cost or put it into their graveyard."
+                    .to_string(),
+            );
+        face.triggers.push(trigger);
+    }
+}
+
 /// Run all synthesis functions in canonical order on a card face.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure the same
 /// complete set of synthesizers is applied.
@@ -784,6 +858,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_scavenge(face);
     synthesize_casualty(face);
     synthesize_entwine(face);
+    synthesize_madness_intrinsics(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
     // CR 721.2b: Spacecraft creature-shift at the max station-symbol striation
@@ -1234,6 +1309,83 @@ mod job_select_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_job_select(&mut face);
         assert!(face.triggers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod madness_synthesis_tests {
+    use super::*;
+
+    fn madness_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Madness(ManaCost::Cost {
+            shards: vec![crate::types::mana::ManaCostShard::Red],
+            generic: 0,
+        }));
+        face
+    }
+
+    #[test]
+    fn synthesize_madness_adds_discard_replacement_and_exile_trigger() {
+        let mut face = madness_face();
+        synthesize_madness_intrinsics(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| matches!(r.event, ReplacementEvent::Discard))
+            .expect("madness should add a discard replacement");
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+        assert!(matches!(
+            replacement.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Discarded))
+            .expect("madness should add a discarded trigger");
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert_eq!(trigger.trigger_zones, vec![Zone::Exile]);
+        assert!(matches!(
+            trigger.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::MadnessCast { cost })
+                if *cost == (ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Red],
+                    generic: 0,
+                })
+        ));
+    }
+
+    #[test]
+    fn synthesize_madness_is_idempotent() {
+        let mut face = madness_face();
+        synthesize_madness_intrinsics(&mut face);
+        synthesize_madness_intrinsics(&mut face);
+
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| matches!(r.event, ReplacementEvent::Discard))
+                .count(),
+            1
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| matches!(t.mode, TriggerMode::Discarded))
+                .count(),
+            1
+        );
     }
 }
 

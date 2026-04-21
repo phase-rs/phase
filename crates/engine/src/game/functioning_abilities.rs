@@ -177,9 +177,8 @@ pub fn battlefield_active_triggers(
 /// Zones callers actually scan today:
 /// - `find_applicable_replacements` in `game/replacement.rs` restricts
 ///   to `[Battlefield, Command]` plus the entering card (CR 614.12
-///   self-replacement on ETB). That matches the shape of every
-///   replacement currently in the engine — no hand-zone (Leyline-class)
-///   replacements are wired up yet.
+///   self-replacement on ETB) or the discarded card (CR 702.35a
+///   Madness self-replacement from hand).
 /// - **CR 903.9a commander redirection** is not routed through
 ///   `ReplacementDefinition` at all; it is a hard-coded redirect in
 ///   `game/zones.rs::move_to_zone`. The helper's scan is future-proofed

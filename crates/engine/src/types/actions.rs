@@ -178,6 +178,13 @@ pub enum GameAction {
         object_id: ObjectId,
         card_id: CardId,
     },
+    /// CR 702.35a: Accept a pending `WaitingFor::MadnessCastOffer` and cast
+    /// `object_id` from exile for its madness cost. Decline is via the shared
+    /// `DecideOptionalEffect { accept: false }`.
+    CastSpellAsMadness {
+        object_id: ObjectId,
+        card_id: CardId,
+    },
     /// CR 609.3: Accept or decline an optional effect ("You may X").
     DecideOptionalEffect {
         accept: bool,
@@ -382,6 +389,7 @@ impl GameAction {
             GameAction::CastSpellAsSneak { gy_object, .. } => Some(*gy_object),
             GameAction::CastSpellForFree { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMiracle { object_id, .. } => Some(*object_id),
+            GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { object_id } => Some(*object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),

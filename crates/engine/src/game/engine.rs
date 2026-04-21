@@ -1670,6 +1670,43 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 true,
             )?
         }
+        // CR 702.35a: Madness cast offer — the madness triggered ability has
+        // resolved. The player may now cast the exiled card for its madness cost.
+        (
+            WaitingFor::MadnessCastOffer {
+                player, object_id, ..
+            },
+            GameAction::CastSpellAsMadness {
+                object_id: action_obj,
+                card_id,
+            },
+        ) => {
+            if *object_id != action_obj {
+                return Err(EngineError::InvalidAction(
+                    "CastSpellAsMadness object_id does not match madness cast offer".to_string(),
+                ));
+            }
+            let p = *player;
+            let obj = action_obj;
+            super::casting::handle_cast_spell_as_madness(state, p, obj, card_id, &mut events)?
+        }
+        // CR 702.35a: Madness decline — put the exiled card into its owner's graveyard.
+        (
+            WaitingFor::MadnessCastOffer {
+                player, object_id, ..
+            },
+            GameAction::DecideOptionalEffect { accept: false },
+        ) => {
+            let p = *player;
+            super::zones::move_to_zone(state, *object_id, Zone::Graveyard, &mut events);
+            state.waiting_for = WaitingFor::Priority { player: p };
+            super::engine_priority::run_post_action_pipeline(
+                state,
+                &mut events,
+                &WaitingFor::Priority { player: p },
+                true,
+            )?
+        }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             match engine_resolution_choices::handle_resolution_choice(
                 state,

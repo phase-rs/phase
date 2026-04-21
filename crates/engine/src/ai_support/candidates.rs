@@ -1450,6 +1450,38 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ));
             v
         }
+        // CR 702.35a: Madness cast offer — cast if the madness cost is affordable,
+        // otherwise decline and put the card into its owner's graveyard.
+        WaitingFor::MadnessCastOffer {
+            player,
+            object_id,
+            cost,
+        } => {
+            let card_id = state
+                .objects
+                .get(object_id)
+                .map(|o| o.card_id)
+                .unwrap_or(crate::types::identifiers::CardId(0));
+            let can_pay =
+                crate::game::casting::can_pay_cost_after_auto_tap(state, *player, *object_id, cost);
+            let mut v: Vec<CandidateAction> = Vec::new();
+            if can_pay {
+                v.push(candidate(
+                    GameAction::CastSpellAsMadness {
+                        object_id: *object_id,
+                        card_id,
+                    },
+                    TacticalClass::Spell,
+                    Some(*player),
+                ));
+            }
+            v.push(candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Pass,
+                Some(*player),
+            ));
+            v
+        }
         WaitingFor::ParadigmCastOffer { player, offers } => {
             let mut v: Vec<CandidateAction> = offers
                 .iter()

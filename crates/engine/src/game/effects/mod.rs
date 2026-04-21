@@ -389,6 +389,15 @@ pub fn resolve_effect(
             };
             Ok(())
         }
+        // CR 702.35a: Madness trigger resolution — offer the cast from exile.
+        Effect::MadnessCast { ref cost } => {
+            state.waiting_for = WaitingFor::MadnessCastOffer {
+                player: ability.controller,
+                object_id: ability.source_id,
+                cost: cost.clone(),
+            };
+            Ok(())
+        }
         Effect::PutAtLibraryPosition { .. } => put_on_top::resolve(state, ability, events),
         Effect::PutOnTopOrBottom { .. } => put_on_top_or_bottom::resolve(state, ability, events),
         Effect::GiftDelivery { .. } => gift_delivery::resolve(state, ability, events),

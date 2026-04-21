@@ -26,9 +26,12 @@ pub fn check_spell_timing(
     allow_flash_timing: bool,
     casting_variant: CastingVariant,
 ) -> Result<(), EngineError> {
-    // CR 702.94a + CR 608.2g: Miracle casts happen during the resolution of the
-    // miracle triggered ability — timing restrictions do not apply during resolution.
-    if matches!(casting_variant, CastingVariant::Miracle) {
+    // CR 702.94a + CR 608.2g / CR 702.35a: Miracle and Madness casts happen
+    // during triggered ability resolution, so timing restrictions do not apply.
+    if matches!(
+        casting_variant,
+        CastingVariant::Miracle | CastingVariant::Madness
+    ) {
         return Ok(());
     }
 

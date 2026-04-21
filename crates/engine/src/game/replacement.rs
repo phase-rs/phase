@@ -131,6 +131,34 @@ fn moved_applier(
     ApplyResult::Modified(event)
 }
 
+fn discard_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Discard { .. })
+}
+
+fn discard_applier(
+    event: ProposedEvent,
+    _rid: ReplacementId,
+    _state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    match event {
+        ProposedEvent::Discard {
+            object_id, applied, ..
+        } => ApplyResult::Modified(ProposedEvent::ZoneChange {
+            object_id,
+            from: Zone::Hand,
+            to: Zone::Graveyard,
+            cause: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied,
+        }),
+        other => ApplyResult::Modified(other),
+    }
+}
+
 // --- 2. DamageDone ---
 
 fn damage_done_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
@@ -1023,6 +1051,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         },
     );
     registry.insert(
+        ReplacementEvent::Discard,
+        ReplacementHandlerEntry {
+            matcher: discard_matcher,
+            applier: discard_applier,
+        },
+    );
+    registry.insert(
         ReplacementEvent::Destroy,
         ReplacementHandlerEntry {
             matcher: destroy_matcher,
@@ -1528,6 +1563,10 @@ pub fn find_applicable_replacements(
         } => Some(*object_id),
         _ => None,
     };
+    let discarding_object_id = match event {
+        ProposedEvent::Discard { object_id, .. } => Some(*object_id),
+        _ => None,
+    };
 
     let zones_to_scan = [Zone::Battlefield, Zone::Command];
     // CR 702.26b + CR 114.4: `active_replacements` owns the phased-out /
@@ -1538,8 +1577,9 @@ pub fn find_applicable_replacements(
     for (index, obj, repl_def) in super::functioning_abilities::active_replacements(state) {
         let in_scanned_zone = zones_to_scan.contains(&obj.zone);
         let is_entering = entering_object_id == Some(obj.id);
+        let is_being_discarded = discarding_object_id == Some(obj.id);
 
-        if !in_scanned_zone && !is_entering {
+        if !in_scanned_zone && !is_entering && !is_being_discarded {
             continue;
         }
 
@@ -1551,6 +1591,12 @@ pub fn find_applicable_replacements(
 
             // Cards not yet on battlefield can only apply self-replacement effects
             if is_entering
+                && !in_scanned_zone
+                && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
+            {
+                continue;
+            }
+            if is_being_discarded
                 && !in_scanned_zone
                 && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
             {
@@ -2774,6 +2820,7 @@ mod tests {
             ReplacementEvent::DamageDone,
             ReplacementEvent::ChangeZone,
             ReplacementEvent::Moved,
+            ReplacementEvent::Discard,
             ReplacementEvent::Destroy,
             ReplacementEvent::Draw,
             ReplacementEvent::DrawCards,

@@ -1100,6 +1100,7 @@ impl GameRunner {
             WaitingFor::ParadigmCastOffer { .. } => "ParadigmCastOffer",
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
             WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
+            WaitingFor::MadnessCastOffer { .. } => "MadnessCastOffer",
         }
     }
 

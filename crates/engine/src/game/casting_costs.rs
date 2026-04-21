@@ -125,18 +125,30 @@ pub(crate) fn handle_discard_for_cost(
         }
     }
 
-    pay_and_push(
-        state,
-        player,
-        pending.object_id,
-        pending.card_id,
-        pending.ability,
-        &pending.cost,
-        pending.casting_variant,
-        pending.distribute,
-        pending.origin_zone,
-        events,
-    )
+    if let Some(ability_index) = pending.activation_ability_index {
+        push_activated_ability_to_stack(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
+            events,
+        )
+    } else {
+        pay_and_push(
+            state,
+            player,
+            pending.object_id,
+            pending.card_id,
+            pending.ability,
+            &pending.cost,
+            pending.casting_variant,
+            pending.distribute,
+            pending.origin_zone,
+            events,
+        )
+    }
 }
 
 /// CR 118.3 + CR 601.2b: Complete sacrifice-as-cost after player selection.
@@ -986,14 +998,14 @@ fn pay_additional_cost(
                 pending_cast: Box::new(pending),
             });
         }
-        AbilityCost::Discard { count, .. } => {
+        AbilityCost::Discard { count, filter, .. } => {
             // CR 601.2b: Discard requires interactive card selection — return a WaitingFor.
-            let eligible: Vec<ObjectId> = state.players[player.0 as usize]
-                .hand
-                .iter()
-                .copied()
-                .filter(|id| *id != pending.object_id)
-                .collect();
+            let eligible = super::casting::find_eligible_discard_targets(
+                state,
+                player,
+                pending.object_id,
+                filter.as_ref(),
+            );
             // CR 601.2b: Defense-in-depth — empty hand means no legal choice.
             if eligible.len() < count as usize {
                 return Err(EngineError::ActionNotAllowed(

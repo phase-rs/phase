@@ -3579,6 +3579,11 @@ pub enum Effect {
     MiracleCast {
         cost: super::mana::ManaCost,
     },
+    /// CR 702.35a: Madness trigger resolution — offers the player the chance to
+    /// cast the source card from exile for its madness cost.
+    MadnessCast {
+        cost: super::mana::ManaCost,
+    },
     /// CR 701.24g: Put a card at a specific position in its owner's library.
     /// Unlike ChangeZone { destination: Library } which auto-shuffles (CR 401.3),
     /// this uses move_to_library_position for precise placement without shuffling.
@@ -4093,6 +4098,7 @@ impl Effect {
             | Effect::Discover { .. }
             | Effect::Cascade
             | Effect::MiracleCast { .. }
+            | Effect::MadnessCast { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl { .. }
             | Effect::ChangeTargets { .. }
@@ -4243,6 +4249,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Discover { .. } => "Discover",
         Effect::Cascade => "Cascade",
         Effect::MiracleCast { .. } => "MiracleCast",
+        Effect::MadnessCast { .. } => "MadnessCast",
         Effect::PutAtLibraryPosition { .. } => "PutAtLibraryPosition",
         Effect::PutOnTopOrBottom { .. } => "PutOnTopOrBottom",
         Effect::GiftDelivery { .. } => "GiftDelivery",
@@ -4397,6 +4404,7 @@ pub enum EffectKind {
     Discover,
     Cascade,
     MiracleCast,
+    MadnessCast,
     PutAtLibraryPosition,
     PutOnTopOrBottom,
     GiftDelivery,
@@ -4555,6 +4563,7 @@ impl From<&Effect> for EffectKind {
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::Cascade => EffectKind::Cascade,
             Effect::MiracleCast { .. } => EffectKind::MiracleCast,
+            Effect::MadnessCast { .. } => EffectKind::MadnessCast,
             Effect::PutAtLibraryPosition { .. } => EffectKind::PutAtLibraryPosition,
             Effect::PutOnTopOrBottom { .. } => EffectKind::PutOnTopOrBottom,
             Effect::GiftDelivery { .. } => EffectKind::GiftDelivery,

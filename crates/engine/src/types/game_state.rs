@@ -1083,6 +1083,15 @@ pub enum WaitingFor {
         object_id: ObjectId,
         cost: super::mana::ManaCost,
     },
+    /// CR 702.35a: The madness triggered ability has resolved — the player may
+    /// cast the exiled discarded card for its madness cost or put it into their
+    /// graveyard. `GameAction::CastSpellAsMadness` accepts; `DecideOptionalEffect
+    /// { accept: false }` declines.
+    MadnessCastOffer {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: super::mana::ManaCost,
+    },
     /// CR 608.2d + CR 101.4: An opponent may choose to perform an optional effect.
     /// Prompts opponents in APNAP order. First accept wins; remaining are not prompted.
     OpponentMayChoice {
@@ -1555,7 +1564,8 @@ impl WaitingFor {
             | WaitingFor::PhyrexianPayment { player, .. }
             | WaitingFor::DiscardChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
-            | WaitingFor::MiracleCastOffer { player, .. } => Some(*player),
+            | WaitingFor::MiracleCastOffer { player, .. }
+            | WaitingFor::MadnessCastOffer { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
         }
     }
@@ -1759,6 +1769,9 @@ pub enum CastingVariant {
     /// is read at preparation time rather than stored here because
     /// `prepare_spell_cast` already reads `obj.keywords` for analogous paths.
     Miracle,
+    /// CR 702.35a: Cast from exile via Madness after the discard replacement
+    /// exiled the card and its madness triggered ability resolved.
+    Madness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
