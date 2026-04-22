@@ -11,6 +11,11 @@ const SIZE_CLASSES = {
   lg: "w-8 h-8",
 } as const;
 
+// Symbols are mirrored into client/public/mana-symbols/ by
+// scripts/gen-symbol-images.sh. We serve from there first and fall back to
+// Scryfall's CDN if a symbol is missing locally (e.g. a brand-new symbol that
+// hasn't been re-downloaded yet).
+const LOCAL_SVG_BASE = "/mana-symbols";
 const SCRYFALL_SVG_BASE = "https://svgs.scryfall.io/card-symbols";
 
 /** Map our internal shard notation to the Scryfall SVG filename (without .svg). */
@@ -27,14 +32,18 @@ export function ManaSymbol({
   className = "",
 }: ManaSymbolProps) {
   const code = shardToScryfallCode(shard);
-  const src = `${SCRYFALL_SVG_BASE}/${code}.svg`;
 
   return (
     <img
-      src={src}
+      src={`${LOCAL_SVG_BASE}/${code}.svg`}
       alt={shard}
       className={`inline-block ${SIZE_CLASSES[size]} ${className}`}
       draggable={false}
+      onError={(e) => {
+        const img = e.currentTarget;
+        const fallback = `${SCRYFALL_SVG_BASE}/${code}.svg`;
+        if (img.src !== fallback) img.src = fallback;
+      }}
     />
   );
 }

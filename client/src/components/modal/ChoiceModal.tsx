@@ -1,4 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { RichLabel } from "../mana/RichLabel.tsx";
+
 export interface ChoiceOption {
   id: string;
   label: string;
@@ -42,9 +44,13 @@ export function ChoiceModal({
             <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
               Game Choice
             </div>
-            <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">{title}</h2>
+            <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">
+              <RichLabel text={title} size="md" />
+            </h2>
             {subtitle && (
-              <p className="mt-1 text-xs text-slate-400 lg:text-sm">{subtitle}</p>
+              <p className="mt-1 text-xs text-slate-400 lg:text-sm">
+                <RichLabel text={subtitle} size="xs" />
+              </p>
             )}
           </div>
           <div className="px-3 py-3 lg:px-5 lg:py-5">
@@ -55,10 +61,12 @@ export function ChoiceModal({
                   onClick={() => onChoose(opt.id)}
                   className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/40"
                 >
-                  <span className="font-semibold text-white">{opt.label}</span>
+                  <span className="font-semibold text-white">
+                    <RichLabel text={opt.label} size="sm" />
+                  </span>
                   {opt.description && (
                     <p className="mt-1 text-xs text-slate-400">
-                      {opt.description}
+                      <RichLabel text={opt.description} size="xs" />
                     </p>
                   )}
                 </button>

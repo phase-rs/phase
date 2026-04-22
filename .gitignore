@@ -37,6 +37,7 @@ client/public/scryfall-data.json
 client/public/set-list.json
 client/public/decks.json
 client/public/decks-skipped.json
+client/public/mana-symbols/
 # Atomic-write staging files from gen-card-data.sh (cleaned on normal exit,
 # but may linger after SIGKILL / power loss).
 client/public/*.tmp
