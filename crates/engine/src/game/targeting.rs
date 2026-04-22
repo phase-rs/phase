@@ -258,6 +258,12 @@ pub fn resolve_event_context_target(
             let attacker_info = combat.attackers.iter().find(|a| a.object_id == source_id)?;
             Some(TargetRef::Player(attacker_info.defending_player))
         }
+        TargetFilter::ParentTargetController => {
+            let event = state.current_trigger_event.as_ref()?;
+            let source_obj_id = extract_source_from_event(event)?;
+            let controller = state.objects.get(&source_obj_id)?.controller;
+            Some(TargetRef::Player(controller))
+        }
         _ => None,
     }
 }
@@ -285,6 +291,9 @@ pub(crate) fn extract_source_from_event(
         GameEvent::Cycled { object_id, .. } => Some(*object_id),
         GameEvent::CreatureSuspected { object_id } => Some(*object_id),
         GameEvent::CaseSolved { object_id } => Some(*object_id),
+        GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.len() == 1 => {
+            attacker_ids.first().copied()
+        }
         _ => None,
     }
 }

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, GainLifePlayer, ResolvedAbility, TargetRef,
+    Effect, EffectError, EffectKind, GainLifePlayer, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -260,25 +260,15 @@ pub fn resolve_lose(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let amount: i32 = match &ability.effect {
-        Effect::LoseLife { amount, .. } => {
-            crate::game::quantity::resolve_quantity_with_targets(state, amount, ability)
-        }
+    let (amount, target_filter): (i32, Option<&TargetFilter>) = match &ability.effect {
+        Effect::LoseLife { amount, target } => (
+            crate::game::quantity::resolve_quantity_with_targets(state, amount, ability),
+            target.as_ref(),
+        ),
         _ => return Err(EffectError::MissingParam("LoseLife amount".to_string())),
     };
 
-    // Determine target player: use first player target or fall back to controller
-    let target_player_id = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Player(pid) = t {
-                Some(*pid)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(ability.controller);
+    let target_player_id = resolve_life_loss_target(state, ability, target_filter);
 
     // CR 119.8: "If an effect says that a player can't lose life ... in that case,
     // the exchange won't happen." Short-circuit BEFORE the replacement pipeline.
@@ -333,6 +323,38 @@ pub fn resolve_lose(
     });
 
     Ok(())
+}
+
+fn resolve_life_loss_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: Option<&TargetFilter>,
+) -> PlayerId {
+    if let Some(player) = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Player(player) => Some(*player),
+        _ => None,
+    }) {
+        return player;
+    }
+
+    if matches!(target_filter, Some(TargetFilter::ParentTargetController)) {
+        if let Some(player) = ability.targets.iter().find_map(|target| match target {
+            TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
+            TargetRef::Player(player) => Some(*player),
+        }) {
+            return player;
+        }
+    }
+
+    target_filter
+        .and_then(|filter| {
+            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+        })
+        .and_then(|target| match target {
+            TargetRef::Player(player) => Some(player),
+            TargetRef::Object(id) => state.objects.get(&id).map(|object| object.controller),
+        })
+        .unwrap_or(ability.controller)
 }
 
 /// CR 119.5: Set a player's life total to a specific number.
@@ -469,6 +491,48 @@ mod tests {
         resolve_lose(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.players[1].life, 17);
+    }
+
+    #[test]
+    fn lose_life_parent_target_controller_uses_attack_event_source() {
+        let mut state = GameState::new_two_player(42);
+        let decree = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Marchesa's Decree".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            )],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::ParentTargetController),
+            },
+            vec![],
+            decree,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 19);
     }
 
     #[test]

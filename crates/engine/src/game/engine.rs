@@ -4008,6 +4008,50 @@ mod tests {
     }
 
     #[test]
+    fn monarch_end_step_draws_exactly_one_card() {
+        let mut state = new_game(42);
+        let _result = start_game_with_starting_player(&mut state, PlayerId(0));
+        state.phase = Phase::PostCombatMain;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        state.priority_passes.clear();
+        state.monarch = Some(PlayerId(0));
+
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First card".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second card".to_string(),
+            Zone::Library,
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::End);
+        assert_eq!(state.stack.len(), 1);
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[0].library.len(), 1);
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[0].library.len(), 1);
+    }
+
+    #[test]
     fn integration_play_land_then_pass() {
         let mut state = new_game(42);
         start_game_with_starting_player(&mut state, PlayerId(0));

@@ -5044,18 +5044,17 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         }
 
         // CR 608.2e: "if [condition], [effect] instead" — the preceding ability's effect
-        // is replaced when the condition holds. Model as: new def has condition + instead effect,
-        // preceding def becomes else_ability (the fallback when condition is false).
-        if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind) {
-            if let Some(last_def) = defs.pop() {
-                let mut new_def = instead_def;
+        // is replaced when the condition holds. Keep the base effect as the root so
+        // target collection stays anchored on the printed target-bearing clause.
+        if let Some(mut instead_def) = try_parse_generic_instead_clause(normalized_text, kind) {
+            if let Some(mut last_def) = defs.pop() {
                 // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
                 // against the fallback (else_ability) effect before composition, since
                 // the instead clause was parsed in isolation by the nested chain call
                 // and could not see its antecedent.
-                rewrite_those_tokens_from_antecedent(&mut new_def.effect, &last_def.effect);
-                new_def.else_ability = Some(Box::new(last_def));
-                defs.push(new_def);
+                rewrite_those_tokens_from_antecedent(&mut instead_def.effect, &last_def.effect);
+                last_def.sub_ability = Some(Box::new(instead_def));
+                defs.push(last_def);
                 continue;
             }
         }
@@ -10861,6 +10860,36 @@ mod tests {
             ability.effect
         );
         assert!(ability.condition.is_some(), "Condition should be extracted");
+    }
+
+    #[test]
+    fn monarch_condition_instead_uses_condition_instead_wrapper() {
+        let ability = parse_effect_chain(
+            "~ deals 2 damage to any target. If you're the monarch, it deals 7 damage instead.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
+        let sub = ability.sub_ability.as_ref().expect("expected instead sub");
+        assert!(matches!(
+            sub.condition,
+            Some(AbilityCondition::ConditionInstead { ref inner })
+                if matches!(inner.as_ref(), AbilityCondition::IsMonarch)
+        ));
+        assert!(matches!(
+            &*sub.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 7 },
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
     }
 
     #[test]

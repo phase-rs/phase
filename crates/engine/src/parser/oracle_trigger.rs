@@ -668,7 +668,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             })
         }
 
-        // CR 724.1: Monarch status bridges directly.
+        // CR 725.1: Monarch status bridges directly.
         StaticCondition::IsMonarch => Some(TriggerCondition::IsMonarch),
         // CR 702.131a: City's Blessing bridges directly.
         StaticCondition::HasCityBlessing => Some(TriggerCondition::HasCityBlessing),
@@ -2106,8 +2106,13 @@ fn try_parse_event(
         // CR 508.3a: Detect attack target qualifier ("attacks a planeswalker" etc.)
         fn parse_attack_target(input: &str) -> OracleResult<'_, AttackTargetFilter> {
             alt((
+                value(
+                    AttackTargetFilter::PlayerOrPlaneswalker,
+                    tag(" you or a planeswalker you control"),
+                ),
                 value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
                 value(AttackTargetFilter::Player, tag(" a player")),
+                value(AttackTargetFilter::Player, tag(" you")),
                 value(AttackTargetFilter::Battle, tag(" a battle")),
             ))
             .parse(input)
@@ -2117,6 +2122,13 @@ fn try_parse_event(
         def.mode = TriggerMode::Attacks;
         def.valid_card = Some(subject.clone());
         def.attack_target_filter = attack_target_filter;
+        if matches!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
+        ) && tag::<_, _, VerboseError<&str>>(" you").parse(after).is_ok()
+        {
+            def.valid_target = Some(TargetFilter::Controller);
+        }
         return Some((TriggerMode::Attacks, def));
     }
 
@@ -5240,6 +5252,20 @@ mod tests {
             "Goblin Guide",
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
+    }
+
+    #[test]
+    fn trigger_attacks_you_or_planeswalker_you_control() {
+        let def = parse_trigger_line(
+            "Whenever a creature attacks you or a planeswalker you control, that creature's controller loses 1 life.",
+            "Marchesa's Decree",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::PlayerOrPlaneswalker)
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
     #[test]

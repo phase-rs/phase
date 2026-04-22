@@ -792,7 +792,9 @@ pub(super) fn try_parse_generic_instead_clause(
 
     let instead_def = parse_effect_chain(effect_text, kind);
     let mut result = instead_def;
-    result.condition = Some(condition);
+    result.condition = Some(AbilityCondition::ConditionInstead {
+        inner: Box::new(condition),
+    });
     Some(result)
 }
 
@@ -938,6 +940,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
             rhs: rhs.clone(),
         }),
         StaticCondition::HasMaxSpeed => Some(AbilityCondition::HasMaxSpeed),
+        StaticCondition::IsMonarch => Some(AbilityCondition::IsMonarch),
         StaticCondition::SourceEnteredThisTurn => None,
         StaticCondition::IsPresent { filter } => {
             let filter = filter.clone().unwrap_or_else(|| {
@@ -1013,7 +1016,6 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceAttachedToCreature
-        | StaticCondition::IsMonarch
         | StaticCondition::HasCityBlessing
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }

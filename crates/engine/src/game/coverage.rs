@@ -3879,6 +3879,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
         AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
+        AbilityCondition::IsMonarch => ("IsMonarch", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
         AbilityCondition::IsYourTurn { .. } => ("IsYourTurn", Handled),
@@ -4017,7 +4018,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Unhandled),
         StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Unhandled),
         StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Unhandled),
-        StaticCondition::IsMonarch => ("IsMonarch", Unhandled),
+        StaticCondition::IsMonarch => ("IsMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),

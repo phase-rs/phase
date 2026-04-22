@@ -1526,6 +1526,7 @@ fn evaluate_condition(
             comparator.evaluate(l, r)
         }
         AbilityCondition::HasMaxSpeed => has_max_speed(state, ability.controller),
+        AbilityCondition::IsMonarch => state.monarch == Some(ability.controller),
         // "Instead" override conditions — return pure boolean value.
         // Terminal control flow (early return from resolve_ability_chain) is the caller's
         // responsibility in the sub-ability context.
@@ -2919,6 +2920,40 @@ mod tests {
             ],
         };
         assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    #[test]
+    fn evaluate_condition_is_monarch_checks_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        state.monarch = Some(PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        assert!(evaluate_condition(
+            &AbilityCondition::IsMonarch,
+            &state,
+            &ability
+        ));
+
+        let opponent_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(2),
+            PlayerId(1),
+        );
+        assert!(!evaluate_condition(
+            &AbilityCondition::IsMonarch,
+            &state,
+            &opponent_ability
+        ));
     }
 
     #[test]
