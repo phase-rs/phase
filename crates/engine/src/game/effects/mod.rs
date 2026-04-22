@@ -121,7 +121,48 @@ fn matches_player_scope(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
-    crate::game::players::matches_scope_filter(state, player, scope, controller, source_id)
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|p| {
+            !p.is_eliminated
+                && match scope {
+                    PlayerFilter::Controller => p.id == controller,
+                    PlayerFilter::All => true,
+                    PlayerFilter::Opponent => p.id != controller,
+                    PlayerFilter::OpponentLostLife => {
+                        p.id != controller && p.life_lost_this_turn > 0
+                    }
+                    PlayerFilter::OpponentGainedLife => {
+                        p.id != controller && p.life_gained_this_turn > 0
+                    }
+                    PlayerFilter::HighestSpeed => {
+                        let highest_speed = state
+                            .players
+                            .iter()
+                            .filter(|player| !player.is_eliminated)
+                            .map(|player| crate::game::speed::effective_speed(state, player.id))
+                            .max()
+                            .unwrap_or(0);
+                        crate::game::speed::effective_speed(state, p.id) == highest_speed
+                    }
+                    PlayerFilter::ZoneChangedThisWay => state
+                        .last_zone_changed_ids
+                        .iter()
+                        .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    PlayerFilter::OwnersOfCardsExiledBySource => {
+                        crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
+                    }
+                    // CR 603.7c: Match only the triggering player extracted from
+                    // `state.current_trigger_event`.
+                    PlayerFilter::TriggeringPlayer => state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                        .is_some_and(|pid| pid == p.id),
+                }
+        })
 }
 
 /// Record the outer effect's `EffectKind` on the current `pending_continuation`

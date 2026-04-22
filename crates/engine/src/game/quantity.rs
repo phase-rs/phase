@@ -983,7 +983,39 @@ pub(crate) fn resolve_player_count(
         .players
         .iter()
         .filter(|p| {
-            crate::game::players::matches_scope_filter(state, p.id, filter, controller, source_id)
+            !p.is_eliminated
+                && match filter {
+                    PlayerFilter::Controller => p.id == controller,
+                    PlayerFilter::Opponent => p.id != controller,
+                    PlayerFilter::OpponentLostLife => {
+                        p.id != controller && p.life_lost_this_turn > 0
+                    }
+                    PlayerFilter::OpponentGainedLife => {
+                        p.id != controller && p.life_gained_this_turn > 0
+                    }
+                    PlayerFilter::All => true,
+                    PlayerFilter::HighestSpeed => {
+                        let highest_speed = state
+                            .players
+                            .iter()
+                            .map(|player| effective_speed(state, player.id))
+                            .max()
+                            .unwrap_or(0);
+                        effective_speed(state, p.id) == highest_speed
+                    }
+                    PlayerFilter::ZoneChangedThisWay => state
+                        .last_zone_changed_ids
+                        .iter()
+                        .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    PlayerFilter::OwnersOfCardsExiledBySource => {
+                        crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
+                    }
+                    PlayerFilter::TriggeringPlayer => state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                        .is_some_and(|pid| pid == p.id),
+                }
         })
         .count() as i32
 }

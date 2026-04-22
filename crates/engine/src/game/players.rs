@@ -1,5 +1,3 @@
-use crate::game::speed::effective_speed;
-use crate::types::ability::PlayerFilter;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -91,62 +89,6 @@ pub fn owns_card_exiled_by_source(
                 .get(&link.exiled_id)
                 .is_some_and(|obj| obj.zone == Zone::Exile && obj.owner == player)
     })
-}
-
-/// Returns true if `player` matches the resolver-level player scope filter.
-pub fn matches_scope_filter(
-    state: &GameState,
-    player: PlayerId,
-    filter: &PlayerFilter,
-    controller: PlayerId,
-    source_id: ObjectId,
-) -> bool {
-    state
-        .players
-        .iter()
-        .find(|candidate| candidate.id == player)
-        .is_some_and(|candidate| {
-            !candidate.is_eliminated
-                && match filter {
-                    PlayerFilter::Controller => candidate.id == controller,
-                    PlayerFilter::Opponent => candidate.id != controller,
-                    PlayerFilter::OpponentLostLife => {
-                        candidate.id != controller && candidate.life_lost_this_turn > 0
-                    }
-                    PlayerFilter::OpponentGainedLife => {
-                        candidate.id != controller && candidate.life_gained_this_turn > 0
-                    }
-                    PlayerFilter::All => true,
-                    PlayerFilter::HighestSpeed => {
-                        let highest_speed = state
-                            .players
-                            .iter()
-                            .filter(|player| !player.is_eliminated)
-                            .map(|player| effective_speed(state, player.id))
-                            .max()
-                            .unwrap_or(0);
-                        effective_speed(state, candidate.id) == highest_speed
-                    }
-                    PlayerFilter::ZoneChangedThisWay => {
-                        state.last_zone_changed_ids.iter().any(|id| {
-                            state
-                                .objects
-                                .get(id)
-                                .is_some_and(|obj| obj.owner == candidate.id)
-                        })
-                    }
-                    PlayerFilter::OwnersOfCardsExiledBySource => {
-                        owns_card_exiled_by_source(state, candidate.id, source_id)
-                    }
-                    PlayerFilter::TriggeringPlayer => state
-                        .current_trigger_event
-                        .as_ref()
-                        .and_then(|event| {
-                            crate::game::targeting::extract_player_from_event(event, state)
-                        })
-                        .is_some_and(|pid| pid == candidate.id),
-                }
-        })
 }
 
 /// Returns teammates of the given player.

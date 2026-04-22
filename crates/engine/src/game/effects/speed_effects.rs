@@ -11,16 +11,80 @@ fn players_for_filter(
     controller: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
 ) -> Vec<PlayerId> {
-    state
-        .players
-        .iter()
-        .filter(|player| {
-            crate::game::players::matches_scope_filter(
-                state, player.id, filter, controller, source_id,
-            )
-        })
-        .map(|player| player.id)
-        .collect()
+    match filter {
+        PlayerFilter::Controller => vec![controller],
+        PlayerFilter::Opponent => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated && player.id != controller)
+            .map(|player| player.id)
+            .collect(),
+        PlayerFilter::OpponentLostLife => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| player.id != controller && player.life_lost_this_turn > 0)
+            .map(|player| player.id)
+            .collect(),
+        PlayerFilter::OpponentGainedLife => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| player.id != controller && player.life_gained_this_turn > 0)
+            .map(|player| player.id)
+            .collect(),
+        PlayerFilter::All => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .map(|player| player.id)
+            .collect(),
+        PlayerFilter::HighestSpeed => {
+            let highest_speed = state
+                .players
+                .iter()
+                .filter(|player| !player.is_eliminated)
+                .map(|player| crate::game::speed::effective_speed(state, player.id))
+                .max()
+                .unwrap_or(0);
+            state
+                .players
+                .iter()
+                .filter(|player| !player.is_eliminated)
+                .filter(|player| crate::game::speed::effective_speed(state, player.id) == highest_speed)
+                .map(|player| player.id)
+                .collect()
+        }
+        PlayerFilter::ZoneChangedThisWay => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                state.last_zone_changed_ids.iter().any(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.owner == player.id)
+                })
+            })
+            .map(|player| player.id)
+            .collect(),
+        PlayerFilter::OwnersOfCardsExiledBySource => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::owns_card_exiled_by_source(state, player.id, source_id)
+            })
+            .map(|player| player.id)
+            .collect(),
+        PlayerFilter::TriggeringPlayer => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+            .into_iter()
+            .collect(),
+    }
 }
 
 /// CR 702.179a: Effects that instruct players to start their engines set speed to 1
