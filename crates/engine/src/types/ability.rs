@@ -2040,7 +2040,7 @@ pub enum StaticCondition {
     /// Once a creature is blocked, it remains blocked for the rest of combat even
     /// if all its blockers leave — mirrors `AttackerInfo.blocked` (sticky flag).
     SourceIsBlocked,
-    /// CR 724.1: True when the controller is the monarch.
+    /// CR 725.1: True when the controller is the monarch.
     IsMonarch,
     /// CR 702.131a: True when the controller has the city's blessing (Ascend).
     HasCityBlessing,
@@ -3045,7 +3045,7 @@ pub enum Effect {
     /// CR 701.56a: Time travel — for each permanent you control with a time counter
     /// and each suspended card you own, you may add or remove a time counter.
     TimeTravel,
-    /// CR 722: Become the monarch. Sets GameState::monarch to the controller.
+    /// CR 725.1: Become the monarch. Sets GameState::monarch to the controller.
     BecomeMonarch,
     Proliferate,
     /// CR 701.36a: Choose a creature token you control, then create a copy of it.
@@ -5053,6 +5053,8 @@ pub enum AbilityCondition {
     },
     /// CR 702.178a: The ability functions only while its controller has max speed.
     HasMaxSpeed,
+    /// CR 725.1: "if you're the monarch" is true when the ability controller has the monarch designation.
+    IsMonarch,
     /// CR 608.2e: "If [target] has [keyword], [override effect] instead"
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.
@@ -5235,7 +5237,7 @@ pub enum TriggerCondition {
     /// CR 702.178a: The trigger functions only while its controller has max speed.
     HasMaxSpeed,
 
-    /// CR 724.1: "if you're the monarch" — true when the controller is the monarch.
+    /// CR 725.1: "if you're the monarch" is true when the controller is the monarch.
     IsMonarch,
     /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
     HasCityBlessing,

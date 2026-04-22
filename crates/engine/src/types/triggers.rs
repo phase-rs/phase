@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum AttackTargetFilter {
     Player,
     Planeswalker,
+    PlayerOrPlaneswalker,
     Battle,
 }
 
@@ -163,7 +164,7 @@ pub enum TriggerMode {
     NewGame,
 
     // Monarch / initiative
-    /// CR 724: Triggers when a player becomes the monarch.
+    /// CR 725: Triggers when a player becomes the monarch.
     BecomeMonarch,
     /// CR 725: Triggers when a player takes the initiative.
     TakesInitiative,

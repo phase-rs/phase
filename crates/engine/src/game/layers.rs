@@ -373,7 +373,7 @@ pub(crate) fn evaluate_condition(
                 .find(|a| a.object_id == source_id)
                 .is_some_and(|a| a.blocked)
         }),
-        // CR 724.1: True when the controller is the monarch.
+        // CR 725.1: True when the controller is the monarch.
         StaticCondition::IsMonarch => state.monarch == Some(controller),
         // CR 702.131a: True when the controller has the city's blessing.
         StaticCondition::HasCityBlessing => state.city_blessing.contains(&controller),

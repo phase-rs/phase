@@ -146,6 +146,12 @@ fn collect_matching_triggers(
             if !matcher(event, trig_def, obj_id, state) {
                 continue;
             }
+            let trigger_events =
+                if matches!(trig_def.mode, TriggerMode::Attacks) && trig_def.condition.is_none() {
+                    super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
+                } else {
+                    vec![event.clone()]
+                };
             if !check_trigger_constraint(state, trig_def, obj_id, trig_idx, controller, event) {
                 continue;
             }
@@ -161,23 +167,25 @@ fn collect_matching_triggers(
                 .as_ref()
                 .map(|exec| (exec.modal.clone(), exec.mode_abilities.clone()))
                 .unwrap_or_default();
-            pending.push(MatchedTrigger {
-                trig_idx,
-                pending: PendingTrigger {
-                    source_id: obj_id,
-                    controller,
-                    condition: trig_def.condition.clone(),
-                    ability,
-                    timestamp,
-                    target_constraints: Vec::new(),
-                    trigger_event: Some(event.clone()),
-                    modal,
-                    mode_abilities,
-                    description: trig_def.description.clone(),
-                },
-                batched: trig_def.batched,
-                constraint: trig_def.constraint.clone(),
-            });
+            for trigger_event in trigger_events {
+                pending.push(MatchedTrigger {
+                    trig_idx,
+                    pending: PendingTrigger {
+                        source_id: obj_id,
+                        controller,
+                        condition: trig_def.condition.clone(),
+                        ability: ability.clone(),
+                        timestamp,
+                        target_constraints: Vec::new(),
+                        trigger_event: Some(trigger_event),
+                        modal: modal.clone(),
+                        mode_abilities: mode_abilities.clone(),
+                        description: trig_def.description.clone(),
+                    },
+                    batched: trig_def.batched,
+                    constraint: trig_def.constraint.clone(),
+                });
+            }
         }
     }
     pending
@@ -677,7 +685,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             }
         }
 
-        // CR 724.2: At the beginning of the monarch's end step, that player draws a card.
+        // CR 725.2: At the beginning of the monarch's end step, that player draws a card.
         // Synthetic game-rule trigger — not attached to any permanent.
         if let GameEvent::PhaseChanged { phase: Phase::End } = event {
             if let Some(monarch_id) = state.monarch {
@@ -688,7 +696,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     let draw_ability =
                         ResolvedAbility::new(draw_effect, Vec::new(), ObjectId(0), monarch_id);
                     let trig_def = TriggerDefinition::new(TriggerMode::Phase)
-                        .description("Monarch draw (CR 724.2)".to_string());
+                        .description("Monarch draw (CR 725.2)".to_string());
                     pending.push(PendingTrigger {
                         source_id: ObjectId(0),
                         controller: monarch_id,
@@ -736,7 +744,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             }
         }
 
-        // CR 724.2: When a creature deals combat damage to the monarch, its controller
+        // CR 725.2: When a creature deals combat damage to the monarch, its controller
         // becomes the monarch. Synthetic game-rule trigger.
         if let GameEvent::DamageDealt {
             source_id,
@@ -758,7 +766,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             new_monarch,
                         );
                         let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
-                            .description("Monarch steal (CR 724.2)".to_string());
+                            .description("Monarch steal (CR 725.2)".to_string());
                         pending.push(PendingTrigger {
                             source_id: *source_id,
                             controller: new_monarch,
@@ -1685,7 +1693,7 @@ pub(crate) fn check_trigger_condition(
                 false
             }
         }
-        // CR 724.1: True when the controller is the monarch.
+        // CR 725.1: True when the controller is the monarch.
         TriggerCondition::IsMonarch => state.monarch == Some(controller),
         // CR 702.131a: True when the controller has the city's blessing.
         TriggerCondition::HasCityBlessing => state.city_blessing.contains(&controller),

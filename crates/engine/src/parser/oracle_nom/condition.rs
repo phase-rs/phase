@@ -77,12 +77,12 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     .parse(input)
 }
 
-/// CR 724.1 / CR 702.131a: Parse player-state conditions.
+/// CR 725.1 / CR 702.131a: Parse player-state conditions.
 ///
 /// Handles "you're the monarch" and "you have the city's blessing".
 fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // CR 724.1: Monarch status
+        // CR 725.1: Monarch status
         value(
             StaticCondition::IsMonarch,
             alt((tag("you're the monarch"), tag("you are the monarch"))),

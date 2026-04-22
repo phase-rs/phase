@@ -2790,7 +2790,7 @@ pub(super) fn parse_imperative_family_ast(
         "roll" | "rolls" => {
             try_parse_roll_die_sides(lower).map(|sides| ImperativeFamilyAst::RollDie { sides })
         }
-        // CR 722: "become the monarch"
+        // CR 725.1: "become the monarch"
         "become" | "becomes" => {
             if lower == "become the monarch" || lower == "becomes the monarch" {
                 Some(ImperativeFamilyAst::BecomeMonarch)

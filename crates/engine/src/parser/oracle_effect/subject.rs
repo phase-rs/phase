@@ -1014,7 +1014,7 @@ fn build_become_clause(
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
-    // CR 722: "become the monarch" — special keyword action, not an animation.
+    // CR 725.1: "become the monarch" sets the monarch designation, not an animation.
     let predicate_lower = predicate.to_lowercase();
     let (become_rest, _) = tag::<_, _, VerboseError<&str>>("become ")
         .parse(predicate_lower.as_str())

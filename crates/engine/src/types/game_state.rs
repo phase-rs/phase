@@ -2262,7 +2262,7 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub exiled_from_hand_this_resolution: u32,
 
-    /// CR 722: The current monarch, if any. At the beginning of the monarch's end step,
+    /// CR 725: The current monarch, if any. At the beginning of the monarch's end step,
     /// the monarch draws a card. When a creature deals combat damage to the monarch,
     /// the creature's controller becomes the monarch.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -751,8 +751,18 @@ pub(super) fn match_attacks(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
+    !matching_attack_events(event, trigger, source_id, state).is_empty()
+}
+
+pub(super) fn matching_attack_events(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Vec<GameEvent> {
     if let GameEvent::AttackersDeclared {
         attacker_ids,
+        defending_player,
         attacks,
         ..
     } = event
@@ -766,31 +776,91 @@ pub(super) fn match_attacks(
             }
         };
 
-        // CR 508.3a: If no target filter, just check creature match (existing behavior)
-        if trigger.attack_target_filter.is_none() {
-            return attacker_ids.iter().any(attacker_matches);
-        }
-
-        // With target filter: check creature match AND target type in one pass
-        let filter = trigger.attack_target_filter.as_ref().unwrap();
-        attacks.iter().any(|(id, target)| {
-            attacker_matches(id)
-                && matches!(
-                    (filter, target),
-                    (
-                        crate::types::triggers::AttackTargetFilter::Player,
-                        crate::game::combat::AttackTarget::Player(_)
-                    ) | (
-                        crate::types::triggers::AttackTargetFilter::Planeswalker,
-                        crate::game::combat::AttackTarget::Planeswalker(_)
-                    ) | (
-                        crate::types::triggers::AttackTargetFilter::Battle,
-                        crate::game::combat::AttackTarget::Battle(_)
-                    )
-                )
-        })
+        attacker_ids
+            .iter()
+            .filter_map(|id| {
+                if !attacker_matches(id) {
+                    return None;
+                }
+                let target = attacks
+                    .iter()
+                    .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
+                    .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+                if !attack_target_matches(trigger, state, target, *defending_player, source_id) {
+                    return None;
+                }
+                Some(GameEvent::AttackersDeclared {
+                    attacker_ids: vec![*id],
+                    defending_player: attack_target_defending_player(
+                        state,
+                        target,
+                        *defending_player,
+                    ),
+                    attacks: vec![(*id, target)],
+                })
+            })
+            .collect()
     } else {
-        false
+        Vec::new()
+    }
+}
+
+fn attack_target_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    target: crate::game::combat::AttackTarget,
+    fallback_defending_player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if let Some(filter) = trigger.attack_target_filter.as_ref() {
+        let type_matches = matches!(
+            (filter, target),
+            (
+                crate::types::triggers::AttackTargetFilter::Player,
+                crate::game::combat::AttackTarget::Player(_)
+            ) | (
+                crate::types::triggers::AttackTargetFilter::Planeswalker,
+                crate::game::combat::AttackTarget::Planeswalker(_)
+            ) | (
+                crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
+                crate::game::combat::AttackTarget::Player(_)
+                    | crate::game::combat::AttackTarget::Planeswalker(_)
+            ) | (
+                crate::types::triggers::AttackTargetFilter::Battle,
+                crate::game::combat::AttackTarget::Battle(_)
+            )
+        );
+        if !type_matches {
+            return false;
+        }
+    }
+
+    if trigger.valid_target.is_some() {
+        let defending_player =
+            attack_target_defending_player(state, target, fallback_defending_player);
+        valid_player_matches(trigger, state, defending_player, source_id)
+    } else {
+        true
+    }
+}
+
+fn attack_target_defending_player(
+    state: &GameState,
+    target: crate::game::combat::AttackTarget,
+    fallback_defending_player: PlayerId,
+) -> PlayerId {
+    match target {
+        crate::game::combat::AttackTarget::Player(player) => player,
+        crate::game::combat::AttackTarget::Planeswalker(object_id) => state
+            .objects
+            .get(&object_id)
+            .map(|object| object.controller)
+            .unwrap_or(fallback_defending_player),
+        crate::game::combat::AttackTarget::Battle(object_id) => state
+            .objects
+            .get(&object_id)
+            .and_then(|object| object.protector())
+            .unwrap_or(fallback_defending_player),
     }
 }
 
@@ -1853,7 +1923,7 @@ pub(super) fn match_you_attack(
     }
 }
 
-/// CR 722: Matches when a player becomes the monarch.
+/// CR 725.1: Matches when a player becomes the monarch.
 /// Fires for "when you become the monarch" / "whenever a player becomes the monarch".
 pub(super) fn match_become_monarch(
     event: &GameEvent,
@@ -2300,7 +2370,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
-        QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        ControllerRef, QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::{GameEvent, PlayerActionKind};
@@ -2329,6 +2400,97 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn attacks_trigger_filters_defender_and_splits_matching_attackers() {
+        let mut state = setup();
+        let decree = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Marchesa's Decree".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_to_player = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker A".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_to_planeswalker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Attacker B".to_string(),
+            Zone::Battlefield,
+        );
+        let own_attacker_elsewhere = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Own Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let planeswalker = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [
+            attacker_to_player,
+            attacker_to_planeswalker,
+            own_attacker_elsewhere,
+        ] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::creature()));
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+        trigger.attack_target_filter =
+            Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![
+                attacker_to_player,
+                attacker_to_planeswalker,
+                own_attacker_elsewhere,
+            ],
+            defending_player: PlayerId(0),
+            attacks: vec![
+                (
+                    attacker_to_player,
+                    crate::game::combat::AttackTarget::Player(PlayerId(0)),
+                ),
+                (
+                    attacker_to_planeswalker,
+                    crate::game::combat::AttackTarget::Planeswalker(planeswalker),
+                ),
+                (
+                    own_attacker_elsewhere,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+
+        let matched = matching_attack_events(&event, &trigger, decree, &state);
+        assert_eq!(matched.len(), 2);
+        assert!(matched.iter().all(|event| matches!(
+            event,
+            GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.len() == 1
+        )));
     }
 
     fn zone_changed_event(
