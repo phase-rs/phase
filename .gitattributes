@@ -1,0 +1,12 @@
+# Enforce LF line endings for all source files.
+# Overrides core.autocrlf so include_str! and shell scripts work on Windows.
+* text=auto eol=lf
+
+*.rs   text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.js   text eol=lf
+*.sh   text eol=lf
