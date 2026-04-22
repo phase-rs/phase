@@ -17,7 +17,9 @@ use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
-use super::oracle_target::{parse_combat_status_prefix, parse_counter_suffix, parse_type_phrase};
+use super::oracle_target::{
+    parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_type_phrase,
+};
 use super::oracle_util::{
     has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
     parse_mana_symbols, parse_number, parse_subtype, strip_after, strip_reminder_text, TextPair,
@@ -3114,12 +3116,44 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         let type_part = subject[..marker_pos].trim();
         let after_spells = subject[marker_pos + spells_marker.len()..].trim();
 
+        // Walk a cursor through optional qualifiers — zone first, then MV —
+        // so combinations like "from exile with mana value 4 or greater" parse
+        // correctly. Each qualifier consumes its own bytes.
+        let mut cursor = after_spells;
+
         // Parse optional zone qualifier: "from exile", "from your graveyard"
-        let zone_filter = if tag::<_, _, VE<'_>>("from exile")(after_spells).is_ok() {
+        let zone_filter = if let Ok((rest, _)) = tag::<_, _, VE<'_>>("from exile").parse(cursor) {
+            cursor = rest.trim_start();
             Some(FilterProp::InZone { zone: Zone::Exile })
         } else {
             None
         };
+
+        // CR 202.3: Optional "with mana value N or greater/less" qualifier
+        // (Imoti, Celebrant of Bounty: "Spells you cast with mana value 6 or
+        // greater have cascade."). Restricted to fixed-value variants — the
+        // dynamic Ref/Offset variants (e.g. "less than that creature's mana
+        // value") presume a triggering source object that doesn't exist in a
+        // CastWithKeyword grant evaluation.
+        let mv_filter = parse_mana_value_suffix(cursor).and_then(|(prop, consumed)| {
+            let is_fixed = matches!(
+                &prop,
+                FilterProp::CmcGE {
+                    value: QuantityExpr::Fixed { .. }
+                } | FilterProp::CmcLE {
+                    value: QuantityExpr::Fixed { .. }
+                } | FilterProp::CmcEQ {
+                    value: QuantityExpr::Fixed { .. }
+                },
+            );
+            if is_fixed {
+                cursor = cursor[consumed..].trim_start();
+                Some(prop)
+            } else {
+                None
+            }
+        });
+        let _ = cursor; // qualifiers are optional; remaining slice is unused
 
         // Build the affected filter
         let mut typed = if type_part.is_empty() {
@@ -3137,6 +3171,9 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         typed = typed.controller(ControllerRef::You);
         if let Some(zone_prop) = zone_filter {
             typed.properties.push(zone_prop);
+        }
+        if let Some(mv_prop) = mv_filter {
+            typed.properties.push(mv_prop);
         }
 
         return Some(
@@ -11430,6 +11467,123 @@ mod tests {
                     tf.properties
                         .contains(&FilterProp::InZone { zone: Zone::Exile }),
                     "Expected InZone(Exile) property"
+                );
+            }
+            other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_spells_with_mana_value_ge_have_cascade() {
+        // Imoti, Celebrant of Bounty: "Spells you cast with mana value 6 or greater have cascade."
+        let def = parse_static_line("Spells you cast with mana value 6 or greater have cascade.")
+            .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Cascade,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.properties.contains(&FilterProp::CmcGE {
+                        value: QuantityExpr::Fixed { value: 6 },
+                    }),
+                    "Expected CmcGE(6) property, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_creature_spells_with_mana_value_ge_have_keyword() {
+        // Type-prefixed + MV qualifier: confirms the type filter and the
+        // CmcGE prop coexist on the same affected filter.
+        let def = parse_static_line(
+            "Creature spells you cast with mana value 4 or greater have trample.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Trample,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "Expected Creature type filter, got {:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::CmcGE {
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }),
+                    "Expected CmcGE(4), got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_spells_from_exile_with_mana_value_ge_have_keyword() {
+        // Combined zone + MV qualifier — both should land on the same filter.
+        let def = parse_static_line(
+            "Spells you cast from exile with mana value 4 or greater have cascade.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Cascade,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(
+                    tf.properties
+                        .contains(&FilterProp::InZone { zone: Zone::Exile }),
+                    "Expected InZone(Exile), got {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::CmcGE {
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }),
+                    "Expected CmcGE(4), got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_creature_spells_have_convoke_no_mv_regression() {
+        // Regression: bare "have keyword" without an MV/zone qualifier still
+        // parses cleanly (the cursor walk must not require any qualifier).
+        let def = parse_static_line("Creature spells you cast have convoke.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Convoke,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(
+                    !tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::CmcGE { .. } | FilterProp::CmcLE { .. })),
+                    "Did not expect any Cmc property, got {:?}",
+                    tf.properties
                 );
             }
             other => panic!("Expected Some(Typed filter), got {other:?}"),
