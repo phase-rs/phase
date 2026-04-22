@@ -6,6 +6,7 @@ import {
   detectAndParseDeck,
   repairParsedDeck,
   resolveCommander,
+  expandParsedDeck,
 } from '../deckParser';
 
 vi.mock('../engineRuntime', () => ({
@@ -462,5 +463,43 @@ describe('resolveCommander waterfall', () => {
 
     expect(resolved.commander).toBeUndefined();
     expect(isCardCommanderEligible).not.toHaveBeenCalled();
+  });
+});
+
+describe('expandParsedDeck', () => {
+  it('expands count-grouped entries into a flat name list', () => {
+    const result = expandParsedDeck({
+      main: [
+        { count: 4, name: 'Lightning Bolt' },
+        { count: 2, name: 'Mountain' },
+      ],
+      sideboard: [{ count: 3, name: 'Pyroblast' }],
+    });
+    expect(result.main_deck).toEqual([
+      'Lightning Bolt',
+      'Lightning Bolt',
+      'Lightning Bolt',
+      'Lightning Bolt',
+      'Mountain',
+      'Mountain',
+    ]);
+    expect(result.sideboard).toEqual(['Pyroblast', 'Pyroblast', 'Pyroblast']);
+  });
+
+  it('preserves the commander slot when present (regression: host Start-Game deck-invalid)', () => {
+    const result = expandParsedDeck({
+      main: [{ count: 99, name: 'Island' }],
+      sideboard: [],
+      commander: ['Kenrith, the Returned King'],
+    });
+    expect(result.commander).toEqual(['Kenrith, the Returned King']);
+  });
+
+  it('defaults commander to an empty array when absent', () => {
+    const result = expandParsedDeck({
+      main: [{ count: 60, name: 'Swamp' }],
+      sideboard: [],
+    });
+    expect(result.commander).toEqual([]);
   });
 });

@@ -18,6 +18,7 @@ import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
+import { expandParsedDeck } from "../services/deckParser";
 import type { LiveCheck } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
@@ -227,19 +228,7 @@ export function MultiplayerPage() {
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
     if (!deck) return null;
-    const mainDeck: string[] = [];
-    for (const entry of deck.main) {
-      for (let i = 0; i < entry.count; i++) {
-        mainDeck.push(entry.name);
-      }
-    }
-    const sideboard: string[] = [];
-    for (const entry of deck.sideboard) {
-      for (let i = 0; i < entry.count; i++) {
-        sideboard.push(entry.name);
-      }
-    }
-    return { main_deck: mainDeck, sideboard };
+    return expandParsedDeck(deck);
   }, []);
 
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);

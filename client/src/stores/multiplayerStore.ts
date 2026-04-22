@@ -48,7 +48,7 @@ function asDeckPayload(deck: HostingDeck): { main_deck: string[]; sideboard: str
   return {
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
-    commander: deck.commander ?? [],
+    commander: deck.commander,
   };
 }
 // Prevents onclose from clearing session token after GameStarted
@@ -105,7 +105,7 @@ export interface AiSeatConfig {
 export interface HostingDeck {
   main_deck: string[];
   sideboard: string[];
-  commander?: string[];
+  commander: string[];
 }
 
 export interface HostingSettings {
@@ -680,7 +680,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           () => ({
             type: "CreateGameWithSettings",
             data: {
-              deck: { main_deck: deck.main_deck, sideboard: deck.sideboard, commander: deck.commander ?? [] },
+              deck: asDeckPayload(deck),
               display_name: settings.displayName,
               public: settings.public,
               password: settings.password || null,
