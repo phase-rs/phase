@@ -139,6 +139,12 @@ pub enum GameAction {
     ChooseWarpCost {
         use_warp: bool,
     },
+    /// CR 702.74a: Choose normal cast (false) or Evoke cast (true) from hand.
+    /// Evoke cast tags the resolving permanent so the synthesized intervening-if
+    /// ETB sacrifice trigger fires.
+    ChooseEvokeCost {
+        use_evoke: bool,
+    },
     /// CR 702.49: Activate a Ninjutsu-family keyword from hand or command zone during combat.
     ActivateNinjutsu {
         ninjutsu_card_id: CardId,
@@ -175,6 +181,13 @@ pub enum GameAction {
     /// the cast is opted into from a specialized prompt, not from Priority.
     /// Decline is via the shared `DecideOptionalEffect { accept: false }`.
     CastSpellAsMiracle {
+        object_id: ObjectId,
+        card_id: CardId,
+    },
+    /// CR 702.35a: Accept a pending `WaitingFor::MadnessCastOffer` and cast
+    /// `object_id` from exile for its madness cost. Decline is via the shared
+    /// `DecideOptionalEffect { accept: false }`.
+    CastSpellAsMadness {
         object_id: ObjectId,
         card_id: CardId,
     },
@@ -382,6 +395,7 @@ impl GameAction {
             GameAction::CastSpellAsSneak { gy_object, .. } => Some(*gy_object),
             GameAction::CastSpellForFree { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMiracle { object_id, .. } => Some(*object_id),
+            GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { object_id } => Some(*object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
@@ -415,6 +429,7 @@ impl GameAction {
             | GameAction::ChooseAdventureFace { .. }
             | GameAction::ChooseModalFace { .. }
             | GameAction::ChooseWarpCost { .. }
+            | GameAction::ChooseEvokeCost { .. }
             | GameAction::ActivateNinjutsu { .. }
             | GameAction::DecideOptionalEffect { .. }
             | GameAction::PayUnlessCost { .. }

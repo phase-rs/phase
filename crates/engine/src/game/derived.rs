@@ -36,12 +36,13 @@ pub fn derive_display_state(state: &mut GameState) {
                 .abilities
                 .iter()
                 .enumerate()
-                .find(|(_, ability)| {
+                .find(|(idx, ability)| {
                     mana_abilities::is_mana_ability(ability)
                         && mana_abilities::can_activate_mana_ability_now(
                             state,
                             obj.controller,
                             obj.id,
+                            *idx,
                             ability,
                         )
                 })

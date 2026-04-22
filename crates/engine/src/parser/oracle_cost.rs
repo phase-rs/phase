@@ -194,7 +194,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // CR 207.2c: "Discard this card" — Channel self-ref cost (ability word, not keyword).
         if rest_lower == "this card" {
             return AbilityCost::Discard {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
                 random: false,
                 self_ref: true,
@@ -202,7 +202,17 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
         if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
             return AbilityCost::Discard {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                random: false,
+                self_ref: false,
+            };
+        }
+        if rest_lower == "your hand" {
+            return AbilityCost::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize,
+                },
                 filter: None,
                 random: false,
                 self_ref: false,
@@ -210,14 +220,14 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
         if let Some((n, _)) = parse_number(&rest_lower) {
             return AbilityCost::Discard {
-                count: n,
+                count: QuantityExpr::Fixed { value: n as i32 },
                 filter: None,
                 random: false,
                 self_ref: false,
             };
         }
         return AbilityCost::Discard {
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             filter: None,
             random: false,
             self_ref: false,
@@ -909,7 +919,7 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Discard a card"),
             AbilityCost::Discard {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
                 random: false,
                 self_ref: false,
@@ -922,10 +932,25 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Discard this card"),
             AbilityCost::Discard {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
                 random: false,
                 self_ref: true,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_discard_your_hand() {
+        assert_eq!(
+            parse_oracle_cost("Discard your hand"),
+            AbilityCost::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize,
+                },
+                filter: None,
+                random: false,
+                self_ref: false,
             }
         );
     }

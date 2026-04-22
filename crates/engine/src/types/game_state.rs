@@ -554,6 +554,10 @@ pub struct PendingManaAbility {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_tappers: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_discards: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1007,6 +1011,18 @@ pub enum WaitingFor {
         /// The Warp keyword's alternative mana cost (for display in the choice modal).
         warp_cost: ManaCost,
     },
+    /// CR 702.74a: Player chooses between normal cast and Evoke cast from hand.
+    /// Evoke creature ETBs and sacrifices itself if cast for evoke cost. Only
+    /// presented when both costs are affordable.
+    EvokeCostChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        card_id: CardId,
+        /// The card's normal mana cost (for display in the choice modal).
+        normal_cost: ManaCost,
+        /// The Evoke keyword's alternative mana cost (for display in the choice modal).
+        evoke_cost: ManaCost,
+    },
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
     MultiTargetSelection {
@@ -1079,6 +1095,15 @@ pub enum WaitingFor {
     /// `GameAction::CastSpellAsMiracle` accepts; `GameAction::DecideOptionalEffect
     /// { accept: false }` declines.
     MiracleCastOffer {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: super::mana::ManaCost,
+    },
+    /// CR 702.35a: The madness triggered ability has resolved — the player may
+    /// cast the exiled discarded card for its madness cost or put it into their
+    /// graveyard. `GameAction::CastSpellAsMadness` accepts; `DecideOptionalEffect
+    /// { accept: false }` declines.
+    MadnessCastOffer {
         player: PlayerId,
         object_id: ObjectId,
         cost: super::mana::ManaCost,
@@ -1196,6 +1221,14 @@ pub enum WaitingFor {
         player: PlayerId,
         count: usize,
         creatures: Vec<ObjectId>,
+        pending_mana_ability: Box<PendingManaAbility>,
+    },
+    /// CR 118.3 / CR 605.3b: Player must choose cards to discard to pay a mana ability cost.
+    DiscardForManaAbility {
+        player: PlayerId,
+        count: usize,
+        /// Eligible cards in hand (excludes the mana ability source).
+        cards: Vec<ObjectId>,
         pending_mana_ability: Box<PendingManaAbility>,
     },
     /// CR 605.3b: Mana ability with a choice dimension — player must answer
@@ -1516,6 +1549,7 @@ impl WaitingFor {
             | WaitingFor::AdventureCastChoice { player, .. }
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::WarpCostChoice { player, .. }
+            | WaitingFor::EvokeCostChoice { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
@@ -1525,6 +1559,7 @@ impl WaitingFor {
             | WaitingFor::BlightChoice { player, .. }
             | WaitingFor::TapCreaturesForSpellCost { player, .. }
             | WaitingFor::TapCreaturesForManaAbility { player, .. }
+            | WaitingFor::DiscardForManaAbility { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
             | WaitingFor::ExileFromGraveyardForCost { player, .. }
             | WaitingFor::CollectEvidenceChoice { player, .. }
@@ -1555,7 +1590,8 @@ impl WaitingFor {
             | WaitingFor::PhyrexianPayment { player, .. }
             | WaitingFor::DiscardChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
-            | WaitingFor::MiracleCastOffer { player, .. } => Some(*player),
+            | WaitingFor::MiracleCastOffer { player, .. }
+            | WaitingFor::MadnessCastOffer { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
         }
     }
@@ -1759,6 +1795,20 @@ pub enum CastingVariant {
     /// is read at preparation time rather than stored here because
     /// `prepare_spell_cast` already reads `obj.keywords` for analogous paths.
     Miracle,
+    /// CR 702.35a: Cast from exile via Madness after the discard replacement
+    /// exiled the card and its madness triggered ability resolved.
+    Madness,
+    /// CR 702.74a: Cast from hand via Evoke's alternative cost. On resolution,
+    /// the permanent enters tagged with `CastVariantPaid::Evoke`, which fires
+    /// the synthesized intervening-if ETB sacrifice trigger.
+    Evoke,
+    /// CR 702.62a: Cast from exile via Suspend's "play it without paying its
+    /// mana cost" trigger after the last time counter was removed. On resolution
+    /// of the resulting permanent, the stack handler tags
+    /// `CastVariantPaid::Suspend` and — for creature spells — installs a
+    /// transient continuous "has haste" effect that lasts as long as the
+    /// resolution-time controller still controls the permanent.
+    Suspend,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3012,6 +3062,8 @@ mod tests {
                 ability_index: 0,
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
+                chosen_tappers: Vec::new(),
+                chosen_discards: Vec::new(),
             }),
         };
         assert!(!tap_mana.has_pending_cast());

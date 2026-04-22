@@ -141,7 +141,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::CombatTaxPayment { .. }, GameAction::PayCombatTax { .. })
         | (WaitingFor::AdventureCastChoice { .. }, GameAction::ChooseAdventureFace { .. })
         | (WaitingFor::ModalFaceChoice { .. }, GameAction::ChooseModalFace { .. })
-        | (WaitingFor::WarpCostChoice { .. }, GameAction::ChooseWarpCost { .. }) => false,
+        | (WaitingFor::WarpCostChoice { .. }, GameAction::ChooseWarpCost { .. })
+        | (WaitingFor::EvokeCostChoice { .. }, GameAction::ChooseEvokeCost { .. }) => false,
         (WaitingFor::MulliganBottomCards { player, count }, GameAction::SelectCards { cards }) => {
             selection_mismatch(
                 cards,
@@ -556,7 +557,9 @@ fn activatable_mana_ability_actions(state: &GameState) -> Vec<GameAction> {
             }
             // CR 605.3b: Activation restrictions still apply to mana abilities.
             if mana_sources::activation_condition_satisfied(state, player, obj_id, idx, ability)
-                && mana_abilities::can_activate_mana_ability_now(state, player, obj_id, ability)
+                && mana_abilities::can_activate_mana_ability_now(
+                    state, player, obj_id, idx, ability,
+                )
             {
                 actions.push(GameAction::ActivateAbility {
                     source_id: obj_id,

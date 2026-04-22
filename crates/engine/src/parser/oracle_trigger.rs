@@ -14,6 +14,7 @@ use super::oracle_nom::primitives::{
 };
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_target::{parse_type_phrase, starts_with_type_word};
+use super::oracle_target_scope;
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
     normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
@@ -165,6 +166,62 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
     (stripped, true)
 }
 
+/// CR 109.4 + CR 115.1 + CR 506.2: Detect a trigger condition that introduces
+/// a player target — currently the "you/an opponent/a player attack(s) a player"
+/// family. When this returns true, follow-on possessive references inside the
+/// effect ("that player controls/owns") refer to that introduced player and the
+/// parser pushes a relative-player scope so they emit `ControllerRef::TargetPlayer`.
+///
+/// Built from composable nom alternatives so adding new condition shapes
+/// (combat-damage-to-a-player, "deals damage to a player", etc.) is a one-line
+/// change to the inner `alt()`.
+fn condition_introduces_target_player(cond_lower: &str) -> bool {
+    use nom::bytes::complete::tag;
+    use nom::combinator::value;
+
+    fn parse_actor(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+        alt((
+            value((), tag::<_, _, VerboseError<&str>>("you ")),
+            value((), tag("an opponent ")),
+            value((), tag("a player ")),
+            value((), tag("another player ")),
+        ))
+        .parse(input)
+    }
+
+    fn parse_attack_verb(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+        alt((
+            value((), tag::<_, _, VerboseError<&str>>("attack ")),
+            value((), tag("attacks ")),
+        ))
+        .parse(input)
+    }
+
+    // Walk word boundaries — the actor/verb pair may be preceded by "whenever",
+    // "when", or quantifiers like "one or more creatures you control".
+    let mut remaining = cond_lower;
+    while !remaining.is_empty() {
+        if let Ok((after_actor, ())) = parse_actor(remaining) {
+            if let Ok((after_verb, ())) = parse_attack_verb(after_actor) {
+                if tag::<_, _, VerboseError<&str>>("a player")
+                    .parse(after_verb)
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+        }
+        // structural: not dispatch — advance to the next word boundary so the
+        // nom alternatives above are retried at every word position (mirrors
+        // `scan_timing_restrictions` in oracle_casting.rs).
+        remaining = match remaining.find(' ') {
+            Some(i) => remaining[i + 1..].trim_start(),
+            None => "",
+        };
+    }
+    false
+}
+
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
@@ -218,6 +275,18 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
         subject: Some(trigger_subject),
         ..Default::default()
     };
+
+    // CR 109.4 + CR 115.1 + CR 506.2: When the trigger condition introduces a
+    // player target (e.g. "whenever you attack a player"), follow-on possessive
+    // phrases inside the effect — "that player controls", "that player owns" —
+    // refer to that player, not to the trigger controller. Push a typed
+    // relative-player scope so the controller-suffix parser emits
+    // `ControllerRef::TargetPlayer` instead of the default `ControllerRef::You`;
+    // the runtime auto-surfaces a companion `TargetFilter::Player` slot via
+    // `effect_references_target_player` (game/ability_utils.rs).
+    let cond_lower = condition_text.to_lowercase();
+    let _scope_guard = condition_introduces_target_player(&cond_lower)
+        .then(|| oracle_target_scope::ScopeGuard::new(ControllerRef::TargetPlayer));
 
     // Parse the effect
     let has_up_to = scan_contains(&effect_for_parse, "up to one");
@@ -635,6 +704,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.
@@ -9767,5 +9837,61 @@ mod tests {
             })
         );
         assert!(def.batched);
+    }
+
+    /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces
+    /// the attacked player in the condition; "that player controls" inside the
+    /// effect must resolve to `ControllerRef::TargetPlayer` so the runtime
+    /// auto-surfaces a Player target slot (the attacked player) rather than
+    /// defaulting to "you" and offering the trigger controller's own creatures.
+    #[test]
+    fn karazikar_attack_a_player_uses_target_player_controller() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "Whenever you attack a player, tap target creature that player controls and goad it.",
+            "Karazikar, the Eye Tyrant",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Tap { target } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "tap target should reference attacked player",
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected Tap effect, got {other:?}"),
+        }
+    }
+
+    /// Negative scope test — a non-attack-player trigger ("Whenever you draw a
+    /// card") MUST NOT push the relative-player scope, so "that player controls"
+    /// inside the effect (synthetic but exercising the parser) still defaults to
+    /// `ControllerRef::You`. Guards against accidental scope leakage.
+    #[test]
+    fn non_attack_player_trigger_does_not_emit_target_player() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "Whenever you draw a card, tap target creature that player controls.",
+            "Test Card",
+        );
+        let execute = def.execute.as_deref().expect("execute ability");
+        // If the parser doesn't classify the synthetic effect, the negative
+        // assertion is vacuously satisfied — the karazikar test covers the
+        // positive case. If it DOES classify, the controller must remain `You`.
+        if let Effect::Tap {
+            target: TargetFilter::Typed(t),
+        } = execute.effect.as_ref()
+        {
+            assert_eq!(
+                t.controller,
+                Some(ControllerRef::You),
+                "non-attack-player trigger should not emit TargetPlayer",
+            );
+        }
     }
 }

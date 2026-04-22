@@ -1024,6 +1024,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         | StaticCondition::CompletedADungeon
         | StaticCondition::ControlsCommander
         | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::None => None,
     }
 }

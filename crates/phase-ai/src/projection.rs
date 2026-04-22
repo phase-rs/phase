@@ -15,6 +15,7 @@ use engine::ai_support::legal_actions;
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply, EngineError};
 use engine::types::{CoreType, GameAction, GameState, ObjectId, Phase, PlayerId, WaitingFor};
+use web_time::{Duration, Instant};
 
 /// How far into the opponent's upcoming turn to project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,6 +32,7 @@ pub enum ProjectionHorizon {
 #[derive(Debug, Clone)]
 pub enum BailReason {
     StepCapExceeded { steps: u32 },
+    TimeCapExceeded { elapsed: Duration },
     GameOverDuringProjection,
     MulliganOrSideboardEncountered,
     NoLegalAction { waiting_for: String },
@@ -95,6 +97,10 @@ pub struct ProjectionKey {
 /// Outer dispatch cap. Each dispatch may trigger up to 500 engine-internal
 /// auto-pass iterations.
 const STEP_CAP: u32 = 256;
+/// Wall-clock guard for projection. The combat path is a heuristic and must
+/// fail closed to the pre-projection behavior rather than monopolize the AI
+/// turn when the engine path is unusually expensive.
+const TIME_CAP: Duration = Duration::from_millis(15);
 
 /// Advance from `base` forward until `horizon` is reached on
 /// `target_opponent`'s next turn. `base` is cloned; never mutated.
@@ -106,6 +112,7 @@ pub fn project_to(
     horizon: ProjectionHorizon,
 ) -> Result<Projection, BailReason> {
     let started_turn = base.turn_number;
+    let started_at = Instant::now();
     let mut state = base.clone();
     let mut snapshots: Vec<(ProjectionHorizon, GameState)> = Vec::new();
     let mut choice_count: u32 = 0;
@@ -122,6 +129,11 @@ pub fn project_to(
     }
 
     for step in 0..STEP_CAP {
+        let elapsed = started_at.elapsed();
+        if elapsed >= TIME_CAP {
+            return Err(BailReason::TimeCapExceeded { elapsed });
+        }
+
         capture_snapshots(&state, target_opponent, started_turn, &mut snapshots);
 
         if reached_horizon(&state, target_opponent, horizon, started_turn) {

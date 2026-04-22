@@ -352,6 +352,15 @@ pub fn resolve_effect(
             };
             Ok(())
         }
+        // CR 702.35a: Madness trigger resolution — offer the cast from exile.
+        Effect::MadnessCast { ref cost } => {
+            state.waiting_for = WaitingFor::MadnessCastOffer {
+                player: ability.controller,
+                object_id: ability.source_id,
+                cost: cost.clone(),
+            };
+            Ok(())
+        }
         Effect::PutAtLibraryPosition { .. } => put_on_top::resolve(state, ability, events),
         Effect::PutOnTopOrBottom { .. } => put_on_top_or_bottom::resolve(state, ability, events),
         Effect::GiftDelivery { .. } => gift_delivery::resolve(state, ability, events),
@@ -1165,13 +1174,20 @@ pub fn resolve_ability_chain(
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {
                     let mut else_resolved = else_branch.as_ref().clone();
-                    // Inject revealed card IDs as targets for else branches following RevealTop,
-                    // so "Otherwise, put that card into your hand" knows which card to move.
+                    // Inject revealed card IDs as targets for else branches following RevealTop
+                    // or a pure-peek Dig (reveal: false, keep_count: 0), so "Otherwise, put
+                    // that card on the bottom of your library" knows which card to move.
                     if else_resolved.targets.is_empty()
                         && !state.last_revealed_ids.is_empty()
                         && matches!(
                             ability.effect,
-                            Effect::RevealTop { .. } | Effect::Dig { reveal: true, .. }
+                            Effect::RevealTop { .. }
+                                | Effect::Dig { reveal: true, .. }
+                                | Effect::Dig {
+                                    reveal: false,
+                                    keep_count: Some(0),
+                                    ..
+                                }
                         )
                     {
                         else_resolved.targets = state

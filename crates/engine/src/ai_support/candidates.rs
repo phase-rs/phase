@@ -840,6 +840,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::DiscardForManaAbility {
+            player,
+            count,
+            cards,
+            ..
+        } => combinations(cards, *count)
+            .into_iter()
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 118.3: AI selects permanents to sacrifice as cost
         WaitingFor::SacrificeForCost {
             player,
@@ -1011,6 +1026,18 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ),
             candidate(
                 GameAction::ChooseWarpCost { use_warp: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
+        WaitingFor::EvokeCostChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChooseEvokeCost { use_evoke: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChooseEvokeCost { use_evoke: false },
                 TacticalClass::Selection,
                 Some(*player),
             ),
@@ -1436,6 +1463,38 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             if can_pay {
                 v.push(candidate(
                     GameAction::CastSpellAsMiracle {
+                        object_id: *object_id,
+                        card_id,
+                    },
+                    TacticalClass::Spell,
+                    Some(*player),
+                ));
+            }
+            v.push(candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Pass,
+                Some(*player),
+            ));
+            v
+        }
+        // CR 702.35a: Madness cast offer — cast if the madness cost is affordable,
+        // otherwise decline and put the card into its owner's graveyard.
+        WaitingFor::MadnessCastOffer {
+            player,
+            object_id,
+            cost,
+        } => {
+            let card_id = state
+                .objects
+                .get(object_id)
+                .map(|o| o.card_id)
+                .unwrap_or(crate::types::identifiers::CardId(0));
+            let can_pay =
+                crate::game::casting::can_pay_cost_after_auto_tap(state, *player, *object_id, cost);
+            let mut v: Vec<CandidateAction> = Vec::new();
+            if can_pay {
+                v.push(candidate(
+                    GameAction::CastSpellAsMadness {
                         object_id: *object_id,
                         card_id,
                     },

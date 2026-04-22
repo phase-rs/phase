@@ -5610,6 +5610,31 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         }
     }
 
+    // CR 701.20a + CR 608.2c: "look at the top card … if it's a [type] …" pure-peek pattern.
+    // A private-Dig (reveal: false, keep_count: None) followed immediately by a def
+    // whose condition is RevealedHasCardType is a conditional peek: the dig is only
+    // there to show the player the card; the sub_ability decides whether to take it.
+    // Mark the Dig as keep_count = 0 so the runtime skips DigChoice interaction and
+    // instead sets last_revealed_ids, letting the condition evaluate correctly.
+    for i in 0..defs.len().saturating_sub(1) {
+        if let Effect::Dig {
+            reveal: false,
+            keep_count: None,
+            filter: TargetFilter::Any,
+            ..
+        } = &*defs[i].effect
+        {
+            if matches!(
+                defs[i + 1].condition,
+                Some(AbilityCondition::RevealedHasCardType { .. })
+            ) {
+                if let Effect::Dig { keep_count, .. } = &mut *defs[i].effect {
+                    *keep_count = Some(0);
+                }
+            }
+        }
+    }
+
     // CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"
     // anaphoric subs — the sub-ability parses as `Unimplemented` because the
     // noun "those tokens" refers back to the previous clause's token-creation

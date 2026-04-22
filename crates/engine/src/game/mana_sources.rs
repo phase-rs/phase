@@ -197,7 +197,13 @@ fn scan_mana_abilities(
             continue;
         }
         if require_current_payability
-            && !mana_abilities::can_activate_mana_ability_now(state, controller, object_id, ability)
+            && !mana_abilities::can_activate_mana_ability_now(
+                state,
+                controller,
+                object_id,
+                ability_index,
+                ability,
+            )
         {
             continue;
         }

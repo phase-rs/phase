@@ -18,6 +18,11 @@ pub enum CounterType {
     Stun,
     /// CR 714.1: Lore counters track Saga chapter progression.
     Lore,
+    /// CR 702.62a + CR 702.63a: Time counters track Suspend / Vanishing duration.
+    /// One is removed at the start of the controller's upkeep; when the last is
+    /// removed, the suspend "play it without paying its mana cost" trigger fires
+    /// (CR 702.62a) or the Vanishing sacrifice trigger fires (CR 702.63a).
+    Time,
     /// CR 122.1b: A keyword counter grants its keyword to the permanent (flying,
     /// first strike, deathtouch, lifelink, ...). Uses the parameterless
     /// `KeywordKind` discriminant — keyword counters never carry parameters
@@ -57,6 +62,7 @@ impl CounterType {
             CounterType::Defense => "defense",
             CounterType::Stun => "stun",
             CounterType::Lore => "lore",
+            CounterType::Time => "time",
             CounterType::Keyword(kind) => KEYWORD_COUNTERS
                 .iter()
                 .find(|(_, k)| k == kind)
@@ -108,6 +114,7 @@ pub fn parse_counter_type(text: &str) -> CounterType {
         "defense" | "DEFENSE" => CounterType::Defense,
         "stun" => CounterType::Stun,
         "lore" | "LORE" => CounterType::Lore,
+        "time" | "TIME" => CounterType::Time,
         other => {
             let lower = other.to_lowercase();
             if let Some((_, kind)) = KEYWORD_COUNTERS.iter().find(|(name, _)| *name == lower) {

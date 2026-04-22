@@ -381,7 +381,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 stabilize_bias: 1.0,
             },
             true,
-            true,
+            false,
             SearchConfig {
                 enabled: true,
                 max_depth: 2,
@@ -403,7 +403,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 stabilize_bias: 1.1,
             },
             true,
-            true,
+            false,
             SearchConfig {
                 enabled: true,
                 max_depth: 3,
@@ -425,7 +425,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 stabilize_bias: 1.2,
             },
             true,
-            true,
+            false,
             SearchConfig {
                 enabled: true,
                 max_depth: 3,

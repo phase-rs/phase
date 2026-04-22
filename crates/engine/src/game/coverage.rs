@@ -1372,6 +1372,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Cascade => {}
         // CR 702.94a: MiracleCast is an internal engine effect, not parsed from Oracle text.
         Effect::MiracleCast { .. } => {}
+        // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.
+        Effect::MadnessCast { .. } => {}
         Effect::PutAtLibraryPosition { target, position } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("position".into(), format!("{position:?}")));
@@ -4003,6 +4005,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
         StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),
         StaticCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        StaticCondition::SourceControllerEquals { .. } => ("SourceControllerEquals", Handled),
         StaticCondition::Unrecognized { .. } => ("Unrecognized", Handled),
         StaticCondition::None => ("None", Handled),
         // Variants below are parsed but not classified as handled by the prior registry.

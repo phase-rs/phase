@@ -8,6 +8,7 @@ import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 
 type MiracleReveal = Extract<WaitingFor, { type: "MiracleReveal" }>;
 type MiracleCastOffer = Extract<WaitingFor, { type: "MiracleCastOffer" }>;
+type MadnessCastOffer = Extract<WaitingFor, { type: "MadnessCastOffer" }>;
 
 function ManaCostSymbols({ cost }: { cost: ManaCost }) {
   if (cost.type === "NoCost" || cost.type === "SelfManaCost")
@@ -58,6 +59,18 @@ export function MiracleRevealModal() {
     );
   }
 
+  if (waitingFor?.type === "MadnessCastOffer") {
+    const data = waitingFor.data as MadnessCastOffer["data"];
+    return (
+      <MiracleRevealContent
+        objectId={data.object_id}
+        cost={data.cost}
+        dispatch={dispatch}
+        phase="madness"
+      />
+    );
+  }
+
   return null;
 }
 
@@ -70,7 +83,7 @@ function MiracleRevealContent({
   objectId: number;
   cost: ManaCost;
   dispatch: (action: GameAction) => Promise<unknown>;
-  phase: "reveal" | "cast";
+  phase: "reveal" | "cast" | "madness";
 }) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
@@ -80,6 +93,17 @@ function MiracleRevealContent({
   const cardId = obj.card_id;
 
   const isReveal = phase === "reveal";
+  const isMadness = phase === "madness";
+  const keywordLabel = isMadness ? "Madness" : "Miracle";
+  const castAction: GameAction = isMadness
+    ? {
+        type: "CastSpellAsMadness",
+        data: { object_id: objectId, card_id: cardId },
+      }
+    : {
+        type: "CastSpellAsMiracle",
+        data: { object_id: objectId, card_id: cardId },
+      };
 
   return (
     <AnimatePresence>
@@ -101,7 +125,7 @@ function MiracleRevealContent({
         >
           <div className="border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5">
             <div className="text-[0.68rem] uppercase tracking-[0.22em] text-amber-300/80">
-              Miracle
+              {keywordLabel}
             </div>
             <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">
               {isReveal ? `Reveal ${cardName}?` : `Cast ${cardName}?`}
@@ -109,17 +133,12 @@ function MiracleRevealContent({
             <p className="mt-1 text-xs text-slate-400 lg:text-sm">
               {isReveal
                 ? "You may reveal this card to cast it for its miracle cost."
-                : "You may cast this card for its miracle cost."}
+                : `You may cast this card for its ${keywordLabel.toLowerCase()} cost.`}
             </p>
           </div>
           <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
             <button
-              onClick={() =>
-                dispatch({
-                  type: "CastSpellAsMiracle",
-                  data: { object_id: objectId, card_id: cardId },
-                })
-              }
+              onClick={() => dispatch(castAction)}
               className="rounded-[16px] border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-left transition hover:bg-amber-400/20 hover:ring-1 hover:ring-amber-400/40"
             >
               <span className="font-semibold text-white">

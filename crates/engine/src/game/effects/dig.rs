@@ -52,6 +52,19 @@ pub fn resolve(
     let cards: Vec<_> = player.library[..count].to_vec();
     let keep_count = keep_num.min(cards.len());
 
+    // CR 701.20a: Pure-peek pattern (keep_count = 0): "look at the top card" with no
+    // player selection — the sub_ability condition decides whether to take it. Set
+    // last_revealed_ids so RevealedHasCardType can evaluate, then return without
+    // creating a DigChoice interaction.
+    if keep_count == 0 && !is_reveal {
+        state.last_revealed_ids = cards.clone();
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     // CR 701.20a: If this is a reveal-dig, mark all cards as publicly revealed
     // and emit CardsRevealed before the player makes their selection.
     if is_reveal {

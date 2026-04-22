@@ -224,63 +224,24 @@ pub fn activate_mana_ability(
     source_id: ObjectId,
     player: PlayerId,
     ability_index: usize,
-    ability_def: &AbilityDefinition,
+    _ability_def: &AbilityDefinition,
     events: &mut Vec<GameEvent>,
     resume: ManaAbilityResume,
     color_override: Option<ProductionOverride>,
 ) -> Result<WaitingFor, EngineError> {
-    if let Some((count, creatures)) =
-        tap_creature_cost_choice(state, player, source_id, &ability_def.cost)
-    {
-        if creatures.len() < count {
-            return Err(EngineError::ActionNotAllowed(
-                "Not enough untapped creatures to pay mana ability cost".to_string(),
-            ));
-        }
-        return Ok(WaitingFor::TapCreaturesForManaAbility {
-            player,
-            count,
-            creatures,
-            pending_mana_ability: Box::new(PendingManaAbility {
-                player,
-                source_id,
-                ability_index,
-                color_override,
-                resume,
-            }),
-        });
-    }
-
-    // CR 605.3b: If the production has multiple options and no override was
-    // provided (manual activation, not auto-tap), pay cost then pause for the
-    // player's choice. Cost is paid before the prompt so `handle_choose_mana_color`
-    // only needs to produce mana (consistent with the tap-creature chain path).
-    if color_override.is_none() {
-        if let Some(choice) = mana_choice_prompt(&ability_def.effect, state, source_id) {
-            pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
-            return Ok(WaitingFor::ChooseManaColor {
-                player,
-                choice,
-                pending_mana_ability: Box::new(PendingManaAbility {
-                    player,
-                    source_id,
-                    ability_index,
-                    color_override: None,
-                    resume,
-                }),
-            });
-        }
-    }
-
-    resolve_mana_ability(
+    advance_mana_ability_activation(
         state,
-        source_id,
-        player,
-        ability_def,
+        PendingManaAbility {
+            player,
+            source_id,
+            ability_index,
+            color_override,
+            resume,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+        },
         events,
-        color_override,
-    )?;
-    Ok(resume_waiting_for(player, resume))
+    )
 }
 
 /// Extract the prompt shape for a mana ability that requires a player choice.
@@ -419,57 +380,44 @@ pub fn handle_tap_creatures_for_mana_ability(
         }
     }
 
-    let ability_def = state
-        .objects
-        .get(&pending.source_id)
-        .and_then(|obj| obj.abilities.get(pending.ability_index))
-        .cloned()
-        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+    let mut updated = pending.clone();
+    updated.chosen_tappers = chosen.to_vec();
+    advance_mana_ability_activation(state, updated, events)
+}
 
-    // If no color_override and production needs a choice, pay cost then pause.
-    if pending.color_override.is_none() {
-        if let Some(choice) = mana_choice_prompt(&ability_def.effect, state, pending.source_id) {
-            // Pay the tap-creature cost portion first, then pause for color choice.
-            let mut chosen_iter = chosen.iter().copied();
-            pay_mana_ability_cost_with_choices(
-                state,
-                pending.source_id,
-                pending.player,
-                &ability_def.cost,
-                events,
-                &mut chosen_iter,
-            )?;
-            return Ok(WaitingFor::ChooseManaColor {
-                player: pending.player,
-                choice,
-                pending_mana_ability: Box::new(PendingManaAbility {
-                    player: pending.player,
-                    source_id: pending.source_id,
-                    ability_index: pending.ability_index,
-                    color_override: None,
-                    resume: pending.resume.clone(),
-                }),
-            });
+pub fn handle_discard_for_mana_ability(
+    state: &mut GameState,
+    count: usize,
+    legal_cards: &[ObjectId],
+    pending: &PendingManaAbility,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Must discard exactly {} card(s), got {}",
+            count,
+            chosen.len()
+        )));
+    }
+    for id in chosen {
+        if !legal_cards.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card not eligible for mana ability cost".to_string(),
+            ));
         }
     }
 
-    resolve_mana_ability_with_tapped_creatures(
-        state,
-        pending.source_id,
-        pending.player,
-        &ability_def,
-        events,
-        pending.color_override.clone(),
-        chosen,
-    )?;
-
-    Ok(resume_waiting_for(pending.player, pending.resume.clone()))
+    let mut updated = pending.clone();
+    updated.chosen_discards = chosen.to_vec();
+    advance_mana_ability_activation(state, updated, events)
 }
 
 pub fn can_activate_mana_ability_now(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
+    ability_index: usize,
     ability_def: &AbilityDefinition,
 ) -> bool {
     // CR 701.35a: Detained permanents' activated abilities can't be activated
@@ -481,22 +429,98 @@ pub fn can_activate_mana_ability_now(
     {
         return false;
     }
-    if let Some((count, creatures)) =
-        tap_creature_cost_choice(state, player, source_id, &ability_def.cost)
-    {
-        return creatures.len() >= count;
-    }
-
     let mut simulated = state.clone();
-    resolve_mana_ability(
+    activate_mana_ability(
         &mut simulated,
         source_id,
         player,
+        ability_index,
         ability_def,
         &mut Vec::new(),
+        ManaAbilityResume::Priority,
         None,
     )
     .is_ok()
+}
+
+fn advance_mana_ability_activation(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let ability_def = state
+        .objects
+        .get(&pending.source_id)
+        .and_then(|obj| obj.abilities.get(pending.ability_index))
+        .cloned()
+        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+
+    if pending.chosen_discards.is_empty() {
+        if let Some((count, cards)) =
+            discard_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
+        {
+            if cards.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough cards in hand to discard for mana ability".to_string(),
+                ));
+            }
+            return Ok(WaitingFor::DiscardForManaAbility {
+                player: pending.player,
+                count,
+                cards,
+                pending_mana_ability: Box::new(pending),
+            });
+        }
+    }
+
+    if pending.chosen_tappers.is_empty() {
+        if let Some((count, creatures)) =
+            tap_creature_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
+        {
+            if creatures.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough untapped creatures to pay mana ability cost".to_string(),
+                ));
+            }
+            return Ok(WaitingFor::TapCreaturesForManaAbility {
+                player: pending.player,
+                count,
+                creatures,
+                pending_mana_ability: Box::new(pending),
+            });
+        }
+    }
+
+    if pending.color_override.is_none() {
+        if let Some(choice) = mana_choice_prompt(&ability_def.effect, state, pending.source_id) {
+            pay_mana_ability_cost_with_choices(
+                state,
+                pending.source_id,
+                pending.player,
+                &ability_def.cost,
+                events,
+                &mut pending.chosen_tappers.iter().copied(),
+                &mut pending.chosen_discards.iter().copied(),
+            )?;
+            return Ok(WaitingFor::ChooseManaColor {
+                player: pending.player,
+                choice,
+                pending_mana_ability: Box::new(pending),
+            });
+        }
+    }
+
+    resolve_mana_ability_with_selected_choices(
+        state,
+        pending.source_id,
+        pending.player,
+        &ability_def,
+        events,
+        pending.color_override.clone(),
+        &pending.chosen_tappers,
+        &pending.chosen_discards,
+    )?;
+    Ok(resume_waiting_for(pending.player, pending.resume))
 }
 
 /// Pay the full cost of a mana ability. This is the single authority for mana ability
@@ -516,10 +540,12 @@ fn pay_mana_ability_cost(
         cost,
         events,
         &mut std::iter::empty(),
+        &mut std::iter::empty(),
     )
 }
 
-fn resolve_mana_ability_with_tapped_creatures(
+#[allow(clippy::too_many_arguments)]
+fn resolve_mana_ability_with_selected_choices(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
@@ -527,8 +553,10 @@ fn resolve_mana_ability_with_tapped_creatures(
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
     tapped_creatures: &[ObjectId],
+    discarded_cards: &[ObjectId],
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
+    let mut discarded = discarded_cards.iter().copied();
     pay_mana_ability_cost_with_choices(
         state,
         source_id,
@@ -536,10 +564,16 @@ fn resolve_mana_ability_with_tapped_creatures(
         &ability_def.cost,
         events,
         &mut chosen,
+        &mut discarded,
     )?;
     if chosen.next().is_some() {
         return Err(EngineError::InvalidAction(
             "Too many creatures selected for mana ability cost".to_string(),
+        ));
+    }
+    if discarded.next().is_some() {
+        return Err(EngineError::InvalidAction(
+            "Too many cards selected for mana ability cost".to_string(),
         ));
     }
 
@@ -563,16 +597,18 @@ fn resolve_mana_ability_with_tapped_creatures(
     Ok(())
 }
 
-fn pay_mana_ability_cost_with_choices<I>(
+fn pay_mana_ability_cost_with_choices<I, J>(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
     cost: &Option<AbilityCost>,
     events: &mut Vec<GameEvent>,
     chosen_tappers: &mut I,
+    chosen_discards: &mut J,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
+    J: Iterator<Item = ObjectId>,
 {
     match cost {
         Some(AbilityCost::Tap) => tap_source(state, source_id, events)?,
@@ -599,6 +635,44 @@ where
                     cost_has_source_tap_component(cost),
                     events,
                 )?;
+            }
+        }
+        Some(AbilityCost::Discard {
+            count,
+            filter,
+            random,
+            self_ref,
+        }) => {
+            if *random {
+                return Err(EngineError::InvalidAction(
+                    "Unsupported random discard cost for mana ability".to_string(),
+                ));
+            }
+            if *self_ref {
+                match crate::game::effects::discard::discard_as_cost(
+                    state, source_id, player, events,
+                ) {
+                    crate::game::effects::discard::DiscardOutcome::Complete => {}
+                    crate::game::effects::discard::DiscardOutcome::NeedsReplacementChoice(_) => {}
+                }
+            } else {
+                let resolved = super::quantity::resolve_quantity(state, count, player, source_id)
+                    .max(0) as usize;
+                for _ in 0..resolved {
+                    let chosen_id = chosen_discards.next().ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "Missing discarded card selection for mana ability".to_string(),
+                        )
+                    })?;
+                    discard_selected_card_for_mana_cost(
+                        state,
+                        source_id,
+                        player,
+                        chosen_id,
+                        filter.as_ref(),
+                        events,
+                    )?;
+                }
             }
         }
         Some(AbilityCost::Composite { costs }) => {
@@ -632,6 +706,46 @@ where
                                 exclude_source,
                                 events,
                             )?;
+                        }
+                    }
+                    AbilityCost::Discard {
+                        count,
+                        filter,
+                        random,
+                        self_ref,
+                    } => {
+                        if *random {
+                            return Err(EngineError::InvalidAction(
+                                "Unsupported random discard cost for mana ability".to_string(),
+                            ));
+                        }
+                        if *self_ref {
+                            match crate::game::effects::discard::discard_as_cost(
+                                state, source_id, player, events,
+                            ) {
+                                crate::game::effects::discard::DiscardOutcome::Complete => {}
+                                crate::game::effects::discard::DiscardOutcome::NeedsReplacementChoice(_) => {}
+                            }
+                        } else {
+                            let resolved =
+                                super::quantity::resolve_quantity(state, count, player, source_id)
+                                    .max(0) as usize;
+                            for _ in 0..resolved {
+                                let chosen_id = chosen_discards.next().ok_or_else(|| {
+                                    EngineError::InvalidAction(
+                                        "Missing discarded card selection for mana ability"
+                                            .to_string(),
+                                    )
+                                })?;
+                                discard_selected_card_for_mana_cost(
+                                    state,
+                                    source_id,
+                                    player,
+                                    chosen_id,
+                                    filter.as_ref(),
+                                    events,
+                                )?;
+                            }
                         }
                     }
                     AbilityCost::Sacrifice {
@@ -732,10 +846,37 @@ fn tap_creature_cost_choice(
     Some((count as usize, creatures))
 }
 
+fn discard_cost_choice(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &Option<AbilityCost>,
+) -> Option<(usize, Vec<ObjectId>)> {
+    let (count, filter) = find_non_self_discard_cost(cost.as_ref()?)?;
+    let resolved = super::quantity::resolve_quantity(state, count, player, source_id).max(0);
+    let cards = super::casting::find_eligible_discard_targets(state, player, source_id, filter);
+    Some((resolved as usize, cards))
+}
+
 fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     match cost {
         AbilityCost::TapCreatures { count, filter } => Some((*count, filter)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_tap_creatures_cost),
+        _ => None,
+    }
+}
+
+fn find_non_self_discard_cost(
+    cost: &AbilityCost,
+) -> Option<(&crate::types::ability::QuantityExpr, Option<&TargetFilter>)> {
+    match cost {
+        AbilityCost::Discard {
+            count,
+            filter,
+            self_ref: false,
+            random: false,
+        } => Some((count, filter.as_ref())),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard_cost),
         _ => None,
     }
 }
@@ -781,6 +922,41 @@ fn tap_selected_creature_for_mana_cost(
         caused_by: None,
     });
     Ok(())
+}
+
+fn discard_selected_card_for_mana_cost(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    chosen_id: ObjectId,
+    filter: Option<&TargetFilter>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let player_state = state
+        .players
+        .get(player.0 as usize)
+        .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
+    if !player_state.hand.contains(&chosen_id) || chosen_id == source_id {
+        return Err(EngineError::ActionNotAllowed(
+            "Selected card is not eligible to discard for mana ability".to_string(),
+        ));
+    }
+    if let Some(target_filter) = filter {
+        if !matches_target_filter(
+            state,
+            chosen_id,
+            target_filter,
+            &FilterContext::from_source(state, source_id),
+        ) {
+            return Err(EngineError::ActionNotAllowed(
+                "Selected card does not satisfy mana ability discard cost".to_string(),
+            ));
+        }
+    }
+    match crate::game::effects::discard::discard_as_cost(state, chosen_id, player, events) {
+        crate::game::effects::discard::DiscardOutcome::Complete => Ok(()),
+        crate::game::effects::discard::DiscardOutcome::NeedsReplacementChoice(_) => Ok(()),
+    }
 }
 
 fn cost_has_source_tap_component(cost: &Option<AbilityCost>) -> bool {
@@ -1104,6 +1280,153 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::ManaAdded { .. })));
+    }
+
+    #[test]
+    fn lions_eye_diamond_discards_hand_and_then_produces_chosen_color() {
+        let mut state = GameState::new_two_player(42);
+        let led = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Lion's Eye Diamond".to_string(),
+            Zone::Battlefield,
+        );
+        let c1 = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Card One".to_string(),
+            Zone::Hand,
+        );
+        let c2 = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Card Two".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::HandSize,
+                    },
+                    filter: None,
+                    random: false,
+                    self_ref: false,
+                },
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: 1,
+                },
+            ],
+        });
+        state
+            .objects
+            .get_mut(&led)
+            .unwrap()
+            .abilities
+            .push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            led,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        let pending = match waiting {
+            WaitingFor::DiscardForManaAbility {
+                player,
+                count,
+                cards,
+                pending_mana_ability,
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 2);
+                assert_eq!(cards.len(), 2);
+                *pending_mana_ability
+            }
+            other => panic!("expected DiscardForManaAbility, got {other:?}"),
+        };
+
+        let waiting = handle_discard_for_mana_ability(
+            &mut state,
+            2,
+            &[c1, c2],
+            &pending,
+            &[c1, c2],
+            &mut events,
+        )
+        .unwrap();
+
+        let pending = match waiting {
+            WaitingFor::ChooseManaColor {
+                player,
+                choice: ManaChoicePrompt::SingleColor { options },
+                pending_mana_ability,
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(options.len(), 5);
+                *pending_mana_ability
+            }
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+
+        assert!(!state.players[0].hand.contains(&c1));
+        assert!(!state.players[0].hand.contains(&c2));
+        assert!(state.players[0].graveyard.contains(&c1));
+        assert!(state.players[0].graveyard.contains(&c2));
+        assert_ne!(
+            state.objects.get(&led).map(|obj| obj.zone),
+            Some(Zone::Battlefield)
+        );
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &ManaChoicePrompt::SingleColor {
+                options: vec![
+                    ManaType::White,
+                    ManaType::Blue,
+                    ManaType::Black,
+                    ManaType::Red,
+                    ManaType::Green,
+                ],
+            },
+            ManaChoice::SingleColor(ManaType::Red),
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
     }
 
     /// Helper: build a Pit-of-Offerings-style permanent with a `{T}: Add one mana
@@ -1769,6 +2092,8 @@ mod tests {
             ability_index: 0,
             color_override: None,
             resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
         };
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Red, ManaType::Green],
@@ -1942,6 +2267,8 @@ mod tests {
             ability_index: 0,
             color_override: None,
             resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -2029,6 +2356,8 @@ mod tests {
             ability_index: 0,
             color_override: None,
             resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![

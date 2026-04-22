@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#features">Features</a> · <a href="#architecture">Architecture</a> · <a href="#development">Development</a> · <a href="https://discord.gg/dUZwhYHUyk">Discord</a>
+  <a href="#quick-start">Quick Start</a> · <a href="#features">Features</a> · <a href="#architecture">Architecture</a> · <a href="#development">Development</a> · <a href="https://discord.gg/dUZwhYHUyk">Discord</a> · <a href="https://deepwiki.com/phase-rs/phase"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
 <!-- coverage-badges:start -->

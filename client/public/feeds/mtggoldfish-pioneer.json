@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-05T00:00:00Z",
+  "updated": "2026-05-06T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -314,15 +314,11 @@
           "name": "Razorverge Thicket"
         },
         {
-          "count": 2,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Ouroboroid"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Plains"
         },
         {
@@ -334,7 +330,7 @@
           "name": "Badgermole Cub"
         },
         {
-          "count": 2,
+          "count": 4,
           "name": "Brushland"
         },
         {
@@ -342,16 +338,8 @@
           "name": "Thalia, Guardian of Thraben"
         },
         {
-          "count": 2,
-          "name": "Michelangelo's Technique"
-        },
-        {
-          "count": 3,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 2,
-          "name": "Anointed Peacekeeper"
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
         },
         {
           "count": 4,
@@ -362,26 +350,30 @@
           "name": "Llanowar Elves"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Elspeth, Storm Slayer"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "The Wandering Emperor"
+        },
+        {
+          "count": 2,
+          "name": "Starting Town"
         }
       ],
       "sideboard": [
         {
+          "count": 2,
+          "name": "Aven Interrupter"
+        },
+        {
           "count": 3,
           "name": "Seam Rip"
-        },
-        {
-          "count": 1,
-          "name": "Scavenging Ooze"
-        },
-        {
-          "count": 2,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 3,
-          "name": "Aven Interrupter"
         },
         {
           "count": 3,
@@ -389,15 +381,19 @@
         },
         {
           "count": 1,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
-          "count": 1,
-          "name": "Get Lost"
+          "name": "March of Otherworldly Light"
         },
         {
           "count": 1,
           "name": "Elesh Norn, Mother of Machines"
+        },
+        {
+          "count": 3,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 2,
+          "name": "Aven Interrupter"
         }
       ]
     },
@@ -1218,137 +1214,6 @@
       ]
     },
     {
-      "name": "Izzet Phoenix",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Proft's Eidetic Memory"
-        },
-        {
-          "count": 1,
-          "name": "Torch the Tower"
-        },
-        {
-          "count": 3,
-          "name": "Picklock Prankster"
-        },
-        {
-          "count": 4,
-          "name": "Ledger Shredder"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 3,
-          "name": "Lightning Axe"
-        },
-        {
-          "count": 4,
-          "name": "Treasure Cruise"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Impulse"
-        },
-        {
-          "count": 3,
-          "name": "Thing in the Ice"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Arclight Phoenix"
-        },
-        {
-          "count": 2,
-          "name": "Shivan Reef"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Abrade"
-        },
-        {
-          "count": 2,
-          "name": "Annul"
-        },
-        {
-          "count": 1,
-          "name": "Thing in the Ice"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Brazen Borrower"
-        },
-        {
-          "count": 2,
-          "name": "Change the Equation"
-        },
-        {
-          "count": 3,
-          "name": "Cori-Steel Cutter"
-        },
-        {
-          "count": 1,
-          "name": "Abrade"
-        }
-      ]
-    },
-    {
       "name": "Abzan Greasefang",
       "author": "MTGGoldfish",
       "colors": [
@@ -1497,6 +1362,137 @@
         {
           "count": 1,
           "name": "Kaervek, the Spiteful"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Phoenix",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 2,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 1,
+          "name": "Proft's Eidetic Memory"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 3,
+          "name": "Picklock Prankster"
+        },
+        {
+          "count": 4,
+          "name": "Ledger Shredder"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 4,
+          "name": "Consider"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Island"
+        },
+        {
+          "count": 3,
+          "name": "Lightning Axe"
+        },
+        {
+          "count": 4,
+          "name": "Treasure Cruise"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 3,
+          "name": "Thing in the Ice"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Arclight Phoenix"
+        },
+        {
+          "count": 2,
+          "name": "Shivan Reef"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Annul"
+        },
+        {
+          "count": 1,
+          "name": "Thing in the Ice"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Brazen Borrower"
+        },
+        {
+          "count": 2,
+          "name": "Change the Equation"
+        },
+        {
+          "count": 3,
+          "name": "Cori-Steel Cutter"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
         }
       ]
     }

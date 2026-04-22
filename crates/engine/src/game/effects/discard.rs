@@ -233,9 +233,12 @@ pub(crate) fn discard_as_cost(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ReplacementDefinition, TargetFilter,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
 
     #[test]
     fn discard_moves_card_from_hand_to_graveyard() {
@@ -296,6 +299,50 @@ mod tests {
 
         assert!(state.players[0].hand.contains(&c1));
         assert!(!state.players[0].hand.contains(&c2));
+    }
+
+    #[test]
+    fn discard_replacement_can_exile_card_and_still_emit_discarded() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Madness Spell".to_string(),
+            Zone::Hand,
+        );
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Discard);
+        replacement.valid_card = Some(TargetFilter::SelfRef);
+        replacement.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+        )));
+        state
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .replacement_definitions
+            .push(replacement);
+
+        let mut events = Vec::new();
+        let outcome = discard_as_cost(&mut state, card, PlayerId(0), &mut events);
+
+        assert!(matches!(outcome, DiscardOutcome::Complete));
+        assert!(state.exile.contains(&card));
+        assert!(!state.players[0].graveyard.contains(&card));
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::Discarded { object_id, .. } if *object_id == card)
+        ));
     }
 
     #[test]

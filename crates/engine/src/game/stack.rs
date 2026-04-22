@@ -449,6 +449,63 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     events,
                 );
             }
+
+            // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag
+            // so the synthesized intervening-if ETB sacrifice trigger fires.
+            if casting_variant == CastingVariant::Evoke {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Evoke,
+                        state.turn_number,
+                    ));
+                }
+            }
+
+            // CR 702.62a: Suspend-cast permanent gets the `cast_variant_paid`
+            // tag for symmetry with Evoke / Sneak (no synthesized trigger reads
+            // it today, but it preserves the audit trail). Additionally, when
+            // the resolving spell was a creature, install a transient
+            // continuous "has haste" effect that lapses the moment another
+            // player gains control of the permanent
+            // (CR 702.62a final sentence: "If you cast a creature spell this
+            // way, it gains haste until you lose control of the spell or the
+            // permanent it becomes."). The layer-6 keyword grant is scoped to
+            // the resolving permanent via `TargetFilter::SpecificObject` and
+            // gated by `Duration::ForAsLongAs { SourceControllerEquals }` —
+            // a Threaten-style control swap flips the predicate false and the
+            // static is gathered out of layer evaluation.
+            if casting_variant == CastingVariant::Suspend {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Suspend,
+                        state.turn_number,
+                    ));
+                }
+
+                let is_creature = state
+                    .objects
+                    .get(&entry.id)
+                    .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature));
+                if is_creature {
+                    let resolution_controller = entry.controller;
+                    let suspended_id = entry.id;
+                    state.add_transient_continuous_effect(
+                        suspended_id,
+                        resolution_controller,
+                        Duration::ForAsLongAs {
+                            condition:
+                                crate::types::ability::StaticCondition::SourceControllerEquals {
+                                    player: resolution_controller,
+                                },
+                        },
+                        crate::types::ability::TargetFilter::SpecificObject { id: suspended_id },
+                        vec![ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Haste,
+                        }],
+                        None,
+                    );
+                }
+            }
         }
     }
     // Activated abilities: source stays where it is, no zone movement

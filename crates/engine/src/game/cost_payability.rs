@@ -89,6 +89,8 @@ impl AbilityCost {
                 if *self_ref {
                     return p.hand.contains(&source);
                 }
+                let resolved =
+                    super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
                 let ctx = FilterContext::from_source(state, source);
                 p.hand
                     .iter()
@@ -99,7 +101,7 @@ impl AbilityCost {
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
                     })
                     .count()
-                    >= *count as usize
+                    >= resolved
             }
             // CR 601.2b: Exile requires a choice of card from the specified zone
             // (defaulting to hand per parser convention). Self-ref exile (e.g.,
@@ -373,7 +375,7 @@ mod tests {
         let mut state = new_state();
         state.players[0].hand.clear();
         assert!(!AbilityCost::Discard {
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             filter: None,
             random: false,
             self_ref: false,

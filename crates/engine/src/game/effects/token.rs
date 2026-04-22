@@ -872,7 +872,7 @@ fn blood_ability() -> AbilityDefinition {
             },
             AbilityCost::Tap,
             AbilityCost::Discard {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
                 random: false,
                 self_ref: false,

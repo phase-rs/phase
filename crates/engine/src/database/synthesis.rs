@@ -5,14 +5,14 @@ use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
-    ChoiceType, ContinuousModification, ControllerRef, CounterTriggerFilter, Duration, Effect,
-    FilterProp, ManaContribution, ManaProduction, NinjutsuVariant, PtValue, QuantityExpr,
-    ReplacementDefinition, RuntimeHandler, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    CastVariantPaid, ChoiceType, ContinuousModification, ControllerRef, CounterTriggerFilter,
+    Duration, Effect, FilterProp, ManaContribution, ManaProduction, NinjutsuVariant, PtValue,
+    QuantityExpr, ReplacementDefinition, RuntimeHandler, StaticDefinition, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
-use crate::types::counter::CounterType;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{CyclingCost, Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -542,7 +542,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
             Keyword::Cycling(cycling_cost) => {
                 // CR 702.29a: "Discard THIS card" — self_ref = true.
                 let discard_self = AbilityCost::Discard {
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: None,
                     random: false,
                     self_ref: true,
@@ -580,7 +580,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                     costs: vec![
                         AbilityCost::Mana { cost: cost.clone() },
                         AbilityCost::Discard {
-                            count: 1,
+                            count: QuantityExpr::Fixed { value: 1 },
                             filter: None,
                             random: false,
                             self_ref: true,
@@ -762,6 +762,323 @@ pub fn synthesize_entwine(face: &mut CardFace) {
     }
 }
 
+/// CR 702.35a: Madness is a static ability with a replacement effect plus a
+/// linked triggered ability. If the player discards the card, they exile it
+/// instead of putting it into their graveyard; when they do, they may cast it
+/// for its madness cost or put it into their graveyard.
+pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
+    let Some(cost) = face.keywords.iter().find_map(|kw| match kw {
+        Keyword::Madness(cost) => Some(cost.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    let already_has_replacement = face.replacements.iter().any(|r| {
+        matches!(r.event, ReplacementEvent::Discard)
+            && matches!(r.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                r.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    });
+    if !already_has_replacement {
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Discard);
+        replacement.valid_card = Some(TargetFilter::SelfRef);
+        replacement.description = Some(
+            "CR 702.35a: If you discard this card, exile it instead of putting it into your graveyard."
+                .to_string(),
+        );
+        replacement.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+        )));
+        face.replacements.push(replacement);
+    }
+
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::Discarded)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && t.trigger_zones.contains(&Zone::Exile)
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::MadnessCast { .. })
+            )
+    });
+    if !already_has_trigger {
+        let trigger = TriggerDefinition::new(TriggerMode::Discarded)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Exile])
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::MadnessCast { cost },
+            ))
+            .description(
+                "CR 702.35a: When this card is exiled this way, its owner may cast it for its madness cost or put it into their graveyard."
+                    .to_string(),
+            );
+        face.triggers.push(trigger);
+    }
+}
+
+/// CR 702.74a: Evoke is a static ability granting an alternative cost plus a
+/// linked intervening-if triggered ability. The static ability's
+/// "you may cast for evoke cost" is wired at the engine level via
+/// `CastingVariant::Evoke` (handled in `casting::handle_cast_spell` and
+/// `prepare_spell_cast_with_variant_override`); only the triggered ability
+/// needs to be synthesized here.
+///
+/// "When this permanent enters, if its evoke cost was paid, sacrifice it."
+/// `TriggerCondition::CastVariantPaid { variant: Evoke }` reads
+/// `GameObject.cast_variant_paid`, which the resolution path tags when the
+/// spell was cast via `CastingVariant::Evoke`.
+pub fn synthesize_evoke(face: &mut CardFace) {
+    if !face.keywords.iter().any(|k| matches!(k, Keyword::Evoke(_))) {
+        return;
+    }
+    // Idempotency: skip if a CastVariantPaid::Evoke ETB sacrifice trigger already
+    // exists (oracle parser already extracted it, or this synthesizer already ran).
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Evoke,
+                })
+            )
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    let sac = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            up_to: false,
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::CastVariantPaid {
+            variant: CastVariantPaid::Evoke,
+        })
+        .execute(sac)
+        .description(
+            "CR 702.74a: When this permanent enters, if its evoke cost was paid, sacrifice it."
+                .to_string(),
+        );
+    face.triggers.push(trigger);
+}
+
+/// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
+/// carrying `Keyword::Suspend { count, cost }`:
+///
+///   1. **Hand-activated alt-cost** ("Rather than cast this card from your hand,
+///      you may pay [cost] and exile it with N time counters on it. This action
+///      doesn't use the stack."). Modeled as an activated ability with
+///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
+///      (CR 702.62a "if you could begin to cast this card by putting it onto the
+///      stack from your hand"). Cost is composite (mana + exile self from hand);
+///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. The
+///      synthesized activation does land on the stack as an activated ability,
+///      which is a controlled approximation of the rule's "doesn't use the stack"
+///      — no card today interacts with that distinction.
+///
+///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
+///      if this card is suspended, remove a time counter from it.") fires from
+///      the Exile zone (CR 702.62b: "suspended" = in exile + has time counters)
+///      via `trigger_zones = [Exile]`, gated by `TriggerConstraint::OnlyDuringYourTurn`
+///      so only the suspended card's controller's upkeep triggers it.
+///
+///   3. **Last-counter free-cast trigger** ("When the last time counter is
+///      removed from this card, if it's exiled, you may play it without paying
+///      its mana cost…") mirrors `synthesize_siege_intrinsics`' victory trigger
+///      pattern: `TriggerMode::CounterRemoved` with
+///      `CounterTriggerFilter { Time, threshold: Some(0) }` and an optional
+///      `Effect::CastFromZone { without_paying_mana_cost: true }` execute body.
+///      The cast itself is detected as `CastingVariant::Suspend` by
+///      `prepare_spell_cast` (keyword presence on the exile-zone source) and
+///      tagged at stack resolution as `CastVariantPaid::Suspend`. The
+///      "if creature, gains haste until you lose control" rider (CR 702.62a
+///      final sentence) is installed at stack resolution as a transient
+///      continuous effect with
+///      `Duration::ForAsLongAs { SourceControllerEquals { resolution_controller } }`.
+///
+/// Idempotent across repeated invocations (parser pipelines may re-run on the
+/// same face). Build-for-the-class: every Suspend card flows through this
+/// single synthesizer regardless of card type — the haste install branches by
+/// `CoreType::Creature` at runtime, not here.
+pub fn synthesize_suspend(face: &mut CardFace) {
+    use crate::types::ability::ActivationRestriction;
+
+    // Find the first Suspend keyword. Cards do not print multiple Suspends.
+    let Some((time_counters, suspend_cost)) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Suspend { count, cost } => Some((*count, cost.clone())),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    // CR 702.62a: Activated ability — pay [cost], exile self from hand, then
+    // place N time counters on it. Composite cost mirrors `synthesize_cycling`.
+    let already_has_activation = face.abilities.iter().any(|a| {
+        a.activation_zone == Some(Zone::Hand)
+            && a.activation_restrictions
+                .contains(&ActivationRestriction::MatchesCardCastTiming)
+            && matches!(
+                &*a.effect,
+                Effect::PutCounter { counter_type, target: TargetFilter::SelfRef, .. }
+                    if counter_type == "time"
+            )
+    });
+    if !already_has_activation {
+        let composite_cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: suspend_cost.clone(),
+                },
+                // CR 702.62a: "exile it" — self-targeted exile from hand.
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Hand),
+                    filter: Some(TargetFilter::SelfRef),
+                },
+            ],
+        };
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            // CR 702.62a: "...with N time counters on it." Time counter is a
+            // typed CounterType variant; the legacy String API for PutCounter
+            // takes the canonical `as_str()` value ("time").
+            Effect::PutCounter {
+                counter_type: CounterType::Time.as_str().to_string(),
+                count: QuantityExpr::Fixed {
+                    value: time_counters as i32,
+                },
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .cost(composite_cost)
+        .activation_restrictions(vec![ActivationRestriction::MatchesCardCastTiming]);
+        def.activation_zone = Some(Zone::Hand);
+        face.abilities.push(def);
+    }
+
+    // CR 702.62a + CR 702.62b: Upkeep state trigger — at the beginning of the
+    // suspended card's controller's upkeep, if it has any time counters,
+    // remove one. `TriggerConstraint::OnlyDuringYourTurn` enforces "your"
+    // upkeep; `TriggerCondition::HasCounters` enforces "if this card is
+    // suspended" (CR 702.62b: suspended = in exile + has time counters; the
+    // exile zone is enforced by `trigger_zones`).
+    let already_has_upkeep_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::Phase)
+            && t.phase == Some(Phase::Upkeep)
+            && t.trigger_zones == vec![Zone::Exile]
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::RemoveCounter { counter_type, target: TargetFilter::SelfRef, .. })
+                    if counter_type == "time"
+            )
+    });
+    if !already_has_upkeep_trigger {
+        let remove_one = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RemoveCounter {
+                counter_type: CounterType::Time.as_str().to_string(),
+                count: 1,
+                target: TargetFilter::SelfRef,
+            },
+        );
+        let trigger = TriggerDefinition::new(TriggerMode::Phase)
+            .phase(Phase::Upkeep)
+            .valid_card(TargetFilter::SelfRef)
+            .condition(TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                minimum: 1,
+                maximum: None,
+            })
+            .constraint(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+            .execute(remove_one)
+            .description(
+                "CR 702.62a: At the beginning of your upkeep, if this card is suspended, remove a time counter from it."
+                    .to_string(),
+            );
+        let mut trigger = trigger;
+        trigger.trigger_zones = vec![Zone::Exile];
+        face.triggers.push(trigger);
+    }
+
+    // CR 702.62a: Last-counter free-cast trigger — "When the last time counter
+    // is removed from this card, if it's exiled, you may play it without
+    // paying its mana cost." Mirrors `synthesize_siege_intrinsics` victory
+    // trigger (CR 310.11b) — both use `CounterRemoved` with `threshold: Some(0)`.
+    // The cast itself goes through the normal casting pipeline; `prepare_spell_cast`
+    // detects the variant via `obj.zone == Exile && Keyword::Suspend` and assigns
+    // `CastingVariant::Suspend`, which tags `CastVariantPaid::Suspend` at
+    // resolution and installs the haste static for creatures.
+    let already_has_last_counter_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::CounterRemoved)
+            && t.counter_filter.as_ref().is_some_and(|f| {
+                matches!(f.counter_type, CounterType::Time) && f.threshold == Some(0)
+            })
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    });
+    if !already_has_last_counter_trigger {
+        let cast = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+            },
+        )
+        .optional();
+        let trigger = TriggerDefinition::new(TriggerMode::CounterRemoved)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: CounterType::Time,
+                threshold: Some(0),
+            })
+            .execute(cast)
+            .description(
+                "CR 702.62a: When the last time counter is removed from this card, if it's exiled, you may play it without paying its mana cost."
+                    .to_string(),
+            );
+        let mut trigger = trigger;
+        trigger.trigger_zones = vec![Zone::Exile];
+        face.triggers.push(trigger);
+    }
+}
+
 /// Run all synthesis functions in canonical order on a card face.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure the same
 /// complete set of synthesizers is applied.
@@ -784,6 +1101,12 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_scavenge(face);
     synthesize_casualty(face);
     synthesize_entwine(face);
+    synthesize_madness_intrinsics(face);
+    synthesize_evoke(face);
+    // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
+    // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
+    // grouped; idempotent so order against Cycling/Madness is irrelevant.
+    synthesize_suspend(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
     // CR 721.2b: Spacecraft creature-shift at the max station-symbol striation
@@ -1234,6 +1557,232 @@ mod job_select_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_job_select(&mut face);
         assert!(face.triggers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod madness_synthesis_tests {
+    use super::*;
+
+    fn madness_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Madness(ManaCost::Cost {
+            shards: vec![crate::types::mana::ManaCostShard::Red],
+            generic: 0,
+        }));
+        face
+    }
+
+    #[test]
+    fn synthesize_madness_adds_discard_replacement_and_exile_trigger() {
+        let mut face = madness_face();
+        synthesize_madness_intrinsics(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| matches!(r.event, ReplacementEvent::Discard))
+            .expect("madness should add a discard replacement");
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+        assert!(matches!(
+            replacement.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Discarded))
+            .expect("madness should add a discarded trigger");
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert_eq!(trigger.trigger_zones, vec![Zone::Exile]);
+        assert!(matches!(
+            trigger.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::MadnessCast { cost })
+                if *cost == (ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Red],
+                    generic: 0,
+                })
+        ));
+    }
+
+    #[test]
+    fn synthesize_madness_is_idempotent() {
+        let mut face = madness_face();
+        synthesize_madness_intrinsics(&mut face);
+        synthesize_madness_intrinsics(&mut face);
+
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| matches!(r.event, ReplacementEvent::Discard))
+                .count(),
+            1
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| matches!(t.mode, TriggerMode::Discarded))
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+mod evoke_synthesis_tests {
+    use super::*;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    fn evoke_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Evoke(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        }));
+        face
+    }
+
+    /// CR 702.74a: Evoke synthesis injects an intervening-if ETB sacrifice
+    /// trigger that fires only when the evoke alt-cost was paid.
+    #[test]
+    fn synthesize_evoke_adds_conditional_etb_sac_trigger() {
+        let mut face = evoke_face();
+        synthesize_evoke(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+                    && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            })
+            .expect("evoke should add an ETB trigger");
+        assert!(matches!(
+            trigger.condition,
+            Some(TriggerCondition::CastVariantPaid {
+                variant: CastVariantPaid::Evoke,
+            })
+        ));
+        assert!(matches!(
+            trigger.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+    }
+
+    /// Repeated synthesis must not duplicate the trigger.
+    #[test]
+    fn synthesize_evoke_is_idempotent() {
+        let mut face = evoke_face();
+        synthesize_evoke(&mut face);
+        synthesize_evoke(&mut face);
+
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.condition,
+                    Some(TriggerCondition::CastVariantPaid {
+                        variant: CastVariantPaid::Evoke,
+                    })
+                )
+            })
+            .count();
+        assert_eq!(count, 1, "evoke trigger should be deduped");
+    }
+
+    /// Cards without Evoke are unaffected.
+    #[test]
+    fn synthesize_evoke_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_evoke(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod evoke_runtime_tests {
+    use super::*;
+    use crate::game::triggers::check_trigger_condition;
+    use crate::game::zones::create_object;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    /// CR 702.74a: The synthesized intervening-if condition fires only when the
+    /// permanent's `cast_variant_paid` matches Evoke for the current turn.
+    /// Mirrors the runtime contract used by Sneak/Ninjutsu.
+    #[test]
+    fn cast_variant_paid_evoke_condition_fires_only_when_tagged() {
+        let mut state = GameState::new_two_player(0);
+        state.turn_number = 3;
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mulldrifter".to_string(),
+            Zone::Battlefield,
+        );
+
+        let condition = TriggerCondition::CastVariantPaid {
+            variant: CastVariantPaid::Evoke,
+        };
+
+        // Untagged → false.
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(id),
+            None
+        ));
+
+        // Tagged with a different variant → false.
+        state.objects.get_mut(&id).unwrap().cast_variant_paid =
+            Some((CastVariantPaid::Sneak, state.turn_number));
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(id),
+            None
+        ));
+
+        // Tagged Evoke for the current turn → true.
+        state.objects.get_mut(&id).unwrap().cast_variant_paid =
+            Some((CastVariantPaid::Evoke, state.turn_number));
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(id),
+            None
+        ));
+
+        // Tagged Evoke but for a stale turn → false (per-turn freshness, CR 603.4).
+        state.objects.get_mut(&id).unwrap().cast_variant_paid =
+            Some((CastVariantPaid::Evoke, state.turn_number - 1));
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(id),
+            None
+        ));
     }
 }
 
@@ -1939,5 +2488,202 @@ mod prepare_layout_invariant_tests {
         let faces = layout_faces(&layout);
         assert_eq!(faces.len(), 2, "Prepare layout exposes both faces");
         assert_eq!(faces[1].name, "Back");
+    }
+}
+
+#[cfg(test)]
+mod suspend_synthesis_tests {
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+    use crate::types::counter::CounterType;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    /// Builds a Suspend-bearing face with `count` time counters and a single-blue
+    /// alt-cost. Returns the populated face for synthesizer probing.
+    fn suspend_face(count: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Suspend {
+            count,
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            },
+        });
+        face
+    }
+
+    /// CR 702.62a: Suspend synthesizes (a) a hand-activated alt-cost ability,
+    /// (b) an upkeep counter-removal trigger, and (c) a last-counter free-cast
+    /// trigger. This regression locks the canonical shape so future refactors
+    /// of synthesis.rs don't silently drop a sub-ability.
+    #[test]
+    fn synthesize_suspend_adds_activation_and_two_triggers() {
+        let mut face = suspend_face(3);
+        synthesize_suspend(&mut face);
+
+        // (a) Hand activation with MatchesCardCastTiming + composite cost.
+        let activation = face
+            .abilities
+            .iter()
+            .find(|a| a.activation_zone == Some(Zone::Hand))
+            .expect("suspend should add a hand-activated ability");
+        assert!(activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::MatchesCardCastTiming));
+        // CR 702.62a: cost = pay [cost] AND exile self from hand.
+        match &activation.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Exile {
+                        zone: Some(Zone::Hand),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+        // CR 702.62a: effect places N time counters on SelfRef.
+        match &*activation.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, "time");
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert!(matches!(count, QuantityExpr::Fixed { value: 3 }));
+            }
+            other => panic!("expected PutCounter effect, got {other:?}"),
+        }
+
+        // (b) Upkeep counter-removal trigger from Exile zone.
+        let upkeep = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::Phase)
+                    && t.phase == Some(Phase::Upkeep)
+                    && t.trigger_zones == vec![Zone::Exile]
+            })
+            .expect("suspend should add an upkeep trigger from Exile");
+        assert!(matches!(
+            upkeep.condition,
+            Some(TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                minimum: 1,
+                maximum: None,
+            })
+        ));
+        match upkeep.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::RemoveCounter {
+                counter_type,
+                target: TargetFilter::SelfRef,
+                ..
+            }) => assert_eq!(counter_type, "time"),
+            other => panic!("expected RemoveCounter effect, got {other:?}"),
+        }
+
+        // (c) Last-counter free-cast trigger via CounterRemoved + threshold(0).
+        let last = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::CounterRemoved)
+                    && t.trigger_zones == vec![Zone::Exile]
+            })
+            .expect("suspend should add a last-counter trigger from Exile");
+        let cf = last.counter_filter.as_ref().expect("counter_filter set");
+        assert!(matches!(cf.counter_type, CounterType::Time));
+        assert_eq!(cf.threshold, Some(0));
+        let exec = last.execute.as_ref().expect("execute body");
+        assert!(exec.optional, "free cast must be a 'you may'");
+        assert!(matches!(
+            *exec.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                ..
+            }
+        ));
+    }
+
+    /// Idempotency: parser/loader pipelines may invoke `synthesize_all` more
+    /// than once on the same face during multi-stage card-data builds.
+    #[test]
+    fn synthesize_suspend_is_idempotent() {
+        let mut face = suspend_face(2);
+        synthesize_suspend(&mut face);
+        synthesize_suspend(&mut face);
+
+        let activation_count = face
+            .abilities
+            .iter()
+            .filter(|a| a.activation_zone == Some(Zone::Hand))
+            .count();
+        assert_eq!(activation_count, 1, "activation must dedupe");
+        let upkeep_count = face
+            .triggers
+            .iter()
+            .filter(|t| matches!(t.mode, TriggerMode::Phase) && t.phase == Some(Phase::Upkeep))
+            .count();
+        assert_eq!(upkeep_count, 1, "upkeep trigger must dedupe");
+        let last_count = face
+            .triggers
+            .iter()
+            .filter(|t| matches!(t.mode, TriggerMode::CounterRemoved))
+            .count();
+        assert_eq!(last_count, 1, "last-counter trigger must dedupe");
+    }
+
+    /// Cards without `Keyword::Suspend` are completely untouched.
+    #[test]
+    fn synthesize_suspend_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_suspend(&mut face);
+        assert!(face.abilities.is_empty());
+        assert!(face.triggers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod suspend_serialization_tests {
+    use crate::types::ability::{CastVariantPaid, StaticCondition};
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::CastingVariant;
+    use crate::types::player::PlayerId;
+
+    /// CR 702.62a: All four typed primitives added by the Suspend runtime
+    /// round-trip through serde. This guards against accidental
+    /// `#[serde(skip)]` regressions or rename-without-migration mistakes.
+    #[test]
+    fn suspend_typed_primitives_round_trip() {
+        let ct = CounterType::Time;
+        let s = serde_json::to_string(&ct).unwrap();
+        assert_eq!(s, "\"time\"");
+        let back: CounterType = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, CounterType::Time));
+
+        let cv = CastingVariant::Suspend;
+        let s = serde_json::to_string(&cv).unwrap();
+        let back: CastingVariant = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, CastingVariant::Suspend);
+
+        let cvp = CastVariantPaid::Suspend;
+        let s = serde_json::to_string(&cvp).unwrap();
+        let back: CastVariantPaid = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, CastVariantPaid::Suspend);
+
+        let cond = StaticCondition::SourceControllerEquals {
+            player: PlayerId(1),
+        };
+        let s = serde_json::to_string(&cond).unwrap();
+        let back: StaticCondition = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            StaticCondition::SourceControllerEquals { player } if player == PlayerId(1)
+        ));
     }
 }

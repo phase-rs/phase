@@ -131,6 +131,37 @@ struct PreparedSpellCast {
     origin_zone: Zone,
 }
 
+fn combined_spell_ability_def(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<AbilityDefinition> {
+    let mut spell_abilities = obj
+        .abilities
+        .iter()
+        .filter(|a| a.kind == AbilityKind::Spell);
+    let mut combined = spell_abilities.next()?.clone();
+
+    if obj.modal.is_some() {
+        return Some(combined);
+    }
+
+    for spell_ability in spell_abilities {
+        append_to_ability_def_sub_chain(&mut combined, spell_ability.clone());
+    }
+
+    Some(combined)
+}
+
+fn append_to_ability_def_sub_chain(ability: &mut AbilityDefinition, next: AbilityDefinition) {
+    let mut node = ability;
+    while node.sub_ability.is_some() {
+        node = node
+            .sub_ability
+            .as_mut()
+            .expect("sub_ability checked above");
+    }
+    node.sub_ability = Some(Box::new(next));
+}
+
 /// CR 101.2 + CR 601.2a: Temporary restrictions can limit which zones affected
 /// players may cast spells from.
 fn is_blocked_by_cast_only_from_zones(
@@ -708,6 +739,13 @@ fn prepare_spell_cast_with_variant_override(
     // CR 715.3d: Cards in exile with AdventureCreature or ExileWithAltCost permission.
     let has_exile_permission =
         obj.zone == Zone::Exile && has_exile_cast_permission(obj, state.turn_number);
+    let has_madness = obj.zone == Zone::Exile
+        && matches!(variant_override, Some(CastingVariant::Madness))
+        && obj.owner == player
+        && obj
+            .keywords
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Madness(_)));
     // CR 702.34 / CR 702.138 / CR 702.180: Cards in graveyard with graveyard-cast keywords.
     let has_escape = obj.zone == Zone::Graveyard
         && super::keywords::object_has_effective_keyword_kind(
@@ -735,6 +773,7 @@ fn prepare_spell_cast_with_variant_override(
                 || (state.format_config.command_zone
                     && obj.zone == Zone::Command
                     && obj.is_commander)
+                || has_madness
                 || has_exile_permission
                 || has_graveyard_cast_keyword
                 || has_graveyard_permission));
@@ -803,11 +842,7 @@ fn prepare_spell_cast_with_variant_override(
 
     // Only Spell-kind abilities define the spell's on-cast effect and targets.
     // Activated abilities are irrelevant when casting the permanent spell.
-    let ability_def = obj
-        .abilities
-        .iter()
-        .find(|a| a.kind == AbilityKind::Spell)
-        .cloned();
+    let ability_def = combined_spell_ability_def(obj);
 
     let flash_cost = restrictions::flash_timing_cost(state, player, obj);
     // ExileWithAltCost: override mana cost when casting from exile with this permission.
@@ -904,8 +939,23 @@ fn prepare_spell_cast_with_variant_override(
     // permission-aware eligibility (the HasKeywordKind filter on the granting
     // rider) while keeping the default cast path for GY creatures under
     // GraveyardCastPermission unchanged.
+    // CR 702.62a: Suspend free-cast detection — when casting an exile-zone card
+    // that has `Keyword::Suspend` AND an `ExileWithAltCost` permission (granted
+    // by the synthesized last-counter trigger via `Effect::CastFromZone`), the
+    // cast is the suspend "play it without paying its mana cost" path. Mirrors
+    // Warp/Flashback's keyword-presence detection and avoids coupling
+    // `Effect::CastFromZone` to a cast-variant override field.
+    let is_suspend_cast = obj.zone == Zone::Exile
+        && alt_cost_from_exile.is_some()
+        && obj
+            .keywords
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }));
+
     let casting_variant = variant_override.unwrap_or_else(|| {
-        if escape_cost.is_some() {
+        if is_suspend_cast {
+            CastingVariant::Suspend
+        } else if escape_cost.is_some() {
             CastingVariant::Escape
         } else if harmonize_cost.is_some() {
             CastingVariant::Harmonize
@@ -919,6 +969,17 @@ fn prepare_spell_cast_with_variant_override(
             CastingVariant::Normal
         }
     });
+    // CR 702.74a: When the caller explicitly opted into Evoke (via
+    // `variant_override = Some(CastingVariant::Evoke)`), substitute the evoke
+    // mana cost taken from the hand object's `Keyword::Evoke(cost)` payload.
+    let evoke_cost = if casting_variant == CastingVariant::Evoke {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Evoke(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from hand. Auto-application is restricted to `Unlimited` sources
     // (Omniscience, Tamiyo emblem); `OncePerTurn` sources (Zaffai) must be opted
@@ -955,6 +1016,14 @@ fn prepare_spell_cast_with_variant_override(
     } else {
         None
     };
+    let madness_cost = if casting_variant == CastingVariant::Madness {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Madness(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     // CR 702.34a: When the flashback cost is purely non-mana (e.g. Battle Screech's
     // "tap three white creatures"), the spell pays no mana through the normal flow.
     // For compound flashback costs ("{1}{U}, Pay 3 life") we still want the mana
@@ -970,6 +1039,8 @@ fn prepare_spell_cast_with_variant_override(
         crate::types::mana::ManaCost::NoCost
     } else {
         miracle_cost
+            .or(madness_cost)
+            .or(evoke_cost)
             .or(escape_cost)
             .or(harmonize_cost)
             .or(flashback_mana_cost)
@@ -1505,6 +1576,30 @@ pub fn handle_warp_cost_choice(
     continue_cast_from_prepared(state, player, object_id, events)
 }
 
+/// CR 702.74a: Handle Evoke cost choice and proceed with casting. When
+/// `use_evoke` is true, the cast is prepared with `CastingVariant::Evoke`
+/// (which substitutes the evoke mana cost for the printed mana cost). When
+/// false, the cast proceeds normally (no variant override → `Normal`).
+pub fn handle_evoke_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    use_evoke: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if use_evoke {
+        let prepared = prepare_spell_cast_with_variant_override(
+            state,
+            player,
+            object_id,
+            Some(CastingVariant::Evoke),
+        )?;
+        return continue_with_prepared(state, player, prepared, events);
+    }
+    continue_cast_from_prepared(state, player, object_id, events)
+}
+
 /// Shared continuation: call prepare_spell_cast and run the standard casting
 /// pipeline (modal → targeting → payment). Extracted so handle_warp_cost_choice
 /// and handle_cast_spell can share the same post-prepare logic.
@@ -1720,6 +1815,47 @@ pub fn handle_cast_spell_as_miracle(
     continue_with_prepared(state, player, prepared, events)
 }
 
+/// CR 702.35a: Cast a discarded card from exile via its Madness alternative
+/// mana cost after the madness triggered ability resolves.
+pub fn handle_cast_spell_as_madness(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let obj = state
+        .objects
+        .get(&object_id)
+        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+    if obj.card_id != card_id {
+        return Err(EngineError::InvalidAction(format!(
+            "Object {object_id:?} does not match card_id {card_id:?}"
+        )));
+    }
+    if obj.zone != Zone::Exile || obj.owner != player {
+        return Err(EngineError::ActionNotAllowed(
+            "CastSpellAsMadness requires an exiled card owned by the caster".to_string(),
+        ));
+    }
+    let has_madness = obj
+        .keywords
+        .iter()
+        .any(|k| matches!(k, crate::types::keywords::Keyword::Madness(_)));
+    if !has_madness {
+        return Err(EngineError::ActionNotAllowed(
+            "Card no longer has madness".to_string(),
+        ));
+    }
+    let prepared = prepare_spell_cast_with_variant_override(
+        state,
+        player,
+        object_id,
+        Some(CastingVariant::Madness),
+    )?;
+    continue_with_prepared(state, player, prepared, events)
+}
+
 /// Cast a spell from hand (or command zone, exile, graveyard in Commander/alternate-cost formats).
 pub fn handle_cast_spell(
     state: &mut GameState,
@@ -1784,6 +1920,41 @@ pub fn handle_cast_spell(
                 }
                 // If only warp or neither, let prepare_spell_cast handle it normally
                 // (it will pick CastingVariant::Warp via precedence)
+            }
+        }
+    }
+
+    // CR 702.74a: Evoke — when a hand card has Keyword::Evoke and both costs
+    // are affordable, present a choice. Auto-skip when only one cost is viable.
+    // Unlike Warp, Evoke is opt-in via variant_override (the printed mana cost
+    // remains the default), so the only routing needed is when the player picks
+    // the evoke cost.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(evoke_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Evoke(cost) => Some(cost.clone()),
+                _ => None,
+            }) {
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &obj.mana_cost);
+                let evoke_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &evoke_cost);
+                if normal_affordable && evoke_affordable {
+                    return Ok(WaitingFor::EvokeCostChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        normal_cost: obj.mana_cost.clone(),
+                        evoke_cost,
+                    });
+                }
+                if !normal_affordable && evoke_affordable {
+                    // Only evoke is payable — proceed via the evoke path.
+                    return handle_evoke_cost_choice(
+                        state, player, object_id, card_id, true, events,
+                    );
+                }
+                // Otherwise (normal-only or neither): fall through to normal cast.
             }
         }
     }
@@ -2118,12 +2289,12 @@ pub fn spell_has_legal_targets(
 
     // Only Spell-kind abilities contribute targets when casting.
     // Activated/Database abilities are irrelevant to spell castability.
-    let ability_def = match obj.abilities.iter().find(|a| a.kind == AbilityKind::Spell) {
+    let ability_def = match combined_spell_ability_def(obj) {
         Some(a) => a,
         None => return true, // Permanent with no spell abilities needs no targets
     };
 
-    let resolved = build_resolved_from_def(ability_def, obj.id, player);
+    let resolved = build_resolved_from_def(&ability_def, obj.id, player);
     match build_target_slots(&simulated, &resolved) {
         Ok(target_slots) => {
             if target_slots.is_empty() {
@@ -2703,6 +2874,45 @@ fn find_non_self_sacrifice(cost: &AbilityCost) -> Option<&TargetFilter> {
     }
 }
 
+fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&TargetFilter>)> {
+    match cost {
+        AbilityCost::Discard {
+            count,
+            filter,
+            self_ref: false,
+            ..
+        } => Some((count, filter.as_ref())),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard),
+        _ => None,
+    }
+}
+
+pub(crate) fn find_eligible_discard_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source(state, source);
+    state
+        .players
+        .get(player.0 as usize)
+        .map(|player_state| {
+            player_state
+                .hand
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    id != source
+                        && filter.is_none_or(|f| {
+                            super::filter::matches_target_filter(state, id, f, &ctx)
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
         AbilityCost::ReturnToHand { count, filter } => Some((*count, filter.as_ref())),
@@ -3094,6 +3304,27 @@ pub fn handle_activate_ability(
                 count: 1,
                 permanents: eligible,
                 pending_cast: Box::new(pending_sac),
+            });
+        }
+
+        if let Some((count, filter)) = find_non_self_discard(cost) {
+            let count =
+                super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
+            let eligible = find_eligible_discard_targets(state, player, source_id, filter);
+            if eligible.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough cards in hand to discard".into(),
+                ));
+            }
+            let mut pending_discard =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_discard.activation_cost = Some(cost.clone());
+            pending_discard.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::DiscardForCost {
+                player,
+                count,
+                cards: eligible,
+                pending_cast: Box::new(pending_discard),
             });
         }
 
@@ -3757,6 +3988,76 @@ mod tests {
             };
         }
         obj_id
+    }
+
+    #[test]
+    fn prepare_spell_cast_chains_all_non_modal_spell_abilities_in_order() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Two-Step Spell".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ));
+        obj.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ));
+
+        let prepared = prepare_spell_cast(&state, PlayerId(0), obj_id).unwrap();
+        let combined = prepared
+            .ability_def
+            .expect("non-modal instant should prepare a spell ability");
+        assert!(matches!(*combined.effect, Effect::Scry { .. }));
+        let sub = combined
+            .sub_ability
+            .as_ref()
+            .expect("second spell ability should be chained");
+        assert!(matches!(*sub.effect, Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn can_cast_object_now_checks_targets_across_all_non_modal_spell_abilities() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Draw Then Doom".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ));
+        obj.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+
+        let castable = can_cast_object_now(&state, PlayerId(0), obj_id);
+        assert!(
+            !castable,
+            "later spell abilities with unresolved targets must still gate castability"
+        );
     }
 
     fn create_sorcery_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
@@ -4482,6 +4783,97 @@ mod tests {
             1,
             "activated ability on stack after auto-pay"
         );
+    }
+
+    #[test]
+    fn activated_discard_cost_prompts_and_resumes_activation() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{AbilityCost, AbilityKind, Effect};
+
+        let mut state = setup_game_at_main_phase();
+        let blood = create_object(
+            &mut state,
+            CardId(970),
+            PlayerId(0),
+            "Blood".to_string(),
+            Zone::Battlefield,
+        );
+        let discarded = create_object(
+            &mut state,
+            CardId(971),
+            PlayerId(0),
+            "Discard Me".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&blood).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Blood".to_string());
+            obj.abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::Tap,
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            random: false,
+                            self_ref: false,
+                        },
+                        AbilityCost::Sacrifice {
+                            target: TargetFilter::SelfRef,
+                            count: 1,
+                        },
+                    ],
+                }),
+            );
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: blood,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DiscardForCost { cards, count, .. } => {
+                assert_eq!(*count, 1);
+                assert_eq!(cards, &vec![discarded]);
+            }
+            other => panic!("expected DiscardForCost, got {other:?}"),
+        }
+        assert!(
+            state.objects[&blood].zone == Zone::Battlefield,
+            "cost payment must pause before tapping or sacrificing the source"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![discarded],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&discarded].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&blood].zone, Zone::Graveyard);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(
+            state.stack[0].kind,
+            StackEntryKind::ActivatedAbility { source_id, .. } if source_id == blood
+        ));
     }
 
     /// Composite costs with Sacrifice + Pay {X}{G}: the fixed G contributes to
@@ -6684,7 +7076,7 @@ mod tests {
                     },
                 },
                 AbilityCost::Discard {
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: None,
                     random: false,
                     self_ref: true,

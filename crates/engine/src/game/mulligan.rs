@@ -507,4 +507,78 @@ mod tests {
             "After 2 mulligans in multiplayer, should bottom 1 card (free mulligan discount)"
         );
     }
+
+    /// Regression: In a 1v1 Commander game where P1 (AI) is the starting player,
+    /// the engine must authorize P1 to submit MulliganDecision.
+    #[test]
+    fn ai_starting_player_can_submit_mulligan_decision() {
+        use crate::game::engine::{apply, start_game_with_starting_player};
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 2, 42);
+        // Populate libraries so mulligan flow engages
+        for player_idx in 0..2u8 {
+            for i in 0..10 {
+                create_object(
+                    &mut state,
+                    CardId((player_idx as u64) * 100 + i as u64),
+                    PlayerId(player_idx),
+                    format!("Card {} P{}", i, player_idx),
+                    Zone::Library,
+                );
+            }
+        }
+        // Add commanders for both players (matches recent fix)
+        let c0 = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "P0 Cmd".to_string(),
+            Zone::Command,
+        );
+        let c1 = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(1),
+            "P1 Cmd".to_string(),
+            Zone::Command,
+        );
+        state.objects.get_mut(&c0).unwrap().is_commander = true;
+        state.objects.get_mut(&c1).unwrap().is_commander = true;
+
+        let result = start_game_with_starting_player(&mut state, PlayerId(1));
+
+        // Engine should want P1 (AI) to mulligan first
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::MulliganDecision {
+                    player: PlayerId(1),
+                    ..
+                }
+            ),
+            "expected MulliganDecision {{ player: 1 }}, got {:?}",
+            result.waiting_for
+        );
+
+        let authorized = crate::game::turn_control::authorized_submitter(&state);
+        assert_eq!(
+            authorized,
+            Some(PlayerId(1)),
+            "authorized_submitter should be P1 (the mulligan player)"
+        );
+
+        // AI dispatches its mulligan decision
+        let r = apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::MulliganDecision { keep: true },
+        );
+        assert!(
+            r.is_ok(),
+            "AI P1 should be authorized to submit MulliganDecision, got {:?}",
+            r
+        );
+    }
 }

@@ -655,7 +655,7 @@ mod tests {
         match result {
             Some(AdditionalCost::Choice(
                 AbilityCost::Discard {
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     random: false,
                     ..
                 },
@@ -717,7 +717,10 @@ mod tests {
         let raw = "As an additional cost to cast this spell, discard a card.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Required(AbilityCost::Discard { count: 1, .. })) => {}
+            Some(AdditionalCost::Required(AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            })) => {}
             other => panic!("Expected Required(Discard), got {:?}", other),
         }
     }

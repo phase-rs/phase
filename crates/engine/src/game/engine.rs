@@ -559,6 +559,23 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             use_warp,
             &mut events,
         )?,
+        // CR 702.74a: Player chooses normal cast or Evoke cast from hand.
+        (
+            WaitingFor::EvokeCostChoice {
+                player,
+                object_id,
+                card_id,
+                ..
+            },
+            GameAction::ChooseEvokeCost { use_evoke },
+        ) => casting::handle_evoke_cost_choice(
+            state,
+            *player,
+            *object_id,
+            *card_id,
+            use_evoke,
+            &mut events,
+        )?,
         (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
             casting::handle_select_modes(state, *player, indices, &mut events)?
         }
@@ -785,6 +802,22 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             state,
             *count,
             creatures,
+            pending_mana_ability,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::DiscardForManaAbility {
+                count,
+                cards: legal_cards,
+                pending_mana_ability,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => engine_casting::handle_discard_for_mana_ability(
+            state,
+            *count,
+            legal_cards,
             pending_mana_ability,
             &chosen,
             &mut events,
@@ -1662,6 +1695,43 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             GameAction::DecideOptionalEffect { accept: false },
         ) => {
             let p = *player;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            super::engine_priority::run_post_action_pipeline(
+                state,
+                &mut events,
+                &WaitingFor::Priority { player: p },
+                true,
+            )?
+        }
+        // CR 702.35a: Madness cast offer — the madness triggered ability has
+        // resolved. The player may now cast the exiled card for its madness cost.
+        (
+            WaitingFor::MadnessCastOffer {
+                player, object_id, ..
+            },
+            GameAction::CastSpellAsMadness {
+                object_id: action_obj,
+                card_id,
+            },
+        ) => {
+            if *object_id != action_obj {
+                return Err(EngineError::InvalidAction(
+                    "CastSpellAsMadness object_id does not match madness cast offer".to_string(),
+                ));
+            }
+            let p = *player;
+            let obj = action_obj;
+            super::casting::handle_cast_spell_as_madness(state, p, obj, card_id, &mut events)?
+        }
+        // CR 702.35a: Madness decline — put the exiled card into its owner's graveyard.
+        (
+            WaitingFor::MadnessCastOffer {
+                player, object_id, ..
+            },
+            GameAction::DecideOptionalEffect { accept: false },
+        ) => {
+            let p = *player;
+            super::zones::move_to_zone(state, *object_id, Zone::Graveyard, &mut events);
             state.waiting_for = WaitingFor::Priority { player: p };
             super::engine_priority::run_post_action_pipeline(
                 state,

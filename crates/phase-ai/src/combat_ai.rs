@@ -32,13 +32,14 @@ pub fn choose_attackers_with_targets(
     state: &GameState,
     player: PlayerId,
 ) -> Vec<(ObjectId, AttackTarget)> {
-    choose_attackers_with_targets_with_profile(state, player, &AiProfile::default(), None)
+    choose_attackers_with_targets_with_profile(state, player, &AiProfile::default(), false, None)
 }
 
 pub fn choose_attackers_with_targets_with_profile(
     state: &GameState,
     player: PlayerId,
     profile: &AiProfile,
+    combat_lookahead: bool,
     valid_attacker_ids: Option<&[ObjectId]>,
 ) -> Vec<(ObjectId, AttackTarget)> {
     let opponents = players::opponents(state, player);
@@ -192,13 +193,17 @@ pub fn choose_attackers_with_targets_with_profile(
         // crackback_damage sees scaled creatures (Ouroboroid class) and
         // attack-trigger pumps (Battle Cry, Mentor). Failure to project
         // falls through to current state — matches pre-projection behavior.
-        let projection = project_to(
-            state,
-            player,
-            opponents[0],
-            ProjectionHorizon::OpponentAttackersDeclared,
-        )
-        .ok();
+        let projection = if combat_lookahead {
+            project_to(
+                state,
+                player,
+                opponents[0],
+                ProjectionHorizon::OpponentAttackersDeclared,
+            )
+            .ok()
+        } else {
+            None
+        };
         let cb_damage = crackback_damage(
             state,
             player,

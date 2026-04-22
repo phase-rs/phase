@@ -39,10 +39,13 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
                     .unwrap_or(0),
             );
         }
+        // CR 702.62a + CR 702.63a: Time counters live only in the counter map
+        // (read by the suspend upkeep / vanishing triggers) — no derived field.
         CounterType::Plus1Plus1
         | CounterType::Minus1Minus1
         | CounterType::Stun
         | CounterType::Lore
+        | CounterType::Time
         | CounterType::Keyword(_)
         | CounterType::Generic(_) => {}
     }

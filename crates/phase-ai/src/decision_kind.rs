@@ -84,6 +84,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::AdventureCastChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::WarpCostChoice { .. }
+        | WaitingFor::EvokeCostChoice { .. }
         | WaitingFor::ChooseRingBearer { .. }
         | WaitingFor::ChooseDungeon { .. }
         | WaitingFor::ChooseDungeonRoom { .. }
@@ -121,7 +122,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // CR 702.94a: Miracle reveal — opt-in cast offer, routed to the
         // ability-offer bucket so activation policies evaluate the candidates.
         | WaitingFor::MiracleReveal { .. }
-        | WaitingFor::MiracleCastOffer { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::MiracleCastOffer { .. }
+        | WaitingFor::MadnessCastOffer { .. }
+        | WaitingFor::DiscardForManaAbility { .. } => DecisionKind::ActivateAbility,
     }
 }
 

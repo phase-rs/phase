@@ -14,10 +14,10 @@ use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
-use crate::parser::oracle_util::parse_number;
 use crate::types::ability::{
     AggregateFunction, ControllerRef, CountScope, FilterProp, ObjectProperty, PlayerFilter,
     QuantityExpr, QuantityRef, TargetFilter, TypedFilter, ZoneRef,
@@ -269,15 +269,31 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
         }
     }
 
-    // "N plus [inner]" generalized offset pattern
-    if let Some((prefix, rest)) = text.split_once(" plus ") {
-        if let Some((n, _)) = parse_number(prefix) {
-            if let Some(inner) = parse_cda_quantity(rest) {
-                return Some(QuantityExpr::Offset {
+    // CR 604.3: "N plus [inner]" / "N minus [inner]" generalized offset pattern.
+    // Negative form uses Offset with a Multiply-by-(-1) inner, composing cleanly
+    // over existing types without introducing new variants.
+    if let Ok((rest, (n, sign))) = (
+        nom_primitives::parse_number,
+        alt((
+            value(1i32, tag::<_, _, VerboseError<&str>>(" plus ")),
+            value(-1i32, tag(" minus ")),
+        )),
+    )
+        .parse(text)
+    {
+        if let Some(inner) = parse_cda_quantity(rest) {
+            let inner_expr = if sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
                     inner: Box::new(inner),
-                    offset: n as i32,
-                });
-            }
+                }
+            } else {
+                inner
+            };
+            return Some(QuantityExpr::Offset {
+                inner: Box::new(inner_expr),
+                offset: n as i32,
+            });
         }
     }
 
@@ -413,6 +429,16 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
                 return Some(QuantityExpr::Ref { qty });
             }
         }
+    }
+
+    // CR 604.3: Composite quantity expressions ("N plus/minus [inner]", "twice [inner]")
+    // delegate to parse_cda_quantity — the single authority for offset/multiply grammar.
+    // Limited to composite variants so atomic refs still flow through the
+    // TargetPower/TargetLifeTotal exclusion in the fallback below.
+    if let Some(qty @ (QuantityExpr::Offset { .. } | QuantityExpr::Multiply { .. })) =
+        parse_cda_quantity(lower)
+    {
+        return Some(qty);
     }
 
     // Fall back to parse_quantity_ref for named quantity patterns

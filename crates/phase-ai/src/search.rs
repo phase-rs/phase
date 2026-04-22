@@ -770,6 +770,7 @@ pub(crate) fn deterministic_choice(
             state,
             ai_player,
             &config.profile,
+            config.combat_lookahead,
             Some(valid_attacker_ids),
         );
         return Some(GameAction::DeclareAttackers { attacks });
@@ -815,6 +816,7 @@ fn deterministic_combat_choice(
             state,
             ai_player,
             profile,
+            false,
             Some(valid_attacker_ids),
         );
         return Some(GameAction::DeclareAttackers { attacks });

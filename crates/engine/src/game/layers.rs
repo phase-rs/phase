@@ -273,6 +273,16 @@ pub(crate) fn evaluate_condition(
         StaticCondition::SourceIsTapped => {
             state.objects.get(&source_id).is_some_and(|obj| obj.tapped)
         }
+        // CR 702.62a + CR 611.2b: True when the source object's current controller
+        // equals the stored player. Drives the Suspend haste duration: when a
+        // suspended creature spell resolves, a transient continuous effect with
+        // `Duration::ForAsLongAs { SourceControllerEquals { resolution_controller } }`
+        // grants haste; a Threaten / Mind Control swap moves controller and
+        // this predicate flips false, naturally lapsing the static.
+        StaticCondition::SourceControllerEquals { player } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.controller == *player),
         // CR 301.5a: True when at least one Equipment is attached to the source object.
         // Mirrors the attacher-is-equipment subtype check from `effects/attach.rs:64-67`.
         StaticCondition::SourceIsEquipped => state.objects.values().any(|obj| {

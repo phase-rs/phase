@@ -1055,6 +1055,7 @@ impl GameRunner {
             WaitingFor::AdventureCastChoice { .. } => "AdventureCastChoice",
             WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
             WaitingFor::WarpCostChoice { .. } => "WarpCostChoice",
+            WaitingFor::EvokeCostChoice { .. } => "EvokeCostChoice",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
             WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
@@ -1068,6 +1069,7 @@ impl GameRunner {
             WaitingFor::ReturnToHandForCost { .. } => "ReturnToHandForCost",
             WaitingFor::TapCreaturesForSpellCost { .. } => "TapCreaturesForSpellCost",
             WaitingFor::TapCreaturesForManaAbility { .. } => "TapCreaturesForManaAbility",
+            WaitingFor::DiscardForManaAbility { .. } => "DiscardForManaAbility",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::ExileFromGraveyardForCost { .. } => "ExileFromGraveyardForCost",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
@@ -1100,6 +1102,7 @@ impl GameRunner {
             WaitingFor::ParadigmCastOffer { .. } => "ParadigmCastOffer",
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
             WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
+            WaitingFor::MadnessCastOffer { .. } => "MadnessCastOffer",
         }
     }
 
