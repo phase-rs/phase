@@ -306,6 +306,23 @@ fn activation_restriction_applies(
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
         ActivationRestriction::AsSorcery => is_sorcery_speed_window(state, player),
         ActivationRestriction::AsInstant => true,
+        // CR 702.62a: "If you could begin to cast this card by putting it onto the
+        // stack from your hand" — defer to the underlying card type's natural
+        // cast timing. Instants activate any time priority is held; sorceries
+        // (and other non-instant card types) require the sorcery-speed window.
+        // Used by Suspend's hand-activated ability so future
+        // cast-timing-mirroring activations (Foretell, etc.) reuse this primitive.
+        ActivationRestriction::MatchesCardCastTiming => state
+            .objects
+            .get(&source_id)
+            .map(|obj| {
+                if obj.card_types.core_types.contains(&CoreType::Instant) {
+                    true
+                } else {
+                    is_sorcery_speed_window(state, player)
+                }
+            })
+            .unwrap_or(false),
         ActivationRestriction::DuringYourTurn => state.active_player == player,
         ActivationRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep

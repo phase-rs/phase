@@ -1802,6 +1802,13 @@ pub enum CastingVariant {
     /// the permanent enters tagged with `CastVariantPaid::Evoke`, which fires
     /// the synthesized intervening-if ETB sacrifice trigger.
     Evoke,
+    /// CR 702.62a: Cast from exile via Suspend's "play it without paying its
+    /// mana cost" trigger after the last time counter was removed. On resolution
+    /// of the resulting permanent, the stack handler tags
+    /// `CastVariantPaid::Suspend` and — for creature spells — installs a
+    /// transient continuous "has haste" effect that lasts as long as the
+    /// resolution-time controller still controls the permanent.
+    Suspend,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

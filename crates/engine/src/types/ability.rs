@@ -2336,6 +2336,12 @@ pub enum CastVariantPaid {
     /// CR 702.74a: Evoke alternative cast cost was paid from hand. Read by the
     /// synthesized intervening-if ETB sacrifice trigger.
     Evoke,
+    /// CR 702.62a: Cast as the suspend "play it without paying its mana cost"
+    /// resolution after the last time counter was removed. Tagged at stack
+    /// resolution; the runtime-installed haste static (creature spells only)
+    /// keys off this marker so a Threaten-style control swap correctly
+    /// terminates haste via `StaticCondition::SourceControllerEquals`.
+    Suspend,
 }
 
 impl From<NinjutsuVariant> for CastVariantPaid {
@@ -4713,6 +4719,14 @@ pub enum ActivationRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<u32>,
     },
+    /// CR 702.62a: "If you could begin to cast this card by putting it onto the
+    /// stack from your hand" — the activation is legal whenever the underlying
+    /// card type's natural cast timing is legal. For a sorcery / permanent card,
+    /// this is sorcery-speed; for an instant, it's instant-speed. Used by the
+    /// synthesized Suspend hand-activated ability so future "cast-timing-mirroring"
+    /// activations (Foretell, etc.) can reuse this primitive instead of
+    /// special-casing card type at synthesis time.
+    MatchesCardCastTiming,
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
