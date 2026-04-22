@@ -4,8 +4,7 @@ import type { ManaCost, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { SHARD_ABBREVIATION } from "../../viewmodel/costLabel.ts";
-import { ManaSymbol } from "../mana/ManaSymbol.tsx";
+import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 
 type CombatTaxPayment = Extract<WaitingFor, { type: "CombatTaxPayment" }>;
 
@@ -21,24 +20,6 @@ type CombatTaxPayment = Extract<WaitingFor, { type: "CombatTaxPayment" }>;
  * engine's mana-payment pipeline handles invalid payments. If a future
  * engine signal surfaces `can_afford`, wire it to disable the Pay button.
  */
-function ManaCostSymbols({ cost }: { cost: ManaCost }) {
-  if (cost.type === "NoCost" || cost.type === "SelfManaCost") {
-    return <span className="text-slate-500">Free</span>;
-  }
-  const symbols: string[] = [];
-  if (cost.generic > 0) symbols.push(String(cost.generic));
-  for (const shard of cost.shards) {
-    symbols.push(SHARD_ABBREVIATION[shard] ?? shard);
-  }
-  if (symbols.length === 0) symbols.push("0");
-  return (
-    <span className="inline-flex items-center gap-0.5">
-      {symbols.map((s, i) => (
-        <ManaSymbol key={i} shard={s} size="sm" />
-      ))}
-    </span>
-  );
-}
 
 export function CombatTaxModal() {
   const canActForWaitingState = useCanActForWaitingState();
