@@ -668,7 +668,7 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TypeFilter;
+    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
     use crate::types::mana::ManaColor;
 
     #[test]
@@ -931,6 +931,39 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn cda_quantity_mana_value_of_the_exiled_card_uses_linked_exile_aggregate() {
+        let qty = parse_cda_quantity("the mana value of the exiled card").unwrap();
+        match qty {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::Aggregate {
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::ManaValue,
+                        filter: TargetFilter::And { filters },
+                    },
+            } => {
+                assert!(
+                    filters
+                        .iter()
+                        .any(|filter| matches!(filter, TargetFilter::ExiledBySource)),
+                    "expected ExiledBySource filter, got {filters:?}"
+                );
+                assert!(filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.properties
+                            == vec![FilterProp::Owned {
+                                controller: ControllerRef::You,
+                            }]
+                )));
+            }
+            other => panic!(
+                "expected Aggregate(Sum, ManaValue) for linked-exile owner quantity, got {other:?}"
+            ),
+        }
     }
 
     #[test]

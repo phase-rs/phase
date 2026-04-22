@@ -5050,7 +5050,8 @@ mod tests {
     use super::*;
     use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
     use crate::types::ability::{
-        Comparator, Duration, Effect, PtValue, QuantityExpr, QuantityRef, UnlessCost,
+        Comparator, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PtValue,
+        QuantityExpr, QuantityRef, TypedFilter, UnlessCost,
     };
 
     #[test]
@@ -6021,6 +6022,51 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.trigger_zones.contains(&Zone::Graveyard));
         assert!(def.trigger_zones.contains(&Zone::Exile));
+    }
+
+    #[test]
+    fn trigger_skyclave_apparition_leaves_battlefield_uses_linked_exile_owner_scope() {
+        let def = parse_trigger_line(
+            "When this creature leaves the battlefield, the exiled card's owner creates an X/X blue Illusion creature token, where X is the mana value of the exiled card.",
+            "Skyclave Apparition",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::OwnersOfCardsExiledBySource)
+        );
+
+        match execute.effect.as_ref() {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                ..
+            } => {
+                assert_eq!(name, "Illusion");
+                let expected = QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate {
+                        function: crate::types::ability::AggregateFunction::Sum,
+                        property: crate::types::ability::ObjectProperty::ManaValue,
+                        filter: TargetFilter::And {
+                            filters: vec![
+                                TargetFilter::ExiledBySource,
+                                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                                    FilterProp::Owned {
+                                        controller: ControllerRef::You,
+                                    },
+                                ])),
+                            ],
+                        },
+                    },
+                };
+                assert_eq!(power, &PtValue::Quantity(expected.clone()));
+                assert_eq!(toughness, &PtValue::Quantity(expected));
+            }
+            other => panic!("expected Skyclave leaves trigger to create a token, got {other:?}"),
+        }
     }
 
     /// CR 113.6k: A non-self-referential LTB trigger (source stays on the

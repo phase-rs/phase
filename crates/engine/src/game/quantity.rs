@@ -311,7 +311,9 @@ fn resolve_ref(
                 .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
                 .count() as i32
         }
-        QuantityRef::PlayerCount { filter } => resolve_player_count(state, filter, controller),
+        QuantityRef::PlayerCount { filter } => {
+            resolve_player_count(state, filter, controller, source_id)
+        }
         QuantityRef::CountersOnSelf { counter_type } => state
             .objects
             .get(&source_id)
@@ -558,14 +560,8 @@ fn resolve_ref(
         }
         QuantityRef::DistinctCardTypesExiledBySource => {
             let mut seen = HashSet::new();
-            for link in &state.exile_links {
-                if link.source_id != source_id {
-                    continue;
-                }
-                if let Some(obj) = state.objects.get(&link.exiled_id) {
-                    if obj.zone != Zone::Exile {
-                        continue;
-                    }
+            for linked in crate::game::players::linked_exile_cards_for_source(state, source_id) {
+                if let Some(obj) = state.objects.get(&linked.exiled_id) {
                     for ct in &obj.card_types.core_types {
                         seen.insert(*ct);
                     }
@@ -573,20 +569,12 @@ fn resolve_ref(
             }
             seen.len() as i32
         }
-        // CR 406.6 + CR 607.1: Count cards currently in exile that are linked to the source
-        // via `exile_links`. Mirrors `DistinctCardTypesExiledBySource` but returns the raw
-        // count rather than a type-set size.
-        QuantityRef::CardsExiledBySource => state
-            .exile_links
-            .iter()
-            .filter(|link| link.source_id == source_id)
-            .filter(|link| {
-                state
-                    .objects
-                    .get(&link.exiled_id)
-                    .is_some_and(|obj| obj.zone == Zone::Exile)
-            })
-            .count() as i32,
+        // CR 603.10a + CR 607.2a: Count cards linked as "exiled with" the
+        // source. LTB triggers read the trigger-event snapshot; other contexts
+        // read the live exile-link store.
+        QuantityRef::CardsExiledBySource => {
+            crate::game::players::linked_exile_cards_for_source(state, source_id).len() as i32
+        }
         // CR 604.3: Count cards in a zone matching optional type filters.
         QuantityRef::ZoneCardCount {
             zone,
@@ -975,6 +963,7 @@ pub(crate) fn resolve_player_count(
     state: &GameState,
     filter: &PlayerFilter,
     controller: PlayerId,
+    source_id: ObjectId,
 ) -> i32 {
     state
         .players
@@ -1004,6 +993,9 @@ pub(crate) fn resolve_player_count(
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    PlayerFilter::OwnersOfCardsExiledBySource => {
+                        crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
+                    }
                     PlayerFilter::TriggeringPlayer => state
                         .current_trigger_event
                         .as_ref()
@@ -1021,11 +1013,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, Effect, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+        AggregateFunction, ControllerRef, Effect, FilterProp, ObjectProperty, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
-    use crate::types::game_state::{ExileLink, ExileLinkKind};
+    use crate::types::game_state::{ExileLink, ExileLinkKind, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
@@ -1966,6 +1959,143 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 7);
+    }
+
+    #[test]
+    fn resolve_aggregate_sum_mana_value_of_owned_cards_exiled_by_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        for (card_id, owner, mv) in [
+            (31, PlayerId(0), 2u32),
+            (32, PlayerId(0), 3),
+            (33, PlayerId(1), 4),
+        ] {
+            let exiled = create_object(
+                &mut state,
+                CardId(card_id),
+                owner,
+                format!("Exiled {card_id}"),
+                Zone::Exile,
+            );
+            state.objects.get_mut(&exiled).unwrap().mana_cost =
+                crate::types::mana::ManaCost::generic(mv);
+            state.exile_links.push(ExileLink {
+                source_id: source,
+                exiled_id: exiled,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+        }
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaValue,
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ExiledBySource,
+                        TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::Owned {
+                                controller: ControllerRef::You,
+                            },
+                        ])),
+                    ],
+                },
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), source), 4);
+    }
+
+    #[test]
+    fn resolve_aggregate_sum_mana_value_of_owned_cards_exiled_by_source_from_ltb_snapshot() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let exiled_a = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Exiled 31".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&exiled_a).unwrap().mana_cost =
+            crate::types::mana::ManaCost::generic(2);
+        let exiled_b = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Exiled 32".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&exiled_b).unwrap().mana_cost =
+            crate::types::mana::ManaCost::generic(3);
+        let exiled_c = create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(1),
+            "Exiled 33".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&exiled_c).unwrap().mana_cost =
+            crate::types::mana::ManaCost::generic(4);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: source,
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                linked_exile_snapshot: vec![
+                    crate::types::game_state::LinkedExileSnapshot {
+                        exiled_id: exiled_a,
+                        owner: PlayerId(0),
+                        mana_value: 2,
+                    },
+                    crate::types::game_state::LinkedExileSnapshot {
+                        exiled_id: exiled_b,
+                        owner: PlayerId(0),
+                        mana_value: 3,
+                    },
+                    crate::types::game_state::LinkedExileSnapshot {
+                        exiled_id: exiled_c,
+                        owner: PlayerId(1),
+                        mana_value: 4,
+                    },
+                ],
+                ..ZoneChangeRecord::test_minimal(source, Zone::Battlefield, Zone::Graveyard)
+            }),
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaValue,
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ExiledBySource,
+                        TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::Owned {
+                                controller: ControllerRef::You,
+                            },
+                        ])),
+                    ],
+                },
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), source), 4);
     }
 
     #[test]

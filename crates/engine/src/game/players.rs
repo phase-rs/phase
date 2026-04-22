@@ -1,5 +1,9 @@
+use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::game_state::LinkedExileSnapshot;
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// Returns true if the player exists in the game and is not eliminated.
 pub fn is_alive(state: &GameState, player: PlayerId) -> bool {
@@ -71,6 +75,54 @@ pub fn apnap_order(state: &GameState) -> Vec<PlayerId> {
         }
     }
     result
+}
+
+/// CR 603.10a + CR 607.2a: Return the cards linked as "exiled with" `source_id`.
+/// Leaves-the-battlefield triggers prefer the trigger event's zone-change snapshot
+/// because `TrackedBySource` links are pruned immediately on battlefield exit per
+/// CR 400.7. Outside that look-back path, fall back to the live exile-link store.
+pub fn linked_exile_cards_for_source(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<LinkedExileSnapshot> {
+    if let Some(GameEvent::ZoneChanged {
+        object_id,
+        from: Zone::Battlefield,
+        record,
+        ..
+    }) = state.current_trigger_event.as_ref()
+    {
+        if *object_id == source_id && !record.linked_exile_snapshot.is_empty() {
+            return record.linked_exile_snapshot.clone();
+        }
+    }
+
+    state
+        .exile_links
+        .iter()
+        .filter(|link| link.source_id == source_id)
+        .filter_map(|link| {
+            state.objects.get(&link.exiled_id).and_then(|obj| {
+                (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
+                    exiled_id: link.exiled_id,
+                    owner: obj.owner,
+                    mana_value: obj.mana_cost.mana_value(),
+                })
+            })
+        })
+        .collect()
+}
+
+/// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently
+/// in exile that is linked to `source_id`.
+pub fn owns_card_exiled_by_source(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    linked_exile_cards_for_source(state, source_id)
+        .iter()
+        .any(|entry| entry.owner == player)
 }
 
 /// Returns teammates of the given player.

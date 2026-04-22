@@ -232,6 +232,14 @@ pub struct ZoneChangeRecord {
     /// leaves the battlefield.
     #[serde(default)]
     pub attachments: Vec<AttachmentSnapshot>,
+    /// CR 603.10a + CR 607.2a: Snapshot of cards linked as "exiled with" this
+    /// object at the moment it left the battlefield. Leaves-the-battlefield
+    /// triggers resolve later through `current_trigger_event`, after
+    /// `TrackedBySource` links have been pruned per CR 400.7, so linked-exile
+    /// follow-ups (Skyclave Apparition) must read this look-back snapshot
+    /// instead of the live `state.exile_links`.
+    #[serde(default)]
+    pub linked_exile_snapshot: Vec<LinkedExileSnapshot>,
     /// CR 111.1: Token identity at the moment of the zone change. Token-ness is a
     /// stable property of the object (not ephemeral battlefield state), so filters
     /// like "whenever a creature token dies" (Grismold) evaluate against this
@@ -249,6 +257,15 @@ pub struct AttachmentSnapshot {
     pub object_id: ObjectId,
     pub controller: PlayerId,
     pub kind: crate::types::ability::AttachmentKind,
+}
+
+/// CR 603.10a + CR 607.2a: Snapshot of a single card linked as "exiled with"
+/// a source at the instant before that source leaves the battlefield.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedExileSnapshot {
+    pub exiled_id: ObjectId,
+    pub owner: PlayerId,
+    pub mana_value: u32,
 }
 
 #[cfg(test)]
@@ -276,6 +293,7 @@ impl ZoneChangeRecord {
             from_zone: from,
             to_zone: to,
             attachments: Vec::new(),
+            linked_exile_snapshot: Vec::new(),
             is_token: false,
         }
     }

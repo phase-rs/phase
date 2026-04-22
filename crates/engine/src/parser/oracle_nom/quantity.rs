@@ -15,8 +15,8 @@ use super::primitives::parse_number;
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    ControllerRef, CountScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter,
-    TypedFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, FilterProp, ObjectProperty, QuantityExpr,
+    QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 
 /// Parse a quantity expression: either a fractional expression, a dynamic reference,
@@ -313,6 +313,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_the_number_of,
         parse_distinct_card_types_exiled_with_source,
+        parse_linked_exile_mana_value_ref,
         parse_distinct_card_types_in_zone,
         // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
         // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
@@ -338,6 +339,38 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_counters_among_ref,
     )))
     .parse(input)
+}
+
+/// CR 607.2a: Parse linked-exile mana-value phrases into the shared aggregate
+/// building block. `ControllerRef::You` is intentional here: player-scope
+/// resolution rebinds the acting controller per owner, so the aggregate reads
+/// "cards exiled with source owned by the iterating player" without a
+/// Skyclave-specific quantity variant.
+fn parse_linked_exile_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((
+        tag("the mana value of the exiled card"),
+        tag("the converted mana cost of the exiled card"),
+        tag("the exiled card's mana value"),
+        tag("the exiled card's converted mana cost"),
+    ))
+    .parse(input)?;
+    Ok((
+        rest,
+        QuantityRef::Aggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::ManaValue,
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ExiledBySource,
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                    ])),
+                ],
+            },
+        },
+    ))
 }
 
 /// CR 122.1: Parse "counters among [filter]" — sum across every counter type.
@@ -852,7 +885,9 @@ fn parse_speed_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TypeFilter;
+    use crate::types::ability::{
+        AggregateFunction, FilterProp, ObjectProperty, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::mana::ManaColor;
 
     #[test]
@@ -1278,5 +1313,35 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_linked_exile_mana_value_ref() {
+        for phrase in [
+            "the mana value of the exiled card",
+            "the converted mana cost of the exiled card",
+            "the exiled card's mana value",
+            "the exiled card's converted mana cost",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                q,
+                QuantityRef::Aggregate {
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::ManaValue,
+                    filter: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::ExiledBySource,
+                            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                                FilterProp::Owned {
+                                    controller: ControllerRef::You,
+                                },
+                            ])),
+                        ],
+                    },
+                }
+            );
+        }
     }
 }

@@ -1822,6 +1822,9 @@ pub enum PlayerFilter {
     /// "each player who [verb]ed a card this way" — scoped to players who owned objects
     /// that changed zones in the preceding effect (tracked via `last_zone_changed_ids`).
     ZoneChangedThisWay,
+    /// Each owner of a card currently exiled with the ability's source.
+    /// Used by linked-exile follow-ups like Skyclave Apparition's leaves trigger.
+    OwnersOfCardsExiledBySource,
     /// CR 113.3c + CR 603.2: The player identified by `state.current_trigger_event`. Used to route
     /// "they [verb]" effects on triggers whose subject is a player (e.g. Firemane
     /// Commando's "another player ... they draw a card").
@@ -3925,6 +3928,7 @@ impl TargetFilter {
                 filters.iter().find_map(|f| f.extract_in_zone())
             }
             TargetFilter::Not { filter } => filter.extract_in_zone(),
+            TargetFilter::ExiledBySource => Some(crate::types::zones::Zone::Exile),
             _ => None,
         }
     }

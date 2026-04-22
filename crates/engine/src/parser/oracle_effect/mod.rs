@@ -5279,7 +5279,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             (None, text)
         };
         let repeat_for = repeat_for.or(repeat_count);
-        let (player_scope, text) = strip_each_player_subject(&text);
+        let (player_scope, text) = strip_player_scope_subject(&text);
 
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
@@ -6107,6 +6107,14 @@ fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
 /// Returns the PlayerFilter scope and the predicate with deconjugated verb.
 /// "Each opponent discards a card" → (Some(Opponent), "discard a card")
 /// "Each player draws a card" → (Some(All), "draw a card")
+fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
+    let (scope, stripped) = strip_linked_exile_owner_subject(text);
+    if scope.is_some() {
+        return (scope, stripped);
+    }
+    strip_each_player_subject(text)
+}
+
 fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let lower = text.to_lowercase();
     let scope_rest = nom_on_lower(text, &lower, |i| {
@@ -6145,6 +6153,43 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     // Deconjugate the verb: "discards" → "discard", "draws" → "draw"
     let deconjugated = subject::deconjugate_verb(rest);
     (Some(scope), deconjugated)
+}
+
+fn strip_linked_exile_owner_subject(text: &str) -> (Option<PlayerFilter>, String) {
+    let lower = text.to_lowercase();
+    let scope_rest = nom_on_lower(text, &lower, |i| {
+        alt((
+            value(
+                PlayerFilter::OwnersOfCardsExiledBySource,
+                tag::<_, _, VerboseError<&str>>("the exiled card's owner "),
+            ),
+            value(
+                PlayerFilter::OwnersOfCardsExiledBySource,
+                tag("the exiled cards' owners "),
+            ),
+        ))
+        .parse(i)
+    });
+    let Some((scope, rest)) = scope_rest else {
+        return (None, text.to_string());
+    };
+
+    let rest_lower = rest.trim().to_lowercase();
+    if alt((
+        tag::<_, _, VerboseError<&str>>("can't"),
+        tag("cannot"),
+        tag("don't"),
+        tag("may only"),
+        tag("may not"),
+        tag("may cast"),
+    ))
+    .parse(rest_lower.as_str())
+    .is_ok()
+    {
+        return (None, text.to_string());
+    }
+
+    (Some(scope), subject::deconjugate_verb(rest))
 }
 
 /// Parse the player noun used by damage-to-players phrases.
@@ -12705,6 +12750,14 @@ mod tests {
         let (scope, result) = strip_each_player_subject("each opponent loses 2 life");
         assert!(scope.is_some());
         assert_eq!(result, "lose 2 life");
+    }
+
+    #[test]
+    fn strip_player_scope_subject_linked_exile_owner() {
+        let (scope, result) =
+            strip_player_scope_subject("the exiled card's owner creates an X/X token");
+        assert_eq!(scope, Some(PlayerFilter::OwnersOfCardsExiledBySource));
+        assert_eq!(result, "create an X/X token");
     }
 
     #[test]

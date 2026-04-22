@@ -212,6 +212,11 @@ pub fn move_to_zone(
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, from, to);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
+    // CR 603.10a + CR 607.2a: Leaves-the-battlefield triggers look back to the
+    // object as it existed immediately before the move. Snapshot linked "exiled
+    // with" cards here, before CR 400.7 cleanup prunes `TrackedBySource`.
+    zone_change_record.linked_exile_snapshot =
+        capture_linked_exile_snapshot(state, object_id, from);
 
     apply_zone_exit_cleanup(state, object_id, from);
 
@@ -289,6 +294,37 @@ pub fn move_to_zone(
         to,
         record: Box::new(zone_change_record),
     });
+}
+
+fn capture_linked_exile_snapshot(
+    state: &GameState,
+    source_id: ObjectId,
+    from: Zone,
+) -> Vec<crate::types::game_state::LinkedExileSnapshot> {
+    if from != Zone::Battlefield {
+        return Vec::new();
+    }
+
+    state
+        .exile_links
+        .iter()
+        .filter(|link| {
+            link.source_id == source_id
+                && matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::TrackedBySource
+                )
+        })
+        .filter_map(|link| {
+            state.objects.get(&link.exiled_id).and_then(|obj| {
+                (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {
+                    exiled_id: link.exiled_id,
+                    owner: obj.owner,
+                    mana_value: obj.mana_cost.mana_value(),
+                })
+            })
+        })
+        .collect()
 }
 
 /// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
@@ -1037,6 +1073,56 @@ mod tests {
             state.objects[&dead].zone,
             Zone::Battlefield,
             "Phased-out Cage must not block ETB from graveyard"
+        );
+    }
+
+    #[test]
+    fn move_to_zone_snapshots_linked_exile_before_pruning_tracked_links() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Skyclave Apparition".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(1),
+            "Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&exiled).unwrap().mana_cost =
+            crate::types::mana::ManaCost::generic(4);
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            source_id: source,
+            exiled_id: exiled,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+
+        let record = match &events[0] {
+            GameEvent::ZoneChanged { record, .. } => record,
+            other => panic!("expected ZoneChanged event, got {other:?}"),
+        };
+
+        assert_eq!(
+            record.linked_exile_snapshot,
+            vec![crate::types::game_state::LinkedExileSnapshot {
+                exiled_id: exiled,
+                owner: PlayerId(1),
+                mana_value: 4,
+            }]
+        );
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .all(|link| link.source_id != source),
+            "TrackedBySource links should still be pruned immediately after LTB"
         );
     }
 }

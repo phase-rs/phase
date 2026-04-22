@@ -9,6 +9,7 @@ fn players_for_filter(
     state: &GameState,
     filter: &PlayerFilter,
     controller: PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
 ) -> Vec<PlayerId> {
     match filter {
         PlayerFilter::Controller => vec![controller],
@@ -43,14 +44,16 @@ fn players_for_filter(
                 .players
                 .iter()
                 .filter(|player| !player.is_eliminated)
-                .map(|player| player.speed.unwrap_or(0))
+                .map(|player| crate::game::speed::effective_speed(state, player.id))
                 .max()
                 .unwrap_or(0);
             state
                 .players
                 .iter()
                 .filter(|player| !player.is_eliminated)
-                .filter(|player| player.speed.unwrap_or(0) == highest_speed)
+                .filter(|player| {
+                    crate::game::speed::effective_speed(state, player.id) == highest_speed
+                })
                 .map(|player| player.id)
                 .collect()
         }
@@ -65,6 +68,15 @@ fn players_for_filter(
                         .get(id)
                         .is_some_and(|obj| obj.owner == player.id)
                 })
+            })
+            .map(|player| player.id)
+            .collect(),
+        PlayerFilter::OwnersOfCardsExiledBySource => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::owns_card_exiled_by_source(state, player.id, source_id)
             })
             .map(|player| player.id)
             .collect(),
@@ -90,7 +102,8 @@ pub fn resolve_start(
         ));
     };
 
-    for player_id in players_for_filter(state, player_scope, ability.controller) {
+    for player_id in players_for_filter(state, player_scope, ability.controller, ability.source_id)
+    {
         let has_no_speed = state
             .players
             .iter()
@@ -126,7 +139,8 @@ pub fn resolve_increase(
         return Ok(());
     }
 
-    for player_id in players_for_filter(state, player_scope, ability.controller) {
+    for player_id in players_for_filter(state, player_scope, ability.controller, ability.source_id)
+    {
         increase_speed(state, player_id, amount, events);
     }
 

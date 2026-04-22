@@ -576,7 +576,7 @@ pub fn resolve_all(
     // CR 120.3: Collect matching player IDs when the effect also targets players.
     // The player set is part of the same damage event as the object set.
     let matching_players: Vec<PlayerId> = match player_filter {
-        Some(pf) => collect_matching_players(state, pf, ability.controller),
+        Some(pf) => collect_matching_players(state, pf, ability.controller, ability.source_id),
         None => Vec::new(),
     };
 
@@ -627,6 +627,7 @@ fn collect_matching_players(
     state: &GameState,
     player_filter: PlayerFilter,
     source_controller: PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
 ) -> Vec<PlayerId> {
     state
         .players
@@ -648,15 +649,18 @@ fn collect_matching_players(
                             .players
                             .iter()
                             .filter(|player| !player.is_eliminated)
-                            .map(|player| player.speed.unwrap_or(0))
+                            .map(|player| crate::game::speed::effective_speed(state, player.id))
                             .max()
                             .unwrap_or(0);
-                        p.speed.unwrap_or(0) == highest_speed
+                        crate::game::speed::effective_speed(state, p.id) == highest_speed
                     }
                     PlayerFilter::ZoneChangedThisWay => state
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    PlayerFilter::OwnersOfCardsExiledBySource => {
+                        crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
+                    }
                     PlayerFilter::TriggeringPlayer => state
                         .current_trigger_event
                         .as_ref()
@@ -712,15 +716,22 @@ pub fn resolve_each_player(
                             .players
                             .iter()
                             .filter(|player| !player.is_eliminated)
-                            .map(|player| player.speed.unwrap_or(0))
+                            .map(|player| crate::game::speed::effective_speed(state, player.id))
                             .max()
                             .unwrap_or(0);
-                        p.speed.unwrap_or(0) == highest_speed
+                        crate::game::speed::effective_speed(state, p.id) == highest_speed
                     }
                     PlayerFilter::ZoneChangedThisWay => state
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    PlayerFilter::OwnersOfCardsExiledBySource => {
+                        crate::game::players::owns_card_exiled_by_source(
+                            state,
+                            p.id,
+                            ability.source_id,
+                        )
+                    }
                     PlayerFilter::TriggeringPlayer => state
                         .current_trigger_event
                         .as_ref()

@@ -3350,6 +3350,161 @@ pub mod tests {
         }
     }
 
+    #[test]
+    fn skyclave_apparition_ltb_trigger_uses_zone_change_linked_exile_snapshot() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let skyclave = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Skyclave Apparition".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&skyclave).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(
+                        AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::Token {
+                                name: "Illusion".to_string(),
+                                power: crate::types::ability::PtValue::Quantity(
+                                    QuantityExpr::Ref {
+                                        qty: QuantityRef::Aggregate {
+                                            function: crate::types::ability::AggregateFunction::Sum,
+                                            property:
+                                                crate::types::ability::ObjectProperty::ManaValue,
+                                            filter: TargetFilter::And {
+                                                filters: vec![
+                                                    TargetFilter::ExiledBySource,
+                                                    TargetFilter::Typed(
+                                                        TypedFilter::default().properties(vec![
+                                                            FilterProp::Owned {
+                                                                controller: ControllerRef::You,
+                                                            },
+                                                        ]),
+                                                    ),
+                                                ],
+                                            },
+                                        },
+                                    },
+                                ),
+                                toughness: crate::types::ability::PtValue::Quantity(
+                                    QuantityExpr::Ref {
+                                        qty: QuantityRef::Aggregate {
+                                            function: crate::types::ability::AggregateFunction::Sum,
+                                            property:
+                                                crate::types::ability::ObjectProperty::ManaValue,
+                                            filter: TargetFilter::And {
+                                                filters: vec![
+                                                    TargetFilter::ExiledBySource,
+                                                    TargetFilter::Typed(
+                                                        TypedFilter::default().properties(vec![
+                                                            FilterProp::Owned {
+                                                                controller: ControllerRef::You,
+                                                            },
+                                                        ]),
+                                                    ),
+                                                ],
+                                            },
+                                        },
+                                    },
+                                ),
+                                types: vec!["Creature".to_string(), "Illusion".to_string()],
+                                colors: vec![ManaColor::Blue],
+                                keywords: vec![],
+                                tapped: false,
+                                count: QuantityExpr::Fixed { value: 1 },
+                                owner: TargetFilter::Controller,
+                                attach_to: None,
+                                enters_attacking: false,
+                                supertypes: vec![],
+                                static_abilities: vec![],
+                                enter_with_counters: vec![],
+                            },
+                        )
+                        .player_scope(
+                            crate::types::ability::PlayerFilter::OwnersOfCardsExiledBySource,
+                        ),
+                    )
+                    .origin(Zone::Battlefield)
+                    .valid_card(TargetFilter::SelfRef)
+                    .trigger_zones(vec![Zone::Battlefield]),
+            );
+        }
+
+        for (card_id, owner, mv) in [
+            (301, PlayerId(0), 2u32),
+            (302, PlayerId(0), 3),
+            (303, PlayerId(1), 4),
+        ] {
+            let exiled = create_object(
+                &mut state,
+                CardId(card_id),
+                owner,
+                format!("Exiled {card_id}"),
+                Zone::Exile,
+            );
+            state.objects.get_mut(&exiled).unwrap().mana_cost =
+                crate::types::mana::ManaCost::generic(mv);
+            state.exile_links.push(crate::types::game_state::ExileLink {
+                source_id: skyclave,
+                exiled_id: exiled,
+                kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            });
+        }
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, skyclave, Zone::Graveyard, &mut events);
+
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .all(|link| link.source_id != skyclave),
+            "precondition: tracked links should be pruned before trigger resolution"
+        );
+
+        process_triggers(&mut state, &events);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "LTB trigger should be pushed to stack"
+        );
+
+        crate::game::stack::resolve_top(&mut state, &mut Vec::new());
+
+        let mut created: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.is_token)
+            .map(|object| {
+                (
+                    object.owner,
+                    object.controller,
+                    object.power,
+                    object.toughness,
+                )
+            })
+            .collect();
+        created.sort_by_key(|entry| entry.0);
+
+        assert_eq!(
+            created,
+            vec![
+                (PlayerId(0), PlayerId(0), Some(5), Some(5)),
+                (PlayerId(1), PlayerId(1), Some(4), Some(4)),
+            ]
+        );
+    }
+
     // ── Ward trigger tests ──────────────────────────────────────────────
 
     #[test]
