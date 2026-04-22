@@ -67,10 +67,30 @@ I'm not trying to make money off this. There are no ads. I'm just a dude who lik
 ### Prerequisites
 
 - [Rust toolchain](https://rustup.rs/)
-- wasm32 target: `rustup target add wasm32-unknown-unknown`
+- wasm32 target: `rustup target add wasm32-unknown-unknown` (Windows: see below)
 - wasm-bindgen-cli: `cargo install wasm-bindgen-cli@0.2.114`
 - wasm-opt (optional): `brew install binaryen` or `apt install binaryen`
 - [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/): `npm i -g pnpm`
+
+#### Windows
+
+`rustup` on Windows defaults to the GNU toolchain, which requires `dlltool.exe` and fails with _"error calling dlltool 'dlltool.exe': program not found"_. You need [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload, then switch to the MSVC host:
+
+```powershell
+rustup set default-host x86_64-pc-windows-msvc
+rustup toolchain install nightly --target wasm32-unknown-unknown
+```
+
+Verify with `rustup show active-toolchain` — it should end in `x86_64-pc-windows-msvc`.
+
+The setup scripts also require `jq` and `curl`, which are not installed by default on Windows. Install them before running `./scripts/setup.sh`:
+
+```powershell
+winget install jqlang.jq
+winget install curl.curl   # skip if curl is already on your PATH
+```
+
+Open a new terminal after installing so the updated PATH takes effect.
 
 ### Setup
 
