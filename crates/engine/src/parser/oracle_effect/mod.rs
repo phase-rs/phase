@@ -7186,9 +7186,9 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
     }
 
     // No "to [target]" clause — the damage target is inherited from the parent effect
-    // (e.g., "it deals 4 damage instead" / "it deals 7 damage instead." reuses the
-    // original target). Also matches bare "instead" with optional trailing punctuation,
-    // which appears when a conditional clause like "If you're the monarch, it deals 7
+    // (e.g., "it deals 4 damage instead" reuses the original target). 
+    // Also matches bare "instead" with optional trailing punctuation, which
+    // appears when a conditional clause like "If you're the monarch, it deals 7
     // damage instead." has no explicit target phrase.
     let after_to_no_punct = after_to_lower.trim_end_matches(|c: char| c.is_ascii_punctuation());
     if after_to.is_empty()
