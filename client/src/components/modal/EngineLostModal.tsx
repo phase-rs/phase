@@ -22,15 +22,23 @@ import { onEngineLost } from "../../game/engineRecovery";
  */
 export function EngineLostModal() {
   const [shown, setShown] = useState(false);
+  // `reason` is a developer tag ("submitAction-retry", "ai-controller-stuck")
+  // used for support-log collection via the debug toggle. Never surfaced as
+  // primary UI copy — users see the user-facing explanation instead.
   const [reason, setReason] = useState<string>("");
+  const [showDetails, setShowDetails] = useState(false);
 
   useEffect(() => {
-    return onEngineLost((r: string) => {
-      setShown((prev) => {
-        if (prev) return prev;
-        setReason(r);
-        return true;
-      });
+    // External latch instead of a setState updater with a side effect.
+    // Updater functions can run multiple times in React concurrent mode,
+    // which would double-set `reason` and could double-show the modal
+    // after a state reset in dev (StrictMode).
+    let fired = false;
+    return onEngineLost((r) => {
+      if (fired) return;
+      fired = true;
+      setReason(r);
+      setShown(true);
     });
   }, []);
 
@@ -41,18 +49,31 @@ export function EngineLostModal() {
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center">
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center"
+      data-engine-lost-reason={reason}
+    >
       <div className="absolute inset-0 bg-black/80" />
       <div className="relative z-10 max-w-md rounded-xl bg-gray-900 p-8 shadow-2xl ring-1 ring-rose-700/60">
         <h2 className="mb-3 text-xl font-bold text-white">Engine connection lost</h2>
         <p className="mb-4 text-sm text-gray-300">
           phase.rs lost its link to the game engine — most often caused by a
           background update activating mid-game. Your last saved turn is
-          preserved.
+          preserved; reload to restore the game.
         </p>
-        <p className="mb-6 text-xs text-gray-500">
-          Reload to restore the game. ({reason})
-        </p>
+        {showDetails ? (
+          <p className="mb-6 font-mono text-[11px] text-gray-500">
+            diagnostic: {reason}
+          </p>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowDetails(true)}
+            className="mb-6 text-[11px] text-gray-600 underline hover:text-gray-400"
+          >
+            Show details
+          </button>
+        )}
         <div className="flex justify-end gap-3">
           <button
             onClick={handleReload}

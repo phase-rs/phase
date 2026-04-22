@@ -124,7 +124,18 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       notifyEngineLost("submitAction");
       throw err;
     }
-    result = await adapter.submitAction(action, actor);
+    // Recovery reported success but the underlying worker restoreState is
+    // fire-and-forget from the adapter (void return, async worker). If the
+    // restore silently failed — e.g., MULTIPLAYER_MODE refused it, the worker
+    // crashed mid-restore — this retry will throw STATE_LOST again. Catch
+    // that explicitly and surface via Layer 3 rather than letting the error
+    // escape uncaught.
+    try {
+      result = await adapter.submitAction(action, actor);
+    } catch (retryErr) {
+      notifyEngineLost("submitAction-retry");
+      throw retryErr;
+    }
   }
   const events: GameEvent[] = result.events;
 
@@ -145,7 +156,12 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       notifyEngineLost("getState");
       throw err;
     }
-    newState = await adapter.getState();
+    try {
+      newState = await adapter.getState();
+    } catch (retryErr) {
+      notifyEngineLost("getState-retry");
+      throw retryErr;
+    }
   }
   const { gameId } = useGameStore.getState();
   if (gameId) saveGame(gameId, newState);
@@ -213,7 +229,12 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       notifyEngineLost("getLegalActions");
       throw err;
     }
-    legalResult = await adapter.getLegalActions();
+    try {
+      legalResult = await adapter.getLegalActions();
+    } catch (retryErr) {
+      notifyEngineLost("getLegalActions-retry");
+      throw retryErr;
+    }
   }
 
   useGameStore.setState((prev) => {
@@ -272,6 +293,20 @@ async function processQueue(): Promise<void> {
     } catch (err) {
       debugLog(`processQueue error (${next.kind}): ${err instanceof Error ? err.message : String(err)}`);
       next.reject(err);
+      // If processAction escalated to Layer 3 (notifyEngineLost already
+      // fired), drain the rest of the queue with the same error. Without
+      // this, each remaining item would attempt its own recovery, each
+      // one failing and re-firing notifyEngineLost — the modal is
+      // de-duped but the log becomes noisy and we waste cycles on doomed
+      // rehydrates. User is about to reload; nothing in this queue is
+      // going to succeed.
+      if (isStateLost(err)) {
+        while (pendingQueue.length > 0) {
+          const stale = pendingQueue.shift()!;
+          stale.reject(err);
+        }
+        break;
+      }
     }
   }
   isAnimating = false;

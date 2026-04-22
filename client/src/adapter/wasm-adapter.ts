@@ -171,8 +171,14 @@ export class WasmAdapter implements EngineAdapter {
               Date.now(),
             );
           }
-        } catch {
-          // Pool failed — fall through to single-worker path
+        } catch (err) {
+          // STATE_LOST must escalate immediately — falling through to the
+          // single-worker path would just hit the same sentinel and waste a
+          // round-trip. All other pool failures are recoverable via the
+          // single-worker fallback.
+          if (err instanceof Error && isStateLostMessage(err.message)) {
+            classifyEngineError(err);
+          }
         }
       }
     }

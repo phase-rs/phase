@@ -63,10 +63,23 @@ function whenMultiplayerGameEnds(callback: () => void): () => void {
     unsub();
     callback();
   };
+  // Selector derives the boolean directly from the state argument rather
+  // than closing over `isMultiplayerGameLive` (which would re-read the
+  // store via getState and bypass the selector pattern). Zustand's
+  // subscribeWithSelector compares with Object.is, so the listener only
+  // fires on true↔false transitions.
   const unsub = useGameStore.subscribe(
-    () => isMultiplayerGameLive(),
+    (s) => {
+      if (!isMultiplayerMode(s.gameMode)) return false;
+      if (!s.adapter) return false;
+      if (s.gameState?.waiting_for?.type === "GameOver") return false;
+      return true;
+    },
     (live) => { if (!live) fire(); },
   );
+  // Immediate re-check closes a TOCTOU window: state may have transitioned
+  // out of "live" between the caller's guard and our subscribe, and Zustand
+  // only fires on *subsequent* changes.
   if (!isMultiplayerGameLive()) fire();
   return unsub;
 }

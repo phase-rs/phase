@@ -174,14 +174,21 @@ export function createAIController(config: AIControllerConfig): AIController {
           if (!isStateLost(err)) throw err;
           // Engine lost state between scheduleAction and the timeout firing.
           // Try to rehydrate from the store snapshot and recompute the AI
-          // action once. If recovery fails, escalate to the user-prompt path.
+          // action once. If recovery fails (or the retry still throws because
+          // restoreState silently failed in the worker), escalate to the
+          // user-prompt path.
           debugLog("AI getAiAction hit STATE_LOST; attempting rehydrate", "warn");
           const recovered = await attemptStateRehydrate();
           if (!recovered) {
             notifyEngineLost("ai-getAction");
             throw err;
           }
-          action = await adapter!.getAiAction(config.difficulty, playerId);
+          try {
+            action = await adapter!.getAiAction(config.difficulty, playerId);
+          } catch (retryErr) {
+            notifyEngineLost("ai-getAction-retry");
+            throw retryErr;
+          }
         }
         // Re-check active after await — the AI computation may have completed
         // after stop() was called, and dispatching a stale action from the old
