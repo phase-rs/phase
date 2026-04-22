@@ -8120,6 +8120,7 @@ mod tests {
         assert!(
             !crate::parser::oracle_warnings::take_warnings()
                 .iter()
+                .next()
                 .is_some(),
             "unexpected target-fallback warning"
         );
