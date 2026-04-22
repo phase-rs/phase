@@ -6,12 +6,12 @@ interface RichLabelProps {
   className?: string;
 }
 
-
 const SYMBOL_PATTERN = /\{([^{}]+)\}/g;
 
 export function RichLabel({ text, size = "sm", className }: RichLabelProps) {
   return (
     <span className={className}>
+      {/* ChoiceModal uses brace-delimited mana/tap notation like {W} and {T}. */}
       {text.split(SYMBOL_PATTERN).map((part, i) =>
         i % 2 === 0 ? (
           part

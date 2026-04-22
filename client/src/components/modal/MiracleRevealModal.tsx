@@ -3,30 +3,11 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { GameAction, ManaCost, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { SHARD_ABBREVIATION } from "../../viewmodel/costLabel.ts";
-import { ManaSymbol } from "../mana/ManaSymbol.tsx";
+import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 
 type MiracleReveal = Extract<WaitingFor, { type: "MiracleReveal" }>;
 type MiracleCastOffer = Extract<WaitingFor, { type: "MiracleCastOffer" }>;
 type MadnessCastOffer = Extract<WaitingFor, { type: "MadnessCastOffer" }>;
-
-function ManaCostSymbols({ cost }: { cost: ManaCost }) {
-  if (cost.type === "NoCost" || cost.type === "SelfManaCost")
-    return <span className="text-slate-500">Free</span>;
-  const symbols: string[] = [];
-  if (cost.generic > 0) symbols.push(String(cost.generic));
-  for (const shard of cost.shards) {
-    symbols.push(SHARD_ABBREVIATION[shard] ?? shard);
-  }
-  if (symbols.length === 0) symbols.push("0");
-  return (
-    <span className="inline-flex items-center gap-0.5">
-      {symbols.map((s, i) => (
-        <ManaSymbol key={i} shard={s} size="sm" />
-      ))}
-    </span>
-  );
-}
 
 export function MiracleRevealModal() {
   const canActForWaitingState = useCanActForWaitingState();
