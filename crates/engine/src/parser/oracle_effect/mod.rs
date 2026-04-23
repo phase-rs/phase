@@ -26,8 +26,8 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause};
 use super::oracle_target::{parse_event_context_ref, parse_target, parse_type_phrase};
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, starts_with_possessive,
-    strip_after, TextPair,
+    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, split_around,
+    starts_with_possessive, strip_after, TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
@@ -1050,6 +1050,96 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 /// When this text appears on a permanent as a static ability, the static parser handles it.
 /// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
 /// it needs to create an emblem to produce a persistent game-state effect.
+/// CR 700.2 + CR 608.2d: Detect inline binary-choice imperatives of the form
+/// "A or B" where both A and B parse independently as supported effects.
+/// Emits `Effect::ChooseOneOf { branches: [A, B] }` so the second branch is
+/// preserved in card data rather than silently dropped by the single-verb
+/// dispatch.
+///
+/// Highway Robbery ("discard a card or sacrifice a land") is the motivating
+/// case; the same shape applies to other "you may A or B" cards where the
+/// outer "you may" has already been stripped by `strip_optional_effect_prefix`.
+///
+/// Constraints (false-positive guards):
+///   1. Reject if the clause starts with "target " — "target creature or
+///      player" is a typed target, not a choice of effects.
+///   2. Reject if the first token is a modal header ("choose "), reminder/
+///      connector ("either"), or a non-imperative starter — this helper is
+///      a last-resort detector, not a general splitter.
+///   3. Reject unless BOTH halves independently parse to a non-`Unimplemented`
+///      effect. A half failing to parse means this isn't a true "A or B"
+///      choice — it's probably noun-phrase disjunction ("creature or land")
+///      inside a larger imperative.
+///   4. Only consider the FIRST `, or ` or first top-level ` or ` split. Cards
+///      with 3+ branches are rare and handled by bulleted modal text instead.
+fn try_parse_choose_one_of_inline(
+    tp: TextPair<'_>,
+    ctx: &ParseContext,
+) -> Option<ParsedEffectClause> {
+    // CR 115.1: bail on target phrases — "target creature or player" is a
+    // typed-target disjunction, not a choice between effects.
+    if tag::<_, _, VerboseError<&str>>("target ")
+        .parse(tp.lower)
+        .is_ok()
+    {
+        return None;
+    }
+
+    // Find the first top-level " or " split. Prefer a comma-qualified ", or "
+    // as the clearer form; fall back to bare " or " when the text is short
+    // enough that misreading intra-phrase "or" is unlikely.
+    let split_index = split_around(tp.lower, ", or ")
+        .map(|(before, _)| before.len())
+        .or_else(|| split_around(tp.lower, " or ").map(|(before, _)| before.len()))?;
+
+    // The ", or " split has a 5-char separator; " or " has 4. Detect which by
+    // looking at the byte at split_index+2.
+    let sep_len = if tp.lower[split_index..].starts_with(", or ") {
+        5
+    } else {
+        4
+    };
+
+    let left_orig = tp.original[..split_index].trim();
+    let right_orig = tp.original[split_index + sep_len..].trim();
+
+    // Both halves must be non-empty and look like imperatives. The left half
+    // must not end with a subject marker that would make the "or" coordinate
+    // nouns (e.g., "target creature" should not split as a branch boundary).
+    if left_orig.is_empty() || right_orig.is_empty() {
+        return None;
+    }
+
+    // Attempt to parse each branch independently as a clause.
+    let left_clause = parse_effect_clause(left_orig, ctx);
+    let right_clause = parse_effect_clause(right_orig, ctx);
+
+    // Reject unless BOTH branches produce non-Unimplemented effects. This
+    // prevents false positives on noun-phrase disjunctions and "and/or"
+    // coordinations inside larger imperatives.
+    if matches!(left_clause.effect, Effect::Unimplemented { .. })
+        || matches!(right_clause.effect, Effect::Unimplemented { .. })
+    {
+        return None;
+    }
+
+    // Also reject if either branch is `TargetOnly` — that's a structural
+    // wrapper, not a terminal effect. A real binary choice needs two
+    // executable branches.
+    if matches!(left_clause.effect, Effect::TargetOnly { .. })
+        || matches!(right_clause.effect, Effect::TargetOnly { .. })
+    {
+        return None;
+    }
+
+    let left_def = AbilityDefinition::new(AbilityKind::Spell, left_clause.effect);
+    let right_def = AbilityDefinition::new(AbilityKind::Spell, right_clause.effect);
+
+    Some(parsed_clause(Effect::ChooseOneOf {
+        branches: vec![left_def, right_def],
+    }))
+}
+
 fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
     // Strip optional "you " prefix, then match "have no maximum hand size"
     let after_you = nom_on_lower(tp.original, tp.lower, |i| value((), tag("you ")).parse(i));
@@ -1253,6 +1343,19 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     // Single lowercase pass for all case-insensitive matching within this clause.
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+
+    // CR 700.2 + CR 608.2d: Inline binary-choice imperative — "discard a card
+    // or sacrifice a land" (Highway Robbery) and analogous "A or B" patterns
+    // that are not bulleted `Choose one —` modals. The split happens BEFORE
+    // any single-verb dispatch so the second branch isn't silently dropped
+    // when the first matches ("discard ..." prefix consumes the whole text).
+    // Constrained to the narrow case where (a) exactly one ` or ` appears at
+    // clause top level, (b) both halves independently parse as a supported
+    // imperative — prevents false positives on intra-imperative "or" like
+    // "target creature or player".
+    if let Some(clause) = try_parse_choose_one_of_inline(tp, ctx) {
+        return clause;
+    }
 
     // CR 402.2 + CR 114.1: "you have no maximum hand size [for the rest of the game]" —
     // as an effect, this creates an emblem with NoMaximumHandSize static.
@@ -15505,5 +15608,68 @@ mod tests {
             ],
         };
         assert_eq!(target, &expected);
+    }
+
+    // ------------------------------------------------------------------
+    // CR 700.2 + CR 608.2d: ChooseOneOf inline binary-choice regression.
+    // ------------------------------------------------------------------
+
+    /// Highway Robbery's spell text "You may discard a card or sacrifice a
+    /// land" produces a `ChooseOneOf` with two branches (Discard + Sacrifice),
+    /// wrapped in an optional outer ability.
+    #[test]
+    fn choose_one_of_detects_highway_robbery_pattern() {
+        let ability = parse_effect_chain(
+            "You may discard a card or sacrifice a land.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            ability.optional,
+            "outer 'you may' must mark ability optional"
+        );
+        match &*ability.effect {
+            Effect::ChooseOneOf { branches } => {
+                assert_eq!(branches.len(), 2, "Highway Robbery has exactly 2 branches");
+                assert!(
+                    matches!(&*branches[0].effect, Effect::Discard { .. }),
+                    "first branch is Discard"
+                );
+                assert!(
+                    matches!(&*branches[1].effect, Effect::Sacrifice { .. }),
+                    "second branch is Sacrifice"
+                );
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    /// False-positive guard: "target creature or player" is a typed-target
+    /// disjunction inside an imperative, NOT a binary choice of effects.
+    #[test]
+    fn choose_one_of_rejects_target_disjunction() {
+        let ability = parse_effect_chain(
+            "deal 3 damage to target creature or player",
+            AbilityKind::Spell,
+        );
+        // Must parse as DealDamage, NOT ChooseOneOf.
+        assert!(
+            !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
+            "target-phrase disjunction must not be split into ChooseOneOf"
+        );
+    }
+
+    /// False-positive guard: if only one half parses (the other is
+    /// Unimplemented), the detector must bail and let the normal dispatch
+    /// handle it — better to get a partial/Unimplemented than a fake choice.
+    #[test]
+    fn choose_one_of_rejects_when_second_half_unparseable() {
+        let ability = parse_effect_chain(
+            "discard a card or <gibberish nonsense phrase>",
+            AbilityKind::Spell,
+        );
+        assert!(
+            !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
+            "must not emit ChooseOneOf when one branch fails to parse"
+        );
     }
 }

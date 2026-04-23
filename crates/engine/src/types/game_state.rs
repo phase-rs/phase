@@ -1860,6 +1860,13 @@ pub enum CastingVariant {
     /// transient continuous "has haste" effect that lasts as long as the
     /// resolution-time controller still controls the permanent.
     Suspend,
+    /// CR 702.170d: Cast from exile via the Plot "cast without paying its mana
+    /// cost" permission during the owner's main phase on a turn after the card
+    /// was plotted. Detected at cast preparation when the exile-zone source has
+    /// a `CastingPermission::Plotted { turn_plotted }` and the current turn is
+    /// strictly greater than `turn_plotted`. Zeroes the mana cost and routes
+    /// through the normal cast pipeline; no special resolution-time behavior.
+    Plot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

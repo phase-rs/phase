@@ -347,7 +347,11 @@ fn redundancy_delta(
         | Effect::LoseAllPlayerCounters { .. }
         // CR 701.20a: RevealFromHand prompts a reveal-or-decline choice; its value
         // depends on the on_decline branch and game state — no simple redundancy signal.
-        | Effect::RevealFromHand { .. } => None,
+        | Effect::RevealFromHand { .. }
+        // CR 700.2: ChooseOneOf offers the controller a runtime choice between
+        // branches — redundancy would require evaluating each branch in turn,
+        // which is beyond this policy's scope. Fall through to None.
+        | Effect::ChooseOneOf { .. } => None,
     }
 }
 

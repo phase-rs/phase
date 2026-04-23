@@ -95,6 +95,12 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                         | crate::types::ability::CastingPermission::PlayFromExile { .. }
                         | crate::types::ability::CastingPermission::ExileWithEnergyCost
                         | crate::types::ability::CastingPermission::WarpExile { .. }
+                        // CR 702.170d + CR 400.7: Plotted permission is scoped
+                        // to the exile zone. Once the card leaves exile (cast
+                        // resolves, or another effect moves it), drop the
+                        // permission so a later return-to-exile doesn't
+                        // inherit a stale turn_plotted value.
+                        | crate::types::ability::CastingPermission::Plotted { .. }
                 )
             });
             state.exile_links.retain(|link| link.exiled_id != object_id);

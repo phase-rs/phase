@@ -72,7 +72,10 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
             | CastingPermission::ExileWithEnergyCost
-            | CastingPermission::WarpExile { .. } => true,
+            | CastingPermission::WarpExile { .. }
+            // CR 702.170d: Plotted persists across turns (that is the whole
+            // point of Plot — cast "on a later turn"); never pruned at cleanup.
+            | CastingPermission::Plotted { .. } => true,
         });
     }
 }
@@ -92,7 +95,10 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
             | CastingPermission::ExileWithEnergyCost
-            | CastingPermission::WarpExile { .. } => true,
+            | CastingPermission::WarpExile { .. }
+            // CR 702.170d: Plotted persists across turns; never pruned at the
+            // untap step. Retention is zone-scoped (see zones::apply_zone_exit_cleanup).
+            | CastingPermission::Plotted { .. } => true,
         });
     }
 }

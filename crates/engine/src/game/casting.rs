@@ -499,6 +499,12 @@ fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject, turn_nu
         crate::types::ability::CastingPermission::WarpExile {
             castable_after_turn,
         } => turn_number > *castable_after_turn,
+        // CR 702.170d: Plotted cards only castable on a later turn than the
+        // one they became plotted on (owner's main phase, empty stack — those
+        // conditions are enforced separately by sorcery-speed timing).
+        crate::types::ability::CastingPermission::Plotted { turn_plotted } => {
+            turn_number > *turn_plotted
+        }
     })
 }
 
@@ -952,9 +958,23 @@ fn prepare_spell_cast_with_variant_override(
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }));
 
+    // CR 702.170d: Plot free-cast detection — when casting an exile-zone card
+    // with a `CastingPermission::Plotted { turn_plotted }` (on a later turn
+    // than it was plotted), the cast is the plot "without paying its mana
+    // cost" path. Mirrors `is_suspend_cast` — permission-keyed, no separate
+    // keyword-presence check (Plot is a hand-zone activated ability; once the
+    // card is in exile with the Plotted permission, the keyword's job is done).
+    let is_plot_cast = obj.zone == Zone::Exile
+        && obj
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, crate::types::ability::CastingPermission::Plotted { .. }));
+
     let casting_variant = variant_override.unwrap_or_else(|| {
         if is_suspend_cast {
             CastingVariant::Suspend
+        } else if is_plot_cast {
+            CastingVariant::Plot
         } else if escape_cost.is_some() {
             CastingVariant::Escape
         } else if harmonize_cost.is_some() {
@@ -1031,10 +1051,14 @@ fn prepare_spell_cast_with_variant_override(
     // selected by the `else` branch below.
     let pure_non_mana_flashback =
         flashback_non_mana_cost.is_some() && flashback_mana_cost.is_none();
+    // CR 702.170d: Plot casts are always free — the Plotted permission encodes
+    // "without paying its mana cost". Zero the mana cost at preparation time,
+    // mirroring the hand-free / flashback-non-mana paths above.
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || is_hand_permission_variant
         || pure_non_mana_flashback
+        || is_plot_cast
     {
         crate::types::mana::ManaCost::NoCost
     } else {

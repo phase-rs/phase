@@ -939,6 +939,16 @@ pub enum CastingPermission {
     /// CR 702.185a: Warp — card may be cast from exile at its normal mana cost,
     /// but only after the specified turn ends. Persists for as long as card remains exiled.
     WarpExile { castable_after_turn: u32 },
+    /// CR 702.170a + CR 702.170d: Plot — card was exiled from its owner's hand via
+    /// the plot special action (or granted this marker by another effect). On any
+    /// turn after `turn_plotted`, the owner may cast it from exile without paying
+    /// its mana cost during their own main phase while the stack is empty
+    /// (sorcery-speed). The `turn_plotted` field is stamped from `state.turn_number`
+    /// at resolution time by `grant_permission::resolve` (placeholder `0` at
+    /// definition time); it is read by `has_exile_cast_permission` to gate the
+    /// "later turn" check. Persists for as long as the card remains in exile
+    /// (cleared by `zones::apply_zone_exit_cleanup` when the card leaves exile).
+    Plotted { turn_plotted: u32 },
 }
 
 /// CR 611.2a + CR 108.3: Identifies which player a `CastingPermission` is granted
@@ -3865,6 +3875,27 @@ pub enum Effect {
         #[serde(default)]
         tapped: bool,
     },
+    /// CR 700.2 + CR 608.2d: Inline "you may [effect A] or [effect B]" —
+    /// controller chooses at resolution which of the two (or more) branches to
+    /// execute. Building block for optional binary-choice imperatives like
+    /// Highway Robbery's "You may discard a card or sacrifice a land" and
+    /// analogous "you may X or Y" patterns that are not expressed as a bulleted
+    /// `Choose one —` modal block. Each branch is a full `AbilityDefinition`
+    /// so it carries its own cost, target, and sub-ability chain. The outer
+    /// imperative is already marked `optional: true` when "you may" is
+    /// stripped; this effect represents the branching choice once the
+    /// controller opts in.
+    ///
+    /// Resolution: controller picks exactly one branch by index; the chosen
+    /// branch's effect resolves normally. Runtime resolver is not yet wired —
+    /// the typed shape is emitted so the parser stops silently dropping the
+    /// second branch; full runtime support can follow without changing the
+    /// card data format.
+    ChooseOneOf {
+        /// The branches the controller may choose between. Each element is a
+        /// self-contained ability (effect + optional cost + optional target).
+        branches: Vec<AbilityDefinition>,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -4195,6 +4226,7 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::ChooseOneOf { .. }
             | Effect::Unimplemented { .. }
             // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
             // it has no discrete `target` field for the generic targeting layer.
@@ -4352,6 +4384,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::Conjure { .. } => "Conjure",
+        Effect::ChooseOneOf { .. } => "ChooseOneOf",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -4505,6 +4538,7 @@ pub enum EffectKind {
     GiveControl,
     RemoveFromCombat,
     Conjure,
+    ChooseOneOf,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -4665,6 +4699,7 @@ impl From<&Effect> for EffectKind {
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::Conjure { .. } => EffectKind::Conjure,
+            Effect::ChooseOneOf { .. } => EffectKind::ChooseOneOf,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }

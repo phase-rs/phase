@@ -1543,7 +1543,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TimeTravel
         | Effect::Conjure { .. }
         | Effect::AddPendingETBCounters { .. }
-        | Effect::ChooseAndSacrificeRest { .. } => {}
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::ChooseOneOf { .. } => {}
     }
     d
 }

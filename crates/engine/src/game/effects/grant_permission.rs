@@ -101,6 +101,15 @@ pub fn resolve(
             if let CastingPermission::PlayFromExile { granted_to, .. } = &mut granted {
                 *granted_to = granted_to_pid;
             }
+            // CR 702.170a + CR 702.170d: `Plotted { turn_plotted }` is stamped
+            // at grant-resolution time from `state.turn_number`, mirroring how
+            // `PlayFromExile { granted_to }` is bound to a concrete `PlayerId`
+            // above. Synthesized plot activations use placeholder `0`; the
+            // real turn number is filled in here so the "later turn" gate in
+            // `has_exile_cast_permission` reflects when the grant resolved.
+            if let CastingPermission::Plotted { turn_plotted } = &mut granted {
+                *turn_plotted = state.turn_number;
+            }
             obj.casting_permissions.push(granted);
         }
     }

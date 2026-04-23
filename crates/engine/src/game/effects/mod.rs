@@ -439,6 +439,18 @@ pub fn resolve_effect(
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
+        Effect::ChooseOneOf { .. } => {
+            // CR 700.2: Runtime resolver for `ChooseOneOf` is not yet wired —
+            // full support requires a new `WaitingFor::ChooseOneOfBranch`
+            // state + effect resolver + UI integration. The typed shape is
+            // emitted by the parser (Highway Robbery and analogous binary
+            // "you may A or B" imperatives) so it is preserved in card data
+            // for future runtime activation. Treat as a no-op at resolution
+            // for now — the outer `optional: true` on the ability means the
+            // controller can simply decline.
+            eprintln!("Warning: ChooseOneOf resolver not yet implemented — treating as no-op");
+            Ok(())
+        }
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);

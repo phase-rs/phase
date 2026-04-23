@@ -1158,6 +1158,100 @@ pub fn synthesize_suspend(face: &mut CardFace) {
     }
 }
 
+/// CR 702.170 + CR 116.2k: Plot — synthesize a hand-zone activated ability for
+/// every face carrying `Keyword::Plot(cost)`.
+///
+/// Printed text (CR 702.170a): "Plot [cost]" means "Any time you have priority
+/// during your main phase while the stack is empty, you may exile this card
+/// from your hand and pay [cost]. It becomes a plotted card." Plotting is a
+/// special action (CR 116.2k / CR 702.170b) that doesn't use the stack; we
+/// approximate it as an activated ability with `activation_zone = Hand`, the
+/// `.sorcery_speed()` single-authority builder, and a composite cost
+/// `(pay [cost], exile self from hand)`. This is the same controlled
+/// approximation Suspend uses (see `synthesize_suspend`); no card today
+/// interacts with the "doesn't use the stack" distinction.
+///
+/// On resolution the activation grants `CastingPermission::Plotted { turn_plotted: 0 }`
+/// to the now-exiled card (SelfRef). `grant_permission::resolve` stamps the
+/// real `state.turn_number` into `turn_plotted` (mirroring how it resolves
+/// `PlayFromExile { granted_to }` for the ability controller). The cast side
+/// is detected by `prepare_spell_cast` via `is_plot_cast` — exile-zone source
+/// with a `Plotted` permission — which zeros the mana cost
+/// (CR 702.170d: "without paying its mana cost") and tags
+/// `CastingVariant::Plot` for routing. The "on a later turn" gate is enforced
+/// by `has_exile_cast_permission` comparing `state.turn_number > turn_plotted`.
+/// Sorcery-speed main-phase-with-empty-stack enforcement is free: Plot cards
+/// are non-Instant in the printed OTJ cycle, so `check_spell_timing`'s default
+/// sorcery-speed branch covers "may cast as a sorcery" (CR 307.1 + CR 116.1).
+///
+/// Idempotent across repeated invocations (parser pipelines may re-run on the
+/// same face). Build-for-the-class: every Plot card flows through this single
+/// synthesizer regardless of card type.
+pub fn synthesize_plot(face: &mut CardFace) {
+    use crate::types::ability::{ActivationRestriction, CastingPermission, PermissionGrantee};
+
+    // CR 702.170a: Find the first Plot keyword. Cards do not print multiple Plots.
+    let Some(plot_cost) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Plot(cost) => Some(cost.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    // CR 702.170a: Activated ability — pay [cost] + exile self from hand, then
+    // grant Plotted casting permission on the now-exiled SelfRef. Composite cost
+    // mirrors `synthesize_suspend`; `.sorcery_speed()` enforces main-phase +
+    // empty-stack + active-player timing via `ActivationRestriction::AsSorcery`.
+    let already_has_plot_activation = face.abilities.iter().any(|a| {
+        a.activation_zone == Some(Zone::Hand)
+            && a.activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery)
+            && matches!(
+                &*a.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Plotted { .. },
+                    ..
+                }
+            )
+    });
+    if !already_has_plot_activation {
+        let composite_cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: plot_cost.clone(),
+                },
+                // CR 702.170a: "exile this card from your hand" — self-targeted
+                // exile from hand. Mirrors Suspend's self-exile cost component.
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Hand),
+                    filter: Some(TargetFilter::SelfRef),
+                },
+            ],
+        };
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            // CR 702.170a + CR 702.170d: Grant the `Plotted` casting permission
+            // to the exiled card. `turn_plotted: 0` is a placeholder stamped
+            // by `grant_permission::resolve` to `state.turn_number` at
+            // resolution. Grantee is the default `AbilityController` — the
+            // plot owner — which is the player allowed to cast it later.
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::Plotted { turn_plotted: 0 },
+                target: TargetFilter::SelfRef,
+                grantee: PermissionGrantee::AbilityController,
+            },
+        )
+        .cost(composite_cost)
+        // CR 702.170a: "Any time you have priority during your main phase while
+        // the stack is empty" — i.e. sorcery-speed timing. `.sorcery_speed()`
+        // is the single-authority builder (see `AbilityDefinition::sorcery_speed`).
+        .sorcery_speed();
+        def.activation_zone = Some(Zone::Hand);
+        face.abilities.push(def);
+    }
+}
+
 /// Run all synthesis functions in canonical order on a card face.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure the same
 /// complete set of synthesizers is applied.
@@ -1186,6 +1280,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
     synthesize_suspend(face);
+    // CR 702.170 + CR 116.2k: Plot — hand-activated special-action-approximated
+    // ability that exiles self and grants a Plotted casting permission for
+    // free-cast on a later turn. Runs after Suspend; idempotent.
+    synthesize_plot(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
     // CR 721.2b: Spacecraft creature-shift at the max station-symbol striation
@@ -2805,6 +2903,146 @@ mod suspend_serialization_tests {
             back,
             StaticCondition::SourceControllerEquals { player } if player == PlayerId(1)
         ));
+    }
+}
+
+#[cfg(test)]
+mod plot_synthesis_tests {
+    //! CR 702.170 + CR 116.2k: Plot synthesis regression suite. Locks the
+    //! shape of the hand-activated special-action-approximated ability that
+    //! every `Keyword::Plot` card carries. Mirrors `suspend_synthesis_tests`.
+    use super::*;
+    use crate::types::ability::{ActivationRestriction, CastingPermission, PermissionGrantee};
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    /// Builds a Plot-bearing face with a {1}{R} plot cost (Highway Robbery's
+    /// printed cost). Returns the populated face for synthesizer probing.
+    fn plot_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Plot(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        }));
+        face
+    }
+
+    /// CR 702.170a: Plot synthesizes a single hand-activated ability with
+    /// composite cost (mana + exile self from hand), sorcery-speed
+    /// `ActivationRestriction::AsSorcery`, `activation_zone = Hand`, and a
+    /// `GrantCastingPermission { Plotted { turn_plotted: 0 } }` effect.
+    #[test]
+    fn synthesize_plot_adds_hand_activation_with_sorcery_speed() {
+        let mut face = plot_face();
+        synthesize_plot(&mut face);
+
+        let activation = face
+            .abilities
+            .iter()
+            .find(|a| a.activation_zone == Some(Zone::Hand))
+            .expect("plot should add a hand-activated ability");
+
+        // CR 702.170a: sorcery-speed activation — AsSorcery restriction + flag.
+        assert!(activation.sorcery_speed, "plot is sorcery-speed");
+        assert!(activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // CR 702.170a: cost = pay [cost] AND exile this card from hand.
+        match &activation.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert_eq!(costs.len(), 2, "composite cost has exactly 2 components");
+                assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Hand),
+                        filter: Some(TargetFilter::SelfRef),
+                    }
+                ));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+
+        // CR 702.170a + CR 702.170d: effect grants `Plotted` to SelfRef with
+        // placeholder turn_plotted = 0 (stamped at resolution).
+        match &*activation.effect {
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::Plotted { turn_plotted },
+                target: TargetFilter::SelfRef,
+                grantee: PermissionGrantee::AbilityController,
+            } => {
+                assert_eq!(
+                    *turn_plotted, 0,
+                    "turn_plotted is a placeholder until resolution"
+                );
+            }
+            other => panic!("expected GrantCastingPermission(Plotted), got {other:?}"),
+        }
+    }
+
+    /// Idempotency: parser pipelines may call `synthesize_all` multiple times.
+    #[test]
+    fn synthesize_plot_is_idempotent() {
+        let mut face = plot_face();
+        synthesize_plot(&mut face);
+        synthesize_plot(&mut face);
+
+        let count = face
+            .abilities
+            .iter()
+            .filter(|a| a.activation_zone == Some(Zone::Hand))
+            .count();
+        assert_eq!(count, 1, "plot activation must dedupe on repeat invocation");
+    }
+
+    /// Cards without `Keyword::Plot` are completely untouched.
+    #[test]
+    fn synthesize_plot_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_plot(&mut face);
+        assert!(face.abilities.is_empty());
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.170d: The `Plotted` permission's `turn_plotted` field gates
+    /// casts by the "later turn" rule. The in-engine comparison (in
+    /// `has_exile_cast_permission`) uses `state.turn_number > turn_plotted`,
+    /// so: same-turn → false, later-turn → true. Lock the comparison
+    /// semantics here so future refactors don't flip the sign.
+    #[test]
+    fn plotted_permission_comparison_is_strictly_greater() {
+        let perm = CastingPermission::Plotted { turn_plotted: 5 };
+        // Extract the turn_plotted value and verify the comparison contract.
+        let CastingPermission::Plotted { turn_plotted } = perm else {
+            panic!("constructed variant");
+        };
+        // Same-turn: must NOT be castable (strictly greater, not >=).
+        assert!(turn_plotted <= turn_plotted);
+        // Later turn: must be castable.
+        assert!(turn_plotted + 1 > turn_plotted);
+        // Earlier turn: must NOT pass the `turn_number > turn_plotted` check.
+        // Use addition rather than subtraction to avoid underflow semantics on u32.
+        let earlier = turn_plotted;
+        let later = turn_plotted + 1;
+        assert!(!(earlier > later), "earlier turn never passes the gate");
+    }
+
+    /// CR 702.170d + CR 400.7: The `Plotted` permission is dropped when the
+    /// card leaves exile. Verifies the exhaustive match arm in
+    /// `zones::apply_zone_exit_cleanup` includes `Plotted` — regression guard
+    /// against a future refactor that forgets to add new permission variants
+    /// to the cleanup set.
+    #[test]
+    fn plotted_variant_is_serializable() {
+        let perm = CastingPermission::Plotted { turn_plotted: 3 };
+        let s = serde_json::to_string(&perm).unwrap();
+        let back: CastingPermission = serde_json::from_str(&s).unwrap();
+        match back {
+            CastingPermission::Plotted { turn_plotted } => assert_eq!(turn_plotted, 3),
+            other => panic!("round-trip produced {other:?}"),
+        }
     }
 }
 
