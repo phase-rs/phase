@@ -246,7 +246,7 @@ fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) 
         } => (record.as_ref(), SuppressedTriggerEvent::EntersBattlefield),
         GameEvent::ZoneChanged {
             record,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             ..
         } => (record.as_ref(), SuppressedTriggerEvent::Dies),
@@ -559,7 +559,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         // them as if they were still on the battlefield (last-known-information).
         if let GameEvent::ZoneChanged {
             object_id: moved_id,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             ..
         } = event
         {
@@ -1242,7 +1242,7 @@ fn delayed_trigger_event(
             .iter()
             .find(|e| {
                 matches!(e,
-                    GameEvent::ZoneChanged { object_id: id, from: Zone::Battlefield, .. }
+                    GameEvent::ZoneChanged { object_id: id, from: Some(Zone::Battlefield), .. }
                     if *id == *object_id
                 )
             })
@@ -1254,7 +1254,7 @@ fn delayed_trigger_event(
                 matches!(
                     e,
                     GameEvent::ZoneChanged {
-                        from: Zone::Battlefield,
+                        from: Some(Zone::Battlefield),
                         to: Zone::Graveyard,
                         ..
                     }
@@ -1268,7 +1268,7 @@ fn delayed_trigger_event(
                 matches!(
                     e,
                     GameEvent::ZoneChanged {
-                        from: Zone::Battlefield,
+                        from: Some(Zone::Battlefield),
                         ..
                     }
                 )
@@ -1294,7 +1294,7 @@ fn delayed_trigger_event(
                 matches!(
                     e,
                     GameEvent::ZoneChanged {
-                        from: Zone::Battlefield,
+                        from: Some(Zone::Battlefield),
                         to: Zone::Graveyard | Zone::Exile,
                         ..
                     }
@@ -2007,13 +2007,33 @@ pub mod tests {
     ) -> GameEvent {
         GameEvent::ZoneChanged {
             object_id,
-            from,
+            from: Some(from),
             to,
             record: Box::new(ZoneChangeRecord {
                 name: "Test Object".to_string(),
                 core_types,
                 subtypes: subtypes.into_iter().map(str::to_string).collect(),
-                ..ZoneChangeRecord::test_minimal(object_id, from, to)
+                ..ZoneChangeRecord::test_minimal(object_id, Some(from), to)
+            }),
+        }
+    }
+
+    /// CR 111.1 + CR 603.6a: Helper for token creation events — no prior zone.
+    fn token_zone_changed_event(
+        object_id: ObjectId,
+        core_types: Vec<CoreType>,
+        subtypes: Vec<&str>,
+    ) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                name: "Test Token".to_string(),
+                core_types,
+                subtypes: subtypes.into_iter().map(str::to_string).collect(),
+                is_token: true,
+                ..ZoneChangeRecord::test_minimal(object_id, None, Zone::Battlefield)
             }),
         }
     }
@@ -3245,13 +3265,13 @@ pub mod tests {
 
         let events = vec![GameEvent::ZoneChanged {
             object_id: bird,
-            from: Zone::Hand,
+            from: Some(Zone::Hand),
             to: Zone::Battlefield,
             record: Box::new(ZoneChangeRecord {
                 name: "Bird".to_string(),
                 core_types: vec![CoreType::Creature],
                 keywords: vec![Keyword::Flying],
-                ..ZoneChangeRecord::test_minimal(bird, Zone::Hand, Zone::Battlefield)
+                ..ZoneChangeRecord::test_minimal(bird, Some(Zone::Hand), Zone::Battlefield)
             }),
         }];
 
@@ -5219,6 +5239,108 @@ pub mod tests {
             !check_trigger_constraint(&state, &trig_def, source, 0, PlayerId(0), &spell_event),
             "intervening non-X spell must not reset qualifying count"
         );
+    }
+
+    /// CR 111.1 + CR 603.6a: An ETB trigger like Elvish Vanguard's "whenever
+    /// another Elf enters" MUST fire when an Elf token is created. Tokens are
+    /// created in the battlefield zone with no prior zone — the engine emits
+    /// `ZoneChanged { from: None, to: Battlefield }` for token creation, and
+    /// the existing `ChangesZone` matcher (which requires no origin filter
+    /// for pure ETB triggers) matches this event. No token-specific trigger
+    /// code is required.
+    #[test]
+    fn etb_changes_zone_trigger_fires_on_token_creation() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Stand-in for Elvish Vanguard: ETB trigger with no origin filter,
+        // destination = Battlefield, filter = "another Elf".
+        let vanguard = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Elvish Vanguard".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&vanguard).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let mut trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                ))
+                .destination(Zone::Battlefield);
+            trig.valid_card = Some(TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Subtype("Elf".to_string()))
+                    .properties(vec![crate::types::ability::FilterProp::Another]),
+            ));
+            obj.trigger_definitions.push(trig);
+        }
+
+        // Simulate an Elf token being created — `from: None` per CR 111.1 /
+        // 603.6a. The matcher must fire because origin is unfiltered.
+        let token_id = ObjectId(500);
+        let events = vec![token_zone_changed_event(
+            token_id,
+            vec![CoreType::Creature],
+            vec!["Elf"],
+        )];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "ETB trigger (no origin filter) must fire on token creation"
+        );
+    }
+
+    /// Negative: a trigger that explicitly names an origin zone ("whenever a
+    /// creature is put into a graveyard from the battlefield") must NOT fire
+    /// on token creation (`from: None`) — tokens did not come from any zone.
+    #[test]
+    fn dies_trigger_does_not_fire_on_token_creation() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dies Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ))
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard),
+            );
+        }
+
+        let token_id = ObjectId(600);
+        let events = vec![token_zone_changed_event(
+            token_id,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 0);
     }
 
     // SOC Tier 2.6: "Whenever you create one or more creature tokens" —

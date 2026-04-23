@@ -3444,7 +3444,7 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
     for event in events.iter() {
         if let GameEvent::ZoneChanged {
             object_id,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             ..
         } = event
         {
@@ -7351,11 +7351,15 @@ mod exile_return_tests {
         // Simulate events where source leaves the battlefield
         let events = vec![GameEvent::ZoneChanged {
             object_id: source_id,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 name: "Banishing Light".to_string(),
-                ..ZoneChangeRecord::test_minimal(source_id, Zone::Battlefield, Zone::Graveyard)
+                ..ZoneChangeRecord::test_minimal(
+                    source_id,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
             }),
         }];
 
@@ -7416,11 +7420,15 @@ mod exile_return_tests {
 
         let events = vec![GameEvent::ZoneChanged {
             object_id: source_id,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 name: "Deep-Cavern Bat".to_string(),
-                ..ZoneChangeRecord::test_minimal(source_id, Zone::Battlefield, Zone::Graveyard)
+                ..ZoneChangeRecord::test_minimal(
+                    source_id,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
             }),
         }];
 
@@ -7473,11 +7481,15 @@ mod exile_return_tests {
 
         let events = vec![GameEvent::ZoneChanged {
             object_id: source_id,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 name: "Source".to_string(),
-                ..ZoneChangeRecord::test_minimal(source_id, Zone::Battlefield, Zone::Graveyard)
+                ..ZoneChangeRecord::test_minimal(
+                    source_id,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
             }),
         }];
 
@@ -7543,11 +7555,15 @@ mod exile_return_tests {
 
         let events = vec![GameEvent::ZoneChanged {
             object_id: source_id,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 name: "Source".to_string(),
-                ..ZoneChangeRecord::test_minimal(source_id, Zone::Battlefield, Zone::Graveyard)
+                ..ZoneChangeRecord::test_minimal(
+                    source_id,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
             }),
         }];
 

@@ -400,7 +400,7 @@ impl GameObject {
     pub fn snapshot_for_zone_change(
         &self,
         object_id: ObjectId,
-        from: Zone,
+        from: Option<Zone>,
         to: Zone,
     ) -> crate::types::game_state::ZoneChangeRecord {
         crate::types::game_state::ZoneChangeRecord {

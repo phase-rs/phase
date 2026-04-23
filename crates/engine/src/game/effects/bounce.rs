@@ -165,7 +165,7 @@ mod tests {
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::ZoneChanged {
-                from: Zone::Battlefield,
+                from: Some(Zone::Battlefield),
                 to: Zone::Hand,
                 ..
             }

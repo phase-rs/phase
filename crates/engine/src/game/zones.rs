@@ -209,7 +209,7 @@ pub fn move_to_zone(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
-    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, from, to);
+    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), to);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     // CR 603.10a + CR 607.2a: Leaves-the-battlefield triggers look back to the
@@ -290,7 +290,7 @@ pub fn move_to_zone(
 
     events.push(GameEvent::ZoneChanged {
         object_id,
-        from,
+        from: Some(from),
         to,
         record: Box::new(zone_change_record),
     });
@@ -352,7 +352,7 @@ pub fn move_to_library_at_index(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
-    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, from, Zone::Library);
+    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), Zone::Library);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
 
@@ -382,7 +382,7 @@ pub fn move_to_library_at_index(
 
     events.push(GameEvent::ZoneChanged {
         object_id,
-        from,
+        from: Some(from),
         to: Zone::Library,
         record: Box::new(zone_change_record),
     });
@@ -561,10 +561,10 @@ mod tests {
                 record,
             } => {
                 assert_eq!(*object_id, id);
-                assert_eq!(*from, Zone::Hand);
+                assert_eq!(*from, Some(Zone::Hand));
                 assert_eq!(*to, Zone::Battlefield);
                 assert_eq!(record.object_id, id);
-                assert_eq!(record.from_zone, Zone::Hand);
+                assert_eq!(record.from_zone, Some(Zone::Hand));
                 assert_eq!(record.to_zone, Zone::Battlefield);
             }
             _ => panic!("expected ZoneChanged event"),
@@ -689,11 +689,11 @@ mod tests {
             events[0],
             GameEvent::ZoneChanged {
                 object_id: id,
-                from: Zone::Hand,
+                from: Some(Zone::Hand),
                 to: Zone::Graveyard,
                 record: Box::new(ZoneChangeRecord {
                     name: "Card".to_string(),
-                    ..ZoneChangeRecord::test_minimal(id, Zone::Hand, Zone::Graveyard)
+                    ..ZoneChangeRecord::test_minimal(id, Some(Zone::Hand), Zone::Graveyard)
                 }),
             }
         );

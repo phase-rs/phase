@@ -1435,7 +1435,10 @@ fn zone_change_record_matches_property(
         // CR 109.1 "another": same-object check against the triggering source.
         FilterProp::Another => record.object_id != source.id,
         // CR 400.1: "from [zone]" — the record's origin zone.
-        FilterProp::InZone { zone } => record.from_zone == *zone,
+        // CR 111.1 + CR 603.6a: Token creation produces `from_zone = None`,
+        // which cannot match any specific origin zone — correct for triggers
+        // like "from the graveyard" that must not fire on tokens.
+        FilterProp::InZone { zone } => record.from_zone == Some(*zone),
         // CR 109.5: Ownership relative to the source's controller.
         FilterProp::Owned { controller } => match controller {
             ControllerRef::You => source.controller == Some(record.owner),
@@ -3202,7 +3205,7 @@ mod tests {
         let token_record = ZoneChangeRecord {
             core_types: vec![CoreType::Creature],
             is_token: true,
-            ..ZoneChangeRecord::test_minimal(ObjectId(42), Zone::Battlefield, Zone::Graveyard)
+            ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Battlefield), Zone::Graveyard)
         };
         assert!(zone_change_record_matches_property(
             &FilterProp::Token,
@@ -3214,7 +3217,7 @@ mod tests {
         let nontoken_record = ZoneChangeRecord {
             core_types: vec![CoreType::Creature],
             is_token: false,
-            ..ZoneChangeRecord::test_minimal(ObjectId(43), Zone::Battlefield, Zone::Graveyard)
+            ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Battlefield), Zone::Graveyard)
         };
         assert!(!zone_change_record_matches_property(
             &FilterProp::Token,

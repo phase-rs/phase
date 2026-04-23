@@ -3056,7 +3056,7 @@ mod tests {
         state.objects.get_mut(&exiled_c).unwrap().mana_cost = ManaCost::generic(4);
         state.current_trigger_event = Some(GameEvent::ZoneChanged {
             object_id: source,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(crate::types::game_state::ZoneChangeRecord {
                 linked_exile_snapshot: vec![
@@ -3078,7 +3078,7 @@ mod tests {
                 ],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                     source,
-                    Zone::Battlefield,
+                    Some(Zone::Battlefield),
                     Zone::Graveyard,
                 )
             }),

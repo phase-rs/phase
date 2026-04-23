@@ -64,9 +64,17 @@ pub enum GameEvent {
     AbilityActivated {
         source_id: ObjectId,
     },
+    /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
+    /// event. `from` is `None` when an object is created directly in a zone
+    /// without a prior zone — e.g., a token is created on the battlefield
+    /// (CR 111.1 + CR 603.6a: "an object that enters the battlefield as a
+    /// token is created in the battlefield zone"). Treating token creation
+    /// as a `ZoneChanged` event means every ETB trigger matcher (Elvish
+    /// Vanguard, Soul Warden, Panharmonicon) automatically fires for tokens
+    /// without bespoke per-matcher code paths.
     ZoneChanged {
         object_id: ObjectId,
-        from: Zone,
+        from: Option<Zone>,
         to: Zone,
         /// CR 603.10: Boxed to keep `GameEvent` variant size small. The record
         /// can be ~200 bytes and is only populated for this one variant; every
@@ -482,11 +490,11 @@ mod tests {
     fn zone_changed_serializes_all_fields() {
         let event = GameEvent::ZoneChanged {
             object_id: ObjectId(5),
-            from: Zone::Hand,
+            from: Some(Zone::Hand),
             to: Zone::Battlefield,
             record: Box::new(ZoneChangeRecord {
                 name: "Test".to_string(),
-                ..ZoneChangeRecord::test_minimal(ObjectId(5), Zone::Hand, Zone::Battlefield)
+                ..ZoneChangeRecord::test_minimal(ObjectId(5), Some(Zone::Hand), Zone::Battlefield)
             }),
         };
         let json = serde_json::to_value(&event).unwrap();

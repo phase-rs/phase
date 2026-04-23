@@ -163,6 +163,22 @@ pub fn resolve(
             crate::game::restrictions::record_token_created(state, token_id);
 
             // Step 7: Emit events.
+            // CR 111.1 + CR 603.6a: Token creation is a zone change from outside
+            // the game. Emit `ZoneChanged { from: None }` so every ETB trigger
+            // matcher fires for copied tokens (Elvish Vanguard, Soul Warden,
+            // Panharmonicon) without token-specific matcher code. `TokenCreated`
+            // is preserved for token-specific consumers.
+            let zone_change_record = state
+                .objects
+                .get(&token_id)
+                .expect("token just created")
+                .snapshot_for_zone_change(token_id, None, Zone::Battlefield);
+            events.push(GameEvent::ZoneChanged {
+                object_id: token_id,
+                from: None,
+                to: Zone::Battlefield,
+                record: Box::new(zone_change_record),
+            });
             events.push(GameEvent::TokenCreated {
                 object_id: token_id,
                 name: name.clone(),

@@ -71,7 +71,7 @@ fn build_madame_null_pay_chain(source_id: ObjectId, controller: PlayerId) -> Res
 fn set_etb_event(state: &mut GameState, entering: ObjectId) {
     state.current_trigger_event = Some(GameEvent::ZoneChanged {
         object_id: entering,
-        from: Zone::Hand,
+        from: Some(Zone::Hand),
         to: Zone::Battlefield,
         record: Box::new(ZoneChangeRecord {
             object_id: entering,
@@ -86,7 +86,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             mana_value: 0,
             controller: PlayerId(0),
             owner: PlayerId(0),
-            from_zone: Zone::Hand,
+            from_zone: Some(Zone::Hand),
             to_zone: Zone::Battlefield,
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),

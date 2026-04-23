@@ -223,7 +223,11 @@ pub struct ZoneChangeRecord {
     pub mana_value: u32,
     pub controller: PlayerId,
     pub owner: PlayerId,
-    pub from_zone: Zone,
+    /// CR 603.6a + CR 111.1: `None` when the object was created directly in the
+    /// destination zone without existing in a prior zone (e.g. token creation
+    /// on the battlefield, emblem creation in the command zone). For normal
+    /// zone moves this carries the origin zone.
+    pub from_zone: Option<Zone>,
     pub to_zone: Zone,
     /// CR 603.10a + CR 603.6e: Snapshot of attachments on the object at the moment
     /// of the zone change. Required by look-back triggers of the form
@@ -276,7 +280,7 @@ impl ZoneChangeRecord {
     ///
     /// Production code must use `GameObject::snapshot_for_zone_change` — the
     /// authoritative constructor that copies from a live object.
-    pub fn test_minimal(object_id: ObjectId, from: Zone, to: Zone) -> Self {
+    pub fn test_minimal(object_id: ObjectId, from: Option<Zone>, to: Zone) -> Self {
         Self {
             object_id,
             name: String::new(),

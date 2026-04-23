@@ -825,7 +825,7 @@ fn resolve_ref(
             state
                 .zone_changes_this_turn
                 .iter()
-                .filter(|r| r.from_zone == Zone::Battlefield && r.controller == controller)
+                .filter(|r| r.from_zone == Some(Zone::Battlefield) && r.controller == controller)
                 .count(),
         ),
         // CR 400.7: Count of nonland permanents (any controller) that left the battlefield this turn.
@@ -834,7 +834,8 @@ fn resolve_ref(
                 .zone_changes_this_turn
                 .iter()
                 .filter(|r| {
-                    r.from_zone == Zone::Battlefield && !r.core_types.contains(&CoreType::Land)
+                    r.from_zone == Some(Zone::Battlefield)
+                        && !r.core_types.contains(&CoreType::Land)
                 })
                 .count(),
         ),
@@ -858,7 +859,7 @@ fn resolve_ref(
                 .iter()
                 .filter(|r| {
                     r.core_types.contains(&CoreType::Creature)
-                        && r.from_zone == Zone::Battlefield
+                        && r.from_zone == Some(Zone::Battlefield)
                         && r.to_zone == Zone::Graveyard
                 })
                 .count(),
@@ -1186,11 +1187,11 @@ mod tests {
                     kind: AttachmentKind::Aura,
                 },
             ],
-            ..ZoneChangeRecord::test_minimal(dying_id, Zone::Battlefield, Zone::Graveyard)
+            ..ZoneChangeRecord::test_minimal(dying_id, Some(Zone::Battlefield), Zone::Graveyard)
         };
         state.current_trigger_event = Some(GameEvent::ZoneChanged {
             object_id: dying_id,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(record),
         });
@@ -2098,7 +2099,7 @@ mod tests {
             crate::types::mana::ManaCost::generic(4);
         state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
             object_id: source,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 linked_exile_snapshot: vec![
@@ -2118,7 +2119,7 @@ mod tests {
                         mana_value: 4,
                     },
                 ],
-                ..ZoneChangeRecord::test_minimal(source, Zone::Battlefield, Zone::Graveyard)
+                ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
             }),
         });
 

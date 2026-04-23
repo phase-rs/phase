@@ -705,7 +705,7 @@ fn evaluate_condition(
         // CR 700.4: "Dies" = creature moved from battlefield to graveyard.
         ParsedCondition::CreatureDiedThisTurn => state.zone_changes_this_turn.iter().any(|r| {
             r.core_types.contains(&CoreType::Creature)
-                && r.from_zone == Zone::Battlefield
+                && r.from_zone == Some(Zone::Battlefield)
                 && r.to_zone == Zone::Graveyard
         }),
         ParsedCondition::YouHadCreatureEnterThisTurn => state
@@ -729,7 +729,7 @@ fn evaluate_condition(
             state
                 .zone_changes_this_turn
                 .iter()
-                .filter(|r| r.from_zone == Zone::Graveyard && r.owner == player)
+                .filter(|r| r.from_zone == Some(Zone::Graveyard) && r.owner == player)
                 .count() as u32
                 >= *count
         }
@@ -1218,7 +1218,7 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                     ObjectId(99),
-                    Zone::Battlefield,
+                    Some(Zone::Battlefield),
                     Zone::Graveyard,
                 )
             });
@@ -1269,7 +1269,7 @@ mod tests {
                     name: format!("Card {}", i),
                     ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                         ObjectId(100 + i),
-                        Zone::Graveyard,
+                        Some(Zone::Graveyard),
                         Zone::Exile,
                     )
                 });
