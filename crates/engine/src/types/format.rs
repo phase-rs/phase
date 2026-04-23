@@ -205,6 +205,27 @@ impl FormatConfig {
             team_based: true,
         }
     }
+
+    /// Default `FormatConfig` for a given `GameFormat`. Used by callers that
+    /// only retain the format enum (e.g. the lobby broker) and need a full
+    /// config to hand back to clients for deck-legality UX. Customizations a
+    /// host may have applied on top of the default (e.g. non-standard player
+    /// counts for Commander) are intentionally not recovered — guests use
+    /// this purely to filter their local deck picker, and the host's own
+    /// FormatConfig remains authoritative once the P2P session is established.
+    pub fn for_format(format: GameFormat) -> Self {
+        match format {
+            GameFormat::Standard => Self::standard(),
+            GameFormat::Commander => Self::commander(),
+            GameFormat::Pioneer => Self::pioneer(),
+            GameFormat::Historic => Self::historic(),
+            GameFormat::Pauper => Self::pauper(),
+            GameFormat::Brawl => Self::brawl(),
+            GameFormat::HistoricBrawl => Self::historic_brawl(),
+            GameFormat::FreeForAll => Self::free_for_all(),
+            GameFormat::TwoHeadedGiant => Self::two_headed_giant(),
+        }
+    }
 }
 
 #[cfg(test)]

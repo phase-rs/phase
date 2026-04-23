@@ -2159,8 +2159,13 @@ async fn handle_client_message(
                 // registered by a Full-mode server has an empty peer_id;
                 // `broker_info` treats that as "not brokerable" so the
                 // error below can distinguish it from a missing game.
-                let (peer_id, max_players, current_players) = match lob.broker_info(&game_code) {
-                    Some(info) => info,
+                let (peer_id, max_players, current_players, format) = match lob.broker_info(&game_code) {
+                    Some(info) => (
+                        info.host_peer_id,
+                        info.max_players,
+                        info.current_players,
+                        info.format,
+                    ),
                     None => {
                         let exists = lob.has_game(&game_code);
                         let msg = ServerMessage::Error {
@@ -2196,7 +2201,7 @@ async fn handle_client_message(
                 let msg = ServerMessage::PeerInfo {
                     game_code: game_code.clone(),
                     host_peer_id: peer_id,
-                    format_config: None,
+                    format_config: format.map(engine::types::format::FormatConfig::for_format),
                     match_config: Default::default(),
                     player_count: max_players as u8,
                     filled_seats: current_players as u8,

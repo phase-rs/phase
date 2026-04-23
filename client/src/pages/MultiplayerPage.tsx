@@ -438,23 +438,48 @@ export function MultiplayerPage() {
 
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
-    (
+    async (
       code: string,
       password?: string,
       format?: GameFormat,
       context?: LobbyGame,
     ) => {
+      // Code-join path (no format supplied by the caller) pre-resolves the
+      // room so the deck-select view filters to format-legal decks from the
+      // start, matching the lobby-row click path. Lobby-row clicks already
+      // carry `format` from the LobbyGame, so they skip this RPC. On
+      // resolve failure we fall through to setting the action without a
+      // format — the user can still try to join; they'll either get the
+      // same error again from `joinP2PRoom`'s resolve, or (in the rare case
+      // the first resolve transiently failed) they'll succeed without
+      // pre-filtering.
+      let resolvedFormat = format;
+      let resolvedPassword = password;
+      if (!resolvedFormat) {
+        const result = await resolveGuestFromStore(code, resolvedPassword);
+        if (result.ok) {
+          resolvedFormat = result.peerInfo.format_config?.format;
+        } else if (result.reason === "password_required") {
+          const entered = window.prompt("This room requires a password:");
+          if (!entered) return;
+          resolvedPassword = entered;
+          const retry = await resolveGuestFromStore(code, resolvedPassword);
+          if (retry.ok) {
+            resolvedFormat = retry.peerInfo.format_config?.format;
+          }
+        }
+      }
       const action: PendingAction = {
         type: "join",
         code,
-        password,
-        format,
+        password: resolvedPassword,
+        format: resolvedFormat,
         context,
       };
       setPendingAction(action);
       setView("deck-select");
     },
-    [],
+    [resolveGuestFromStore],
   );
 
   const handleBack = () => {

@@ -32,6 +32,18 @@ pub struct RegisterGameRequest {
     pub host_peer_id: String,
 }
 
+/// Fields returned by `broker_info` — everything the `JoinGameWithPassword`
+/// handler needs to populate `PeerInfo` in one atomic snapshot. Structured
+/// so extending the broker response with a new field (e.g. match-type or
+/// room metadata) is a single-line change at the call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerInfo {
+    pub host_peer_id: String,
+    pub max_players: u32,
+    pub current_players: u32,
+    pub format: Option<GameFormat>,
+}
+
 struct LobbyGameMeta {
     host_name: String,
     created_at: u64,
@@ -205,22 +217,22 @@ impl LobbyManager {
         self.games.is_empty()
     }
 
-    /// Atomic lookup of the fields a broker-path guest response needs:
-    /// host's PeerJS peer ID plus `(max_players, current_players)`. Returns
-    /// `None` if the game isn't registered OR if the entry has no peer ID
-    /// (registered by a `Full`-mode server — nothing to broker). Packaging
-    /// this as a single accessor avoids races where a caller reads the
-    /// peer ID, drops the lock, then re-locks for seat counts.
-    pub fn broker_info(&self, game_code: &str) -> Option<(String, u32, u32)> {
+    /// Atomic lookup of the fields a broker-path guest response needs.
+    /// Returns `None` if the game isn't registered OR if the entry has no
+    /// peer ID (registered by a `Full`-mode server — nothing to broker).
+    /// Packaging this as a single accessor avoids races where a caller reads
+    /// the peer ID, drops the lock, then re-locks for seat counts or format.
+    pub fn broker_info(&self, game_code: &str) -> Option<BrokerInfo> {
         let meta = self.games.get(game_code)?;
         if meta.host_peer_id.is_empty() {
             return None;
         }
-        Some((
-            meta.host_peer_id.clone(),
-            meta.max_players,
-            meta.current_players,
-        ))
+        Some(BrokerInfo {
+            host_peer_id: meta.host_peer_id.clone(),
+            max_players: meta.max_players,
+            current_players: meta.current_players,
+            format: meta.format,
+        })
     }
 
     pub fn timer_seconds(&self, game_code: &str) -> Option<u32> {
@@ -582,7 +594,12 @@ mod tests {
         );
         assert_eq!(
             lobby.broker_info("GAME01"),
-            Some(("peer-xyz".to_string(), 4, 1))
+            Some(BrokerInfo {
+                host_peer_id: "peer-xyz".to_string(),
+                max_players: 4,
+                current_players: 1,
+                format: None,
+            })
         );
     }
 
