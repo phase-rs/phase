@@ -1431,6 +1431,22 @@ pub fn parse_oracle_text(
             }
         }
 
+        // CR 702.27a: Buyback em-dash form — "Buyback—Sacrifice a land." (Constant
+        // Mists) etc. MTGJSON omits the Buyback keyword when the cost is non-mana,
+        // so `extract_keyword_line` bails and the line would otherwise fall through
+        // to the spell-effect catch-all and produce `Unimplemented`. Intercept here
+        // before the spell catch-all, mirroring the Flashback em-dash intercept above.
+        // structural: not dispatch — em-dash char presence gates the cost sub-parser,
+        // which uses nom combinators in `parse_buyback_cost` / `parse_oracle_cost`.
+        if lower_starts_with(&lower, "buyback") && line.contains('\u{2014}') {
+            let lower_clean = lower.trim_end_matches('.').trim();
+            if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+                result.extracted_keywords.push(kw);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
             // B7: Strip ability-word prefix and attach condition for spell effects.

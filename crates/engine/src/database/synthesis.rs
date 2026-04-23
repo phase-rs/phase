@@ -13,7 +13,7 @@ use crate::types::ability::{
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::keywords::{CyclingCost, Keyword, PartnerType};
+use crate::types::keywords::{BuybackCost, CyclingCost, Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
@@ -439,6 +439,35 @@ pub fn synthesize_kicker(face: &mut CardFace) {
     }) {
         face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }));
     }
+}
+
+/// CR 702.27a: Synthesize `additional_cost` from `Keyword::Buyback(BuybackCost)`.
+///
+/// Buyback is an optional additional cost: "You may pay an additional [cost]
+/// as you cast this spell. If the buyback cost was paid, put this spell into
+/// its owner's hand instead of into that player's graveyard as it resolves."
+///
+/// The resolution-time routing (hand instead of graveyard) is handled in
+/// `game::stack::resolve_top` by inspecting `ability.context.additional_cost_paid`
+/// on the resolving spell when the source carries `Keyword::Buyback`.
+///
+/// Idempotent: skips if `additional_cost` is already set (Oracle-parsed
+/// "as an additional cost" lines take precedence, matching the Kicker pattern).
+pub fn synthesize_buyback(face: &mut CardFace) {
+    if face.additional_cost.is_some() {
+        return;
+    }
+    let Some(buyback_cost) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Buyback(cost) => Some(cost.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    let cost = match buyback_cost {
+        BuybackCost::Mana(mana_cost) => AbilityCost::Mana { cost: mana_cost },
+        BuybackCost::NonMana(ac) => ac,
+    };
+    face.additional_cost = Some(AdditionalCost::Optional(cost));
 }
 
 /// Synthesize Gift optional cost and delivery effect.
@@ -1264,6 +1293,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_ninjutsu_family(face);
     synthesize_changeling_cda(face);
     synthesize_kicker(face);
+    synthesize_buyback(face);
     synthesize_gift(face);
     synthesize_case_solve(face);
     // Warp: no synthesis needed — runtime handled by Keyword::Warp directly
@@ -1648,6 +1678,107 @@ fn build_oracle_face_inner(
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);
     synthesize_all(&mut face);
     face
+}
+
+#[cfg(test)]
+mod buyback_synthesis_tests {
+    use super::*;
+
+    /// CR 702.27a: Mana-cost Buyback synthesizes an optional additional mana cost.
+    #[test]
+    fn synthesize_buyback_mana_sets_optional_additional_cost() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Buyback(BuybackCost::Mana(ManaCost::Cost {
+                generic: 3,
+                shards: vec![],
+            }))],
+            ..CardFace::default()
+        };
+
+        synthesize_buyback(&mut face);
+
+        match face.additional_cost.expect("additional_cost set") {
+            AdditionalCost::Optional(AbilityCost::Mana { cost }) => {
+                assert!(matches!(
+                    cost,
+                    ManaCost::Cost {
+                        generic: 3,
+                        ref shards,
+                    } if shards.is_empty()
+                ));
+            }
+            other => panic!("expected Optional(Mana), got {other:?}"),
+        }
+    }
+
+    /// CR 702.27a: Non-mana Buyback (Constant Mists "Sacrifice a land") routes
+    /// through the full AbilityCost pipeline as an optional additional cost.
+    #[test]
+    fn synthesize_buyback_non_mana_preserves_ability_cost() {
+        let sac_cost = AbilityCost::Sacrifice {
+            target: TargetFilter::Any,
+            count: 1,
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Buyback(BuybackCost::NonMana(sac_cost.clone()))],
+            ..CardFace::default()
+        };
+
+        synthesize_buyback(&mut face);
+
+        match face.additional_cost.expect("additional_cost set") {
+            AdditionalCost::Optional(cost) => assert_eq!(cost, sac_cost),
+            other => panic!("expected Optional(Sacrifice), got {other:?}"),
+        }
+    }
+
+    /// Idempotency: running synthesize_buyback twice produces the same result.
+    #[test]
+    fn synthesize_buyback_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Buyback(BuybackCost::Mana(ManaCost::Cost {
+                generic: 5,
+                shards: vec![],
+            }))],
+            ..CardFace::default()
+        };
+
+        synthesize_buyback(&mut face);
+        let first = face.additional_cost.clone();
+        synthesize_buyback(&mut face);
+        assert_eq!(face.additional_cost, first);
+    }
+
+    /// Parser-parsed `additional_cost` takes precedence over synthesized buyback
+    /// (Kicker pattern).
+    #[test]
+    fn synthesize_buyback_skips_when_additional_cost_already_set() {
+        let existing = AdditionalCost::Required(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 1,
+                shards: vec![],
+            },
+        });
+        let mut face = CardFace {
+            keywords: vec![Keyword::Buyback(BuybackCost::Mana(ManaCost::Cost {
+                generic: 3,
+                shards: vec![],
+            }))],
+            additional_cost: Some(existing.clone()),
+            ..CardFace::default()
+        };
+
+        synthesize_buyback(&mut face);
+        assert_eq!(face.additional_cost, Some(existing));
+    }
+
+    /// No-op when the card has no Buyback keyword.
+    #[test]
+    fn synthesize_buyback_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_buyback(&mut face);
+        assert!(face.additional_cost.is_none());
+    }
 }
 
 #[cfg(test)]

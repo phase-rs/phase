@@ -10,7 +10,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_target::parse_type_phrase;
 use crate::types::ability::AbilityCost;
-use crate::types::keywords::{CyclingCost, FlashbackCost, Keyword, WardCost};
+use crate::types::keywords::{BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost};
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
 /// Handles both "protection from X and from Y" and "hexproof from X and from Y"
@@ -294,6 +294,30 @@ fn parse_flashback_cost(cost_text: &str) -> Option<FlashbackCost> {
 /// so compound comma-separated costs compose into `AbilityCost::Composite`,
 /// which the synthesis in `database::synthesis::synthesize_cycling` splices
 /// alongside the mandatory "discard this card" sub-cost.
+/// CR 702.27a: Parse a buyback cost following the em-dash separator
+/// (e.g., "buyback—sacrifice a land" on Constant Mists). Mirrors
+/// `parse_flashback_cost`: delegates to `parse_oracle_cost` so comma-separated
+/// parts compose into `AbilityCost::Composite`, and wraps the result in
+/// `BuybackCost::Mana` when it's a pure mana cost or `BuybackCost::NonMana`
+/// otherwise.
+fn parse_buyback_cost(cost_text: &str) -> Option<BuybackCost> {
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, VerboseError<&str>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(BuybackCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(BuybackCost::NonMana(other)),
+    }
+}
+
 fn parse_cycling_cost(cost_text: &str) -> Option<CyclingCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     // Strip reminder text in parentheses: take everything before the first " (".
@@ -412,6 +436,15 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("flashback\u{2014}").parse(text) {
         if let Some(fb_cost) = parse_flashback_cost(rest) {
             return Some(Keyword::Flashback(fb_cost));
+        }
+    }
+
+    // CR 702.27a: Buyback with em-dash cost — non-mana costs like
+    // "buyback—sacrifice a land" (Constant Mists). Pure-mana buyback
+    // ("Buyback {3}") is handled by the direct `FromStr` path above.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("buyback\u{2014}").parse(text) {
+        if let Some(bb_cost) = parse_buyback_cost(rest) {
+            return Some(Keyword::Buyback(bb_cost));
         }
     }
 

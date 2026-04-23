@@ -29,6 +29,18 @@ pub enum CyclingCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.27a: Buyback cost — the optional additional cost a player may pay
+/// as they cast a spell with Buyback. Most Buyback cards use a pure mana cost
+/// (e.g., Capsize "Buyback {3}") but some use a non-mana cost (Constant Mists
+/// "Buyback—Sacrifice a land"). Mirrors `FlashbackCost` so non-mana costs
+/// compose through the existing `AbilityCost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum BuybackCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -455,7 +467,9 @@ pub enum Keyword {
     Spectacle(ManaCost),
     Surge(ManaCost),
     Encore(ManaCost),
-    Buyback(ManaCost),
+    /// CR 702.27a: Buyback — optional additional cost; if paid, the spell returns
+    /// to its owner's hand instead of the graveyard as it resolves.
+    Buyback(BuybackCost),
     /// CR 702.153a: Casualty N — as an additional cost, you may sacrifice a creature
     /// with power N or greater. When you do, copy this spell.
     Casualty(u32),
@@ -1039,7 +1053,11 @@ impl FromStr for Keyword {
                 "spectacle" => return Ok(Keyword::Spectacle(parse_keyword_mana_cost(p))),
                 "surge" => return Ok(Keyword::Surge(parse_keyword_mana_cost(p))),
                 "encore" => return Ok(Keyword::Encore(parse_keyword_mana_cost(p))),
-                "buyback" => return Ok(Keyword::Buyback(parse_keyword_mana_cost(p))),
+                "buyback" => {
+                    return Ok(Keyword::Buyback(BuybackCost::Mana(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "casualty" => return Ok(Keyword::Casualty(p.parse().unwrap_or(1))),
                 "entwine" => return Ok(Keyword::Entwine(parse_keyword_mana_cost(p))),
                 "affinity" => {
@@ -1531,7 +1549,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Spectacle" => Ok(Keyword::Spectacle(mana(data)?)),
         "Surge" => Ok(Keyword::Surge(mana(data)?)),
         "Encore" => Ok(Keyword::Encore(mana(data)?)),
-        "Buyback" => Ok(Keyword::Buyback(mana(data)?)),
+        "Buyback" => {
+            // Accept both legacy ManaCost format and new BuybackCost tagged format.
+            if let Ok(bb_cost) = serde_json::from_value::<BuybackCost>(data.clone()) {
+                Ok(Keyword::Buyback(bb_cost))
+            } else {
+                Ok(Keyword::Buyback(BuybackCost::Mana(mana(data)?)))
+            }
+        }
         // CR 702.153a
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a

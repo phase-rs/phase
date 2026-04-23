@@ -189,6 +189,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         } else if is_permanent_type(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.
             Zone::Battlefield
+        } else if ability
+            .as_ref()
+            .is_some_and(|a| a.context.additional_cost_paid)
+            && state.objects.get(&entry.id).is_some_and(|o| {
+                o.keywords
+                    .iter()
+                    .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)))
+            })
+        {
+            // CR 702.27a: If the buyback cost was paid, put this spell into its
+            // owner's hand instead of into that player's graveyard as it resolves.
+            // Buyback appears only on instants/sorceries, so this branch is
+            // unreachable for permanent spells. Does NOT redirect on counter
+            // (CR 701.5a) or fizzle (CR 608.2b) — buyback applies only "as it
+            // resolves."
+            Zone::Hand
         } else {
             // CR 608.2n: Non-permanent spells are put into owner's graveyard.
             Zone::Graveyard
@@ -1446,6 +1462,92 @@ mod tests {
             state.objects[&spell_id].zone,
             Zone::Exile,
             "Flashback spell should be exiled on fizzle, not sent to graveyard"
+        );
+    }
+    /// CR 702.27a: Build an instant spell on the stack with a draw effect and
+    /// a `Keyword::Buyback` on the game object. `buyback_paid` controls
+    /// `ability.context.additional_cost_paid`. Returns the spell's object id.
+    fn push_buyback_spell(state: &mut GameState, buyback_paid: bool) -> ObjectId {
+        use crate::types::keywords::{BuybackCost, Keyword};
+        use crate::types::mana::ManaCost;
+        let spell_id = create_object(
+            state,
+            CardId(300),
+            PlayerId(0),
+            "Whispers of the Muse".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.keywords
+                .push(Keyword::Buyback(BuybackCost::Mana(ManaCost::Cost {
+                    generic: 5,
+                    shards: vec![],
+                })));
+        }
+
+        let mut resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            spell_id,
+            PlayerId(0),
+        );
+        resolved.context.additional_cost_paid = buyback_paid;
+
+        state.stack.push(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(300),
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        spell_id
+    }
+
+    /// CR 702.27a: When the buyback cost was paid, the spell returns to its
+    /// owner's hand instead of the graveyard as it resolves.
+    #[test]
+    fn buyback_paid_routes_resolving_spell_to_hand() {
+        let mut state = setup();
+        let spell_id = push_buyback_spell(&mut state, true);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert!(
+            state.players[0].hand.contains(&spell_id),
+            "buyback-paid spell should return to owner's hand"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell_id),
+            "buyback-paid spell must not go to graveyard"
+        );
+    }
+
+    /// CR 608.2n: Without the buyback cost paid, the non-permanent spell
+    /// goes to its owner's graveyard normally.
+    #[test]
+    fn buyback_not_paid_routes_resolving_spell_to_graveyard() {
+        let mut state = setup();
+        let spell_id = push_buyback_spell(&mut state, false);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert!(
+            state.players[0].graveyard.contains(&spell_id),
+            "non-buyback spell should go to owner's graveyard"
+        );
+        assert!(
+            !state.players[0].hand.contains(&spell_id),
+            "non-buyback spell must not return to hand"
         );
     }
 }
