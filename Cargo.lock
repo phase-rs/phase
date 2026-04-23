@@ -509,6 +509,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "web-time",
 ]
 
 [[package]]

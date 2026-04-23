@@ -1,10 +1,10 @@
 mod candidates;
 mod context;
 mod copy;
+pub mod filter;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::game::engine::apply_as_current;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
@@ -22,16 +22,20 @@ pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
     project_copy_mana_spent_for_x,
 };
+pub use filter::{
+    BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
+};
 
+/// Filter `candidate_actions` down to the actions that are actually legal now.
+///
+/// Runs the default [`FilterPipeline`] — cheap structural checks first, then
+/// an `apply_as_current` simulation as a catch-all. The `cheap ⊆ sim`
+/// invariant (enforced by `filter::tests::basic_legality_is_subset_of_simulation`)
+/// guarantees that no candidate accepted by the simulation is silently
+/// dropped by a cheap filter.
 pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
-    candidate_actions(state)
-        .into_iter()
-        .filter(|candidate| !cheap_reject_candidate(state, &candidate.action))
-        .filter(|candidate| {
-            let mut sim = state.clone();
-            apply_as_current(&mut sim, candidate.action.clone()).is_ok()
-        })
-        .collect()
+    let pipeline = FilterPipeline::default_pipeline();
+    pipeline.apply(state, candidate_actions(state))
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
