@@ -1,9 +1,19 @@
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
 import type { GameAction } from "../../adapter/types";
+import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { debugLog } from "../debugLog";
 import { dispatchAction } from "../dispatch";
+import { attemptStateRehydrate, notifyEngineLost } from "../engineRecovery";
 import type { OpponentController } from "./types";
+
+/**
+ * Hard stop on AI controller after this many total consecutive failures on
+ * the same WaitingFor key — pre-fallback *and* post-fallback failures both
+ * count. Previously the controller would spin indefinitely once post-fallback
+ * failures started accumulating, generating 300k+ log lines per minute.
+ */
+const MAX_TOTAL_FAILURES = 6;
 
 export interface AIControllerConfig {
   difficulty: string;
@@ -16,17 +26,23 @@ export interface AIController extends OpponentController {
   dispose(): void;
 }
 
+function isStateLost(err: unknown): boolean {
+  return err instanceof AdapterError && err.code === AdapterErrorCode.STATE_LOST;
+}
+
 export function createAIController(config: AIControllerConfig): AIController {
   let active = false;
   let pending = false;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let unsubscribe: (() => void) | null = null;
 
-  // Track consecutive failures on the same WaitingFor state to break infinite loops.
-  // When the AI returns null or the engine rejects the action, the WaitingFor doesn't
-  // change — without a cap, checkAndSchedule would retry forever.
+  // Failure tracking on the same WaitingFor state to break infinite loops.
+  // `MAX_CONSECUTIVE_FAILURES` gates the normal→fallback transition; the
+  // separate `MAX_TOTAL_FAILURES` hard-stops the controller so post-fallback
+  // failures (e.g., engine rejecting even the safe fallback) cannot spin.
   let lastWaitingForKey: string | null = null;
   let consecutiveFailures = 0;
+  let totalFailures = 0;
   const MAX_CONSECUTIVE_FAILURES = 3;
 
   const aiPlayerIds = new Set(config.playerIds);
@@ -52,11 +68,29 @@ export function createAIController(config: AIControllerConfig): AIController {
     if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) return;
     if (!aiPlayerIds.has(waitingFor.data.player)) return;
 
-    // Reset failure counter when the WaitingFor state changes (type or player)
+    // Reset failure counters when the WaitingFor state changes (type or player).
+    // `consecutiveFailures` gates normal→fallback escalation; `totalFailures`
+    // is the absolute hard stop that kills the controller.
     const key = waitingForKey(waitingFor);
     if (key !== lastWaitingForKey) {
       lastWaitingForKey = key;
       consecutiveFailures = 0;
+      totalFailures = 0;
+    }
+
+    // Hard stop: if we've burned through both the normal and fallback paths
+    // on the same key without progress, the engine is unrecoverably stuck
+    // for this seat. Surface to the user instead of spinning. Previously
+    // there was no absolute cap — fallback failures could loop indefinitely,
+    // generating log storms.
+    if (totalFailures >= MAX_TOTAL_FAILURES) {
+      debugLog(
+        `AI controller halting: ${totalFailures} failures on ${waitingFor.type}`,
+        "error",
+      );
+      notifyEngineLost("ai-controller-stuck");
+      stop();
+      return;
     }
 
     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -87,12 +121,14 @@ export function createAIController(config: AIControllerConfig): AIController {
       dispatchAction(fallback, waitingFor.data.player)
         .then(() => {
           consecutiveFailures = 0;
+          totalFailures = 0;
         })
         .catch((e) => {
-          // Increment to prevent infinite fallback retry on persistent errors
+          // Increment both counters to prevent infinite fallback retry.
           consecutiveFailures++;
+          totalFailures++;
           debugLog(
-            `AI fallback also failed (${consecutiveFailures}): ${e instanceof Error ? e.message : String(e)}`,
+            `AI fallback also failed (${consecutiveFailures}/${totalFailures}): ${e instanceof Error ? e.message : String(e)}`,
             "warn",
           );
         })
@@ -131,7 +167,29 @@ export function createAIController(config: AIControllerConfig): AIController {
       let failed = false;
       try {
         const { gameState } = useGameStore.getState();
-        const action = await actionPromise;
+        let action: GameAction | null;
+        try {
+          action = await actionPromise;
+        } catch (err) {
+          if (!isStateLost(err)) throw err;
+          // Engine lost state between scheduleAction and the timeout firing.
+          // Try to rehydrate from the store snapshot and recompute the AI
+          // action once. If recovery fails (or the retry still throws because
+          // restoreState silently failed in the worker), escalate to the
+          // user-prompt path.
+          debugLog("AI getAiAction hit STATE_LOST; attempting rehydrate", "warn");
+          const recovered = await attemptStateRehydrate();
+          if (!recovered) {
+            notifyEngineLost("ai-getAction");
+            throw err;
+          }
+          try {
+            action = await adapter!.getAiAction(config.difficulty, playerId);
+          } catch (retryErr) {
+            notifyEngineLost("ai-getAction-retry");
+            throw retryErr;
+          }
+        }
         // Re-check active after await — the AI computation may have completed
         // after stop() was called, and dispatching a stale action from the old
         // game into a new game session would corrupt state.
@@ -147,15 +205,19 @@ export function createAIController(config: AIControllerConfig): AIController {
         // Pass `playerId` (the AI seat we're driving) as actor. The engine
         // guard in `apply` verifies actor matches the authorized submitter;
         // dispatching as the human here would be rejected.
+        // dispatch.ts has its own STATE_LOST recovery; any error that reaches
+        // here after that retry is genuinely unrecoverable for this attempt.
         await dispatchAction(action, playerId);
-        // Successful dispatch — reset failure counter
+        // Successful dispatch — reset both failure counters
         consecutiveFailures = 0;
+        totalFailures = 0;
       } catch (e) {
         debugLog(`AI error choosing action: ${e instanceof Error ? e.message : String(e)}`);
         failed = true;
       } finally {
         if (failed) {
           consecutiveFailures++;
+          totalFailures++;
         }
         pending = false;
         if (active) checkAndSchedule();

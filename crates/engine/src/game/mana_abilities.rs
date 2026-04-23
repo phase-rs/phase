@@ -7,6 +7,7 @@ use crate::types::game_state::{
     ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::{ManaCost, ManaPool, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -269,6 +270,7 @@ pub fn activate_mana_ability(
             resume,
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
         },
         events,
     )
@@ -463,6 +465,16 @@ pub fn can_activate_mana_ability_now(
     {
         return false;
     }
+    // CR 605.3a + CR 601.2h: Mana abilities pay their cost at activation
+    // time ("unpayable costs can't be paid"). Gate on pool affordability +
+    // choice-of-object eligibility before simulating — this surfaces filter
+    // lands as un-activatable when the player has no {W/U}-style mana
+    // available.
+    if let Some(cost) = &ability_def.cost {
+        if !cost.is_payable_for_mana_ability(state, player, source_id) {
+            return false;
+        }
+    }
     let mut simulated = state.clone();
     activate_mana_ability(
         &mut simulated,
@@ -525,6 +537,37 @@ fn advance_mana_ability_activation(
         }
     }
 
+    // CR 605.3a + CR 601.2h + CR 107.4e: Resolve the mana sub-cost payment before
+    // producing any mana or prompting for output choices. If the cost has hybrid
+    // shards (CR 107.4e) with more than one legal color assignment given the
+    // current pool, surface `PayManaAbilityMana` so the player picks. Unambiguous
+    // plans auto-pay.
+    if pending.chosen_mana_payment.is_none() {
+        if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
+            let pool = &state.players[pending.player.0 as usize].mana_pool;
+            let plans = enumerate_hybrid_payment_plans(pool, sub_cost);
+            match plans.len() {
+                0 => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay mana cost for mana ability".to_string(),
+                    ));
+                }
+                1 => {
+                    let mut updated = pending;
+                    updated.chosen_mana_payment = Some(plans.into_iter().next().unwrap());
+                    return advance_mana_ability_activation(state, updated, events);
+                }
+                _ => {
+                    return Ok(WaitingFor::PayManaAbilityMana {
+                        player: pending.player,
+                        options: plans,
+                        pending_mana_ability: Box::new(pending),
+                    });
+                }
+            }
+        }
+    }
+
     if pending.color_override.is_none() {
         if let Some(choice) = mana_choice_prompt(&ability_def.effect, state, pending.source_id) {
             pay_mana_ability_cost_with_choices(
@@ -535,6 +578,7 @@ fn advance_mana_ability_activation(
                 events,
                 &mut pending.chosen_tappers.iter().copied(),
                 &mut pending.chosen_discards.iter().copied(),
+                pending.chosen_mana_payment.as_deref(),
             )?;
             return Ok(WaitingFor::ChooseManaColor {
                 player: pending.player,
@@ -553,6 +597,7 @@ fn advance_mana_ability_activation(
         pending.color_override.clone(),
         &pending.chosen_tappers,
         &pending.chosen_discards,
+        pending.chosen_mana_payment.as_deref(),
     )?;
     if waiting_changed {
         Ok(state.waiting_for.clone())
@@ -579,6 +624,7 @@ fn pay_mana_ability_cost(
         events,
         &mut std::iter::empty(),
         &mut std::iter::empty(),
+        None,
     )
 }
 
@@ -592,6 +638,7 @@ fn resolve_mana_ability_with_selected_choices(
     color_override: Option<ProductionOverride>,
     tapped_creatures: &[ObjectId],
     discarded_cards: &[ObjectId],
+    chosen_hybrid_payment: Option<&[ManaType]>,
 ) -> Result<bool, EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
     let mut discarded = discarded_cards.iter().copied();
@@ -603,6 +650,7 @@ fn resolve_mana_ability_with_selected_choices(
         events,
         &mut chosen,
         &mut discarded,
+        chosen_hybrid_payment,
     )?;
     if chosen.next().is_some() {
         return Err(EngineError::InvalidAction(
@@ -625,6 +673,7 @@ fn resolve_mana_ability_with_selected_choices(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pay_mana_ability_cost_with_choices<I, J>(
     state: &mut GameState,
     source_id: ObjectId,
@@ -633,6 +682,7 @@ fn pay_mana_ability_cost_with_choices<I, J>(
     events: &mut Vec<GameEvent>,
     chosen_tappers: &mut I,
     chosen_discards: &mut J,
+    chosen_hybrid_payment: Option<&[ManaType]>,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
@@ -640,6 +690,11 @@ where
 {
     match cost {
         Some(AbilityCost::Tap) => tap_source(state, source_id, events)?,
+        // CR 605.3a + CR 601.2h: Top-level mana sub-cost (e.g. hypothetical
+        // `{R}: Add {G}{G}`). Composite costs route through the Composite arm.
+        Some(AbilityCost::Mana { cost }) => {
+            pay_mana_sub_cost(state, player, cost, chosen_hybrid_payment, events)?;
+        }
         Some(AbilityCost::PayLife { amount }) => {
             // CR 119.4 + CR 903.4: QuantityExpr resolves against the activator's
             // current state (e.g. commander color identity count).
@@ -782,6 +837,14 @@ where
                     } => {
                         let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
                     }
+                    // CR 605.3a + CR 601.2h + CR 107.4e: Mana sub-cost inside a
+                    // Composite mana-ability cost (filter lands' `{W/U}, {T}`).
+                    // The caller (via `chosen_mana_payment`) has already resolved
+                    // any hybrid color choices (CR 107.4e); auto-pay the remaining
+                    // cost from the activator's pool.
+                    AbilityCost::Mana { cost } => {
+                        pay_mana_sub_cost(state, player, cost, chosen_hybrid_payment, events)?;
+                    }
                     other => {
                         return Err(EngineError::InvalidAction(format!(
                             "Unsupported mana ability sub-cost: {other:?}"
@@ -816,6 +879,191 @@ fn pay_life_cost(
             EngineError::ActionNotAllowed("Cannot pay life cost for mana ability".to_string()),
         ),
     }
+}
+
+/// CR 605.3a + CR 605.1a: Extract the nested `ManaCost` from an ability cost
+/// that contains a mana sub-cost (either at top level or inside a Composite).
+/// Returns `None` for costs with no mana payment component.
+fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> {
+    match cost {
+        Some(AbilityCost::Mana { cost }) => Some(cost),
+        Some(AbilityCost::Composite { costs }) => costs.iter().find_map(|c| match c {
+            AbilityCost::Mana { cost } => Some(cost),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// CR 107.4e + CR 601.2h: Enumerate legal per-hybrid-shard color assignments
+/// for a mana-ability mana sub-cost. Each returned vector aligns 1:1 with
+/// hybrid shards in `cost` in printed order. A plan is included iff a clone
+/// of `pool` can be fully debited when each hybrid shard is pinned to the
+/// chosen color.
+///
+/// For a cost with zero hybrid shards the result is `[vec![]]` when the pool
+/// covers the cost (representing the trivial empty-choice plan), or empty
+/// when the pool cannot cover. Callers short-circuit the single-plan case
+/// into auto-pay.
+fn enumerate_hybrid_payment_plans(pool: &ManaPool, cost: &ManaCost) -> Vec<Vec<ManaType>> {
+    let hybrid_pairs = hybrid_shard_pairs(cost);
+    let mut plans = Vec::new();
+    enumerate_plans_rec(pool, cost, &hybrid_pairs, &mut Vec::new(), &mut plans);
+    plans
+}
+
+/// List the (a, b) color pairs for each hybrid shard in printed order.
+/// Only pure hybrid shards (`{W/U}` style) contribute — Phyrexian hybrid
+/// shards resolve via the mana-payment life-fallback path and
+/// colorless-hybrid (`{C/W}`) defers to the auto-pay preference, which
+/// matches how casting treats them.
+fn hybrid_shard_pairs(cost: &ManaCost) -> Vec<(ManaType, ManaType)> {
+    let ManaCost::Cost { shards, .. } = cost else {
+        return Vec::new();
+    };
+    shards
+        .iter()
+        .filter_map(|&shard| match mana_payment::shard_to_mana_type(shard) {
+            mana_payment::ShardRequirement::Hybrid(a, b) => Some((a, b)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn enumerate_plans_rec(
+    pool: &ManaPool,
+    cost: &ManaCost,
+    hybrid_pairs: &[(ManaType, ManaType)],
+    chosen: &mut Vec<ManaType>,
+    out: &mut Vec<Vec<ManaType>>,
+) {
+    if chosen.len() == hybrid_pairs.len() {
+        if try_pay_with_hybrid_plan(pool, cost, chosen).is_some() {
+            out.push(chosen.clone());
+        }
+        return;
+    }
+    let (a, b) = hybrid_pairs[chosen.len()];
+    chosen.push(a);
+    enumerate_plans_rec(pool, cost, hybrid_pairs, chosen, out);
+    chosen.pop();
+    if a != b {
+        chosen.push(b);
+        enumerate_plans_rec(pool, cost, hybrid_pairs, chosen, out);
+        chosen.pop();
+    }
+}
+
+/// CR 107.4e: Simulate paying `cost` from a clone of `pool` with hybrid
+/// shards pinned to the colors in `plan`. Returns `Some(())` when the pool
+/// covers the cost, `None` otherwise. Deterministic — uses the same
+/// auto-pay rules as `pay_cost` except hybrid shards defer to `plan`.
+fn try_pay_with_hybrid_plan(pool: &ManaPool, cost: &ManaCost, plan: &[ManaType]) -> Option<()> {
+    let mut sim = pool.clone();
+    debit_cost_with_plan(&mut sim, cost, plan).ok()
+}
+
+/// CR 107.4e + CR 601.2h: Debit `cost` from `pool` using `plan` for hybrid
+/// shards. Non-hybrid shards (single, Phyrexian, snow, colorless-hybrid,
+/// hybrid-Phyrexian, two-generic-hybrid, X) are routed through the same
+/// auto-pay rules the casting flow uses via `mana_payment::pay_cost`, but
+/// with the hybrid shards already resolved, the plan is unambiguous.
+///
+/// Implementation: build a scratch cost with hybrid shards rewritten to
+/// single-color shards per `plan`, then delegate to `pay_cost`. This keeps
+/// every shard-kind's payment rules in one place.
+fn debit_cost_with_plan(
+    pool: &mut ManaPool,
+    cost: &ManaCost,
+    plan: &[ManaType],
+) -> Result<(), mana_payment::PaymentError> {
+    use crate::types::mana::ManaCostShard;
+    let ManaCost::Cost { shards, generic } = cost else {
+        return Ok(());
+    };
+    let mut plan_cursor = 0usize;
+    let rewritten_shards: Vec<ManaCostShard> = shards
+        .iter()
+        .map(|&shard| match mana_payment::shard_to_mana_type(shard) {
+            mana_payment::ShardRequirement::Hybrid(..) => {
+                let color = plan[plan_cursor];
+                plan_cursor += 1;
+                mana_type_to_single_shard(color)
+            }
+            _ => shard,
+        })
+        .collect();
+    let scratch_cost = ManaCost::Cost {
+        shards: rewritten_shards,
+        generic: *generic,
+    };
+    mana_payment::pay_cost(pool, &scratch_cost).map(|_| ())
+}
+
+/// Map a `ManaType` to the printed-shard variant that requires exactly that
+/// color (used to pin hybrid shards after the player's color choice).
+fn mana_type_to_single_shard(color: ManaType) -> crate::types::mana::ManaCostShard {
+    use crate::types::mana::ManaCostShard;
+    match color {
+        ManaType::White => ManaCostShard::White,
+        ManaType::Blue => ManaCostShard::Blue,
+        ManaType::Black => ManaCostShard::Black,
+        ManaType::Red => ManaCostShard::Red,
+        ManaType::Green => ManaCostShard::Green,
+        ManaType::Colorless => ManaCostShard::Colorless,
+    }
+}
+
+/// CR 605.3a + CR 601.2h: Debit a mana sub-cost from the activator's pool.
+/// If `hybrid_plan` is provided, hybrid shards are pinned to those colors;
+/// otherwise `pay_cost` auto-decides via the standard casting rules. An
+/// `InsufficientMana` error surfaces as `ActionNotAllowed` so the UI can
+/// recover cleanly (the pre-activation gate should have prevented this).
+fn pay_mana_sub_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+    hybrid_plan: Option<&[ManaType]>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let pool = &mut state.players[player.0 as usize].mana_pool;
+    let (spent, _life) = match hybrid_plan {
+        Some(plan) => debit_cost_with_plan(pool, cost, plan)
+            .map(|_| (Vec::new(), Vec::new()))
+            .map_err(|_| {
+                EngineError::ActionNotAllowed(
+                    "Mana pool cannot cover mana ability cost".to_string(),
+                )
+            })?,
+        None => mana_payment::pay_cost(pool, cost).map_err(|_| {
+            EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
+        })?,
+    };
+    let _ = spent;
+    // CR 605.3b: The player's mana pool mutation is the public signal; no
+    // dedicated event exists for ability mana payments. The pool-diff is
+    // surfaced via the standard state-update machinery.
+    let _ = events;
+    Ok(())
+}
+
+/// CR 605.3b: Complete a `PayManaAbilityMana` prompt by validating the
+/// submitted payment against the enumerated options and resuming activation.
+pub fn handle_pay_mana_ability_mana(
+    state: &mut GameState,
+    options: &[Vec<ManaType>],
+    pending: &PendingManaAbility,
+    payment: &[ManaType],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !options.iter().any(|opt| opt.as_slice() == payment) {
+        return Err(EngineError::InvalidAction(
+            "Chosen mana payment is not among the legal options".to_string(),
+        ));
+    }
+    let mut updated = pending.clone();
+    updated.chosen_mana_payment = Some(payment.to_vec());
+    advance_mana_ability_activation(state, updated, events)
 }
 
 /// Tap a permanent as part of paying a mana ability cost.
@@ -1057,6 +1305,20 @@ mod tests {
                 damage_source: None,
             },
         ))
+    }
+
+    fn seed_pool_with(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
+        use crate::types::mana::ManaUnit;
+        for _ in 0..count {
+            state.players[player.0 as usize].mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                snow: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
     }
 
     #[test]
@@ -2138,6 +2400,7 @@ mod tests {
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
         };
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Red, ManaType::Green],
@@ -2194,6 +2457,7 @@ mod tests {
                 resume: ManaAbilityResume::Priority,
                 chosen_tappers: Vec::new(),
                 chosen_discards: Vec::new(),
+                chosen_mana_payment: None,
             };
             let prompt = ManaChoicePrompt::SingleColor {
                 options: vec![ManaType::Green, ManaType::White],
@@ -2299,6 +2563,10 @@ mod tests {
 
     fn sunken_ruins_colored_ability() -> AbilityDefinition {
         // CR 605.3b + CR 106.1a: `{U/B}, {T}: Add {U}{U}, {U}{B}, or {B}{B}`.
+        // The real printed cost is composite: one hybrid `{U/B}` plus `{T}`.
+        // Tests must use the real shape — truncating to `AbilityCost::Tap`
+        // masks the Composite + Mana sub-cost bug path.
+        use crate::types::mana::{ManaCost, ManaCostShard};
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
@@ -2314,7 +2582,17 @@ mod tests {
                 expiry: None,
             },
         )
-        .cost(AbilityCost::Tap)
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::BlueBlack],
+                        generic: 0,
+                    },
+                },
+                AbilityCost::Tap,
+            ],
+        })
     }
 
     #[test]
@@ -2335,6 +2613,10 @@ mod tests {
             .push(crate::types::card_type::CoreType::Land);
         let ability = sunken_ruins_colored_ability();
         obj.abilities.push(ability.clone());
+        // Seed the pool with one {U} so the `{U/B}` sub-cost has a single
+        // unambiguous plan — this test focuses on the output Combination
+        // prompt, not the input mana-payment prompt.
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Blue, 1);
 
         let mut events = Vec::new();
         let result = activate_mana_ability(
@@ -2367,6 +2649,9 @@ mod tests {
         }
         // CR 605.3b: tap cost is paid before the prompt.
         assert!(state.objects.get(&ruins).unwrap().tapped);
+        // CR 601.2h + CR 107.4e: {U/B} sub-cost was debited from the seeded pool — only
+        // the two combination-produced units remain.
+        assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
     #[test]
@@ -2394,6 +2679,7 @@ mod tests {
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -2436,6 +2722,10 @@ mod tests {
             .push(crate::types::card_type::CoreType::Land);
         let ability = sunken_ruins_colored_ability();
         obj.abilities.push(ability.clone());
+        // Seed one {B} so the {U/B} sub-cost is unambiguously payable; the
+        // auto-tap path then short-circuits both mana-payment and
+        // combination-choice prompts.
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
 
         let mut events = Vec::new();
         let result = activate_mana_ability(
@@ -2454,6 +2744,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result, WaitingFor::Priority { .. }));
+        // Pool starts with 1 {B}; {U/B} sub-cost debits that {B}; production
+        // adds 1 {U} + 1 {B} per the override.
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
     }
@@ -2483,6 +2775,7 @@ mod tests {
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -2500,5 +2793,293 @@ mod tests {
             &mut events,
         );
         assert!(result.is_err(), "mismatched shape must be rejected");
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Filter-land mana sub-cost regression tests.
+    // CR 605.3a + CR 601.2h + CR 107.4e.
+    // ─────────────────────────────────────────────────────────────
+
+    fn setup_sunken_ruins(state: &mut GameState) -> (ObjectId, AbilityDefinition) {
+        let ruins = create_object(
+            state,
+            CardId(500),
+            PlayerId(0),
+            "Sunken Ruins".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = sunken_ruins_colored_ability();
+        let obj = state.objects.get_mut(&ruins).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        obj.abilities.push(ability.clone());
+        (ruins, ability)
+    }
+
+    #[test]
+    fn filter_land_auto_pays_unambiguous_mana_sub_cost() {
+        // CR 605.3a + CR 107.4e: Pool has only {U}; the single legal plan
+        // auto-pays without surfacing `PayManaAbilityMana`. The flow then
+        // lands on `ChooseManaColor` for the combination output.
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        let mut events = Vec::new();
+        let result = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(
+                result,
+                WaitingFor::ChooseManaColor {
+                    choice: ManaChoicePrompt::Combination { .. },
+                    ..
+                }
+            ),
+            "expected ChooseManaColor after unambiguous mana-sub-cost auto-pay, got {:?}",
+            result,
+        );
+        // Pool had 1 {U}; sub-cost debited it.
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        // Tap component also paid.
+        assert!(state.objects.get(&ruins).unwrap().tapped);
+    }
+
+    #[test]
+    fn filter_land_prompts_for_ambiguous_hybrid_mana_payment() {
+        // CR 107.4e + CR 601.2h: Pool has one {U} and one {B}. Both color
+        // assignments for the {U/B} hybrid are legal, so the engine pauses
+        // at `PayManaAbilityMana` with both options.
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Blue, 1);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        let mut events = Vec::new();
+        let result = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        match &result {
+            WaitingFor::PayManaAbilityMana { options, .. } => {
+                let expected_u = vec![ManaType::Blue];
+                let expected_b = vec![ManaType::Black];
+                assert!(options.contains(&expected_u));
+                assert!(options.contains(&expected_b));
+                assert_eq!(options.len(), 2);
+            }
+            _ => panic!("expected PayManaAbilityMana, got {:?}", result),
+        }
+        // Tap MUST NOT have happened yet — cost payment is atomic: if the
+        // prompt is still pending, no part of the cost has been paid.
+        // (The Composite handler pays all sub-costs in order, after the
+        // hybrid plan is resolved.)
+        assert!(
+            !state.objects.get(&ruins).unwrap().tapped,
+            "source must not be tapped while mana payment is pending",
+        );
+    }
+
+    #[test]
+    fn filter_land_resume_with_blue_choice_produces_requested_combination() {
+        // End-to-end: enter PayManaAbilityMana, pick {U}, then resume and
+        // pick the {U}{U} combination. Pool debits {U} for cost, produces
+        // {U}{U}.
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Blue, 1);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        let mut events = Vec::new();
+        let result = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        let (options, pending) = match result {
+            WaitingFor::PayManaAbilityMana {
+                options,
+                pending_mana_ability,
+                ..
+            } => (options, pending_mana_ability),
+            other => panic!("expected PayManaAbilityMana, got {:?}", other),
+        };
+
+        let pay_result = handle_pay_mana_ability_mana(
+            &mut state,
+            &options,
+            &pending,
+            &[ManaType::Blue],
+            &mut events,
+        )
+        .unwrap();
+
+        // Now at ChooseManaColor::Combination, and the {U} has been debited.
+        assert!(
+            matches!(
+                pay_result,
+                WaitingFor::ChooseManaColor {
+                    choice: ManaChoicePrompt::Combination { .. },
+                    ..
+                }
+            ),
+            "expected ChooseManaColor after PayManaAbilityMana",
+        );
+        // {U} debited, {B} still in pool (only the hybrid shard consumed one mana).
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
+        assert!(state.objects.get(&ruins).unwrap().tapped);
+
+        let combo_pending = match pay_result {
+            WaitingFor::ChooseManaColor {
+                pending_mana_ability,
+                ..
+            } => pending_mana_ability,
+            other => panic!("unexpected variant: {:?}", other),
+        };
+        let combo_prompt = ManaChoicePrompt::Combination {
+            options: vec![
+                vec![ManaType::Blue, ManaType::Blue],
+                vec![ManaType::Blue, ManaType::Black],
+                vec![ManaType::Black, ManaType::Black],
+            ],
+        };
+        handle_choose_mana_color(
+            &mut state,
+            &combo_pending,
+            &combo_prompt,
+            ManaChoice::Combination(vec![ManaType::Blue, ManaType::Blue]),
+            &mut events,
+        )
+        .unwrap();
+
+        // Produced {U}{U}; plus the {B} still floating.
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 2);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
+    }
+
+    #[test]
+    fn filter_land_resume_with_black_choice_debits_black_from_pool() {
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Blue, 1);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        let (options, pending) = match waiting {
+            WaitingFor::PayManaAbilityMana {
+                options,
+                pending_mana_ability,
+                ..
+            } => (options, pending_mana_ability),
+            other => panic!("expected PayManaAbilityMana, got {:?}", other),
+        };
+
+        handle_pay_mana_ability_mana(
+            &mut state,
+            &options,
+            &pending,
+            &[ManaType::Black],
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 0);
+    }
+
+    #[test]
+    fn filter_land_colored_ability_not_activatable_with_empty_pool() {
+        // CR 605.3a + CR 601.2h: Payability gate — colored filter-land
+        // ability must not surface as activatable when the pool has no
+        // {U} or {B}.
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        // Pool intentionally empty of {U}/{B}; put one {G} so pool isn't totally empty.
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Green, 1);
+
+        assert!(
+            !can_activate_mana_ability_now(&state, PlayerId(0), ruins, 0, &ability),
+            "filter-land colored ability must be un-activatable without the mana to pay {{U/B}}",
+        );
+    }
+
+    #[test]
+    fn filter_land_colored_ability_activatable_with_sufficient_pool() {
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+        assert!(can_activate_mana_ability_now(
+            &state,
+            PlayerId(0),
+            ruins,
+            0,
+            &ability,
+        ));
+    }
+
+    #[test]
+    fn pay_mana_ability_mana_rejects_unlisted_payment() {
+        // Handler rejects a payment vector not present in `options`.
+        let mut state = GameState::new_two_player(42);
+        let (ruins, _ability) = setup_sunken_ruins(&mut state);
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: ruins,
+            ability_index: 0,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+        };
+        let options = vec![vec![ManaType::Blue], vec![ManaType::Black]];
+        let mut events = Vec::new();
+        let result = handle_pay_mana_ability_mana(
+            &mut state,
+            &options,
+            &pending,
+            &[ManaType::Red],
+            &mut events,
+        );
+        assert!(result.is_err());
     }
 }

@@ -264,7 +264,8 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         // Full mode (the Full-mode handler path uses them for hosting/joining
         // normal server-run games).
         ClientMessage::CreateGameWithSettings { .. }
-        | ClientMessage::JoinGameWithPassword { .. } => None,
+        | ClientMessage::JoinGameWithPassword { .. }
+        | ClientMessage::LookupJoinTarget { .. } => None,
 
         // Lobby-only-exclusive.
         ClientMessage::UpdateLobbyMetadata { .. } | ClientMessage::UnregisterLobby { .. } => {
@@ -370,6 +371,12 @@ async fn main() {
                                             public: meta.public,
                                             password: meta.password,
                                             timer_seconds: meta.timer_seconds,
+                                            current_players: session.current_player_count(),
+                                            max_players: session.player_count as u32,
+                                            format_config: Some(
+                                                session.state.format_config.clone(),
+                                            ),
+                                            match_config: session.state.match_config,
                                             ..Default::default()
                                         },
                                     );
@@ -1736,7 +1743,7 @@ async fn handle_client_message(
                 let game_code = server_core::generate_game_code();
                 let player_token = server_core::generate_player_token();
                 let pc = requested_player_count.clamp(2, 6);
-                let format_for_lobby = format_config.as_ref().map(|fc| fc.format);
+                let format_config_for_lobby = format_config.clone();
                 let (host_version, host_build_commit) = identity
                     .client_hello
                     .as_ref()
@@ -1760,7 +1767,8 @@ async fn handle_client_message(
                             // the client when it observes new connections.
                             current_players: 1,
                             max_players: pc as u32,
-                            format: format_for_lobby,
+                            format_config: format_config_for_lobby,
+                            match_config,
                             room_name: room_name
                                 .as_deref()
                                 .map(str::trim)
@@ -1986,7 +1994,7 @@ async fn handle_client_message(
                 let pc = requested_player_count.clamp(2, 6);
                 // Capture the format before `format_config` is consumed so we
                 // can stamp it on the lobby entry below.
-                let format_for_lobby = format_config.as_ref().map(|fc| fc.format);
+                let format_config_for_lobby = format_config.clone();
                 let (game_code, player_token) = mgr.create_game_n_players(
                     resolved,
                     display_name.clone(),
@@ -2038,7 +2046,8 @@ async fn handle_client_message(
                         // `player_count: 100` would otherwise advertise
                         // "1/100 players" while the game ran with 6.
                         max_players: pc as u32,
-                        format: format_for_lobby,
+                        format_config: format_config_for_lobby,
+                        match_config,
                         // Trim then drop empty strings so the client can't
                         // smuggle a blank room_name that would render as an
                         // empty row title. `None` is the "use host name"
@@ -2090,6 +2099,85 @@ async fn handle_client_message(
                 let count = player_count.load(Ordering::Relaxed);
                 broadcast_player_count(lobby_subscribers, count).await;
             }
+        }
+
+        ClientMessage::LookupJoinTarget {
+            game_code,
+            password,
+        } => {
+            info!(game = %game_code, "LookupJoinTarget");
+
+            let lookup = {
+                let lob = lobby.lock().await;
+
+                let guest_commit = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| h.build_commit.as_str())
+                    .unwrap_or("");
+                let host_commit = lob.host_build_commit(&game_code).unwrap_or("");
+                if let BuildCommitCheck::Reject { host, guest } =
+                    check_build_commit(host_commit, guest_commit)
+                {
+                    warn!(game = %game_code, %host, %guest, "build mismatch — refusing lookup");
+                    Err(ServerMessage::Error {
+                        message: format!(
+                            "Build mismatch: host is on {host}, you are on {guest}. Refresh to update."
+                        ),
+                    })
+                } else {
+                    match lob.verify_password(&game_code, password.as_deref()) {
+                        Ok(()) => match lob.join_target_info(&game_code) {
+                            Some(info) => Ok(info),
+                            None => Err(ServerMessage::Error {
+                                message: format!("Game not found in lobby: {game_code}"),
+                            }),
+                        },
+                        Err(e) if e == "password_required" => {
+                            Err(ServerMessage::PasswordRequired {
+                                game_code: game_code.clone(),
+                            })
+                        }
+                        Err(e) => {
+                            warn!(game = %game_code, error = %e, "lookup password verification failed");
+                            Err(ServerMessage::Error { message: e })
+                        }
+                    }
+                }
+            };
+
+            let info = match lookup {
+                Ok(info) => info,
+                Err(msg) => {
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            if info.max_players > 0 && info.current_players >= info.max_players {
+                let msg = ServerMessage::Error {
+                    message: format!("Game {game_code} is full"),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            let msg = ServerMessage::JoinTargetInfo {
+                game_code: game_code.clone(),
+                is_p2p: info.is_p2p,
+                format_config: info.format_config,
+                match_config: info.match_config,
+                player_count: info.max_players as u8,
+                filled_seats: info.current_players as u8,
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+            info!(game = %game_code, is_p2p = info.is_p2p, "sent JoinTargetInfo");
         }
 
         ClientMessage::JoinGameWithPassword {
@@ -2159,18 +2247,11 @@ async fn handle_client_message(
                 // registered by a Full-mode server has an empty peer_id;
                 // `broker_info` treats that as "not brokerable" so the
                 // error below can distinguish it from a missing game.
-                let (peer_id, max_players, current_players) = match lob.broker_info(&game_code) {
+                let info = match lob.join_target_info(&game_code) {
                     Some(info) => info,
                     None => {
-                        let exists = lob.has_game(&game_code);
                         let msg = ServerMessage::Error {
-                            message: if exists {
-                                format!(
-                                    "Game {game_code} is hosted on a Full-mode server and cannot be brokered"
-                                )
-                            } else {
-                                format!("Game not found in lobby: {game_code}")
-                            },
+                            message: format!("Game not found in lobby: {game_code}"),
                         };
                         if let Ok(json) = serde_json::to_string(&msg) {
                             let _ = socket.send(Message::text(json)).await;
@@ -2178,12 +2259,23 @@ async fn handle_client_message(
                         return;
                     }
                 };
+                if !info.is_p2p {
+                    let msg = ServerMessage::Error {
+                        message: format!(
+                            "Game {game_code} is hosted on a Full-mode server and cannot be brokered"
+                        ),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
 
                 // Seat-full rejection: the host owns final seat assignment
                 // over P2P, but if the lobby already advertises the room
                 // as full there's no point handing out a PeerInfo the
                 // host would immediately refuse.
-                if max_players > 0 && current_players >= max_players {
+                if info.max_players > 0 && info.current_players >= info.max_players {
                     let msg = ServerMessage::Error {
                         message: format!("Game {game_code} is full"),
                     };
@@ -2195,11 +2287,11 @@ async fn handle_client_message(
 
                 let msg = ServerMessage::PeerInfo {
                     game_code: game_code.clone(),
-                    host_peer_id: peer_id,
-                    format_config: None,
-                    match_config: Default::default(),
-                    player_count: max_players as u8,
-                    filled_seats: current_players as u8,
+                    host_peer_id: info.host_peer_id,
+                    format_config: info.format_config,
+                    match_config: info.match_config,
+                    player_count: info.max_players as u8,
+                    filled_seats: info.current_players as u8,
                 };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;

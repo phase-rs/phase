@@ -1,4 +1,10 @@
-import type { FormatConfig, LobbyGame, MatchConfig, PeerInfo } from "../adapter/types";
+import type {
+  FormatConfig,
+  JoinTargetInfo,
+  LobbyGame,
+  MatchConfig,
+  PeerInfo,
+} from "../adapter/types";
 import type { ServerInfo } from "../adapter/ws-adapter";
 import {
   HandshakeError,
@@ -38,6 +44,20 @@ export interface RegisteredGame {
  */
 export type ResolveResult =
   | { ok: true; peerInfo: PeerInfo }
+  | {
+      ok: false;
+      reason:
+        | "password_required"
+        | "build_mismatch"
+        | "not_found"
+        | "room_full"
+        | "connection_lost"
+        | "error";
+      message: string;
+    };
+
+export type LookupJoinTargetResult =
+  | { ok: true; info: JoinTargetInfo }
   | {
       ok: false;
       reason:
@@ -331,7 +351,115 @@ export function resolveGuestOver(
   });
 }
 
-type FailureReason = Extract<ResolveResult, { ok: false }>["reason"];
+export function lookupJoinTargetOver(
+  socket: PhaseSocket,
+  code: string,
+  password?: string,
+  opts: ResolveGuestOptions = {},
+): Promise<LookupJoinTargetResult> {
+  const { ws } = socket;
+  const { signal, timeoutMs = 10_000 } = opts;
+
+  return new Promise<LookupJoinTargetResult>((resolve) => {
+    if (ws.readyState !== WebSocket.OPEN) {
+      resolve({
+        ok: false,
+        reason: "connection_lost",
+        message: "Lobby connection dropped, please try again",
+      });
+      return;
+    }
+    if (signal?.aborted) {
+      resolve({
+        ok: false,
+        reason: "connection_lost",
+        message: "Lookup aborted before start",
+      });
+      return;
+    }
+
+    const listener = (event: MessageEvent) => {
+      let msg: { type: string; data?: unknown };
+      try {
+        msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
+      } catch {
+        return;
+      }
+      if (msg.type === "JoinTargetInfo") {
+        const data = msg.data as JoinTargetInfo;
+        if (data.game_code !== code) return;
+        cleanup();
+        resolve({ ok: true, info: data });
+      } else if (msg.type === "PasswordRequired") {
+        const data = msg.data as { game_code: string };
+        if (data.game_code !== code) return;
+        cleanup();
+        resolve({
+          ok: false,
+          reason: "password_required",
+          message: "This room requires a password",
+        });
+      } else if (msg.type === "Error") {
+        const data = msg.data as { message: string };
+        cleanup();
+        resolve({ ok: false, reason: classifyError(data.message), message: data.message });
+      }
+    };
+
+    const closeListener = () => {
+      cleanup();
+      resolve({
+        ok: false,
+        reason: "connection_lost",
+        message: "Lobby connection dropped, please try again",
+      });
+    };
+
+    const onAbort = () => {
+      cleanup();
+      resolve({
+        ok: false,
+        reason: "connection_lost",
+        message: "Lookup aborted",
+      });
+    };
+
+    const timer =
+      Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? setTimeout(() => {
+            cleanup();
+            resolve({
+              ok: false,
+              reason: "connection_lost",
+              message: `No response from lobby within ${timeoutMs}ms`,
+            });
+          }, timeoutMs)
+        : null;
+
+    const cleanup = () => {
+      if (timer !== null) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      ws.removeEventListener("message", listener);
+      ws.removeEventListener("close", closeListener);
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    ws.addEventListener("message", listener);
+    ws.addEventListener("close", closeListener, { once: true });
+
+    ws.send(
+      JSON.stringify({
+        type: "LookupJoinTarget",
+        data: {
+          game_code: code,
+          password: password ?? null,
+        },
+      }),
+    );
+  });
+}
+
+type FailureReason = Extract<ResolveResult | LookupJoinTargetResult, { ok: false }>["reason"];
 
 function classifyError(message: string): FailureReason {
   const lower = message.toLowerCase();

@@ -1,4 +1,6 @@
 import type { GameAction, GameEvent, GameState, LegalActionsResult } from "../adapter/types";
+import { AdapterError, AdapterErrorCode } from "../adapter/types";
+import { attemptStateRehydrate, notifyEngineLost } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { getPlayerId } from "../hooks/usePlayerId";
 import type { AnimationStep } from "../animation/types";
@@ -79,6 +81,10 @@ function actionsEqual(a: GameAction, b: GameAction): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function isStateLost(err: unknown): boolean {
+  return err instanceof AdapterError && err.code === AdapterErrorCode.STATE_LOST;
+}
+
 async function processAction(action: GameAction, actor: number): Promise<void> {
   const { adapter, gameState } = useGameStore.getState();
   if (!adapter || !gameState) {
@@ -103,12 +109,60 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   // The engine's guard rejects any action whose actor doesn't match the
   // authorized submitter — so passing the local human's ID during the AI's
   // turn correctly fails instead of silently applying as the AI.
-  const result = await adapter.submitAction(action, actor);
+  // If the engine reports STATE_LOST (thread-local cleared between calls —
+  // PWA update desync, worker restart, etc.), transparently rehydrate from
+  // the store snapshot and retry once. Safe because submitAction fails
+  // before mutating any engine state when the cell is None.
+  let result;
+  try {
+    result = await adapter.submitAction(action, actor);
+  } catch (err) {
+    if (!isStateLost(err)) throw err;
+    debugLog(`processAction: STATE_LOST on ${action.type}; attempting rehydrate`, "warn");
+    const recovered = await attemptStateRehydrate();
+    if (!recovered) {
+      notifyEngineLost("submitAction");
+      throw err;
+    }
+    // Recovery reported success but the underlying worker restoreState is
+    // fire-and-forget from the adapter (void return, async worker). If the
+    // restore silently failed — e.g., MULTIPLAYER_MODE refused it, the worker
+    // crashed mid-restore — this retry will throw STATE_LOST again. Catch
+    // that explicitly and surface via Layer 3 rather than letting the error
+    // escape uncaught.
+    try {
+      result = await adapter.submitAction(action, actor);
+    } catch (retryErr) {
+      notifyEngineLost("submitAction-retry");
+      throw retryErr;
+    }
+  }
   const events: GameEvent[] = result.events;
 
   // 3b. Fetch new state eagerly and persist before animations so a mid-animation
   //     page reload (e.g. PWA service-worker update) doesn't lose the latest state.
-  const newState = await adapter.getState();
+  // Recover from STATE_LOST here too — a worker restart could happen between
+  // submitAction and getState. Critically: if recovery fails, do NOT call
+  // saveGame — earlier revisions silently wrote a default empty GameState to
+  // IDB on null, corrupting the checkpoint we now rely on for Layer 3 reload.
+  let newState: GameState;
+  try {
+    newState = await adapter.getState();
+  } catch (err) {
+    if (!isStateLost(err)) throw err;
+    debugLog("processAction: STATE_LOST on getState; attempting rehydrate", "warn");
+    const recovered = await attemptStateRehydrate();
+    if (!recovered) {
+      notifyEngineLost("getState");
+      throw err;
+    }
+    try {
+      newState = await adapter.getState();
+    } catch (retryErr) {
+      notifyEngineLost("getState-retry");
+      throw retryErr;
+    }
+  }
   const { gameId } = useGameStore.getState();
   if (gameId) saveGame(gameId, newState);
 
@@ -162,8 +216,26 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     }
   }
 
-  // 8. Update game state (deferred after animations — state already fetched in step 3b)
-  const legalResult = await adapter.getLegalActions();
+  // 8. Update game state (deferred after animations — state already fetched in step 3b).
+  // Engine state could have been lost during the animation window; rehydrate
+  // once if needed so the UI doesn't render empty legal actions.
+  let legalResult;
+  try {
+    legalResult = await adapter.getLegalActions();
+  } catch (err) {
+    if (!isStateLost(err)) throw err;
+    const recovered = await attemptStateRehydrate();
+    if (!recovered) {
+      notifyEngineLost("getLegalActions");
+      throw err;
+    }
+    try {
+      legalResult = await adapter.getLegalActions();
+    } catch (retryErr) {
+      notifyEngineLost("getLegalActions-retry");
+      throw retryErr;
+    }
+  }
 
   useGameStore.setState((prev) => {
     const newHistory = shouldSaveHistory
@@ -221,6 +293,20 @@ async function processQueue(): Promise<void> {
     } catch (err) {
       debugLog(`processQueue error (${next.kind}): ${err instanceof Error ? err.message : String(err)}`);
       next.reject(err);
+      // If processAction escalated to Layer 3 (notifyEngineLost already
+      // fired), drain the rest of the queue with the same error. Without
+      // this, each remaining item would attempt its own recovery, each
+      // one failing and re-firing notifyEngineLost — the modal is
+      // de-duped but the log becomes noisy and we waste cycles on doomed
+      // rehydrates. User is about to reload; nothing in this queue is
+      // going to succeed.
+      if (isStateLost(err)) {
+        while (pendingQueue.length > 0) {
+          const stale = pendingQueue.shift()!;
+          stale.reject(err);
+        }
+        break;
+      }
     }
   }
   isAnimating = false;

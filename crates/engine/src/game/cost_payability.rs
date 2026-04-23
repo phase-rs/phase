@@ -18,6 +18,7 @@
 use crate::types::ability::{AbilityCost, TargetFilter};
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::GameState;
@@ -25,6 +26,29 @@ use crate::types::GameState;
 use super::filter::{matches_target_filter, FilterContext};
 
 impl AbilityCost {
+    /// CR 605.3a + CR 605.3b + CR 601.2h: Payability gate for ACTIVATED MANA
+    /// ABILITIES specifically. Unlike [`is_payable`] (which defers mana
+    /// affordability to the casting-time `ManaPayment` step per CR 601.2g),
+    /// mana abilities resolve immediately and their mana sub-cost must be
+    /// debited from the pool at activation — so pool affordability is checked
+    /// here. All other cost kinds delegate to [`is_payable`] with no change.
+    pub fn is_payable_for_mana_ability(
+        &self,
+        state: &GameState,
+        player: PlayerId,
+        source: ObjectId,
+    ) -> bool {
+        match self {
+            AbilityCost::Mana { cost } => mana_cost_payable_from_pool(state, player, cost),
+            AbilityCost::Composite { costs } => costs
+                .iter()
+                .all(|c| c.is_payable_for_mana_ability(state, player, source)),
+            // Every other kind has no mana-pool component — defer to the
+            // generic 601.2b gate, which already handles it correctly.
+            other => other.is_payable(state, player, source),
+        }
+    }
+
     /// CR 601.2b: Returns true if this cost can be paid given the current game
     /// state. Returns false only when the cost requires a choice of object and
     /// no legal object exists, or a hard resource check fails (e.g., life total).
@@ -254,6 +278,17 @@ impl AbilityCost {
             AbilityCost::Unimplemented { .. } => true,
         }
     }
+}
+
+/// CR 601.2h + CR 605.3a: Check whether `cost` can be paid from `player`'s
+/// current mana pool. This is the single authority for mana-ability mana
+/// payability — auto-tap is NOT considered (mana abilities activate at
+/// instant speed without chaining into other mana abilities, CR 605.3c).
+fn mana_cost_payable_from_pool(state: &GameState, player: PlayerId, cost: &ManaCost) -> bool {
+    let Some(p) = state.players.get(player.0 as usize) else {
+        return false;
+    };
+    super::mana_payment::can_pay(&p.mana_pool, cost)
 }
 
 /// Count objects in `zone` controlled by `player` that match `filter`

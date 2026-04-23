@@ -19,7 +19,7 @@ import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
-import type { ParsedDeck } from "../services/deckParser";
+import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { ensureCardDatabase } from "../services/cardData";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
@@ -36,19 +36,7 @@ import {
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 
 function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
-  const names: string[] = [];
-  for (const entry of deck.main) {
-    for (let i = 0; i < entry.count; i++) {
-      names.push(entry.name);
-    }
-  }
-  const sbNames: string[] = [];
-  for (const entry of deck.sideboard) {
-    for (let i = 0; i < entry.count; i++) {
-      sbNames.push(entry.name);
-    }
-  }
-  return { main_deck: names, sideboard: sbNames, commander: deck.commander ?? [] };
+  return expandParsedDeck(deck);
 }
 
 function collectFormatFeedDecks(formatConfig?: FormatConfig): FeedDeck[] {
@@ -174,26 +162,9 @@ async function buildDeckList(deck: ParsedDeck, formatConfig?: FormatConfig): Pro
   opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
   ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
 }> {
-  const playerNames: string[] = [];
-  for (const entry of deck.main) {
-    for (let i = 0; i < entry.count; i++) {
-      playerNames.push(entry.name);
-    }
-  }
-  const playerSideboard: string[] = [];
-  for (const entry of deck.sideboard) {
-    for (let i = 0; i < entry.count; i++) {
-      playerSideboard.push(entry.name);
-    }
-  }
-  const opponentDeck = parsedDeckToDeckData(await pickOpponentDeck(deck, formatConfig));
   return {
-    player: { main_deck: playerNames, sideboard: playerSideboard, commander: deck.commander ?? [] },
-    opponent: {
-      main_deck: opponentDeck.main_deck,
-      sideboard: opponentDeck.sideboard,
-      commander: opponentDeck.commander ?? [],
-    },
+    player: expandParsedDeck(deck),
+    opponent: expandParsedDeck(await pickOpponentDeck(deck, formatConfig)),
     ai_decks: [],
   };
 }

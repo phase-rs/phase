@@ -62,6 +62,20 @@ I'm not trying to make money off this. There are no ads. I'm just a dude who lik
 - **Cross-platform** — Tauri desktop (Windows, macOS, Linux), browser PWA, and tablet
 - **Card images** — Scryfall integration with IndexedDB caching
 
+## Contribute a Card with Your LLM
+
+Thousands of cards are still unimplemented. If you use Claude Code, Codex CLI, or a similar agent, you can "lend your LLM" an hour and ship a real PR — **even if you don't have a Rust toolchain**. The LLM does all the work; you just paste a prompt.
+
+Hand this to your LLM:
+
+```
+Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
+and follow it end-to-end to implement {a card I name, or pick one for me}.
+Use medium thinking. Don't stop for my input. Open a PR when done.
+```
+
+Full procedure, two tracks (developer / non-developer), and copy-paste prompts for LLM UIs without web fetch: [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md).
+
 ## Quick Start
 
 ### Prerequisites

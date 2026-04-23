@@ -1,5 +1,6 @@
 import { registerSW } from "virtual:pwa-register";
 import { isTauri } from "../services/sidecar";
+import { isMultiplayerMode, useGameStore } from "../stores/gameStore";
 import { markPendingAutoUpdate } from "./updateMarker";
 import {
   setUpdateStatus,
@@ -23,6 +24,80 @@ let manualCheckForUpdate: (() => Promise<void>) | null = null;
 let progressIntervalId: number | null = null;
 let activationTimeoutId: number | null = null;
 let simulatedProgress = 0;
+
+/**
+ * True when a multiplayer game is live in this tab and reloading would
+ * drop the P2P/WebSocket connection mid-game.
+ *
+ * Covers:
+ * - Active MP game with a `gameState` (waiting_for !== GameOver).
+ * - Pre-game P2P lobby (adapter attached, no gameState yet) — reloading
+ *   here drops the user from the lobby.
+ */
+function isMultiplayerGameLive(): boolean {
+  const { gameMode, gameState, adapter } = useGameStore.getState();
+  if (!isMultiplayerMode(gameMode)) return false;
+  if (!adapter) return false;
+  if (gameState?.waiting_for?.type === "GameOver") return false;
+  return true;
+}
+
+/**
+ * Register a one-shot callback that fires once `isMultiplayerGameLive()`
+ * transitions from true to false. Returns the unsubscribe function so
+ * callers can cancel if the deferred action is no longer needed.
+ *
+ * Selector-based subscribe so the listener only fires when the derived
+ * liveness boolean flips, not on every unrelated store mutation (actions,
+ * log entries, animation ticks).
+ *
+ * Immediate re-check after subscribe closes a TOCTOU window: the state
+ * may have transitioned out of "live" between the caller's guard and
+ * our subscribe, and Zustand only fires on *subsequent* changes.
+ */
+function whenMultiplayerGameEnds(callback: () => void): () => void {
+  let fired = false;
+  const fire = () => {
+    if (fired) return;
+    fired = true;
+    unsub();
+    callback();
+  };
+  // Selector derives the boolean directly from the state argument rather
+  // than closing over `isMultiplayerGameLive` (which would re-read the
+  // store via getState and bypass the selector pattern). Zustand's
+  // subscribeWithSelector compares with Object.is, so the listener only
+  // fires on true↔false transitions.
+  const unsub = useGameStore.subscribe(
+    (s) => {
+      if (!isMultiplayerMode(s.gameMode)) return false;
+      if (!s.adapter) return false;
+      if (s.gameState?.waiting_for?.type === "GameOver") return false;
+      return true;
+    },
+    (live) => { if (!live) fire(); },
+  );
+  // Immediate re-check closes a TOCTOU window: state may have transitioned
+  // out of "live" between the caller's guard and our subscribe, and Zustand
+  // only fires on *subsequent* changes.
+  if (!isMultiplayerGameLive()) fire();
+  return unsub;
+}
+
+/**
+ * Deferred update closure captured at `onNeedRefresh` time when a MP game
+ * is live. Applied when the game ends. Null when nothing is deferred.
+ */
+let deferredUpdate: (() => void) | null = null;
+let deferredUpdateUnsub: (() => void) | null = null;
+
+/**
+ * Deferred reload closure captured at `controllerchange` time when a MP
+ * game is live. Defense-in-depth for the case where another tab triggered
+ * activation of a new SW while this tab is still mid-game.
+ */
+let deferredReload: (() => void) | null = null;
+let deferredReloadUnsub: (() => void) | null = null;
 
 function formatError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
@@ -108,28 +183,91 @@ export function registerServiceWorker() {
   let hasReloadedOnControllerChange = false;
 
   navigator.serviceWorker.addEventListener("controllerchange", () => {
+    // `hasReloadedOnControllerChange` latches true on the first event so we
+    // don't reload twice if the browser fires it again. Set *after* the
+    // deferral check so a second controllerchange during a deferred state
+    // isn't simply dropped — though in practice once this listener has
+    // deferred a reload, there's no way for a second controllerchange to
+    // do anything useful (the deferred reload, when it fires, fetches the
+    // live SW anyway).
     if (hasReloadedOnControllerChange) return;
     clearActivationTimeout();
-    pushUpdateDebug("Service worker controller changed; reloading.");
     hasReloadedOnControllerChange = true;
-    window.location.reload();
+
+    const doReload = () => {
+      pushUpdateDebug("Service worker controller changed; reloading.");
+      window.location.reload();
+    };
+
+    // Defer reload until a live multiplayer game ends — reloading mid-game
+    // tears down the P2P DataChannel / WebSocket, forcing the opponent
+    // into the disconnect grace window and breaking continuity.
+    if (isMultiplayerGameLive()) {
+      pushUpdateDebug(
+        "Service worker controller changed during multiplayer game; deferring reload until game ends.",
+        "warn",
+      );
+      setUpdateStatus("deferred");
+      deferredReload = doReload;
+      deferredReloadUnsub = whenMultiplayerGameEnds(() => {
+        pushUpdateDebug("Multiplayer game ended; applying deferred reload.");
+        const fn = deferredReload;
+        deferredReload = null;
+        deferredReloadUnsub = null;
+        fn?.();
+      });
+      return;
+    }
+
+    doReload();
   });
 
   const updateSW = registerSW({
     immediate: true,
     onNeedRefresh() {
-      pushUpdateDebug("Service worker reported update ready; applying update.");
-      markPendingAutoUpdate();
-      setActivatingStatus();
-      void updateSW(true).catch((error: unknown) => {
+      const applyUpdate = () => {
+        pushUpdateDebug("Service worker reported update ready; applying update.");
+        markPendingAutoUpdate();
+        setActivatingStatus();
+        void updateSW(true).catch((error: unknown) => {
+          clearActivationTimeout();
+          if (getUpdateStatus() === "activating") {
+            setUpdateStatus("idle");
+            setDownloadProgress(0);
+          }
+          setUpdateError(`Failed to apply service worker update: ${formatError(error)}`);
+          console.warn("[phase.rs] Failed to apply service worker update.", error);
+        });
+      };
+
+      // Defer activation while a multiplayer game is live. Calling
+      // `updateSW(true)` triggers skipWaiting → controllerchange → reload,
+      // which would drop the user's live connection mid-game. Leave the new
+      // SW parked in "installed" until the game ends, then activate.
+      if (isMultiplayerGameLive()) {
+        pushUpdateDebug(
+          "Update ready during multiplayer game; deferring activation until game ends.",
+          "warn",
+        );
+        // Clear the 20s activation timer that the `installed` statechange
+        // started — otherwise the user sees a spurious "activation timed
+        // out after 20s" error during a deferral that may last much longer.
         clearActivationTimeout();
-        if (getUpdateStatus() === "activating") {
-          setUpdateStatus("idle");
-          setDownloadProgress(0);
-        }
-        setUpdateError(`Failed to apply service worker update: ${formatError(error)}`);
-        console.warn("[phase.rs] Failed to apply service worker update.", error);
-      });
+        setDownloadProgress(0);
+        setUpdateStatus("deferred");
+        deferredUpdate = applyUpdate;
+        deferredUpdateUnsub?.();
+        deferredUpdateUnsub = whenMultiplayerGameEnds(() => {
+          pushUpdateDebug("Multiplayer game ended; applying deferred update.");
+          const fn = deferredUpdate;
+          deferredUpdate = null;
+          deferredUpdateUnsub = null;
+          fn?.();
+        });
+        return;
+      }
+
+      applyUpdate();
     },
     onRegisteredSW(swUrl, swRegistration) {
       if (!swRegistration) return;
@@ -229,6 +367,8 @@ export function registerServiceWorker() {
           clearActivationTimeout();
           document.removeEventListener("visibilitychange", handleVisibilityChange);
           manualCheckForUpdate = null;
+          deferredUpdateUnsub?.();
+          deferredReloadUnsub?.();
         },
         { once: true },
       );

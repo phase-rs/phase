@@ -38,7 +38,9 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
       ? "checking…"
       : updateStatus === "activating"
         ? "updating…"
-        : null;
+        : updateStatus === "deferred"
+          ? "update pending after game"
+          : null;
 
   const isActive = updateStatus !== "idle";
   const isDownloading = updateStatus === "downloading";

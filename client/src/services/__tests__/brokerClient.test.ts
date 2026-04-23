@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PhaseSocket } from "../openPhaseSocket";
-import { resolveGuestOver, subscribeLobbyOver } from "../brokerClient";
+import {
+  lookupJoinTargetOver,
+  resolveGuestOver,
+  subscribeLobbyOver,
+} from "../brokerClient";
 import type { LobbyGame } from "../../adapter/types";
 
 class MockWebSocket extends EventTarget {
@@ -128,6 +132,60 @@ describe("resolveGuestOver", () => {
       new Promise((r) => setTimeout(() => r("pending"), 20)),
     ]);
     expect(raced).toBe("pending");
+  });
+});
+
+describe("lookupJoinTargetOver", () => {
+  it("resolves with JoinTargetInfo for the matching code", async () => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "ABC123");
+    ws.deliver(
+      JSON.stringify({
+        type: "JoinTargetInfo",
+        data: {
+          game_code: "ABC123",
+          is_p2p: false,
+          player_count: 2,
+          filled_seats: 1,
+          match_config: { match_type: "Bo1" },
+          format_config: { format: "Commander" },
+        },
+      }),
+    );
+    const result = await promise;
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: true,
+        info: expect.objectContaining({
+          game_code: "ABC123",
+          is_p2p: false,
+        }),
+      }),
+    );
+  });
+
+  it("sends LookupJoinTarget instead of JoinGameWithPassword", async () => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "ABC123", "pw");
+    expect(ws.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"LookupJoinTarget"'),
+    );
+    expect(ws.send).toHaveBeenCalledWith(
+      expect.stringContaining('"password":"pw"'),
+    );
+    ws.deliver(
+      JSON.stringify({
+        type: "JoinTargetInfo",
+        data: {
+          game_code: "ABC123",
+          is_p2p: true,
+          player_count: 4,
+          filled_seats: 2,
+          match_config: { match_type: "Bo1" },
+        },
+      }),
+    );
+    await promise;
   });
 });
 

@@ -1,6 +1,6 @@
 import type { GameFormat, MatchType } from "../adapter/types";
 import { evaluateDeckCompatibilityJs } from "./engineRuntime";
-import type { ParsedDeck } from "./deckParser";
+import { expandParsedDeck, type ParsedDeck } from "./deckParser";
 
 export interface CompatibilityCheck {
   compatible: boolean;
@@ -60,21 +60,9 @@ interface EvaluateOptions {
   selectedMatchType?: MatchType | null;
 }
 
-function expandDeckEntries(entries: ParsedDeck["main"]): string[] {
-  const cards: string[] = [];
-  for (const entry of entries) {
-    for (let i = 0; i < entry.count; i++) {
-      cards.push(entry.name);
-    }
-  }
-  return cards;
-}
-
 function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibilityRequest {
   return {
-    main_deck: expandDeckEntries(deck.main),
-    sideboard: expandDeckEntries(deck.sideboard),
-    commander: deck.commander ?? [],
+    ...expandParsedDeck(deck),
     selected_format: options.selectedFormat ?? null,
     selected_match_type: options.selectedMatchType ?? null,
   };

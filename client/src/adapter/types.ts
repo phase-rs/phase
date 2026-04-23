@@ -82,6 +82,20 @@ export interface PeerInfo {
   filled_seats: number;
 }
 
+/**
+ * Read-only join-target lookup returned before deck selection. Lets the
+ * client discover format and whether the code targets a brokered P2P room
+ * without consuming a seat.
+ */
+export interface JoinTargetInfo {
+  game_code: string;
+  is_p2p: boolean;
+  format_config?: FormatConfig | null;
+  match_config: MatchConfig;
+  player_count: number;
+  filled_seats: number;
+}
+
 // ── Match / Series ───────────────────────────────────────────────────────
 
 export type MatchType = "Bo1" | "Bo3";
@@ -875,9 +889,26 @@ export class AdapterError extends Error {
 /** Error codes for AdapterError */
 export const AdapterErrorCode = {
   NOT_INITIALIZED: "NOT_INITIALIZED",
+  /**
+   * The engine had a game, then lost it. Distinct from NOT_INITIALIZED
+   * (never had one). Triggered by the Rust sentinel `NOT_INITIALIZED: ...`
+   * prefix — indicates the thread-local `GAME_STATE` is `None` mid-session
+   * (worker restart, PWA update desync, panic recovery). Recoverable via
+   * `adapter.restoreState(lastKnownGoodState)`.
+   */
+  STATE_LOST: "STATE_LOST",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
 } as const;
+
+/**
+ * Detect the Rust-side sentinel used by `with_state`/`with_state_mut` in
+ * `engine-wasm/src/lib.rs` when `GAME_STATE` is `None`. Match against the
+ * exact prefix — never the full message, which may evolve.
+ */
+export function isStateLostMessage(message: string): boolean {
+  return message.startsWith("NOT_INITIALIZED:");
+}
 
 /**
  * Transport-agnostic interface for communicating with the game engine.

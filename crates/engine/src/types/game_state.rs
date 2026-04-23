@@ -576,6 +576,13 @@ pub struct PendingManaAbility {
     pub chosen_tappers: Vec<ObjectId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_discards: Vec<ObjectId>,
+    /// CR 107.4e + CR 605.3a: Pre-resolved hybrid-color choices for a `Mana` sub-cost
+    /// inside an `AbilityCost::Composite` (e.g. filter lands' `{W/U}, {T}` payment).
+    /// One entry per hybrid shard, in printed order. `None` means the payment hasn't
+    /// been resolved yet; the activation flow either auto-picks (unambiguous pool) or
+    /// surfaces `WaitingFor::PayManaAbilityMana` for a genuine choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_mana_payment: Option<Vec<ManaType>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1249,6 +1256,20 @@ pub enum WaitingFor {
         cards: Vec<ObjectId>,
         pending_mana_ability: Box<PendingManaAbility>,
     },
+    /// CR 605.3a + CR 601.2h + CR 107.4e: A mana ability whose cost is
+    /// `Composite { Mana(..), Tap, .. }` (filter lands, Cabal Coffers-style
+    /// pay-to-produce abilities) requires the activator to debit mana from
+    /// their pool. When the cost contains a hybrid shard with more than one
+    /// legal color assignment given the current pool, the player must choose.
+    /// `options` lists every legal per-hybrid-shard color vector; each vector
+    /// aligns 1:1 with hybrid shards in the cost in printed order. The
+    /// unambiguous case (zero hybrid shards or a single legal assignment) is
+    /// auto-paid inline and never surfaces this variant.
+    PayManaAbilityMana {
+        player: PlayerId,
+        options: Vec<Vec<ManaType>>,
+        pending_mana_ability: Box<PendingManaAbility>,
+    },
     /// CR 605.3b: Mana ability with a choice dimension — player must answer
     /// before mana is added to the pool. The prompt shape (`SingleColor` vs
     /// `Combination`) depends on the `ManaProduction` variant. Both shapes
@@ -1578,6 +1599,7 @@ impl WaitingFor {
             | WaitingFor::TapCreaturesForSpellCost { player, .. }
             | WaitingFor::TapCreaturesForManaAbility { player, .. }
             | WaitingFor::DiscardForManaAbility { player, .. }
+            | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
             | WaitingFor::ExileFromGraveyardForCost { player, .. }
             | WaitingFor::CollectEvidenceChoice { player, .. }
@@ -3082,6 +3104,7 @@ mod tests {
                 resume: ManaAbilityResume::Priority,
                 chosen_tappers: Vec::new(),
                 chosen_discards: Vec::new(),
+                chosen_mana_payment: None,
             }),
         };
         assert!(!tap_mana.has_pending_cast());

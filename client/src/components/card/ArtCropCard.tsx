@@ -111,11 +111,11 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           {/* 4. ART AREA */}
           <div className="flex-1 w-full px-[2px] pb-[2px] flex flex-col relative z-0">
             <div className="w-full h-full relative rounded-[1.5px] overflow-hidden border border-black/80 shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)] bg-black">
-              <div
-                className="absolute inset-0 w-full h-full bg-cover bg-center"
-                style={{ backgroundImage: `url(${src})` }}
-                role="img"
-                aria-label={cardName}
+              <img
+                src={src}
+                alt={cardName}
+                draggable={false}
+                className="absolute inset-0 w-full h-full object-cover"
               />
 
               <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />

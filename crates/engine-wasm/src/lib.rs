@@ -88,14 +88,21 @@ pub fn is_multiplayer_mode() -> bool {
     MULTIPLAYER_MODE.with(|cell| cell.get())
 }
 
+/// Stable sentinel prefix for "game state thread-local is None" errors.
+/// JS adapter code matches on this prefix to classify the failure as
+/// `AdapterErrorCode.STATE_LOST` and trigger transparent rehydrate-and-retry
+/// recovery. Keep the prefix exact — it is part of the adapter contract.
+const NOT_INITIALIZED_ERR: &str =
+    "NOT_INITIALIZED: Game state not initialized. Call initialize_game or restore_game_state first.";
+
 /// Take the game state out of the Cell, pass it to a closure that may mutate it,
 /// then put it back. If the closure panics, the state is lost (None) but subsequent
 /// calls won't fail with "RefCell already borrowed".
 fn with_state_mut<R>(f: impl FnOnce(&mut GameState) -> R) -> Result<R, JsValue> {
     GAME_STATE.with(|cell| {
-        let mut state = cell.take().ok_or_else(|| {
-            JsValue::from_str("Game not initialized. Call initialize_game first.")
-        })?;
+        let mut state = cell
+            .take()
+            .ok_or_else(|| JsValue::from_str(NOT_INITIALIZED_ERR))?;
         let result = f(&mut state);
         cell.set(Some(state));
         Ok(result)
@@ -105,9 +112,9 @@ fn with_state_mut<R>(f: impl FnOnce(&mut GameState) -> R) -> Result<R, JsValue> 
 /// Borrow the game state immutably. Same take/set pattern to avoid RefCell poisoning.
 fn with_state<R>(f: impl FnOnce(&GameState) -> R) -> Result<R, JsValue> {
     GAME_STATE.with(|cell| {
-        let state = cell.take().ok_or_else(|| {
-            JsValue::from_str("Game not initialized. Call initialize_game first.")
-        })?;
+        let state = cell
+            .take()
+            .ok_or_else(|| JsValue::from_str(NOT_INITIALIZED_ERR))?;
         let result = f(&state);
         cell.set(Some(state));
         Ok(result)

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use engine::types::format::GameFormat;
+use engine::types::format::FormatConfig;
+use engine::types::match_config::MatchConfig;
 use tracing::{debug, warn};
 
 use crate::protocol::LobbyGame;
@@ -21,7 +22,8 @@ pub struct RegisterGameRequest {
     pub host_build_commit: String,
     pub current_players: u32,
     pub max_players: u32,
-    pub format: Option<GameFormat>,
+    pub format_config: Option<FormatConfig>,
+    pub match_config: MatchConfig,
     /// Optional match-scoped label shown in lobby listings. Distinct from
     /// `host_name` (the player identity). `None` means the lobby row falls
     /// back to the host's name.
@@ -30,6 +32,19 @@ pub struct RegisterGameRequest {
     /// on `Full`-mode servers (the server runs the engine and P2P is not
     /// used). Guests on a lobby-only server use this to dial the host.
     pub host_peer_id: String,
+}
+
+/// Fields returned by `join_target_info` — everything the server needs to
+/// answer a typed-code lookup or populate `PeerInfo` for a brokered join in
+/// one atomic snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinTargetInfo {
+    pub host_peer_id: String,
+    pub max_players: u32,
+    pub current_players: u32,
+    pub format_config: Option<FormatConfig>,
+    pub match_config: MatchConfig,
+    pub is_p2p: bool,
 }
 
 struct LobbyGameMeta {
@@ -43,7 +58,8 @@ struct LobbyGameMeta {
     host_build_commit: String,
     current_players: u32,
     max_players: u32,
-    format: Option<GameFormat>,
+    format_config: Option<FormatConfig>,
+    match_config: MatchConfig,
     room_name: Option<String>,
     host_peer_id: String,
 }
@@ -87,7 +103,8 @@ impl LobbyManager {
                 host_build_commit: req.host_build_commit,
                 current_players: req.current_players,
                 max_players: req.max_players,
-                format: req.format,
+                format_config: req.format_config,
+                match_config: req.match_config,
                 room_name: req.room_name,
                 host_peer_id: req.host_peer_id,
             },
@@ -163,7 +180,7 @@ impl LobbyManager {
             host_build_commit: meta.host_build_commit.clone(),
             current_players: meta.current_players,
             max_players: meta.max_players,
-            format: meta.format,
+            format: meta.format_config.as_ref().map(|fc| fc.format),
             room_name: meta.room_name.clone(),
             is_p2p: !meta.host_peer_id.is_empty(),
         })
@@ -182,7 +199,7 @@ impl LobbyManager {
                 host_build_commit: meta.host_build_commit.clone(),
                 current_players: meta.current_players,
                 max_players: meta.max_players,
-                format: meta.format,
+                format: meta.format_config.as_ref().map(|fc| fc.format),
                 room_name: meta.room_name.clone(),
                 is_p2p: !meta.host_peer_id.is_empty(),
             })
@@ -205,22 +222,19 @@ impl LobbyManager {
         self.games.is_empty()
     }
 
-    /// Atomic lookup of the fields a broker-path guest response needs:
-    /// host's PeerJS peer ID plus `(max_players, current_players)`. Returns
-    /// `None` if the game isn't registered OR if the entry has no peer ID
-    /// (registered by a `Full`-mode server — nothing to broker). Packaging
-    /// this as a single accessor avoids races where a caller reads the
-    /// peer ID, drops the lock, then re-locks for seat counts.
-    pub fn broker_info(&self, game_code: &str) -> Option<(String, u32, u32)> {
+    /// Atomic lookup of the fields a typed-code join needs to route correctly.
+    /// Returns `None` if the game isn't registered.
+    pub fn join_target_info(&self, game_code: &str) -> Option<JoinTargetInfo> {
         let meta = self.games.get(game_code)?;
-        if meta.host_peer_id.is_empty() {
-            return None;
-        }
-        Some((
-            meta.host_peer_id.clone(),
-            meta.max_players,
-            meta.current_players,
-        ))
+        let is_p2p = !meta.host_peer_id.is_empty();
+        Some(JoinTargetInfo {
+            host_peer_id: meta.host_peer_id.clone(),
+            max_players: meta.max_players,
+            current_players: meta.current_players,
+            format_config: meta.format_config.clone(),
+            match_config: meta.match_config,
+            is_p2p,
+        })
     }
 
     pub fn timer_seconds(&self, game_code: &str) -> Option<u32> {
@@ -258,6 +272,7 @@ impl Default for LobbyManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::format::GameFormat;
 
     /// Test helper: registers a game with default metadata so existing tests
     /// don't have to care about the extended set of fields. Tests that
@@ -501,7 +516,7 @@ mod tests {
                 public: true,
                 current_players: 2,
                 max_players: 4,
-                format: Some(GameFormat::Commander),
+                format_config: Some(FormatConfig::commander()),
                 ..Default::default()
             },
         );
@@ -542,7 +557,7 @@ mod tests {
                 public: true,
                 current_players: 2,
                 max_players: 4,
-                format: Some(GameFormat::Commander),
+                format_config: Some(FormatConfig::commander()),
                 ..Default::default()
             },
         );
@@ -567,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn broker_info_returns_atomic_tuple_when_peer_id_populated() {
+    fn join_target_info_returns_atomic_snapshot() {
         let mut lobby = LobbyManager::new();
         lobby.register_game(
             "GAME01",
@@ -577,36 +592,52 @@ mod tests {
                 host_peer_id: "peer-xyz".to_string(),
                 current_players: 1,
                 max_players: 4,
+                format_config: Some(FormatConfig::commander()),
                 ..Default::default()
             },
         );
         assert_eq!(
-            lobby.broker_info("GAME01"),
-            Some(("peer-xyz".to_string(), 4, 1))
+            lobby.join_target_info("GAME01"),
+            Some(JoinTargetInfo {
+                host_peer_id: "peer-xyz".to_string(),
+                max_players: 4,
+                current_players: 1,
+                format_config: Some(FormatConfig::commander()),
+                match_config: MatchConfig::default(),
+                is_p2p: true,
+            })
         );
     }
 
     #[test]
-    fn broker_info_returns_none_for_missing_game() {
+    fn join_target_info_returns_none_for_missing_game() {
         let lobby = LobbyManager::new();
-        assert_eq!(lobby.broker_info("NOPE"), None);
+        assert_eq!(lobby.join_target_info("NOPE"), None);
     }
 
     #[test]
-    fn broker_info_returns_none_when_peer_id_empty() {
-        // Games registered by a Full-mode server leave host_peer_id as "".
-        // broker_info treats these as "not brokerable" so the caller can
-        // distinguish them from missing games and send a clearer error.
+    fn join_target_info_marks_full_mode_entries_as_non_p2p() {
         let mut lobby = LobbyManager::new();
         lobby.register_game(
             "GAME01",
             RegisterGameRequest {
                 host_name: "Alice".to_string(),
                 public: true,
+                format_config: Some(FormatConfig::standard()),
                 ..Default::default()
             },
         );
-        assert_eq!(lobby.broker_info("GAME01"), None);
+        assert_eq!(
+            lobby.join_target_info("GAME01"),
+            Some(JoinTargetInfo {
+                host_peer_id: String::new(),
+                max_players: 0,
+                current_players: 0,
+                format_config: Some(FormatConfig::standard()),
+                match_config: MatchConfig::default(),
+                is_p2p: false,
+            })
+        );
         assert!(lobby.has_game("GAME01"));
     }
 

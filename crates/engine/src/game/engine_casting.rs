@@ -216,6 +216,22 @@ pub(super) fn handle_choose_mana_color(
     mana_abilities::handle_choose_mana_color(state, pending_mana_ability, prompt, chosen, events)
 }
 
+pub(super) fn handle_pay_mana_ability_mana(
+    state: &mut GameState,
+    options: &[Vec<crate::types::mana::ManaType>],
+    pending_mana_ability: &PendingManaAbility,
+    payment: &[crate::types::mana::ManaType],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    mana_abilities::handle_pay_mana_ability_mana(
+        state,
+        options,
+        pending_mana_ability,
+        payment,
+        events,
+    )
+}
+
 pub(super) fn handle_exile_from_graveyard_for_cost(
     state: &mut GameState,
     player: PlayerId,

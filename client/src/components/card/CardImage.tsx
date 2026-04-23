@@ -46,11 +46,12 @@ export function CardImage({
 
   return (
     <div className="relative inline-block w-fit select-none">
-      <div
-        className={`${baseClasses} shadow-lg bg-cover bg-center`}
-        style={{ backgroundImage: `url(${src})`, ...(borderStyle ?? { border: "1px solid #4b5563" }) }}
-        role="img"
-        aria-label={cardName}
+      <img
+        src={src}
+        alt={cardName}
+        draggable={false}
+        className={`${baseClasses} shadow-lg object-cover`}
+        style={borderStyle ?? { border: "1px solid #4b5563" }}
       />
       {unimplementedMechanics && unimplementedMechanics.length > 0 && (
         <span

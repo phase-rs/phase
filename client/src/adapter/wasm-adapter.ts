@@ -8,9 +8,25 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode } from "./types";
+import { AdapterError, AdapterErrorCode, isStateLostMessage } from "./types";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
+
+/**
+ * Classify an unknown error thrown by the engine worker or main-thread
+ * fallback. If the Rust sentinel prefix is present, escalate to an
+ * `AdapterError` with code `STATE_LOST` so the recovery layer in
+ * `dispatch.ts` / `aiController.ts` can trigger rehydrate-and-retry.
+ * All other errors pass through unchanged.
+ */
+function classifyEngineError(err: unknown): never {
+  const message = err instanceof Error ? err.message : String(err);
+  if (isStateLostMessage(message)) {
+    throw new AdapterError(AdapterErrorCode.STATE_LOST, message, true);
+  }
+  if (err instanceof Error) throw err;
+  throw new Error(message);
+}
 
 /**
  * Module-level singleton for AI/local games.
@@ -90,34 +106,42 @@ export class WasmAdapter implements EngineAdapter {
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized();
-    if (this.engine) {
-      return this.engine.submitAction(actor, action);
+    try {
+      if (this.engine) return await this.engine.submitAction(actor, action);
+      return await this.fallback!.submitAction(action, actor);
+    } catch (err) {
+      classifyEngineError(err);
     }
-    return this.fallback!.submitAction(action, actor);
   }
 
   async getState(): Promise<GameState> {
     this.assertInitialized();
-    if (this.engine) {
-      return this.engine.getState();
+    try {
+      if (this.engine) return await this.engine.getState();
+      return await this.fallback!.getState();
+    } catch (err) {
+      classifyEngineError(err);
     }
-    return this.fallback!.getState();
   }
 
   async getFilteredState(viewerId: number): Promise<GameState> {
     this.assertInitialized();
-    if (this.engine) {
-      return this.engine.getFilteredState(viewerId);
+    try {
+      if (this.engine) return await this.engine.getFilteredState(viewerId);
+      return await this.fallback!.getFilteredState(viewerId);
+    } catch (err) {
+      classifyEngineError(err);
     }
-    return this.fallback!.getFilteredState(viewerId);
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
     this.assertInitialized();
-    if (this.engine) {
-      return this.engine.getLegalActions();
+    try {
+      if (this.engine) return await this.engine.getLegalActions();
+      return await this.fallback!.getLegalActions();
+    } catch (err) {
+      classifyEngineError(err);
     }
-    return this.fallback!.getLegalActions();
   }
 
   async getAiAction(
@@ -147,17 +171,25 @@ export class WasmAdapter implements EngineAdapter {
               Date.now(),
             );
           }
-        } catch {
-          // Pool failed — fall through to single-worker path
+        } catch (err) {
+          // STATE_LOST must escalate immediately — falling through to the
+          // single-worker path would just hit the same sentinel and waste a
+          // round-trip. All other pool failures are recoverable via the
+          // single-worker fallback.
+          if (err instanceof Error && isStateLostMessage(err.message)) {
+            classifyEngineError(err);
+          }
         }
       }
     }
 
     // Single-worker path for non-VeryHard or when pool unavailable
-    if (this.engine) {
-      return this.engine.getAiAction(difficulty, playerId);
+    try {
+      if (this.engine) return await this.engine.getAiAction(difficulty, playerId);
+      return await this.fallback!.getAiAction(difficulty, playerId);
+    } catch (err) {
+      classifyEngineError(err);
     }
-    return this.fallback!.getAiAction(difficulty, playerId);
   }
 
   /** Lazy AI pool init — only created on first VeryHard request. */
@@ -399,22 +431,30 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
 
+    // null from any of these three getters means WASM `GAME_STATE` is None
+    // (worker restart, PWA update desync, panic recovery). Throw with the
+    // Rust sentinel so the adapter's classifyEngineError escalates to
+    // STATE_LOST. Previously we substituted defaults here, which silently
+    // poisoned IndexedDB via dispatch.ts's saveGame call.
     getState: () =>
       enqueue(() => {
         const s = wasm.get_game_state();
-        return (s === null ? wasm.create_initial_state() : s) as GameState;
+        if (s === null) throw new Error("NOT_INITIALIZED: get_game_state returned null");
+        return s as GameState;
       }),
 
     getFilteredState: (viewerId: number) =>
       enqueue(() => {
         const s = wasm.get_filtered_game_state(viewerId);
-        return (s === null ? wasm.create_initial_state() : s) as GameState;
+        if (s === null) throw new Error("NOT_INITIALIZED: get_filtered_game_state returned null");
+        return s as GameState;
       }),
 
     getLegalActions: () =>
       enqueue(() => {
         const r = wasm.get_legal_actions_js();
-        return (r === null ? { actions: [], autoPassRecommended: false } : r) as LegalActionsResult;
+        if (r === null) throw new Error("NOT_INITIALIZED: get_legal_actions_js returned null");
+        return r as LegalActionsResult;
       }),
 
     getAiAction: (difficulty: string, playerId: number) =>

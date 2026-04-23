@@ -830,6 +830,22 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             chosen.clone(),
             &mut events,
         )?,
+        // CR 605.3a + CR 601.2h + CR 107.4e: Player submits the per-hybrid-shard
+        // color vector for a mana-ability mana sub-cost (filter lands, etc.).
+        (
+            WaitingFor::PayManaAbilityMana {
+                options,
+                pending_mana_ability,
+                ..
+            },
+            GameAction::PayManaAbilityMana { payment },
+        ) => engine_casting::handle_pay_mana_ability_mana(
+            state,
+            options,
+            pending_mana_ability,
+            &payment,
+            &mut events,
+        )?,
         // CR 702.138a: Player selected cards to exile from graveyard as escape cost.
         (
             WaitingFor::ExileFromGraveyardForCost {

@@ -12,6 +12,44 @@ export interface ParsedDeck {
   companion?: string;
 }
 
+/**
+ * Flat deck shape consumed by the engine (`PlayerDeckList` in Rust) and by
+ * `evaluate_deck_compatibility_js`. The single authority for projecting a
+ * `ParsedDeck` to this shape is `expandParsedDeck` below — all callers MUST
+ * use it so the commander slot (and any future field) cannot be dropped on
+ * one code path while preserved on another.
+ */
+export interface ExpandedDeck {
+  main_deck: string[];
+  sideboard: string[];
+  commander: string[];
+}
+
+function expandEntries(entries: DeckEntry[]): string[] {
+  const cards: string[] = [];
+  for (const entry of entries) {
+    for (let i = 0; i < entry.count; i++) {
+      cards.push(entry.name);
+    }
+  }
+  return cards;
+}
+
+/**
+ * Project a `ParsedDeck` to the flat `{ main_deck, sideboard, commander }`
+ * shape the engine validates and loads. This is the only supported bridge
+ * between the client's structured deck model and the engine payload — used
+ * by both the upfront format-legality check and the host adapter's
+ * `initializeGame` call so their inputs can never diverge.
+ */
+export function expandParsedDeck(deck: ParsedDeck): ExpandedDeck {
+  return {
+    main_deck: expandEntries(deck.main),
+    sideboard: expandEntries(deck.sideboard),
+    commander: deck.commander ?? [],
+  };
+}
+
 type DeckSection = "main" | "sideboard" | "commander" | "companion";
 const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
 const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);

@@ -18,6 +18,7 @@ import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
+import { expandParsedDeck } from "../services/deckParser";
 import type { LiveCheck } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
@@ -40,6 +41,7 @@ type PendingAction =
       code: string;
       password?: string;
       format?: GameFormat;
+      isP2P?: boolean;
       /**
        * Full lobby row, populated when the join originated from a lobby list
        * click (not from a typed code). Lets the deck-select view render
@@ -227,22 +229,11 @@ export function MultiplayerPage() {
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
     if (!deck) return null;
-    const mainDeck: string[] = [];
-    for (const entry of deck.main) {
-      for (let i = 0; i < entry.count; i++) {
-        mainDeck.push(entry.name);
-      }
-    }
-    const sideboard: string[] = [];
-    for (const entry of deck.sideboard) {
-      for (let i = 0; i < entry.count; i++) {
-        sideboard.push(entry.name);
-      }
-    }
-    return { main_deck: mainDeck, sideboard };
+    return expandParsedDeck(deck);
   }, []);
 
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);
+  const lookupJoinTargetFromStore = useMultiplayerStore((s) => s.lookupJoinTarget);
 
   /**
    * Guest-path P2P resolve loop. Tries `resolveGuest` over the shared
@@ -405,7 +396,7 @@ export function MultiplayerPage() {
       } else {
         const { code, password, context } = action;
 
-        if (context?.is_p2p === true) {
+        if (context?.is_p2p === true || action.isP2P === true) {
           return joinP2PRoom(code, password);
         }
 
@@ -449,23 +440,62 @@ export function MultiplayerPage() {
 
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
-    (
+    async (
       code: string,
       password?: string,
       format?: GameFormat,
       context?: LobbyGame,
     ) => {
+      const trimmedCode = code.trim();
+      const directP2PCode = parseRoomCode(trimmedCode);
+
+      // Raw 5-character room codes are direct PeerJS joins with no server
+      // metadata to query. Preserve the old flow and skip lookup entirely.
+      if (!format && !context && directP2PCode && trimmedCode.length === 5) {
+        setPendingAction({
+          type: "join",
+          code,
+          password,
+          format,
+        });
+        setView("deck-select");
+        return;
+      }
+
+      // Typed-code path (no lobby-row context) uses the read-only
+      // `LookupJoinTarget` RPC so the deck picker can filter by format
+      // without accidentally consuming a seat on Full servers.
+      let resolvedFormat = format;
+      let resolvedPassword = password;
+      let resolvedIsP2P = context?.is_p2p === true;
+      if (!resolvedFormat) {
+        const result = await lookupJoinTargetFromStore(code, resolvedPassword);
+        if (result.ok) {
+          resolvedFormat = result.info.format_config?.format;
+          resolvedIsP2P = result.info.is_p2p;
+        } else if (result.reason === "password_required") {
+          const entered = window.prompt("This room requires a password:");
+          if (!entered) return;
+          resolvedPassword = entered;
+          const retry = await lookupJoinTargetFromStore(code, resolvedPassword);
+          if (retry.ok) {
+            resolvedFormat = retry.info.format_config?.format;
+            resolvedIsP2P = retry.info.is_p2p;
+          }
+        }
+      }
       const action: PendingAction = {
         type: "join",
         code,
-        password,
-        format,
+        password: resolvedPassword,
+        format: resolvedFormat,
+        isP2P: resolvedIsP2P,
         context,
       };
       setPendingAction(action);
       setView("deck-select");
     },
-    [],
+    [lookupJoinTargetFromStore],
   );
 
   const handleBack = () => {

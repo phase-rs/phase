@@ -9,10 +9,12 @@ import {
   saveWsSession,
 } from "../services/multiplayerSession";
 import {
+  lookupJoinTargetOver,
   openBrokerClient,
   resolveGuestOver,
   subscribeLobbyOver,
   type BrokerClient,
+  type LookupJoinTargetResult,
   type RegisterHostRequest,
   type ResolveResult,
 } from "../services/brokerClient";
@@ -48,7 +50,7 @@ function asDeckPayload(deck: HostingDeck): { main_deck: string[]; sideboard: str
   return {
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
-    commander: deck.commander ?? [],
+    commander: deck.commander,
   };
 }
 // Prevents onclose from clearing session token after GameStarted
@@ -73,12 +75,13 @@ let subscriptionReconnect: ReconnectHandle | null = null;
 let subscriptionFirstOpen: Promise<PhaseSocket | null> | null = null;
 
 /**
- * AbortControllers for in-flight `resolveGuest` calls. On the socket's
- * `reconnecting` transition we abort every pending call so the caller
- * gets a `connection_lost` result immediately rather than waiting for
- * its own timeout. New calls after reconnect use fresh controllers.
+ * AbortControllers for in-flight join-adjacent RPCs (`resolveGuest`,
+ * `lookupJoinTarget`). On the socket's `reconnecting` transition we abort
+ * every pending call so the caller gets a `connection_lost` result
+ * immediately rather than waiting for its own timeout. New calls after
+ * reconnect use fresh controllers.
  */
-const pendingResolveAborts: Set<AbortController> = new Set();
+const pendingJoinRpcAborts: Set<AbortController> = new Set();
 
 /**
  * Registered lobby subscribers. The store multiplexes one
@@ -105,7 +108,7 @@ export interface AiSeatConfig {
 export interface HostingDeck {
   main_deck: string[];
   sideboard: string[];
-  commander?: string[];
+  commander: string[];
 }
 
 export interface HostingSettings {
@@ -258,6 +261,14 @@ interface MultiplayerActions {
    * password retry, build mismatch, etc. before navigation.
    */
   resolveGuest: (code: string, password?: string) => Promise<ResolveResult>;
+  /**
+   * Read-only typed-code lookup. Returns format/routing metadata without
+   * consuming a seat.
+   */
+  lookupJoinTarget: (
+    code: string,
+    password?: string,
+  ) => Promise<LookupJoinTargetResult>;
   /**
    * Subscribe to lobby-list updates over the subscription socket. Returns
    * a cleanup function that detaches listeners and sends `UnsubscribeLobby`.
@@ -680,7 +691,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           () => ({
             type: "CreateGameWithSettings",
             data: {
-              deck: { main_deck: deck.main_deck, sideboard: deck.sideboard, commander: deck.commander ?? [] },
+              deck: asDeckPayload(deck),
               display_name: settings.displayName,
               public: settings.public,
               password: settings.password || null,
@@ -961,8 +972,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                   // timeout. Abort them now so the caller can branch
                   // immediately. New RPCs registered after this point
                   // use fresh controllers and are unaffected.
-                  for (const ac of pendingResolveAborts) ac.abort();
-                  pendingResolveAborts.clear();
+                  for (const ac of pendingJoinRpcAborts) ac.abort();
+                  pendingJoinRpcAborts.clear();
                   // Drop the handle to the old socket's listener; it
                   // will be re-bound on the next "open".
                   lobbyAttachDetach = null;
@@ -970,8 +981,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                   // Reconnect exhausted. Caller's `ensureSubscriptionSocket`
                   // resolves `null` so fallback UI renders. Also drain any
                   // stragglers that joined between reconnecting and offline.
-                  for (const ac of pendingResolveAborts) ac.abort();
-                  pendingResolveAborts.clear();
+                  for (const ac of pendingJoinRpcAborts) ac.abort();
+                  pendingJoinRpcAborts.clear();
                   settle(null);
                 }
               },
@@ -985,8 +996,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       closeSubscriptionSocket: () => {
-        for (const ac of pendingResolveAborts) ac.abort();
-        pendingResolveAborts.clear();
+        for (const ac of pendingJoinRpcAborts) ac.abort();
+        pendingJoinRpcAborts.clear();
         lobbyAttachDetach?.();
         lobbyAttachDetach = null;
         lobbySubscribers.clear();
@@ -1008,13 +1019,33 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // transition can cut short the wait with `connection_lost`
         // rather than letting the caller's own timeout fire.
         const ac = new AbortController();
-        pendingResolveAborts.add(ac);
+        pendingJoinRpcAborts.add(ac);
         try {
           return await resolveGuestOver(socket, code, password, {
             signal: ac.signal,
           });
         } finally {
-          pendingResolveAborts.delete(ac);
+          pendingJoinRpcAborts.delete(ac);
+        }
+      },
+
+      lookupJoinTarget: async (code, password) => {
+        const socket = await get().ensureSubscriptionSocket();
+        if (!socket) {
+          return {
+            ok: false,
+            reason: "connection_lost",
+            message: "Lobby connection unavailable. Check your server address.",
+          };
+        }
+        const ac = new AbortController();
+        pendingJoinRpcAborts.add(ac);
+        try {
+          return await lookupJoinTargetOver(socket, code, password, {
+            signal: ac.signal,
+          });
+        } finally {
+          pendingJoinRpcAborts.delete(ac);
         }
       },
 

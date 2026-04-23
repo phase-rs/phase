@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-export type UpdateStatus = "idle" | "checking" | "downloading" | "activating";
+export type UpdateStatus = "idle" | "checking" | "downloading" | "activating" | "deferred";
 type DebugLevel = "info" | "warn" | "error";
 
 interface UpdateDebugEvent {

@@ -6,7 +6,6 @@
  */
 import init, {
   ping,
-  create_initial_state,
   initialize_game,
   submit_action,
   get_game_state,
@@ -164,6 +163,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "submitAction": {
         const actionResult = submit_action(msg.actor, msg.action);
         if (typeof actionResult === "string") {
+          // Rust's submit_action error contract: returns the error string
+          // on failure. `NOT_INITIALIZED:` prefix signals state-loss —
+          // forward verbatim so the adapter can classify it as STATE_LOST.
           error(msg.id, actionResult);
           break;
         }
@@ -176,19 +178,36 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "getState": {
         const state = get_game_state();
-        result(msg.id, state === null ? create_initial_state() : state);
+        // null means the WASM thread-local `GAME_STATE` is None. Previously
+        // we substituted a fresh default state here, which would poison
+        // IndexedDB via the dispatch.ts saveGame call. Surface as a real
+        // error so the adapter classifies it STATE_LOST and the recovery
+        // layer can rehydrate from the last-known-good state.
+        if (state === null) {
+          error(msg.id, "NOT_INITIALIZED: get_game_state returned null");
+          break;
+        }
+        result(msg.id, state);
         break;
       }
 
       case "getFilteredState": {
         const state = get_filtered_game_state(msg.viewerId);
-        result(msg.id, state === null ? create_initial_state() : state);
+        if (state === null) {
+          error(msg.id, "NOT_INITIALIZED: get_filtered_game_state returned null");
+          break;
+        }
+        result(msg.id, state);
         break;
       }
 
       case "getLegalActions": {
         const r = get_legal_actions_js();
-        result(msg.id, r === null ? { actions: [], autoPassRecommended: false } : r);
+        if (r === null) {
+          error(msg.id, "NOT_INITIALIZED: get_legal_actions_js returned null");
+          break;
+        }
+        result(msg.id, r);
         break;
       }
 

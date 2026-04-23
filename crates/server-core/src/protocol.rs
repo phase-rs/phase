@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -158,6 +158,12 @@ pub enum ClientMessage {
         display_name: String,
         password: Option<String>,
     },
+    /// Read-only lookup used by typed-code joins before deck selection.
+    /// Returns room metadata (`JoinTargetInfo`) without consuming a seat.
+    LookupJoinTarget {
+        game_code: String,
+        password: Option<String>,
+    },
     Concede,
     Emote {
         emote: String,
@@ -282,6 +288,18 @@ pub enum ServerMessage {
     },
     PasswordRequired {
         game_code: String,
+    },
+    /// Read-only response describing how a typed-code join should be routed.
+    /// Returned by `LookupJoinTarget` on both Full and LobbyOnly servers.
+    JoinTargetInfo {
+        game_code: String,
+        is_p2p: bool,
+        #[serde(default)]
+        format_config: Option<FormatConfig>,
+        #[serde(default)]
+        match_config: MatchConfig,
+        player_count: u8,
+        filled_seats: u8,
     },
     PlayerSlotsUpdate {
         slots: Vec<PlayerSlotInfo>,
@@ -530,6 +548,26 @@ mod tests {
                 assert_eq!(game_code, "ABC123");
                 assert_eq!(display_name, "Bob");
                 assert_eq!(password, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_lookup_join_target_roundtrips() {
+        let msg = ClientMessage::LookupJoinTarget {
+            game_code: "ABC123".to_string(),
+            password: Some("pw".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::LookupJoinTarget {
+                game_code,
+                password,
+            } => {
+                assert_eq!(game_code, "ABC123");
+                assert_eq!(password, Some("pw".to_string()));
             }
             _ => panic!("wrong variant"),
         }
@@ -1034,6 +1072,37 @@ mod tests {
             } => {
                 assert_eq!(game_code, "ABC123");
                 assert_eq!(host_peer_id, "peer-host-xyz");
+                assert_eq!(player_count, 4);
+                assert_eq!(filled_seats, 2);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn join_target_info_roundtrips() {
+        let msg = ServerMessage::JoinTargetInfo {
+            game_code: "ABC123".to_string(),
+            is_p2p: true,
+            format_config: Some(FormatConfig::commander()),
+            match_config: MatchConfig::default(),
+            player_count: 4,
+            filled_seats: 2,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::JoinTargetInfo {
+                game_code,
+                is_p2p,
+                format_config,
+                player_count,
+                filled_seats,
+                ..
+            } => {
+                assert_eq!(game_code, "ABC123");
+                assert!(is_p2p);
+                assert_eq!(format_config, Some(FormatConfig::commander()));
                 assert_eq!(player_count, 4);
                 assert_eq!(filled_seats, 2);
             }

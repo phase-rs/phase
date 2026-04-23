@@ -384,6 +384,20 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             creatures,
             ..
         } => select_cards_variants(*player, creatures, Some(*count)),
+        WaitingFor::PayManaAbilityMana {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|plan| {
+                candidate(
+                    GameAction::PayManaAbilityMana {
+                        payment: plan.clone(),
+                    },
+                    TacticalClass::Mana,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ChooseManaColor { player, choice, .. } => {
             use crate::types::game_state::{ManaChoice, ManaChoicePrompt};
             match choice {

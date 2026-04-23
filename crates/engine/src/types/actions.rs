@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::TargetRef;
 use super::game_state::{AutoPassRequest, CombatDamageAssignmentMode, ShardChoice};
 use super::identifiers::{CardId, ObjectId};
+use super::mana::ManaType;
 use super::match_config::DeckCardCount;
 use super::player::PlayerId;
 use crate::game::combat::AttackTarget;
@@ -310,6 +311,14 @@ pub enum GameAction {
     ChooseManaColor {
         choice: super::game_state::ManaChoice,
     },
+    /// CR 605.3a + CR 601.2h + CR 107.4e: Answer the
+    /// `WaitingFor::PayManaAbilityMana` prompt by picking one of the legal
+    /// per-hybrid-shard color vectors. `payment.len()` equals the number of
+    /// hybrid shards in the ability's `Mana` sub-cost. The engine verifies
+    /// the vector is present in the prompt's `options` before debiting.
+    PayManaAbilityMana {
+        payment: Vec<ManaType>,
+    },
     /// CR 702.xxx: Prepare (Strixhaven) — at priority, cast a token copy of a
     /// prepared creature's face-`b` prepare-spell. The source creature must
     /// have `prepared.is_some()` and be controlled by the acting player.
@@ -453,6 +462,7 @@ impl GameAction {
             | GameAction::ChooseX { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }
+            | GameAction::PayManaAbilityMana { .. }
             | GameAction::PassParadigmOffer
             | GameAction::Concede { .. } => None,
         }

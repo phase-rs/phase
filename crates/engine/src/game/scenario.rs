@@ -1071,6 +1071,7 @@ impl GameRunner {
             WaitingFor::TapCreaturesForManaAbility { .. } => "TapCreaturesForManaAbility",
             WaitingFor::DiscardForManaAbility { .. } => "DiscardForManaAbility",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
+            WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
             WaitingFor::ExileFromGraveyardForCost { .. } => "ExileFromGraveyardForCost",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
