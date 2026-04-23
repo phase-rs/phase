@@ -338,6 +338,38 @@ fn parse_discard_unless_filter<'a>(
     (before, Some(filter))
 }
 
+/// CR 701.9a + CR 608.2c: Parse the card-type filter portion of a discard phrase.
+///
+/// Recognizes "a <type> card" / "an <type> card" / "<N> <type> cards" where the
+/// type portion is anything `parse_target` understands (subtypes, core types,
+/// "instant or sorcery", etc.). Returns `None` when no type qualifier appears
+/// (plain "a card" / "N cards" means any card is legal).
+///
+/// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
+/// Dokuchi Silencer ("you may discard a creature card") preserves the same
+/// filter data as cost-form discards like "Discard a creature card:".
+fn parse_discard_card_filter(lower: &str) -> Option<TargetFilter> {
+    // Consume the article / quantifier prefix ("a ", "an ", "N ", "X "). The
+    // count itself was already parsed upstream; we only need to reach the
+    // type-word portion.
+    let after_article = strip_article(lower);
+    // Find the " card" / " cards" suffix — the type phrase lies between the
+    // article and that suffix. Without a suffix, there is no type qualifier
+    // (e.g. plain "a card" → `None`).
+    let type_phrase = after_article
+        .strip_suffix(" cards")
+        .or_else(|| after_article.strip_suffix(" card"))?
+        .trim();
+    if type_phrase.is_empty() {
+        return None;
+    }
+    let (filter, remainder) = parse_target(type_phrase);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some(filter)
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
@@ -467,6 +499,7 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
                 random,
                 up_to,
                 unless_filter: None,
+                filter: None,
             });
         }
         // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
@@ -479,11 +512,18 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         let count = parse_count_expr(original_after)
             .map(|(q, _)| q)
             .unwrap_or(QuantityExpr::Fixed { value: 1 });
+        // CR 701.9a + CR 608.2c: Extract card-type filter from phrases like
+        // "a creature card" / "an artifact card". Mirrors the filter slot on
+        // `AbilityCost::Discard` so trigger-effect discards carry the same
+        // restriction data as cost discards (Dokuchi Silencer's "you may
+        // discard a creature card").
+        let filter = parse_discard_card_filter(after_discard);
         return Some(TargetedImperativeAst::Discard {
             count,
             random,
             up_to,
             unless_filter,
+            filter,
         });
     }
     if let Some((_, rest)) =
@@ -603,6 +643,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             random,
             up_to,
             unless_filter,
+            filter,
         } => Effect::Discard {
             count,
             // CR 701.9a: "Discard" with no subject defaults to the controller.
@@ -611,6 +652,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             random,
             up_to,
             unless_filter,
+            filter,
         },
         TargetedImperativeAst::Return { target } => Effect::Bounce {
             target,

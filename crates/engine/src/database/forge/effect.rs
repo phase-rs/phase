@@ -442,6 +442,7 @@ fn translate_discard(
         random,
         up_to: false,
         unless_filter: None,
+        filter: None,
     })
 }
 

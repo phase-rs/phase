@@ -331,6 +331,13 @@ pub(crate) fn extract_player_from_event(
             TargetRef::Player(pid) => Some(*pid),
             TargetRef::Object(oid) => state.objects.get(oid).map(|obj| obj.controller),
         },
+        // CR 500.2 + CR 603.7c: Phase-change triggers like "at the beginning of
+        // each player's upkeep" bind "that player" / `TriggeringPlayer` to the
+        // active player — the player whose phase is currently beginning.
+        // Without this, Ruthless Winnower ("that player sacrifices a non-Elf
+        // creature") would have no player anchor and the sacrifice filter
+        // would match across all players.
+        GameEvent::PhaseChanged { .. } => Some(state.active_player),
         _ => None,
     }
 }

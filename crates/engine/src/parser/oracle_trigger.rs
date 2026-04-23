@@ -197,6 +197,24 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
         .parse(input)
     }
 
+    /// CR 119.1 + CR 109.4: "deals [combat] damage to a player" also introduces
+    /// a player target, so "that player controls" in the effect refers to it
+    /// (Dokuchi Silencer's "destroy target creature or planeswalker that player
+    /// controls"). Mirrors `parse_attack_verb` — both verbs produce the same
+    /// downstream scope.
+    fn parse_damage_phrase(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+        alt((
+            value(
+                (),
+                tag::<_, _, VerboseError<&str>>("deals combat damage to "),
+            ),
+            value((), tag("deals damage to ")),
+            value((), tag("deal combat damage to ")),
+            value((), tag("deal damage to ")),
+        ))
+        .parse(input)
+    }
+
     // Walk word boundaries — the actor/verb pair may be preceded by "whenever",
     // "when", or quantifiers like "one or more creatures you control".
     let mut remaining = cond_lower;
@@ -209,6 +227,18 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
                 {
                     return true;
                 }
+            }
+        }
+        // CR 119.1: "[anything] deals [combat] damage to a player" — introduces
+        // the damaged player as the target-referring player. The subject can be
+        // SelfRef ("~"), equipped creature ("equipped creature"), or any typed
+        // subject, so match on the verb phrase alone.
+        if let Ok((after_damage, ())) = parse_damage_phrase(remaining) {
+            if tag::<_, _, VerboseError<&str>>("a player")
+                .parse(after_damage)
+                .is_ok()
+            {
+                return true;
             }
         }
         // structural: not dispatch — advance to the next word boundary so the
@@ -4205,6 +4235,11 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
 }
 
 /// "you draw your <ordinal> card each turn"
+///
+/// CR 121.2 + CR 603.2: The "you" subject restricts the trigger to the
+/// controller's draws. `valid_target` carries a `ControllerRef::You` filter so
+/// `match_drawn` / `valid_player_matches` reject events where the drawing
+/// player is not the trigger controller — mirroring the opponent arm below.
 fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "you draw your ";
     let after = strip_after(lower, prefix)?;
@@ -4218,6 +4253,9 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
     {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
         def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
         return Some((TriggerMode::Drawn, def));
     }
@@ -5819,6 +5857,28 @@ mod tests {
     }
 
     #[test]
+    fn trigger_attacker_it_gets_is_single_target_pump() {
+        // CR 608.2c: "Whenever a creature you control attacks, it gets +2/+0 until end of turn."
+        // "it" refers to the triggering attacker → single-object TriggeringSource,
+        // which must lower to Effect::Pump (single target), NOT Effect::PumpAll.
+        let def = parse_trigger_line(
+            "Whenever a creature you control attacks, it gets +2/+2 until end of turn.",
+            "Fervent Charge",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        match &*exec.effect {
+            Effect::Pump { target, .. } => {
+                assert_eq!(*target, TargetFilter::TriggeringSource);
+            }
+            other => panic!(
+                "expected Effect::Pump with TriggeringSource, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
     fn trigger_execute_pump_all_creatures() {
         // Regression: trigger bodies with "creatures you control get +1/+1 until end of turn"
         // must produce a PumpAll execute effect, not null.
@@ -6779,9 +6839,37 @@ mod tests {
             "Some Card",
         );
         assert_eq!(def.mode, TriggerMode::Drawn);
+        // CR 603.2: "you draw" scopes the trigger to the controller's draws.
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
         assert_eq!(
             def.constraint,
             Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        );
+    }
+
+    #[test]
+    fn trigger_nth_draw_you_in_a_turn_phrasing() {
+        // CR 603.2: "When you draw your Nth card in a turn" (Sneaky Snacker phrasing)
+        // must scope to the controller's draws, not any player's.
+        let def = parse_trigger_line(
+            "When you draw your third card in a turn, return this card from your graveyard to the battlefield tapped.",
+            "Sneaky Snacker",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
         );
     }
 

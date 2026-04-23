@@ -3224,6 +3224,13 @@ pub enum Effect {
         /// the player may discard 1 card matching this filter instead of `count` cards.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unless_filter: Option<TargetFilter>,
+        /// CR 701.9a + CR 608.2c: Restriction on which cards can satisfy the discard
+        /// (e.g., Dokuchi Silencer's "discard a creature card"). Mirrors the
+        /// `filter` slot on `AbilityCost::Discard` — when set, only cards matching
+        /// this filter are legal to discard. `None` means any card in the
+        /// discarding player's hand is legal (the default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
     Shuffle {
         #[serde(default = "default_target_filter_controller")]

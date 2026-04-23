@@ -3978,6 +3978,46 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
     }
 }
 
+/// CR 109.4: Map a player-reference `TargetFilter` to the `ControllerRef`
+/// variant a typed object filter should adopt to match "permanents that player
+/// controls". Only the two anaphoric variants used in trigger effects
+/// (`TriggeringPlayer`, `TargetPlayer`) produce a result — caster-scoped
+/// filters (`Controller`, `You`) should not rewrite an object filter because
+/// they reference the ability controller, not an acting player target.
+fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::TriggeringPlayer => Some(ControllerRef::TargetPlayer),
+        TargetFilter::Typed(tf)
+            if tf.type_filters.is_empty()
+                && tf.controller.is_some()
+                && tf.properties.is_empty() =>
+        {
+            tf.controller.clone()
+        }
+        _ => None,
+    }
+}
+
+/// CR 109.4 + CR 115.7: Attach a controller constraint to a typed object
+/// filter that does not yet have one. Walks into `Or`/`And`/`Not` to cover
+/// compound filters like "target creature or planeswalker". Filters that
+/// already carry a controller constraint are left untouched so an explicit
+/// "creature you control" clause is never silently rewritten.
+fn attach_controller_if_absent(filter: &mut TargetFilter, ctrl: ControllerRef) {
+    match filter {
+        TargetFilter::Typed(tf) if tf.controller.is_none() => {
+            tf.controller = Some(ctrl);
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                attach_controller_if_absent(inner, ctrl.clone());
+            }
+        }
+        TargetFilter::Not { filter } => attach_controller_if_absent(filter, ctrl),
+        _ => {}
+    }
+}
+
 fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Player
@@ -4097,6 +4137,23 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
             if *target == TargetFilter::Any =>
         {
             *target = subject_filter;
+        }
+        // CR 608.2k + CR 109.4: "that player sacrifices a non-Elf creature" /
+        // "each opponent sacrifices a creature they control". When the subject
+        // is a player reference (TriggeringPlayer / TargetPlayer / etc.) and
+        // the effect targets a TYPED object filter that has not been scoped to
+        // a controller, inject the controller constraint so the filter matches
+        // only permanents controlled by the acting player. Without this, a
+        // phase trigger like Ruthless Winnower's "that player sacrifices a
+        // non-Elf creature" would match any player's non-Elf creature instead
+        // of the sacrificing player's. Reached only when the earlier Any-only
+        // arm did not fire (target is a typed filter, not `Any`).
+        Effect::Sacrifice { target, .. }
+            if player_filter_as_controller_ref(&subject_filter).is_some() =>
+        {
+            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+                attach_controller_if_absent(target, ctrl);
+            }
         }
         // CR 119.3 + CR 115.1d: "they lose N life" — inject subject's player reference.
         // LoseLife.target is Option<TargetFilter>, unlike other effects' non-optional targets.
@@ -6410,6 +6467,25 @@ fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) 
             " at the beginning of your next main phase",
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
+                player: crate::types::player::PlayerId(0),
+            },
+        ),
+        // CR 505.1 + CR 603.7a: Symmetric to the prefix form at
+        // `strip_temporal_prefix`. Greasefang's "return it to its owner's hand
+        // at the beginning of your next end step" uses this suffix shape; the
+        // player placeholder is rewritten to `ability.controller` at resolve
+        // time alongside the main-phase and upkeep variants.
+        (
+            " at the beginning of your next end step",
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: crate::types::player::PlayerId(0),
+            },
+        ),
+        (
+            " at the beginning of your next upkeep",
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::Upkeep,
                 player: crate::types::player::PlayerId(0),
             },
         ),

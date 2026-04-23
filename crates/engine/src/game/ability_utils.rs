@@ -1821,6 +1821,7 @@ mod tests {
                 random: false,
                 up_to: true,
                 unless_filter: None,
+                filter: None,
             },
         );
         mode2.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -1892,6 +1893,7 @@ mod tests {
                 random: false,
                 up_to: false,
                 unless_filter: None,
+                filter: None,
             },
         );
         let abilities = vec![mode_destroy, mode_draw, mode_discard];

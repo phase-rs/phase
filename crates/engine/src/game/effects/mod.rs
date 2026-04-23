@@ -2686,6 +2686,7 @@ mod tests {
                 random: false,
                 up_to: false,
                 unless_filter: None,
+                filter: None,
             },
             vec![],
             ObjectId(100),

@@ -456,6 +456,10 @@ pub(super) enum TargetedImperativeAst {
         /// CR 608.2c: "discard N unless you discard a [type]" — type filter for
         /// the alternative 1-card discard.
         unless_filter: Option<TargetFilter>,
+        /// CR 701.9a + CR 608.2c: Restricts which cards are legal to discard
+        /// (e.g., "discard a creature card" — Dokuchi Silencer). `None` means
+        /// any card in the discarding player's hand is legal.
+        filter: Option<TargetFilter>,
     },
     /// CR 701.3: Return to hand (bounce).
     Return {

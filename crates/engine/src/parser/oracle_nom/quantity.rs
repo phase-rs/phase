@@ -419,6 +419,12 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
         parse_number_of_controlled_type,
+        // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
+        // must be tried BEFORE the scoped-zone combinator so the target-referring
+        // possessive routes to `TargetZoneCardCount` (resolves against the player
+        // target in scope) instead of falling back to a controller-less
+        // `InZone` filter that counts every player's cards.
+        parse_number_of_cards_in_target_zone,
         parse_number_of_cards_in_zone,
         parse_number_of_opponents,
     ))
@@ -458,6 +464,24 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
 /// Parse "cards in your graveyard" / "creature cards in your graveyard" after "the number of".
 fn parse_number_of_cards_in_zone(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_zone_card_count(input)
+}
+
+/// CR 109.4 + CR 115.7: Parse "cards in their <zone>" / "cards in that player's <zone>"
+/// into `QuantityRef::TargetZoneCardCount`. The possessive refers to the enclosing
+/// effect's player target (e.g., Sword of War and Peace's "deals damage to that
+/// player equal to the number of cards in their hand"), so the count must resolve
+/// against the first `TargetRef::Player` in `ability.targets`, not against a
+/// zone-wide `InZone` filter.
+///
+/// Mirrors `parse_their_tail` but is reachable after a leading `"cards in "`
+/// prefix — the compound form used by "the number of cards in ..." expressions.
+fn parse_number_of_cards_in_target_zone(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("cards in ").parse(input)?;
+    let (rest, _) = alt((tag("their "), tag("that player's "))).parse(rest)?;
+    map(parse_zone_ref_singular, |zone| {
+        QuantityRef::TargetZoneCardCount { zone }
+    })
+    .parse(rest)
 }
 
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -918,6 +942,33 @@ mod tests {
                 zone: ZoneRef::Hand,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_cards_in_their_hand_is_target_zone_count() {
+        // CR 109.4 + CR 115.7: "the number of cards in their hand" must resolve
+        // against the effect's player target, not count every hand in the game.
+        // Sword of War and Peace exemplar.
+        let (rest, q) = parse_quantity_ref("the number of cards in their hand").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::TargetZoneCardCount {
+                zone: ZoneRef::Hand,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_cards_in_that_players_hand_is_target_zone_count() {
+        let (rest, q) = parse_quantity_ref("the number of cards in that player's hand").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::TargetZoneCardCount {
+                zone: ZoneRef::Hand,
             }
         );
         assert_eq!(rest, "");
