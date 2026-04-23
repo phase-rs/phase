@@ -6404,6 +6404,14 @@ fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) 
                 phase: Phase::EndCombat,
             },
         ),
+        // CR 603.7a: "your next end step" binds to the ability's controller.
+        (
+            " at the beginning of your next end step",
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: crate::types::player::PlayerId(0),
+            },
+        ),
         // CR 505.1: Precombat main phase of the controller. "Your" binds
         // `player` to the ability's controller; resolved at resolve time.
         (
@@ -10311,6 +10319,21 @@ mod tests {
             cond,
             Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
+                player: crate::types::player::PlayerId(0),
+            })
+        );
+    }
+
+    #[test]
+    fn strip_temporal_suffix_your_next_end_step() {
+        let (text, cond) = strip_temporal_suffix(
+            "return it to its owner's hand at the beginning of your next end step"
+        );
+        assert_eq!(text, "return it to its owner's hand");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
                 player: crate::types::player::PlayerId(0),
             })
         );
