@@ -232,7 +232,8 @@ fn map_layout_str(s: &str) -> Option<LayoutKind> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+        AbilityDefinition, Effect, QuantityExpr, ReplacementDefinition, StaticDefinition,
+        TriggerDefinition,
     };
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;
@@ -322,5 +323,53 @@ mod tests {
             db.legality_status("Test Card", LegalityFormat::Commander),
             Some(LegalityStatus::NotLegal)
         );
+    }
+
+    #[test]
+    fn from_json_str_accepts_legacy_quantity_expr_in_export() {
+        let json = serde_json::json!({
+            "test card": {
+                "name": "Test Card",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [{
+                    "kind": "Activated",
+                    "effect": { "type": "Draw", "count": 1 },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "sorcery_speed": false,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false
+                }],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null
+            }
+        })
+        .to_string();
+
+        let db = CardDatabase::from_json_str(&json).unwrap();
+        let face = db.get_face_by_name("Test Card").unwrap();
+        assert!(matches!(
+            *face.abilities[0].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        ));
     }
 }
