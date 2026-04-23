@@ -3907,9 +3907,9 @@ mod tests {
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, ChosenAttribute, ChosenSubtypeKind,
-        ContinuousModification, ControllerRef, GameRestriction, ManaContribution, QuantityExpr,
-        RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        ContinuousModification, ControllerRef, GameRestriction, ManaContribution, ManaProduction,
+        QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -3961,6 +3961,86 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.subtypes.push(subtype.to_string());
         land
+    }
+
+    fn add_brushland_like_land(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+        controller_harm: bool,
+    ) -> ObjectId {
+        let land = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        let colored = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::Green, ManaColor::White],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        obj.abilities.push(if controller_harm {
+            colored.sub_ability(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                    damage_source: None,
+                },
+            ))
+        } else {
+            colored
+        });
+        land
+    }
+
+    fn create_single_color_spell_in_hand(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+        shard: ManaCostShard,
+    ) -> ObjectId {
+        let obj_id = create_object(state, card_id, PlayerId(0), name.to_string(), Zone::Hand);
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ));
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![shard],
+            generic: 0,
+        };
+        obj_id
     }
 
     fn create_instant_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
@@ -5816,6 +5896,50 @@ mod tests {
         );
         assert!(state.objects[&passage].tapped);
         assert!(state.objects[&forest].tapped);
+    }
+
+    #[test]
+    fn auto_tap_uses_brushland_and_loses_life_when_it_is_only_colored_source() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_single_color_spell_in_hand(
+            &mut state,
+            CardId(28),
+            "Adventure Awaits",
+            ManaCostShard::Green,
+        );
+        let brushland = add_brushland_like_land(&mut state, CardId(29), "Brushland", true);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(28), &mut events).unwrap();
+
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert!(state.objects[&brushland].tapped);
+        assert_eq!(state.players[0].life, 19);
+        assert_eq!(state.stack.len(), 1, "spell should be on the stack");
+    }
+
+    #[test]
+    fn auto_tap_prefers_safe_land_over_controller_harming_source() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_single_color_spell_in_hand(
+            &mut state,
+            CardId(30),
+            "Lay of the Land",
+            ManaCostShard::Green,
+        );
+        let brushland = add_brushland_like_land(&mut state, CardId(31), "Brushland", true);
+        let safe_land = add_brushland_like_land(&mut state, CardId(32), "Safe Grove", false);
+
+        let mut events = Vec::new();
+        handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(30), &mut events).unwrap();
+
+        assert!(
+            !state.objects[&brushland].tapped,
+            "auto-tap should avoid the harmful source when a safe equivalent exists"
+        );
+        assert!(state.objects[&safe_land].tapped);
+        assert_eq!(state.players[0].life, 20);
     }
 
     #[test]

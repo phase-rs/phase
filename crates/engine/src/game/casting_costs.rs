@@ -1847,7 +1847,7 @@ pub(super) fn auto_tap_mana_sources(
             return (4, false); // sacrifice is irreversible — always last
         }
         if deprioritize_source == Some(option.object_id) {
-            return (3, option.requires_life_payment);
+            return (3, option.harms_controller);
         }
         let obj = state.objects.get(&option.object_id);
         let is_land = obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land));
@@ -1860,7 +1860,7 @@ pub(super) fn auto_tap_mana_sources(
         } else {
             1 // non-land mana dork (creature, artifact, etc.)
         };
-        (base_tier, option.requires_life_payment)
+        (base_tier, option.harms_controller)
     });
 
     let mut to_tap: Vec<ManaSourceOption> = Vec::new();

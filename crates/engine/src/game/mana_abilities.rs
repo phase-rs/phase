@@ -10,6 +10,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::ability_utils;
 use super::effects::mana::resolve_mana_types;
 use super::engine::EngineError;
 use super::filter::{matches_target_filter, FilterContext};
@@ -175,14 +176,14 @@ pub fn resolve_mana_ability(
     // Pay the full ability cost (tap, sacrifice, etc.)
     pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
 
-    produce_mana_from_ability(
+    let _ = resolve_mana_ability_effects(
         state,
         source_id,
         player,
         ability_def,
         events,
         color_override,
-    );
+    )?;
     Ok(())
 }
 
@@ -215,6 +216,35 @@ fn produce_mana_from_ability(
     for mana_type in produced_mana {
         mana_payment::produce_mana(state, source_id, mana_type, player, tapped, events);
     }
+}
+
+fn resolve_mana_ability_effects(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+    color_override: Option<ProductionOverride>,
+) -> Result<bool, EngineError> {
+    let waiting_before = state.waiting_for.clone();
+
+    produce_mana_from_ability(
+        state,
+        source_id,
+        player,
+        ability_def,
+        events,
+        color_override,
+    );
+
+    if let Some(sub_ability) = ability_def.sub_ability.as_deref() {
+        let resolved = ability_utils::build_resolved_from_def(sub_ability, source_id, player);
+        super::effects::resolve_ability_chain(state, &resolved, events, 1).map_err(|err| {
+            EngineError::InvalidAction(format!("Mana ability continuation failed: {err}"))
+        })?;
+    }
+
+    Ok(state.waiting_for != waiting_before)
 }
 
 /// CR 605.3b: Mana abilities resolve immediately unless paying the cost requires a choice.
@@ -344,16 +374,20 @@ pub fn handle_choose_mana_color(
         .cloned()
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
 
-    produce_mana_from_ability(
+    let waiting_changed = resolve_mana_ability_effects(
         state,
         pending.source_id,
         pending.player,
         &ability_def,
         events,
         Some(override_value),
-    );
+    )?;
 
-    Ok(resume_waiting_for(pending.player, pending.resume.clone()))
+    if waiting_changed {
+        Ok(state.waiting_for.clone())
+    } else {
+        Ok(resume_waiting_for(pending.player, pending.resume.clone()))
+    }
 }
 
 /// CR 118.3 / CR 605.3b: Complete the tapped-creature choice, then resolve the mana ability.
@@ -510,7 +544,7 @@ fn advance_mana_ability_activation(
         }
     }
 
-    resolve_mana_ability_with_selected_choices(
+    let waiting_changed = resolve_mana_ability_with_selected_choices(
         state,
         pending.source_id,
         pending.player,
@@ -520,7 +554,11 @@ fn advance_mana_ability_activation(
         &pending.chosen_tappers,
         &pending.chosen_discards,
     )?;
-    Ok(resume_waiting_for(pending.player, pending.resume))
+    if waiting_changed {
+        Ok(state.waiting_for.clone())
+    } else {
+        Ok(resume_waiting_for(pending.player, pending.resume))
+    }
 }
 
 /// Pay the full cost of a mana ability. This is the single authority for mana ability
@@ -554,7 +592,7 @@ fn resolve_mana_ability_with_selected_choices(
     color_override: Option<ProductionOverride>,
     tapped_creatures: &[ObjectId],
     discarded_cards: &[ObjectId],
-) -> Result<(), EngineError> {
+) -> Result<bool, EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
     let mut discarded = discarded_cards.iter().copied();
     pay_mana_ability_cost_with_choices(
@@ -577,24 +615,14 @@ fn resolve_mana_ability_with_selected_choices(
         ));
     }
 
-    let produced_mana = match &*ability_def.effect {
-        Effect::Mana { produced, .. } => match color_override {
-            Some(ProductionOverride::Combination(types)) => types,
-            Some(ProductionOverride::SingleColor(color)) => {
-                let resolved = resolve_mana_types(produced, &*state, player, source_id);
-                vec![color; resolved.len()]
-            }
-            None => resolve_mana_types(produced, &*state, player, source_id),
-        },
-        _ => Vec::new(),
-    };
-
-    let tapped = mana_sources::has_tap_component(&ability_def.cost);
-    for mana_type in produced_mana {
-        mana_payment::produce_mana(state, source_id, mana_type, player, tapped, events);
-    }
-
-    Ok(())
+    resolve_mana_ability_effects(
+        state,
+        source_id,
+        player,
+        ability_def,
+        events,
+        color_override,
+    )
 }
 
 fn pay_mana_ability_cost_with_choices<I, J>(
@@ -1013,6 +1041,22 @@ mod tests {
             },
         )
         .cost(AbilityCost::Tap)
+    }
+
+    fn brushland_colored_ability() -> AbilityDefinition {
+        make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: vec![ManaColor::Green, ManaColor::White],
+            contribution: ManaContribution::Base,
+        })
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+            },
+        ))
     }
 
     #[test]
@@ -2126,6 +2170,52 @@ mod tests {
     }
 
     #[test]
+    fn handle_choose_mana_color_resolves_pain_land_damage_for_each_color() {
+        for chosen in [ManaType::Green, ManaType::White] {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(77),
+                PlayerId(0),
+                "Brushland".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+            obj.abilities.push(brushland_colored_ability());
+
+            let pending = PendingManaAbility {
+                player: PlayerId(0),
+                source_id: source,
+                ability_index: 0,
+                color_override: None,
+                resume: ManaAbilityResume::Priority,
+                chosen_tappers: Vec::new(),
+                chosen_discards: Vec::new(),
+            };
+            let prompt = ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Green, ManaType::White],
+            };
+            let mut events = Vec::new();
+
+            let result = handle_choose_mana_color(
+                &mut state,
+                &pending,
+                &prompt,
+                ManaChoice::SingleColor(chosen),
+                &mut events,
+            )
+            .unwrap();
+
+            assert!(matches!(result, WaitingFor::Priority { .. }));
+            assert_eq!(state.players[0].mana_pool.count_color(chosen), 1);
+            assert_eq!(state.players[0].life, 19);
+        }
+    }
+
+    #[test]
     fn color_override_bypasses_choice() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -2166,6 +2256,41 @@ mod tests {
             "auto-tap with color_override should resolve immediately"
         );
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+    }
+
+    #[test]
+    fn color_override_pain_land_still_deals_damage() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(78),
+            PlayerId(0),
+            "Brushland".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        let ability = brushland_colored_ability();
+        obj.abilities.push(ability.clone());
+
+        let mut events = Vec::new();
+        let result = activate_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        )
+        .unwrap();
+
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+        assert_eq!(state.players[0].life, 19);
     }
 
     // ─────────────────────────────────────────────────────────────
