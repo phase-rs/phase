@@ -177,7 +177,7 @@ pub fn resolve_mana_ability(
     // Pay the full ability cost (tap, sacrifice, etc.)
     pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
 
-    let _ = resolve_mana_ability_effects(
+    resolve_mana_ability_effects(
         state,
         source_id,
         player,
@@ -246,6 +246,24 @@ fn resolve_mana_ability_effects(
     }
 
     Ok(state.waiting_for != waiting_before)
+}
+
+/// If resolving a mana-ability continuation pushed its own `WaitingFor`
+/// (e.g., a pain-land damage sub-effect that needs target selection), keep
+/// that live prompt. Otherwise fall back to the caller-supplied default
+/// (typically `WaitingFor::Priority` or a `resume_waiting_for(...)` stack
+/// frame). Shared by `handle_tap_land_for_mana`, `handle_choose_mana_color`,
+/// and `advance_mana_ability_activation`.
+pub(crate) fn preserve_or_resume(
+    state: &GameState,
+    waiting_changed: bool,
+    default: WaitingFor,
+) -> WaitingFor {
+    if waiting_changed {
+        state.waiting_for.clone()
+    } else {
+        default
+    }
 }
 
 /// CR 605.3b: Mana abilities resolve immediately unless paying the cost requires a choice.
@@ -385,11 +403,11 @@ pub fn handle_choose_mana_color(
         Some(override_value),
     )?;
 
-    if waiting_changed {
-        Ok(state.waiting_for.clone())
-    } else {
-        Ok(resume_waiting_for(pending.player, pending.resume.clone()))
-    }
+    Ok(preserve_or_resume(
+        state,
+        waiting_changed,
+        resume_waiting_for(pending.player, pending.resume.clone()),
+    ))
 }
 
 /// CR 118.3 / CR 605.3b: Complete the tapped-creature choice, then resolve the mana ability.
@@ -599,11 +617,11 @@ fn advance_mana_ability_activation(
         &pending.chosen_discards,
         pending.chosen_mana_payment.as_deref(),
     )?;
-    if waiting_changed {
-        Ok(state.waiting_for.clone())
-    } else {
-        Ok(resume_waiting_for(pending.player, pending.resume))
-    }
+    Ok(preserve_or_resume(
+        state,
+        waiting_changed,
+        resume_waiting_for(pending.player, pending.resume),
+    ))
 }
 
 /// Pay the full cost of a mana ability. This is the single authority for mana ability
@@ -1291,21 +1309,7 @@ mod tests {
         .cost(AbilityCost::Tap)
     }
 
-    fn brushland_colored_ability() -> AbilityDefinition {
-        make_mana_ability(ManaProduction::AnyOneColor {
-            count: QuantityExpr::Fixed { value: 1 },
-            color_options: vec![ManaColor::Green, ManaColor::White],
-            contribution: ManaContribution::Base,
-        })
-        .sub_ability(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-                damage_source: None,
-            },
-        ))
-    }
+    use crate::game::test_fixtures::brushland_colored_ability;
 
     fn seed_pool_with(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
         use crate::types::mana::ManaUnit;

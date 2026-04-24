@@ -554,9 +554,7 @@ pub fn mana_type_to_color(mana_type: ManaType) -> Option<ManaColor> {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ManaContribution, QuantityExpr, TargetFilter,
-    };
+    use crate::types::ability::{AbilityDefinition, AbilityKind, ManaContribution, QuantityExpr};
     use crate::types::identifiers::CardId;
 
     fn verge_ability(color: ManaColor) -> AbilityDefinition {
@@ -575,30 +573,7 @@ mod tests {
         .cost(AbilityCost::Tap)
     }
 
-    fn brushland_colored_ability() -> AbilityDefinition {
-        AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Mana {
-                produced: ManaProduction::AnyOneColor {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    color_options: vec![ManaColor::Green, ManaColor::White],
-                    contribution: ManaContribution::Base,
-                },
-                restrictions: vec![],
-                grants: vec![],
-                expiry: None,
-            },
-        )
-        .cost(AbilityCost::Tap)
-        .sub_ability(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-                damage_source: None,
-            },
-        ))
-    }
+    use crate::game::test_fixtures::brushland_colored_ability;
 
     fn add_verge_land(
         state: &mut GameState,

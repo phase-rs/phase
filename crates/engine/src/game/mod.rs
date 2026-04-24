@@ -66,6 +66,9 @@ pub mod turns;
 pub mod visibility;
 pub mod zones;
 
+#[cfg(test)]
+pub(crate) mod test_fixtures;
+
 pub use deck_loading::{
     create_commander_from_card_face, load_deck_into_state, resolve_deck_list,
     resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,

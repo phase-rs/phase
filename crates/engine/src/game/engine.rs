@@ -2646,11 +2646,12 @@ pub(super) fn handle_tap_land_for_mana(
             .push(object_id);
     }
 
-    if state.waiting_for != waiting_before {
-        Ok(state.waiting_for.clone())
-    } else {
-        Ok(WaitingFor::Priority { player })
-    }
+    let waiting_changed = state.waiting_for != waiting_before;
+    Ok(mana_abilities::preserve_or_resume(
+        state,
+        waiting_changed,
+        WaitingFor::Priority { player },
+    ))
 }
 
 /// CR 605.3b: Reverse a manual land tap — untap source and remove its mana from pool.
@@ -3547,33 +3548,7 @@ mod tests {
         def
     }
 
-    fn brushland_colored_ability() -> AbilityDefinition {
-        AbilityDefinition::new(
-            AbilityKind::Activated,
-            crate::types::ability::Effect::Mana {
-                produced: crate::types::ability::ManaProduction::AnyOneColor {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    color_options: vec![
-                        crate::types::mana::ManaColor::Green,
-                        crate::types::mana::ManaColor::White,
-                    ],
-                    contribution: ManaContribution::Base,
-                },
-                restrictions: vec![],
-                grants: vec![],
-                expiry: None,
-            },
-        )
-        .cost(AbilityCost::Tap)
-        .sub_ability(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-                damage_source: None,
-            },
-        ))
-    }
+    use crate::game::test_fixtures::brushland_colored_ability;
 
     fn setup_game_at_main_phase() -> GameState {
         let mut state = new_game(42);
