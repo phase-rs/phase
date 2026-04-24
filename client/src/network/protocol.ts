@@ -39,10 +39,25 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
   };
 }
 
+/**
+ * Wire-protocol version. Bumped whenever the binary wire format or the shape
+ * of the first-contact messages (`game_setup` / `reconnect_ack`) changes in
+ * a non-backward-compatible way. Carried on those two messages so a guest
+ * connecting to a host running a different version can detect the mismatch
+ * in-band and surface an actionable "refresh both windows" message instead
+ * of silently corrupting state.
+ *
+ * Bumps to date:
+ *   1 — pre-compression JSON-serialization era (no longer in production)
+ *   2 — gzip + version-prefixed binary wire format (current)
+ */
+export const WIRE_PROTOCOL_VERSION = 2 as const;
+
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string }
   | ({
       type: "game_setup";
+      wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
       assignedPlayerId: number;
       playerToken: string;
       state: GameState;
@@ -65,6 +80,7 @@ export type P2PMessage =
   | { type: "reconnect"; playerToken: string }
   | ({
       type: "reconnect_ack";
+      wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
       assignedPlayerId: number;
       state: GameState;
     } & LegalActionsWire)
@@ -134,4 +150,49 @@ export function validateMessage(raw: unknown): P2PMessage {
     throw new Error(`Invalid message type: ${msg.type}`);
   }
   return raw as P2PMessage;
+}
+
+// ── Wire-Format Encoding ─────────────────────────────────────────────────
+// The P2P DataChannel carries gzipped JSON with a 1-byte version prefix:
+//   [0x00][raw JSON]       — tiny messages where gzip would inflate
+//   [0x01][gzip(JSON)]     — state_update, game_setup, etc.
+// Messages smaller than COMPRESSION_THRESHOLD skip compression because gzip's
+// ~20-byte header would inflate sub-100-byte payloads. Ping/pong and small
+// control messages take the raw path; state broadcasts take the gzip path.
+
+const FORMAT_RAW = 0x00;
+const FORMAT_GZIP = 0x01;
+const COMPRESSION_THRESHOLD = 256;
+
+export async function encodeWireMessage(msg: P2PMessage): Promise<Uint8Array> {
+  const json = JSON.stringify(msg);
+  const jsonBytes = new TextEncoder().encode(json);
+  if (jsonBytes.length < COMPRESSION_THRESHOLD) {
+    const out = new Uint8Array(1 + jsonBytes.length);
+    out[0] = FORMAT_RAW;
+    out.set(jsonBytes, 1);
+    return out;
+  }
+  const stream = new Blob([jsonBytes]).stream().pipeThrough(new CompressionStream("gzip"));
+  const gzipped = new Uint8Array(await new Response(stream).arrayBuffer());
+  const out = new Uint8Array(1 + gzipped.length);
+  out[0] = FORMAT_GZIP;
+  out.set(gzipped, 1);
+  return out;
+}
+
+export async function decodeWireMessage(bytes: Uint8Array): Promise<P2PMessage> {
+  if (bytes.length < 1) throw new Error("empty wire message");
+  const version = bytes[0];
+  const payload = bytes.subarray(1);
+  let json: string;
+  if (version === FORMAT_RAW) {
+    json = new TextDecoder().decode(payload);
+  } else if (version === FORMAT_GZIP) {
+    const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream("gzip"));
+    json = await new Response(stream).text();
+  } else {
+    throw new Error(`unknown wire format version: 0x${version.toString(16)}`);
+  }
+  return validateMessage(JSON.parse(json));
 }

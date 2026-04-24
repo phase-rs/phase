@@ -14,6 +14,30 @@ import type { DataConnection } from "peerjs";
 import { P2PHostAdapter } from "../p2p-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 
+// `vi.mock` is hoisted above imports, so the factory can't reference module
+// scope. Inline the wire-format stub. See `./protocolTestStub.ts` for the
+// rationale: `CompressionStream` doesn't drain under fake timers in happy-dom,
+// so adapter tests bypass the gzip path. The dedicated `protocol.test.ts`
+// exercises the real wire format under real timers.
+vi.mock("../../network/protocol", async (orig) => {
+  const real = await orig<typeof import("../../network/protocol")>();
+  const SENTINEL = 0xff;
+  return {
+    ...real,
+    encodeWireMessage: async (msg: unknown) => {
+      const bytes = new TextEncoder().encode(JSON.stringify(msg));
+      const out = new Uint8Array(1 + bytes.length);
+      out[0] = SENTINEL;
+      out.set(bytes, 1);
+      return out;
+    },
+    decodeWireMessage: async (bytes: Uint8Array) => {
+      if (bytes[0] !== SENTINEL) throw new Error(`unexpected wire format: 0x${bytes[0].toString(16)}`);
+      return real.validateMessage(JSON.parse(new TextDecoder().decode(bytes.subarray(1))));
+    },
+  };
+});
+
 // ── Mock the WasmAdapter so we don't need an actual WASM build ─────────────
 // `vi.hoisted` lets us share these refs with the hoisted vi.mock factory.
 const mocks = vi.hoisted(() => {
@@ -24,16 +48,25 @@ const mocks = vi.hoisted(() => {
       actions: [],
       autoPassRecommended: false,
     })),
+    getLegalActionsForViewer: vi.fn(async (_pid: number) => ({
+      actions: [],
+      autoPassRecommended: false,
+    })),
     getFilteredState: vi.fn(async (pid: number) => ({
       filteredFor: pid,
       players: [],
+    })),
+    getViewerSnapshot: vi.fn(async (pid: number) => ({
+      state: { filteredFor: pid, players: [] },
+      actions: [],
+      autoPassRecommended: false,
     })),
     initializeGame: vi.fn(async () => ({ events: [] })),
     setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
   };
 });
 const mockSubmitAction = mocks.submitAction;
-const mockGetFilteredState = mocks.getFilteredState;
+const mockGetViewerSnapshot = mocks.getViewerSnapshot;
 const mockInitializeGame = mocks.initializeGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
 
@@ -44,7 +77,9 @@ vi.mock("../wasm-adapter", () => ({
     submitAction: mocks.submitAction,
     getState: mocks.getState,
     getLegalActions: mocks.getLegalActions,
+    getLegalActionsForViewer: mocks.getLegalActionsForViewer,
     getFilteredState: mocks.getFilteredState,
+    getViewerSnapshot: mocks.getViewerSnapshot,
     setMultiplayerMode: mocks.setMultiplayerMode,
     dispose: vi.fn(),
   })),
@@ -58,7 +93,7 @@ beforeEach(() => {
     () => `token-${++uuidCounter}` as `${string}-${string}-${string}-${string}-${string}`,
   );
   mockSubmitAction.mockClear();
-  mockGetFilteredState.mockClear();
+  mockGetViewerSnapshot.mockClear();
   mockInitializeGame.mockClear();
   mockSetMultiplayerMode.mockClear();
 });
@@ -136,19 +171,23 @@ function makeHost(playerCount: number, gracePeriodMs = 5_000) {
   return { adapter, emitConnection };
 }
 
-function joinGuest(
+async function joinGuest(
   emitConnection: (c: DataConnection) => void,
   msg: { type: "guest_deck"; deckData: unknown } | { type: "reconnect"; playerToken: string },
-): FakeOpenableConnection {
+): Promise<FakeOpenableConnection> {
   const conn = new FakeOpenableConnection();
   emitConnection(conn as unknown as DataConnection);
   conn.fireOpen();
-  conn.simulateData(msg);
+  await conn.simulateData(msg);
   return conn;
 }
 
 describe("P2PHostAdapter — 3-4p multiplayer", () => {
   beforeEach(() => {
+    // `toFake` opt-in: keep `queueMicrotask` real so the binary wire-format
+    // encode/decode chain (CompressionStream, Response.text) drives stream
+    // backpressure callbacks correctly. Faking those would deadlock the
+    // gzip path.
     vi.useFakeTimers();
   });
   afterEach(() => {
@@ -190,17 +229,17 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // Both guests join with their own decks.
     const g1Deck = { player: { main_deck: ["Plains"], sideboard: [] } };
     const g2Deck = { player: { main_deck: ["Swamp"], sideboard: [] } };
-    const g1 = joinGuest(emitConnection, { type: "guest_deck", deckData: g1Deck });
-    const g2 = joinGuest(emitConnection, { type: "guest_deck", deckData: g2Deck });
+    const g1 = await joinGuest(emitConnection, { type: "guest_deck", deckData: g1Deck });
+    const g2 = await joinGuest(emitConnection, { type: "guest_deck", deckData: g2Deck });
 
     await adapter.initializeGame();
 
     // Find the per-guest game_setup messages.
-    const g1Setup = g1.sent.find(
+    const g1Setup = (await g1.getSentMessages()).find(
       (m): m is { type: "game_setup"; assignedPlayerId: number; playerToken: string } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
     );
-    const g2Setup = g2.sent.find(
+    const g2Setup = (await g2.getSentMessages()).find(
       (m): m is { type: "game_setup"; assignedPlayerId: number; playerToken: string } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
     );
@@ -216,11 +255,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it("rejects an action whose senderPlayerId does not match the session's seat", async () => {
     const { adapter, emitConnection } = makeHost(3);
     await adapter.initialize();
-    const g1 = joinGuest(emitConnection, {
+    const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    const g2 = joinGuest(emitConnection, {
+    const g2 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
@@ -231,14 +270,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     g2.sent.length = 0;
 
     // Guest 2 attempts to spoof an action declaring senderPlayerId = 1.
-    g2.simulateData({
+    await g2.simulateData({
       type: "action",
       senderPlayerId: 1, // wrong! session is for seat 2
       action: { type: "PassPriority" },
     });
 
     // Spoofing guest receives action_rejected.
-    const rejected = g2.sent.find(
+    const rejected = (await g2.getSentMessages()).find(
       (m) =>
         typeof m === "object" &&
         m !== null &&
@@ -252,34 +291,34 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it("fan-outs filtered state per-guest on submitAction", async () => {
     const { adapter, emitConnection } = makeHost(3);
     await adapter.initialize();
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
     await adapter.initializeGame();
-    mockGetFilteredState.mockClear();
+    mockGetViewerSnapshot.mockClear();
 
     await adapter.submitAction({ type: "PassPriority" }, 0);
 
     // One filtered-state lookup per connected guest (host doesn't need one
     // for itself — local state is authoritative).
-    expect(mockGetFilteredState).toHaveBeenCalledTimes(2);
-    expect(mockGetFilteredState).toHaveBeenCalledWith(1);
-    expect(mockGetFilteredState).toHaveBeenCalledWith(2);
+    expect(mockGetViewerSnapshot).toHaveBeenCalledTimes(2);
+    expect(mockGetViewerSnapshot).toHaveBeenCalledWith(1);
+    expect(mockGetViewerSnapshot).toHaveBeenCalledWith(2);
   });
 
   it("starts grace-window timer on guest disconnect and auto-concedes on expiry", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
-    const g1 = joinGuest(emitConnection, {
+    const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
@@ -314,18 +353,18 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it("cancels grace timer and resumes on reconnect with valid token", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
-    const g1 = joinGuest(emitConnection, {
+    const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
     await adapter.initializeGame();
 
     // Capture token before disconnect.
-    const setup = g1.sent.find(
+    const setup = (await g1.getSentMessages()).find(
       (m): m is { type: "game_setup"; playerToken: string } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
     );
@@ -334,7 +373,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     g1.simulateClose();
 
     // Reconnect within grace.
-    const g1Reconnect = joinGuest(emitConnection, {
+    const g1Reconnect = await joinGuest(emitConnection, {
       type: "reconnect",
       playerToken: token,
     });
@@ -342,7 +381,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await Promise.resolve();
 
     // Reconnecting guest gets a reconnect_ack.
-    const ack = g1Reconnect.sent.find(
+    const ack = (await g1Reconnect.getSentMessages()).find(
       (m) =>
         typeof m === "object" &&
         m !== null &&
@@ -359,16 +398,16 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it("kick adds token to denylist; subsequent reconnect with same token is rejected", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
-    const g1 = joinGuest(emitConnection, {
+    const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
     await adapter.initializeGame();
-    const setup = g1.sent.find(
+    const setup = (await g1.getSentMessages()).find(
       (m): m is { type: "game_setup"; playerToken: string } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
     );
@@ -386,11 +425,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
 
     // Attempt reconnect with the kicked token → reconnect_rejected.
-    const rejoinAttempt = joinGuest(emitConnection, {
+    const rejoinAttempt = await joinGuest(emitConnection, {
       type: "reconnect",
       playerToken: token,
     });
-    const rejected = rejoinAttempt.sent.find(
+    const rejected = (await rejoinAttempt.getSentMessages()).find(
       (m) =>
         typeof m === "object" &&
         m !== null &&
@@ -402,21 +441,21 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it("rejects reconnect with unknown token", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
     await adapter.initializeGame();
 
-    const attempt = joinGuest(emitConnection, {
+    const attempt = await joinGuest(emitConnection, {
       type: "reconnect",
       playerToken: "unknown-token-foo",
     });
-    const rejected = attempt.sent.find(
+    const rejected = (await attempt.getSentMessages()).find(
       (m) =>
         typeof m === "object" &&
         m !== null &&
@@ -428,11 +467,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it("rejects actions from an eliminated seat before reaching the engine", async () => {
     const { adapter, emitConnection } = makeHost(3);
     await adapter.initialize();
-    const g1 = joinGuest(emitConnection, {
+    const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
@@ -441,14 +480,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // Guest 1 concedes (self-concede path via wire "concede" message). The
     // submitAction triggered by the concede handler is the ONLY WASM call we
     // expect for this seat from here on.
-    g1.simulateData({ type: "concede" });
+    await g1.simulateData({ type: "concede" });
     await Promise.resolve();
     await Promise.resolve();
     const concedeCallCount = mockSubmitAction.mock.calls.length;
 
     // Any further action from guest 1 must be short-circuited by the
     // adapter — no additional engine round-trip may happen.
-    g1.simulateData({
+    await g1.simulateData({
       type: "action",
       senderPlayerId: 1,
       action: { type: "PassPriority" },
@@ -461,11 +500,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it("kick broadcasts player_kicked; host-continue broadcasts player_conceded", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    const g2 = joinGuest(emitConnection, {
+    const g2 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
@@ -477,13 +516,13 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await adapter.concedeDisconnected(1);
 
     // Remaining guest (g2) receives player_conceded (not player_kicked).
-    const wireConceded = g2.sent.find(
+    const wireConceded = (await g2.getSentMessages()).find(
       (m) =>
         typeof m === "object" &&
         m !== null &&
         (m as { type: string }).type === "player_conceded",
     );
-    const wireKicked = g2.sent.find(
+    const wireKicked = (await g2.getSentMessages()).find(
       (m) =>
         typeof m === "object" &&
         m !== null &&
@@ -501,11 +540,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // since guests that miss the signal would re-enter the backoff.
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
-    const g1 = joinGuest(emitConnection, {
+    const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    const g2 = joinGuest(emitConnection, {
+    const g2 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
@@ -514,13 +553,15 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     g1.sent.length = 0;
     g2.sent.length = 0;
 
-    adapter.terminateGame();
+    await adapter.terminateGame();
 
     // The send must happen before the PeerSession is closed — close()
     // itself enqueues a `disconnect` wire message, so we verify
     // `host_left` arrives first in the send queue (not merely present).
-    const g1Types = g1.sent.map((m) => (m as { type: string }).type);
-    const g2Types = g2.sent.map((m) => (m as { type: string }).type);
+    const g1Sent = await g1.getSentMessages();
+    const g2Sent = await g2.getSentMessages();
+    const g1Types = g1Sent.map((m) => (m as { type: string }).type);
+    const g2Types = g2Sent.map((m) => (m as { type: string }).type);
     expect(g1Types[0]).toBe("host_left");
     expect(g2Types[0]).toBe("host_left");
   });
@@ -528,11 +569,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it("blocks submitAction while paused-disconnect", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
-    const g1 = joinGuest(emitConnection, {
+    const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    joinGuest(emitConnection, {
+    await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
@@ -570,8 +611,16 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // Cast via `unknown` because the hoisted mock's default return is inferred
     // as `{ actions: never[]; autoPassRecommended: boolean }`, which would
     // reject our richer payload. The adapter consumes the full
-    // `LegalActionsResult` shape regardless of the mock's narrow signature.
-    mocks.getLegalActions.mockResolvedValue({
+    // `LegalActionsResult` / `ViewerSnapshot` shape regardless of the mock's
+    // narrow signature. Populate `getViewerSnapshot` because `broadcastStateUpdate`
+    // and `game_setup` now use the combined viewer-snapshot call.
+    // Same unknown-cast pattern as the original `mocks.getLegalActions.mockResolvedValue`
+    // — the hoisted mock's default return type is narrower than a full
+    // `ViewerSnapshot`, so we widen through `unknown` to inject a richer payload.
+    (mocks.getViewerSnapshot as unknown as {
+      mockImplementation: (fn: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { filteredFor: pid, players: [] },
       actions: [
         { type: "CastSpell", data: { object_id: 42, targets: [] } },
         { type: "PlayLand", data: { object_id: 43 } },
@@ -580,19 +629,19 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       autoPassRecommended: false,
       legalActionsByObject,
       spellCosts,
-    } as unknown as { actions: never[]; autoPassRecommended: boolean });
+    }));
 
     const { adapter, emitConnection } = makeHost(2, 5_000);
     await adapter.initialize();
 
     // ── game_setup ─────────────────────────────────────────────────────────
-    const g1 = joinGuest(emitConnection, {
+    const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
     await adapter.initializeGame();
 
-    const setup = g1.sent.find(
+    const setup = (await g1.getSentMessages()).find(
       (m): m is {
         type: "game_setup";
         playerToken: string;
@@ -610,7 +659,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     g1.sent.length = 0;
     await adapter.submitAction({ type: "PassPriority" }, 0);
 
-    const stateUpdate = g1.sent.find(
+    const stateUpdate = (await g1.getSentMessages()).find(
       (m): m is {
         type: "state_update";
         legalActionsByObject?: Record<string, unknown>;
@@ -624,7 +673,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     // ── reconnect_ack ──────────────────────────────────────────────────────
     g1.simulateClose();
-    const g1Reconnect = joinGuest(emitConnection, {
+    const g1Reconnect = await joinGuest(emitConnection, {
       type: "reconnect",
       playerToken,
     });
@@ -633,7 +682,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    const ack = g1Reconnect.sent.find(
+    const ack = (await g1Reconnect.getSentMessages()).find(
       (m): m is {
         type: "reconnect_ack";
         legalActionsByObject?: Record<string, unknown>;

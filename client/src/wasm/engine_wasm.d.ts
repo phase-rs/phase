@@ -111,6 +111,14 @@ export function get_filtered_game_state(viewer: number): any;
 export function get_game_state(): any;
 
 /**
+ * Viewer-scoped legal actions. Returns the same shape as `get_legal_actions_js`
+ * but empty when the viewer is not the player currently expected to act. Used
+ * by the P2P host to broadcast per-guest legal-action payloads without leaking
+ * game logic into the transport adapter.
+ */
+export function get_legal_actions_for_viewer_js(player_id: number): any;
+
+/**
  * Get the legal actions, auto-pass recommendation, and spell costs for the current game state.
  * Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<ObjectId, ManaCost> }`.
  */
@@ -123,6 +131,8 @@ export function get_legal_actions_js(): any;
  * tsify enum-sharing overhead; frontend maps the string to a multiplier.
  */
 export function get_stack_pressure(): any;
+
+export function get_viewer_snapshot_js(player_id: number): any;
 
 /**
  * Initialize panic hook for better error messages in WASM.
@@ -278,6 +288,8 @@ export interface InitOutput {
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
     readonly get_filtered_game_state: (a: number) => any;
+    readonly get_legal_actions_for_viewer_js: (a: number) => any;
+    readonly get_viewer_snapshot_js: (a: number) => any;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;

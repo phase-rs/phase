@@ -16,13 +16,45 @@ import { P2PHostAdapter } from "../p2p-adapter";
 import type { BrokerClient } from "../../services/brokerClient";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 
+// See p2p-adapter-multiplayer.test.ts — bypass CompressionStream because it
+// doesn't drain under fake timers in happy-dom. `protocol.test.ts` covers
+// the real wire format.
+vi.mock("../../network/protocol", async (orig) => {
+  const real = await orig<typeof import("../../network/protocol")>();
+  const SENTINEL = 0xff;
+  return {
+    ...real,
+    encodeWireMessage: async (msg: unknown) => {
+      const bytes = new TextEncoder().encode(JSON.stringify(msg));
+      const out = new Uint8Array(1 + bytes.length);
+      out[0] = SENTINEL;
+      out.set(bytes, 1);
+      return out;
+    },
+    decodeWireMessage: async (bytes: Uint8Array) => {
+      if (bytes[0] !== SENTINEL) throw new Error(`unexpected wire format: 0x${bytes[0].toString(16)}`);
+      return real.validateMessage(JSON.parse(new TextDecoder().decode(bytes.subarray(1))));
+    },
+  };
+});
+
+
 const mocks = vi.hoisted(() => ({
   initializeGame: vi.fn(async () => ({ events: [] })),
   getLegalActions: vi.fn(async () => ({
     actions: [],
     autoPassRecommended: false,
   })),
+  getLegalActionsForViewer: vi.fn(async (_pid: number) => ({
+    actions: [],
+    autoPassRecommended: false,
+  })),
   getFilteredState: vi.fn(async (pid: number) => ({ filteredFor: pid })),
+  getViewerSnapshot: vi.fn(async (pid: number) => ({
+    state: { filteredFor: pid },
+    actions: [],
+    autoPassRecommended: false,
+  })),
   setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
 }));
 
@@ -33,7 +65,9 @@ vi.mock("../wasm-adapter", () => ({
     submitAction: vi.fn(async () => ({ events: [] })),
     getState: vi.fn(async () => ({})),
     getLegalActions: mocks.getLegalActions,
+    getLegalActionsForViewer: mocks.getLegalActionsForViewer,
     getFilteredState: mocks.getFilteredState,
+    getViewerSnapshot: mocks.getViewerSnapshot,
     setMultiplayerMode: mocks.setMultiplayerMode,
     dispose: vi.fn(),
   })),
@@ -178,7 +212,7 @@ describe("P2PHostAdapter — broker integration", () => {
     const conn = new FakeOpenableConnection();
     emitConnection(conn as unknown as DataConnection);
     conn.fireOpen();
-    conn.simulateData({
+    await conn.simulateData({
       type: "guest_deck",
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
@@ -202,7 +236,7 @@ describe("P2PHostAdapter — broker integration", () => {
     const conn = new FakeOpenableConnection();
     emitConnection(conn as unknown as DataConnection);
     conn.fireOpen();
-    conn.simulateData({
+    await conn.simulateData({
       type: "guest_deck",
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
@@ -226,7 +260,7 @@ describe("P2PHostAdapter — broker integration", () => {
     const conn = new FakeOpenableConnection();
     emitConnection(conn as unknown as DataConnection);
     conn.fireOpen();
-    conn.simulateData({
+    await conn.simulateData({
       type: "guest_deck",
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
@@ -248,7 +282,7 @@ describe("P2PHostAdapter — broker integration", () => {
     const conn = new FakeOpenableConnection();
     emitConnection(conn as unknown as DataConnection);
     conn.fireOpen();
-    conn.simulateData({
+    await conn.simulateData({
       type: "guest_deck",
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },

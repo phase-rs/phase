@@ -12,6 +12,7 @@ use crate::types::actions::GameAction;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
+use crate::types::player::PlayerId;
 
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact, ActionMetadata,
@@ -542,6 +543,27 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     (actions, spell_costs, grouped)
 }
 
+/// Returns `legal_actions_full` scoped to a specific viewer. Empty tuple if
+/// `viewer` is not the player currently expected to act.
+///
+/// CR 117.1 — "which player can take actions at any given time is determined by
+/// a system of priority. The player with priority may cast spells, activate
+/// abilities, and take special actions." `WaitingFor::acting_player()` is the
+/// engine's authoritative answer — it covers priority *and* non-priority
+/// decision points like target selection during resolution.
+///
+/// This is the single engine-side authority for "what does player X need to
+/// know" and exists to keep game-logic gating out of transport adapters. The
+/// P2P multiplayer host broadcasts a filtered state + legal-actions payload
+/// per guest; only the acting guest needs a populated legal-actions map.
+pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsFull {
+    if state.waiting_for.acting_player() == Some(viewer) {
+        legal_actions_full(state)
+    } else {
+        (Vec::new(), HashMap::new(), HashMap::new())
+    }
+}
+
 /// CR 605.1b: Enumerate activatable mana abilities for the priority player.
 ///
 /// Mirrors the per-ability scan pattern in `mana_sources::scan_mana_abilities` rather
@@ -595,14 +617,96 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_full,
-        validated_candidate_actions,
+        candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_for_viewer,
+        legal_actions_full, validated_candidate_actions,
     };
     use crate::types::ability::ManaContribution;
     use crate::types::actions::GameAction;
     use crate::types::game_state::{GameState, WaitingFor};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
+
+    #[test]
+    fn legal_actions_for_viewer_returns_empty_when_not_acting() {
+        // Priority to player 0; any other viewer must receive an empty tuple.
+        let state = GameState::new_two_player(42);
+        // Baseline: the acting player gets the full result.
+        let acting = state
+            .waiting_for
+            .acting_player()
+            .expect("new_two_player opens with a priority state");
+        let full = legal_actions_for_viewer(&state, acting);
+        let expected = legal_actions_full(&state);
+        assert_eq!(full.0.len(), expected.0.len());
+        assert_eq!(full.1.len(), expected.1.len());
+        assert_eq!(full.2.len(), expected.2.len());
+
+        // Non-acting viewer: empty across all three components.
+        let other = PlayerId(acting.0 ^ 1);
+        let (actions, costs, grouped) = legal_actions_for_viewer(&state, other);
+        assert!(
+            actions.is_empty(),
+            "non-acting viewer must receive no actions"
+        );
+        assert!(
+            costs.is_empty(),
+            "non-acting viewer must receive no spell costs"
+        );
+        assert!(
+            grouped.is_empty(),
+            "non-acting viewer must receive no grouped actions"
+        );
+    }
+
+    #[test]
+    fn legal_actions_for_viewer_gates_on_non_priority_decision_points() {
+        // Regression: the viewer-gating wrapper dispatches purely on
+        // `acting_player()`, which covers priority *and* non-priority decision
+        // points (combat declarations, target selection, mulligan, etc.). If a
+        // future refactor breaks `acting_player()` for one of these variants,
+        // the wrapper would silently strip legal actions from the player who
+        // actually owes the decision. `DeclareAttackers` is the cheapest such
+        // variant to construct and stands in for the broader class.
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(1),
+            valid_attacker_ids: Vec::new(),
+            valid_attack_targets: Vec::new(),
+        };
+        // Acting player gets the full result (matches `legal_actions_full`).
+        let acting = legal_actions_for_viewer(&state, PlayerId(1));
+        let expected = legal_actions_full(&state);
+        assert_eq!(acting.0.len(), expected.0.len());
+        // Non-acting player gets the empty tuple.
+        let (actions, costs, grouped) = legal_actions_for_viewer(&state, PlayerId(0));
+        assert!(actions.is_empty());
+        assert!(costs.is_empty());
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn legal_actions_for_viewer_empty_on_game_over() {
+        // CR 117.1 — only the acting player may act. `WaitingFor::GameOver` has
+        // no acting player, so every viewer (including would-be "active" ones)
+        // receives the empty tuple.
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        for pid in [PlayerId(0), PlayerId(1)] {
+            let (actions, costs, grouped) = legal_actions_for_viewer(&state, pid);
+            assert!(
+                actions.is_empty(),
+                "GameOver: viewer {pid:?} must receive no actions"
+            );
+            assert!(
+                costs.is_empty(),
+                "GameOver: viewer {pid:?} must receive no spell costs"
+            );
+            assert!(
+                grouped.is_empty(),
+                "GameOver: viewer {pid:?} must receive no grouped actions"
+            );
+        }
+    }
 
     #[test]
     fn legal_actions_by_object_groups_flat_list_correctly() {

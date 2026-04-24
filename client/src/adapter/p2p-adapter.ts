@@ -17,7 +17,7 @@ import { AdapterError } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
-import { legalActionsFromWire, legalActionsToWire } from "../network/protocol";
+import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
 import type {
   PlayerSlot,
   SeatKind,
@@ -880,18 +880,18 @@ export class P2PHostAdapter implements EngineAdapter {
         });
       }
 
-      const legal = await this.wasm.getLegalActions();
       for (const [pid, session] of this.guestSessions) {
         const token = this.playerTokens.get(pid)!;
-        const filteredState = await this.wasm.getFilteredState(pid);
+        const snapshot = await this.wasm.getViewerSnapshot(pid);
         session.send({
           type: "game_setup",
+          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
           assignedPlayerId: pid,
           playerToken: token,
-          state: filteredState,
+          state: snapshot.state,
           events: result.events,
           playerNames: allNames,
-          ...legalActionsToWire(legal),
+          ...legalActionsToWire(snapshot),
         });
       }
 
@@ -918,22 +918,26 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   /**
-   * Fan out a state update to every connected guest. Each guest gets a
-   * separately-filtered snapshot via `wasm.getFilteredState(pid)`. Skips
-   * disconnected seats (their state is delivered via `reconnect_ack`).
+   * Fan out a state update to every connected guest. Each guest gets its own
+   * `ViewerSnapshot` via the engine's combined filter+legal-actions call (one
+   * WASM round-trip per guest instead of two). Only the acting guest gets a
+   * populated `legalActions` map; non-acting guests receive empty legal
+   * actions from the engine-side viewer gate (`legal_actions_for_viewer`).
+   * Skips disconnected seats (their state is delivered via `reconnect_ack`).
    */
   private async broadcastStateUpdate(events: GameEvent[]): Promise<void> {
-    const legal = await this.wasm.getLegalActions();
+    const sends: Array<Promise<void>> = [];
     for (const [pid, session] of this.guestSessions) {
       if (this.disconnectedSeats.has(pid)) continue;
-      const filteredState = await this.wasm.getFilteredState(pid);
-      session.send({
+      const snapshot = await this.wasm.getViewerSnapshot(pid);
+      sends.push(session.send({
         type: "state_update",
-        state: filteredState,
+        state: snapshot.state,
         events,
-        ...legalActionsToWire(legal),
-      });
+        ...legalActionsToWire(snapshot),
+      }));
     }
+    await Promise.all(sends);
   }
 
   async getState(): Promise<GameState> {
@@ -1006,7 +1010,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * component unmount / tab close / StrictMode remount — those need
    * persistence preserved and go through `dispose()`.
    */
-  terminateGame(): void {
+  async terminateGame(): Promise<void> {
     // Notify every live guest session BEFORE dispose tears the sessions down.
     // Without this, guests interpret the ensuing DataConnection close as a
     // transient network drop and burn through the full reconnect backoff
@@ -1017,9 +1021,15 @@ export class P2PHostAdapter implements EngineAdapter {
     // down. This broadcast is intentionally skipped on `dispose()` — plain
     // unmounts (StrictMode remount, tab close, navigation) may be transient
     // and the guest's reconnect loop is the correct behavior there.
-    for (const session of this.guestSessions.values()) {
-      session.send({ type: "host_left", reason: "Host left the game" });
-    }
+    // Await `host_left` flushes before disposing — `dispose()` tears down
+    // sessions, so any not-yet-flushed bytes would race the close. Adapter
+    // contract: `await terminateGame()` returns once every guest has
+    // received the farewell (or the channel was already gone).
+    await Promise.all(
+      [...this.guestSessions.values()].map((s) =>
+        s.send({ type: "host_left", reason: "Host left the game" }),
+      ),
+    );
     if (this.gameId) {
       void clearP2PHostSession(this.gameId);
     }
@@ -1216,13 +1226,13 @@ export class P2PHostAdapter implements EngineAdapter {
 
     // Send fresh state to the reconnecting guest.
     void (async () => {
-      const filteredState = await this.wasm.getFilteredState(pid as PlayerId);
-      const legal = await this.wasm.getLegalActions();
+      const snapshot = await this.wasm.getViewerSnapshot(pid as PlayerId);
       session.send({
         type: "reconnect_ack",
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
         assignedPlayerId: pid as PlayerId,
-        state: filteredState,
-        ...legalActionsToWire(legal),
+        state: snapshot.state,
+        ...legalActionsToWire(snapshot),
       });
     })();
 
@@ -1574,6 +1584,24 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   private handleHostMessage(msg: P2PMessage): void {
     traceAdapter("Guest", "host-message", { type: msg.type });
+    // First-contact protocol-version check. `game_setup` and `reconnect_ack`
+    // both carry `wireProtocolVersion`; if a future host bumps the version
+    // and the guest tab is running the older bundle (or vice versa), this
+    // is the in-band signal that lets us surface "refresh both windows"
+    // instead of silently corrupting state via field-shape drift. The
+    // PEER_ID_PREFIX bump prevents *room discovery* across mismatched
+    // bundles, but a same-version-prefix-different-message-shape change
+    // would slip past it — that's what this guards.
+    if (msg.type === "game_setup" || msg.type === "reconnect_ack") {
+      if (msg.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
+        const reason = `Wire protocol mismatch: host sent v${msg.wireProtocolVersion}, this client speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
+        console.error("[P2PGuestAdapter]", reason);
+        this.terminated = true;
+        this.rejectGameSetup(reason);
+        this.emit({ type: "reconnectFailed", reason });
+        return;
+      }
+    }
     switch (msg.type) {
       case "game_setup": {
         this.assignedPlayerId = msg.assignedPlayerId;

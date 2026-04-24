@@ -15,6 +15,8 @@ import init, {
   get_ai_scored_candidates,
   select_action_from_scores,
   get_legal_actions_js,
+  get_legal_actions_for_viewer_js,
+  get_viewer_snapshot_js,
   restore_game_state,
   resume_multiplayer_host_state,
   load_card_database,
@@ -45,6 +47,8 @@ type EngineRequest =
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
   | { type: "getLegalActions"; id: number }
+  | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
+  | { type: "getViewerSnapshot"; id: number; viewerId: number }
   | { type: "getAiAction"; id: number; difficulty: string; playerId: number }
   | {
       type: "getAiScoredCandidates";
@@ -207,6 +211,26 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         const r = get_legal_actions_js();
         if (r === null) {
           error(msg.id, "NOT_INITIALIZED: get_legal_actions_js returned null");
+          break;
+        }
+        result(msg.id, r);
+        break;
+      }
+
+      case "getLegalActionsForViewer": {
+        const r = get_legal_actions_for_viewer_js(msg.viewerId);
+        if (r === null) {
+          error(msg.id, "NOT_INITIALIZED: get_legal_actions_for_viewer_js returned null");
+          break;
+        }
+        result(msg.id, r);
+        break;
+      }
+
+      case "getViewerSnapshot": {
+        const r = get_viewer_snapshot_js(msg.viewerId);
+        if (r === null) {
+          error(msg.id, "NOT_INITIALIZED: get_viewer_snapshot_js returned null");
           break;
         }
         result(msg.id, r);

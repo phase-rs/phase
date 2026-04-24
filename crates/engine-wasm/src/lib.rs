@@ -5,13 +5,13 @@ use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use engine::ai_support::{auto_pass_recommended, legal_actions_full};
+use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
 use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
-    is_commander_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db,
-    resolve_deck_list, start_game, start_game_with_starting_player, validate_deck_for_format,
+    is_commander_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
+    start_game, start_game_with_starting_player, validate_deck_for_format,
     DeckCompatibilityRequest, DeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
@@ -567,6 +567,63 @@ pub fn get_legal_actions_js() -> JsValue {
         let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(state);
         let auto_pass = auto_pass_recommended(state, &actions);
         to_js(&LegalActionsResult {
+            actions,
+            auto_pass_recommended: auto_pass,
+            spell_costs,
+            legal_actions_by_object,
+        })
+    }) {
+        Ok(val) => val,
+        Err(_) => JsValue::NULL,
+    }
+}
+
+/// Viewer-scoped legal actions. Returns the same shape as `get_legal_actions_js`
+/// but empty when the viewer is not the player currently expected to act. Used
+/// by the P2P host to broadcast per-guest legal-action payloads without leaking
+/// game logic into the transport adapter.
+#[wasm_bindgen]
+pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
+    match with_state(|state| {
+        let (actions, spell_costs, legal_actions_by_object) =
+            legal_actions_for_viewer(state, PlayerId(player_id as u8));
+        let auto_pass = auto_pass_recommended(state, &actions);
+        to_js(&LegalActionsResult {
+            actions,
+            auto_pass_recommended: auto_pass,
+            spell_costs,
+            legal_actions_by_object,
+        })
+    }) {
+        Ok(val) => val,
+        Err(_) => JsValue::NULL,
+    }
+}
+
+/// Combined filtered-state + viewer-scoped legal-actions snapshot. Collapses
+/// two WASM round-trips into one for the P2P host broadcast loop. Field names
+/// match `LegalActionsResult` so the existing `legalActionsToWire` helper on
+/// the TS side accepts it via structural typing.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewerSnapshot {
+    state: GameState,
+    actions: Vec<GameAction>,
+    auto_pass_recommended: bool,
+    spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
+    legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+}
+
+#[wasm_bindgen]
+pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
+    match with_state(|state| {
+        let viewer = PlayerId(player_id as u8);
+        let filtered = filter_state_for_viewer(state, viewer);
+        let (actions, spell_costs, legal_actions_by_object) =
+            legal_actions_for_viewer(state, viewer);
+        let auto_pass = auto_pass_recommended(state, &actions);
+        to_js(&ViewerSnapshot {
+            state: filtered,
             actions,
             auto_pass_recommended: auto_pass,
             spell_costs,

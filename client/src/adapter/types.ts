@@ -1044,6 +1044,22 @@ export interface LegalActionsResult {
   legalActionsByObject?: Record<string, GameAction[]>;
 }
 
+/**
+ * Combined filtered-state + viewer-scoped legal-actions snapshot returned by
+ * the engine in one WASM round-trip. Used by the P2P host broadcast loop to
+ * collapse `getFilteredState(pid) + getLegalActionsForViewer(pid)` into a
+ * single call. Fields deliberately mirror `LegalActionsResult`'s field names
+ * so the existing `legalActionsToWire` helper accepts a `ViewerSnapshot`
+ * directly via structural typing.
+ */
+export interface ViewerSnapshot {
+  state: GameState;
+  actions: GameAction[];
+  autoPassRecommended: boolean;
+  spellCosts?: Record<string, ManaCost>;
+  legalActionsByObject?: Record<string, GameAction[]>;
+}
+
 export interface EngineAdapter {
   initialize(): Promise<void>;
   initializeGame(

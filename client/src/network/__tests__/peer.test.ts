@@ -61,15 +61,17 @@ describe("P2P Protocol - validateMessage", () => {
 });
 
 describe("PeerSession", () => {
-  it("send returns false when connection is not open", () => {
+  it("send resolves immediately and bypasses encoding when connection is not open", async () => {
     const { conn, session } = createTestSession();
     conn.open = false;
-    const result = session.send({ type: "concede" });
-    expect(result).toBe(false);
+    // The closed-channel sentinel is now a same-microtask resolve with no
+    // bytes recorded — equivalent to the old `false` return.
+    await session.send({ type: "concede" });
+    expect(conn.sentRaw.length).toBe(0);
     session.close();
   });
 
-  it("onMessage handler receives parsed messages", () => {
+  it("onMessage handler receives parsed messages", async () => {
     const { conn, session } = createTestSession();
     const handler = vi.fn();
     session.onMessage(handler);
@@ -79,14 +81,14 @@ describe("PeerSession", () => {
       senderPlayerId: 0,
       action: { type: "PassPriority" as const },
     };
-    conn.simulateData(actionMessage);
+    await conn.simulateData(actionMessage);
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith(actionMessage);
     session.close();
   });
 
-  it("buffers messages when no listeners are attached, then flushes on subscribe", () => {
+  it("buffers messages when no listeners are attached, then flushes on subscribe", async () => {
     const { conn, session } = createTestSession();
 
     const actionMessage = {
@@ -94,7 +96,7 @@ describe("PeerSession", () => {
       senderPlayerId: 0,
       action: { type: "PassPriority" as const },
     };
-    conn.simulateData(actionMessage);
+    await conn.simulateData(actionMessage);
 
     const handler = vi.fn();
     session.onMessage(handler);
@@ -127,5 +129,58 @@ describe("PeerSession", () => {
     session.close("manual"); // additional close attempt
 
     expect(onSessionEnd).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression: a thrown handler MUST NOT poison the recvQueue. `.then()`
+  // without a rejection handler propagates rejection forward, so a single
+  // exception would otherwise silently freeze inbound dispatch for the
+  // remainder of the session. The fix wraps each handler invocation in an
+  // internal try/catch, mirroring the sendQueue posture.
+  it("recvQueue continues dispatching after a handler throws", async () => {
+    const { conn, session } = createTestSession();
+    const errorSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls: number[] = [];
+    let throwOnNext = true;
+    session.onMessage(() => {
+      calls.push(calls.length);
+      if (throwOnNext) {
+        throwOnNext = false;
+        throw new Error("handler boom");
+      }
+    });
+
+    await conn.simulateData({ type: "concede" });
+    await conn.simulateData({ type: "concede" });
+    await conn.simulateData({ type: "concede" });
+
+    // All three messages must still reach the handler — the first throw
+    // must not silence the queue.
+    expect(calls.length).toBe(3);
+    errorSpy.mockRestore();
+    session.close();
+  });
+
+  // Regression for plan test (g): when `conn.send` throws synchronously
+  // inside the queued send entry, the session must call `handleDisconnect`
+  // — the keep-alive's pong-timeout is the safety net but immediate
+  // detection is the documented contract.
+  it("conn.send throwing inside the queue triggers handleDisconnect", async () => {
+    const { conn, session } = createTestSession();
+    const onDisconnect = vi.fn();
+    session.onDisconnect(onDisconnect);
+    const errorSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Replace `send` with a throwing impl. Any send routed through the
+    // queue will hit this and trigger handleDisconnect from the queued
+    // catch — same disconnect semantics the original sync path provided.
+    conn.send = () => {
+      throw new Error("channel torn down");
+    };
+
+    await session.send({ type: "concede" });
+
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+    expect(onDisconnect).toHaveBeenCalledWith("Channel send failed");
+    errorSpy.mockRestore();
   });
 });

@@ -7,6 +7,7 @@ import type {
   MatchConfig,
   PlayerId,
   SubmitResult,
+  ViewerSnapshot,
 } from "./types";
 import { AdapterError, AdapterErrorCode, isStateLostMessage } from "./types";
 import { EngineWorkerClient } from "./engine-worker-client";
@@ -204,6 +205,30 @@ export class WasmAdapter implements EngineAdapter {
     try {
       if (this.engine) return await this.engine.getLegalActions();
       return await this.fallback!.getLegalActions();
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult> {
+    this.assertInitialized();
+    try {
+      if (this.engine) return await this.engine.getLegalActionsForViewer(viewerId);
+      return await this.fallback!.getLegalActionsForViewer(viewerId);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot> {
+    this.assertInitialized();
+    try {
+      const wrapped = this.engine
+        ? await this.engine.getViewerSnapshot(viewerId)
+        : await this.fallback!.getViewerSnapshot(viewerId);
+      // The `state` field needs the same client-side unwrap as `getFilteredState`
+      // to normalize serde-wasm-bindgen oddities (Map-as-Object conversion etc).
+      return { ...wrapped, state: unwrapClientGameState(wrapped.state) };
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -456,6 +481,8 @@ interface MainThreadFallback {
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
+  getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
+  getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiAction(difficulty: string, playerId: number): Promise<GameAction | null>;
   restoreState(stateJson: string): void;
   resumeMultiplayerHostState(stateJson: string): void;
@@ -522,6 +549,20 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.get_legal_actions_js();
         if (r === null) throw new Error("NOT_INITIALIZED: get_legal_actions_js returned null");
         return r as LegalActionsResult;
+      }),
+
+    getLegalActionsForViewer: (viewerId: number) =>
+      enqueue(() => {
+        const r = wasm.get_legal_actions_for_viewer_js(viewerId);
+        if (r === null) throw new Error("NOT_INITIALIZED: get_legal_actions_for_viewer_js returned null");
+        return r as LegalActionsResult;
+      }),
+
+    getViewerSnapshot: (viewerId: number) =>
+      enqueue(() => {
+        const r = wasm.get_viewer_snapshot_js(viewerId);
+        if (r === null) throw new Error("NOT_INITIALIZED: get_viewer_snapshot_js returned null");
+        return r as ViewerSnapshot;
       }),
 
     getAiAction: (difficulty: string, playerId: number) =>

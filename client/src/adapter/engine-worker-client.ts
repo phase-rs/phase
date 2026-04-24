@@ -11,6 +11,7 @@ import type {
   LegalActionsResult,
   MatchConfig,
   SubmitResult,
+  ViewerSnapshot,
 } from "./types";
 import { debugLog } from "../game/debugLog";
 
@@ -132,6 +133,14 @@ export class EngineWorkerClient {
 
   async getLegalActions(): Promise<LegalActionsResult> {
     return this.request<LegalActionsResult>({ type: "getLegalActions" });
+  }
+
+  async getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult> {
+    return this.request<LegalActionsResult>({ type: "getLegalActionsForViewer", viewerId });
+  }
+
+  async getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot> {
+    return this.request<ViewerSnapshot>({ type: "getViewerSnapshot", viewerId });
   }
 
   async getAiAction(

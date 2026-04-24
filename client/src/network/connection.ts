@@ -10,7 +10,14 @@ const CODE_LENGTH = 5;
  * other PeerJS-based app on the internet (and `new Peer(peerId)` would fail
  * with `unavailable-id`). Keep in sync with `stripPeerIdPrefix` consumers.
  */
-const PEER_ID_PREFIX = "phase-";
+// Bumped from "phase-" → "phase2-" when the binary wire format shipped:
+// old-bundle clients (JSON serialization) connecting to a new-bundle host
+// (binary serialization) would silently corrupt every message. The prefix
+// bump causes old-bundle peers to fail with `unavailable-id` instead of
+// connecting and garbling — a clean, actionable failure mode. Persisted
+// reconnect tokens survive the bump because they key on bare roomCode, not
+// peerId.
+const PEER_ID_PREFIX = "phase2-";
 
 /**
  * Strip the PeerJS namespace prefix so a peer id from any source (broker
@@ -53,6 +60,74 @@ const PEER_CONFIG: RTCConfiguration = {
 
 function traceP2P(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
   console.debug(`[P2P ${side} Trace]`, performance.now().toFixed(1), event, data ?? {});
+}
+
+// ICE nomination typically settles within 1-2s of channel open; on slow links
+// nomination may take longer. The first stat may be a `prflx` that later
+// upgrades to `srflx`/`host`. 2000ms is a heuristic balance between accuracy
+// and user-visible log latency.
+const ICE_SETTLE_MS = 2000;
+
+/**
+ * Log the selected ICE candidate pair for a DataConnection, distinguishing
+ * direct (host/srflx/prflx) from TURN-relayed sessions. Pure observability —
+ * never throws upward. Called once per session after `conn.open`.
+ *
+ * Critical for TURN-bandwidth diagnostics: TURN-relayed sessions pay 2x the
+ * application traffic (ingress + egress on the relay), and we have a free-tier
+ * quota. Without this log we cannot tell whether bandwidth burn is due to
+ * payload size or TURN-relay multiplication.
+ */
+// lib.dom.d.ts exposes `RTCIceCandidatePairStats` but not `RTCIceCandidateStats`
+// in the TS version this project ships with; define the fields we read
+// structurally to stay independent of lib.dom version drift.
+interface IceCandidateStats {
+  id: string;
+  candidateType?: string;
+  protocol?: string;
+}
+
+// Minimal DataConnection surface we need — tests can supply mocks without
+// reconstructing the full RTCPeerConnection/DataConnection type hierarchy.
+export interface IceStatsSource {
+  peerConnection?: Pick<RTCPeerConnection, "getStats"> | undefined;
+}
+
+export async function logSelectedIceCandidate(
+  side: "Host" | "Guest",
+  conn: IceStatsSource,
+): Promise<void> {
+  try {
+    await new Promise((r) => setTimeout(r, ICE_SETTLE_MS));
+    const pc = conn.peerConnection;
+    if (!pc) return;
+    const stats = await pc.getStats();
+    let pair: RTCIceCandidatePairStats | undefined;
+    const candidates = new Map<string, IceCandidateStats>();
+    stats.forEach((report) => {
+      if (report.type === "candidate-pair") {
+        const p = report as RTCIceCandidatePairStats;
+        if (p.nominated && p.state === "succeeded") {
+          pair = p;
+        }
+      } else if (report.type === "local-candidate" || report.type === "remote-candidate") {
+        candidates.set(report.id, report as IceCandidateStats);
+      }
+    });
+    if (!pair) return;
+    const local = pair.localCandidateId ? candidates.get(pair.localCandidateId) : undefined;
+    const remote = pair.remoteCandidateId ? candidates.get(pair.remoteCandidateId) : undefined;
+    const localType = local?.candidateType;
+    const remoteType = remote?.candidateType;
+    const relayed = localType === "relay" || remoteType === "relay";
+    const marker = relayed ? "⚠️ RELAYED VIA TURN (paid bandwidth)" : "✓ direct";
+    console.log(
+      `[ICE ${side}] selected pair: local=${localType}/${local?.protocol} remote=${remoteType}/${remote?.protocol} ${marker}`,
+    );
+    traceP2P(side, "ice-candidate-pair", { localType, remoteType, relayed });
+  } catch (err) {
+    console.warn(`[ICE ${side}] getStats failed:`, err);
+  }
 }
 
 export interface HostResult {
@@ -273,6 +348,7 @@ export async function hostRoom(
         peerId,
         connOpen: conn.open,
       });
+      void logSelectedIceCandidate("Host", conn);
       if (destroyed) {
         try { conn.close(); } catch { /* best-effort */ }
         return;
@@ -374,7 +450,14 @@ export function joinRoom(code: string, signal?: AbortSignal, timeoutMs = 30_000)
       }
       traceP2P("Guest", "peer-open", { peerId });
       console.log("[P2P Guest] registered on signaling server, connecting to:", peerId);
-      const conn = peer.connect(peerId);
+      // `serialization: "binary"` switches PeerJS to its MsgPackBinaryConnection,
+      // which packs our `Uint8Array` wire bytes through BinaryPack (~3–6 byte
+      // msgpack envelope) and retains BinaryPack's `_sendChunks` chunker for
+      // SCTP fragmentation (max 16,300 B per frame). Required so we can send
+      // gzip-compressed `encodeWireMessage` payloads over the channel.
+      // The option lives on `PeerConnectOption`, not `PeerOptions`; host adopts
+      // whatever the guest declares (verified at peerjs/bundler.mjs:1597).
+      const conn = peer.connect(peerId, { serialization: "binary", reliable: true });
       traceP2P("Guest", "connect-called", { peerId, connOpen: conn.open });
 
       const timeout = setTimeout(() => {
@@ -386,6 +469,7 @@ export function joinRoom(code: string, signal?: AbortSignal, timeoutMs = 30_000)
 
       conn.on("open", () => {
         traceP2P("Guest", "conn-open", { peerId, connOpen: conn.open });
+        void logSelectedIceCandidate("Guest", conn);
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);
         opened = true;
