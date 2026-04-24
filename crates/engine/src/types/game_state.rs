@@ -1477,6 +1477,17 @@ pub enum WaitingFor {
         targets: Vec<TargetRef>,
         unit: DistributionUnit,
     },
+    /// CR 107.1c + CR 107.14: "Pay any amount of {E}" — mid-resolution prompt.
+    /// Player picks any integer between `min` and `max` inclusive; the chosen
+    /// amount is deducted from the relevant resource pool and stamped into
+    /// `state.last_effect_count` so subsequent chain steps referencing
+    /// `QuantityRef::EventContextAmount` resolve to the paid amount.
+    PayAmountChoice {
+        player: PlayerId,
+        resource: PayableResource,
+        min: u32,
+        max: u32,
+    },
     /// CR 115.7: Change the target(s) of a spell or ability on the stack.
     /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
     /// TODO: Add Effect::ChangeTargets variant + resolver in effects/change_targets.rs.
@@ -1566,6 +1577,16 @@ pub enum DistributionUnit {
     Life,
 }
 
+/// CR 107.14 + CR 118.8: Resource that can be paid in a "pay any amount of X"
+/// prompt. Typed so the same `WaitingFor::PayAmountChoice` variant generalizes
+/// to future classes (energy, life, mana) without re-introducing boolean flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PayableResource {
+    /// CR 107.14: Pay any amount of `{E}` — removes N energy counters from the player.
+    Energy,
+}
+
 /// CR 115.7: Scope of retargeting — single target, all targets, or forced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -1651,6 +1672,7 @@ impl WaitingFor {
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::DistributeAmong { player, .. }
+            | WaitingFor::PayAmountChoice { player, .. }
             | WaitingFor::RetargetChoice { player, .. }
             | WaitingFor::WardDiscardChoice { player, .. }
             | WaitingFor::WardSacrificeChoice { player, .. }

@@ -1343,6 +1343,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::ExploreChoice { .. }
                 | WaitingFor::CopyRetarget { .. }
                 | WaitingFor::DistributeAmong { .. }
+                | WaitingFor::PayAmountChoice { .. }
                 | WaitingFor::RetargetChoice { .. }
                 | WaitingFor::ChooseFromZoneChoice { .. }
                 | WaitingFor::ManifestDreadChoice { .. }

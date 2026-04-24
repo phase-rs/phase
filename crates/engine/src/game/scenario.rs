@@ -1085,6 +1085,7 @@ impl GameRunner {
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",
+            WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",
             WaitingFor::RetargetChoice { .. } => "RetargetChoice",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
             WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",

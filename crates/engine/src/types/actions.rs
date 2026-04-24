@@ -301,6 +301,12 @@ pub enum GameAction {
     DistributeAmong {
         distribution: Vec<(TargetRef, u32)>,
     },
+    /// CR 107.1c + CR 107.14: Submit the chosen amount for a
+    /// `WaitingFor::PayAmountChoice` prompt ("pay any amount of {E}" and
+    /// similar resource-choice patterns).
+    SubmitPayAmount {
+        amount: u32,
+    },
     /// CR 115.7: Choose new target(s) for a spell or ability on the stack.
     RetargetSpell {
         new_targets: Vec<TargetRef>,
@@ -479,6 +485,7 @@ impl GameAction {
             | GameAction::SetPhaseStops { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::DistributeAmong { .. }
+            | GameAction::SubmitPayAmount { .. }
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }

@@ -1454,6 +1454,20 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 107.1c + CR 107.14: Enumerate every legal amount in [min, max].
+        // AI search layer picks among these; for a damage-scaling effect like
+        // Galvanic Discharge the evaluator prefers the maximum (most damage).
+        WaitingFor::PayAmountChoice {
+            player, min, max, ..
+        } => (*min..=*max)
+            .map(|amount| {
+                candidate(
+                    GameAction::SubmitPayAmount { amount },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::GameOver { .. } => Vec::new(),
         WaitingFor::ReplacementChoice { .. }
         | WaitingFor::CopyTargetChoice { .. }

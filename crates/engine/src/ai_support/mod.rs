@@ -148,6 +148,10 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::WarpCostChoice { .. }, GameAction::ChooseWarpCost { .. })
         | (WaitingFor::EvokeCostChoice { .. }, GameAction::ChooseEvokeCost { .. })
         | (WaitingFor::OverloadCostChoice { .. }, GameAction::ChooseOverloadCost { .. }) => false,
+        // CR 107.1c + CR 107.14: Submitted amount must fall within [min, max].
+        (WaitingFor::PayAmountChoice { min, max, .. }, GameAction::SubmitPayAmount { amount }) => {
+            *amount < *min || *amount > *max
+        }
         (WaitingFor::MulliganBottomCards { player, count }, GameAction::SelectCards { cards }) => {
             selection_mismatch(
                 cards,

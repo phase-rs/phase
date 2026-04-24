@@ -116,6 +116,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ProliferateChoice { .. }
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }
+        // CR 107.1c + CR 107.14: "Pay any amount of X" prompts are forced
+        // mid-resolution choices; route to ActivateAbility as a catch-all.
+        | WaitingFor::PayAmountChoice { .. }
         | WaitingFor::GameOver { .. }
         // CR 702.xxx: Paradigm (Strixhaven) — modeled as an ability-style
         // offer decision. Assign when WotC publishes SOS CR update.

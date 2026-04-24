@@ -46,6 +46,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::PayAmountChoice { .. }
     )
 }
 
@@ -247,6 +248,49 @@ pub(super) fn handle_resolution_choice(
             GameAction::ChooseTopOrBottom { top },
         ) => {
             zones::move_to_library_position(state, object_id, top, events);
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        // CR 107.1c + CR 107.14: Commit the chosen amount for a "pay any amount
+        // of X" prompt. Deducts the resource, emits the matching resource event,
+        // and stamps `last_effect_count` so the next chain step's
+        // `QuantityRef::EventContextAmount` resolves to the paid amount.
+        (
+            WaitingFor::PayAmountChoice {
+                player,
+                resource,
+                min,
+                max,
+            },
+            GameAction::SubmitPayAmount { amount },
+        ) => {
+            if amount < min || amount > max {
+                return Err(EngineError::InvalidAction(format!(
+                    "Submitted pay amount {} outside legal range [{}, {}]",
+                    amount, min, max
+                )));
+            }
+            match resource {
+                crate::types::game_state::PayableResource::Energy => {
+                    // CR 107.14: Remove N energy counters from the player.
+                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
+                        if p.energy < amount {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Player {:?} has {} energy, cannot pay {}",
+                                player, p.energy, amount
+                            )));
+                        }
+                        p.energy -= amount;
+                        events.push(GameEvent::EnergyChanged {
+                            player,
+                            delta: -(amount as i32),
+                        });
+                    }
+                }
+            }
+            // CR 603.7c: Bind the paid amount for downstream chain steps that
+            // read `QuantityRef::EventContextAmount` (e.g. "deals that much
+            // damage"). `last_effect_count` is the documented fallback slot.
+            state.last_effect_count = Some(amount as i32);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (

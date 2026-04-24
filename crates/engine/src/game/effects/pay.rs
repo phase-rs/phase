@@ -2,11 +2,24 @@ use crate::game::casting;
 use crate::game::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{effective_speed, set_speed};
-use crate::types::ability::{Effect, PaymentCost};
+use crate::types::ability::{Effect, PaymentCost, QuantityExpr, QuantityRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PayableResource, WaitingFor};
 
 use super::{EffectError, ResolvedAbility};
+
+/// CR 107.1c + CR 107.14: Detect a "pay any amount of X" shape — the parser
+/// emits `QuantityExpr::Ref { QuantityRef::Variable { name: "X" } }` for
+/// these prompts (Galvanic Discharge, etc.). A fixed or dynamic reference
+/// (e.g., `Fixed { 2 }` or `EventContextSourcePower`) is paid unconditionally.
+fn is_pay_any_amount(amount: &QuantityExpr) -> bool {
+    matches!(
+        amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X"
+    )
+}
 
 /// CR 118.1: Pay a cost as part of an effect resolution.
 /// CR 117.1: Mana payment uses auto-tap + pool deduction.
@@ -72,6 +85,30 @@ pub fn resolve(
         }
         // CR 107.14: A player can pay {E} only if they have enough energy counters.
         PaymentCost::Energy { amount } => {
+            // CR 107.1c + CR 107.14: "Pay any amount of {E}" — suspend the chain
+            // and surface a `PayAmountChoice` prompt. The sub-ability continuation
+            // machinery in `effects::mod` stashes the remainder of the chain;
+            // when the player submits the chosen amount (see
+            // `engine_resolution_choices::handle_resolution_choice`), the engine
+            // deducts energy, records the paid amount on `last_effect_count`
+            // (the fallback for `QuantityRef::EventContextAmount`), and drains
+            // the continuation so the subsequent "that much damage" effect
+            // reads the player's chosen value.
+            if is_pay_any_amount(amount) {
+                let max = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == ability.controller)
+                    .map(|p| p.energy)
+                    .unwrap_or(0);
+                state.waiting_for = WaitingFor::PayAmountChoice {
+                    player: ability.controller,
+                    resource: PayableResource::Energy,
+                    min: 0,
+                    max,
+                };
+                return Ok(());
+            }
             let amount = resolve_quantity_with_targets(state, amount, ability);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
             let can_pay = state
@@ -91,6 +128,12 @@ pub fn resolve(
                         delta: -(amount as i32),
                     });
                 }
+                // CR 107.1c: Record the paid amount for downstream chain steps
+                // that reference `QuantityRef::EventContextAmount` (e.g.
+                // "that much damage"). Uses the same fallback slot populated
+                // for "pay any amount of X" so fixed and variable pays are
+                // observationally uniform downstream.
+                state.last_effect_count = Some(amount as i32);
             } else {
                 state.cost_payment_failed_flag = true;
             }
@@ -226,6 +269,180 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.cost_payment_failed_flag);
         assert_eq!(state.players[0].energy, 1); // No change
+    }
+
+    /// CR 107.14: A fixed-amount energy payment stamps `last_effect_count`
+    /// so downstream chain steps like "deals that much damage" can read the
+    /// paid value through `QuantityRef::EventContextAmount`.
+    #[test]
+    fn energy_payment_stamps_last_effect_count() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 5;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Energy {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+            },
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.last_effect_count, Some(3));
+    }
+
+    /// CR 107.1c + CR 107.14: "Pay any amount of {E}" — the resolver pauses
+    /// on a `PayAmountChoice` prompt with `max` bounded by the player's
+    /// current energy. No energy is deducted until `SubmitPayAmount` fires.
+    #[test]
+    fn pay_any_amount_of_energy_pauses_for_choice() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 3;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Energy {
+                amount: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                player,
+                resource,
+                min,
+                max,
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*resource, PayableResource::Energy);
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 3);
+            }
+            other => panic!("expected PayAmountChoice, got {:?}", other),
+        }
+        assert_eq!(
+            state.players[0].energy, 3,
+            "energy must not be deducted yet"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::EnergyChanged { .. })),
+            "no EnergyChanged event until the player commits an amount"
+        );
+    }
+
+    /// CR 107.1c + CR 107.14 + CR 603.7c: Galvanic Discharge chain shape —
+    /// GainEnergy(3) → PayCost{Energy, Variable X} → DealDamage{EventContextAmount}.
+    /// The player picks 2 out of 3 energy; damage equals the chosen amount.
+    #[test]
+    fn pay_any_amount_then_deal_that_much_damage_flow() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::game::zones::create_object;
+        use crate::types::ability::{QuantityExpr, QuantityRef, TargetFilter, TargetRef};
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        // Target creature owned by player 1.
+        let target_id = create_object(
+            &mut state,
+            CardId(777),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target_id).unwrap().toughness = Some(2);
+        state.objects.get_mut(&target_id).unwrap().power = Some(2);
+
+        // Player 0 starts with 3 energy (after a prior GainEnergy step in the chain).
+        state.players[0].energy = 3;
+
+        // PayCost { Energy, Variable("X") } followed by DealDamage { EventContextAmount, target }.
+        let damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                damage_source: None,
+                target: TargetFilter::Any,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+            vec![TargetRef::Object(target_id)],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut pay_ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::Energy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            },
+            vec![TargetRef::Object(target_id)],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        pay_ability.sub_ability = Some(Box::new(damage));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay_ability, &mut events, 0).unwrap();
+
+        // Chain paused on PayAmountChoice.
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => assert_eq!(*max, 3),
+            other => panic!("expected PayAmountChoice, got {:?}", other),
+        }
+
+        // Player commits 2.
+        let wf = state.waiting_for.clone();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            wf,
+            GameAction::SubmitPayAmount { amount: 2 },
+            &mut events,
+        )
+        .unwrap();
+        match outcome {
+            ResolutionChoiceOutcome::WaitingFor(_) => {}
+            ResolutionChoiceOutcome::ActionResult(_) => {}
+        }
+
+        assert_eq!(state.players[0].energy, 1, "two energy consumed");
+        assert_eq!(
+            state.objects.get(&target_id).map(|o| o.damage_marked),
+            Some(2),
+            "Galvanic Discharge dealt 2 damage (the chosen amount)"
+        );
+    }
+
+    /// CR 107.1c: "Pay any amount" with zero energy still pauses with
+    /// `max = 0` — the player can only pick 0 (the "may" branch).
+    #[test]
+    fn pay_any_amount_with_zero_energy_max_is_zero() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 0;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Energy {
+                amount: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => assert_eq!(*max, 0),
+            other => panic!("expected PayAmountChoice, got {:?}", other),
+        }
     }
 
     /// CR 119.8: An `Effect::PayCost { Life }` under CantLoseLife is unpayable —
