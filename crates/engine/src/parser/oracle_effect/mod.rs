@@ -2812,22 +2812,38 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
         return effect;
     }
 
-    let target = match parse_subject_application(subject_text, &ParseContext::default()) {
-        Some(app) => app.affected,
-        None => return effect,
-    };
+    let (target, is_targeted) =
+        match parse_subject_application(subject_text, &ParseContext::default()) {
+            Some(app) => (app.affected, app.target.is_some()),
+            None => return effect,
+        };
 
     // Only replace default/placeholder targets — leave already-resolved targets alone.
     match effect {
+        // CR 609 + CR 611.2: "All creatures get -1/-1 until end of turn for each Swamp
+        // you control" (Mutilate). When the subject filter identifies a class of
+        // permanents (not a single targeted object or single-object ref), lower to
+        // `Effect::PumpAll` so the continuous effect applies to every matching
+        // permanent — not a single target. Mirrors `subject::build_pump_effect`.
         Effect::Pump {
             power,
             toughness,
             target: TargetFilter::Any,
-        } => Effect::Pump {
-            power,
-            toughness,
-            target,
-        },
+        } => {
+            if is_targeted || subject::is_single_object_ref(&target) {
+                Effect::Pump {
+                    power,
+                    toughness,
+                    target,
+                }
+            } else {
+                Effect::PumpAll {
+                    power,
+                    toughness,
+                    target,
+                }
+            }
+        }
         Effect::Mill {
             count,
             target: TargetFilter::Controller,
@@ -15142,6 +15158,50 @@ mod tests {
         // replace Any with SelfRef from the subject.
         let clause =
             parse_effect_clause("~ gets +2/+2 until end of turn", &ParseContext::default());
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::Pump {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "expected Pump with SelfRef target, got: {:?}",
+            clause.effect
+        );
+    }
+
+    #[test]
+    fn mutilate_all_creatures_for_each_is_pump_all() {
+        // CR 609 + CR 611.2: "All creatures get -1/-1 until end of turn for each
+        // Swamp you control" (Mutilate). The "all creatures" subject is a class
+        // filter, so the for-each effect must lower to `Effect::PumpAll`, not
+        // `Effect::Pump` with a single target — otherwise the engine prompts
+        // for one target and only that creature shrinks.
+        let clause = parse_effect_clause(
+            "All creatures get -1/-1 until end of turn for each Swamp you control.",
+            &ParseContext::default(),
+        );
+        match &clause.effect {
+            Effect::PumpAll { target, .. } => {
+                assert!(
+                    matches!(target, TargetFilter::Typed(t) if t.type_filters.contains(&crate::types::ability::TypeFilter::Creature)),
+                    "expected PumpAll target TypedFilter::Creature, got {target:?}"
+                );
+            }
+            other => panic!("expected PumpAll, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_ref_for_each_stays_pump() {
+        // Preserves single-object promotion: "~ gets +1/+0 until end of turn for
+        // each card in your graveyard" (Skeletal Changeling-style) must remain
+        // `Effect::Pump` with `SelfRef` — not `PumpAll`.
+        let clause = parse_effect_clause(
+            "~ gets +1/+0 until end of turn for each card in your graveyard.",
+            &ParseContext::default(),
+        );
         assert!(
             matches!(
                 clause.effect,

@@ -862,7 +862,7 @@ fn build_pump_effect(
 /// Returns `true` when a `TargetFilter` refers to exactly one object at
 /// resolution time (not a class filter). Used by `build_pump_effect` and other
 /// builders that must distinguish single-target from class-targeting effects.
-fn is_single_object_ref(filter: &TargetFilter) -> bool {
+pub(super) fn is_single_object_ref(filter: &TargetFilter) -> bool {
     matches!(
         filter,
         TargetFilter::SelfRef
