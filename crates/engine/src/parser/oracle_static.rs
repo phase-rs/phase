@@ -246,6 +246,7 @@ enum RuleStaticPredicate {
     MustBlock,
     BlockOnlyCreaturesWithFlying,
     Shroud,
+    Hexproof,
     MayLookAtTopOfLibrary,
     LoseAllAbilities,
     NoMaximumHandSize,
@@ -3592,6 +3593,8 @@ fn strip_rule_static_subject<'a>(text: &'a str, lower: &str) -> Option<(TargetFi
         " can block only creatures with flying",
         " has shroud",
         " have shroud",
+        " has hexproof",
+        " have hexproof",
         " has no maximum hand size",
         " have no maximum hand size",
         " may play an additional land",
@@ -3723,6 +3726,16 @@ fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
         return Some(RuleStaticPredicate::Shroud);
     }
 
+    // CR 702.11: Hexproof — player-scope hexproof ("You have hexproof.") mirrors
+    // the shroud predicate wiring so the static is represented as a player-level
+    // rule modification rather than a bogus AddKeyword on empty-typed objects.
+    if matches!(
+        tp.lower,
+        "has hexproof" | "has hexproof." | "have hexproof" | "have hexproof."
+    ) {
+        return Some(RuleStaticPredicate::Hexproof);
+    }
+
     if nom_tag_tp(&tp, "may look at the top card of your library").is_some() {
         return Some(RuleStaticPredicate::MayLookAtTopOfLibrary);
     }
@@ -3778,6 +3791,9 @@ fn lower_rule_static(
                 .description(description.to_string())
         }
         RuleStaticPredicate::Shroud => StaticDefinition::new(StaticMode::Shroud)
+            .affected(affected)
+            .description(description.to_string()),
+        RuleStaticPredicate::Hexproof => StaticDefinition::new(StaticMode::Hexproof)
             .affected(affected)
             .description(description.to_string()),
         RuleStaticPredicate::MayLookAtTopOfLibrary => {
@@ -8135,6 +8151,23 @@ mod tests {
     fn static_you_have_shroud() {
         let def = parse_static_line("You have shroud.").unwrap();
         assert_eq!(def.mode, StaticMode::Shroud);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
+    }
+
+    /// CR 702.11: "You have hexproof." (Crystal Barricade) must produce a
+    /// player-scope `StaticMode::Hexproof`, not a bogus
+    /// `ContinuousModification::AddKeyword(Hexproof)` on an empty-typed
+    /// controller-scoped filter (which would wrongly grant hexproof to every
+    /// permanent you control instead of to the player).
+    #[test]
+    fn static_you_have_hexproof() {
+        let def = parse_static_line("You have hexproof.").unwrap();
+        assert_eq!(def.mode, StaticMode::Hexproof);
         assert_eq!(
             def.affected,
             Some(TargetFilter::Typed(

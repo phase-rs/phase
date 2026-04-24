@@ -428,6 +428,11 @@ pub enum StaticMode {
     FlashBack,
     /// CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
     Shroud,
+    /// CR 702.11: Hexproof — affected player/permanent cannot be the target of
+    /// spells or abilities an opponent controls. Applied at the player scope
+    /// ("You have hexproof.") mirroring `Shroud`; permanent-scope hexproof
+    /// grants flow through `ContinuousModification::AddKeyword` instead.
+    Hexproof,
     /// CR 702.20: Vigilance — attacking doesn't cause this creature to tap.
     Vigilance,
     /// CR 702.111: Menace — can't be blocked except by two or more creatures.
@@ -645,6 +650,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
             StaticMode::FlashBack => write!(f, "FlashBack"),
             StaticMode::Shroud => write!(f, "Shroud"),
+            StaticMode::Hexproof => write!(f, "Hexproof"),
             StaticMode::Vigilance => write!(f, "Vigilance"),
             StaticMode::Menace => write!(f, "Menace"),
             StaticMode::Reach => write!(f, "Reach"),
@@ -796,6 +802,7 @@ impl FromStr for StaticMode {
             "CantBeDestroyed" => StaticMode::CantBeDestroyed,
             "FlashBack" => StaticMode::FlashBack,
             "Shroud" => StaticMode::Shroud,
+            "Hexproof" => StaticMode::Hexproof,
             "Vigilance" => StaticMode::Vigilance,
             "Menace" => StaticMode::Menace,
             "Reach" => StaticMode::Reach,
@@ -1034,6 +1041,7 @@ mod tests {
             StaticMode::CantBeDestroyed,
             StaticMode::FlashBack,
             StaticMode::Shroud,
+            StaticMode::Hexproof,
             StaticMode::Vigilance,
             StaticMode::Menace,
             StaticMode::Reach,

@@ -103,6 +103,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::FlashBack, handle_flashback);
     // CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
     registry.insert(StaticMode::Shroud, handle_shroud);
+    // CR 702.11: Hexproof — affected player/permanent cannot be the target of
+    // spells or abilities an opponent controls. Player-scope grant (e.g.,
+    // Crystal Barricade's "You have hexproof.") surfaces as a `RuleModification`
+    // marker analogous to Shroud.
+    registry.insert(StaticMode::Hexproof, handle_hexproof);
     // CR 702.20: Vigilance — attacking doesn't cause this creature to tap.
     registry.insert(StaticMode::Vigilance, handle_static_vigilance);
     // CR 702.111: Menace — can't be blocked except by two or more creatures.
@@ -360,6 +365,21 @@ fn handle_shroud(
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
         mode: "Shroud".to_string(),
+    }]
+}
+
+/// CR 702.11: Hexproof — surfaces a RuleModification marker so downstream
+/// coverage/registry consumers see the grant. Runtime targeting for
+/// permanent-scope hexproof flows through `Keyword::Hexproof` on the object
+/// (granted via `ContinuousModification::AddKeyword` paths); the player-scope
+/// marker mirrors `handle_shroud`.
+fn handle_hexproof(
+    _state: &GameState,
+    _mode: &StaticMode,
+    _source_id: ObjectId,
+) -> Vec<StaticEffect> {
+    vec![StaticEffect::RuleModification {
+        mode: "Hexproof".to_string(),
     }]
 }
 

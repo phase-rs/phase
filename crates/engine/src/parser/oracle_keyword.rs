@@ -9,7 +9,7 @@ use nom_language::error::VerboseError;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_target::parse_type_phrase;
-use crate::types::ability::AbilityCost;
+use crate::types::ability::{AbilityCost, ControllerRef, TargetFilter, TypeFilter, TypedFilter};
 use crate::types::keywords::{BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost};
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
@@ -94,6 +94,18 @@ pub(crate) fn extract_keyword_line(
         return None;
     }
 
+    // CR 303.4a: "Enchant A, B, [and/or] C" — multi-type enchant restriction.
+    // The comma-separated list is a single keyword (one TargetFilter::Or), not
+    // multiple comma-separated keywords. Detect and handle before the generic
+    // comma-split path which would treat "land" and "or planeswalker" as
+    // unrecognized keyword parts and reject the line. Gated on MTGJSON reporting
+    // "Enchant" so non-enchant "X, Y, or Z" lines are unaffected.
+    if mtgjson_keyword_names.iter().any(|n| n == "enchant") {
+        if let Some(kw) = try_parse_multi_type_enchant(line) {
+            return Some(vec![kw]);
+        }
+    }
+
     let raw_parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
     if raw_parts.is_empty() {
         return None;
@@ -156,6 +168,108 @@ pub(crate) fn extract_keyword_line(
     } else {
         None
     }
+}
+
+/// Nom leaf combinator: match one of the six enchantable core types and yield
+/// the corresponding `TypeFilter`. Driven by `value()` + `alt()` so additional
+/// types slot in as one-line extensions.
+fn parse_enchant_type_leg(input: &str) -> nom::IResult<&str, TypeFilter, VerboseError<&str>> {
+    alt((
+        value(TypeFilter::Creature, tag("creature")),
+        value(TypeFilter::Land, tag("land")),
+        value(TypeFilter::Artifact, tag("artifact")),
+        value(TypeFilter::Enchantment, tag("enchantment")),
+        value(TypeFilter::Planeswalker, tag("planeswalker")),
+        value(TypeFilter::Permanent, tag("permanent")),
+    ))
+    .parse(input)
+}
+
+/// Nom combinator: separator between enchant list legs. Covers serial-comma
+/// (", or "/", and "), bare comma (", "), and bare conjunction (" or "/" and ")
+/// forms so "A, B, or C", "A, B, C", and "A or B" all compose uniformly.
+fn parse_enchant_list_sep(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+    value(
+        (),
+        alt((
+            tag(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" or "),
+            tag(" and "),
+        )),
+    )
+    .parse(input)
+}
+
+/// Nom combinator: parse a leg list with serial-comma or bare-conjunction
+/// separators. Returns the list in source order.
+fn parse_enchant_type_list(input: &str) -> nom::IResult<&str, Vec<TypeFilter>, VerboseError<&str>> {
+    use nom::multi::many0;
+    use nom::sequence::preceded;
+
+    let (input, first) = parse_enchant_type_leg(input)?;
+    let (input, rest) =
+        many0(preceded(parse_enchant_list_sep, parse_enchant_type_leg)).parse(input)?;
+    let mut legs = Vec::with_capacity(rest.len() + 1);
+    legs.push(first);
+    legs.extend(rest);
+    Ok((input, legs))
+}
+
+/// Nom combinator: optional trailing controller clause. Ordered longest-first
+/// so "an opponent controls" isn't shadowed by "opponent controls".
+fn parse_enchant_controller_suffix(
+    input: &str,
+) -> nom::IResult<&str, ControllerRef, VerboseError<&str>> {
+    alt((
+        value(ControllerRef::You, tag(" you control")),
+        value(ControllerRef::Opponent, tag(" an opponent controls")),
+        value(ControllerRef::Opponent, tag(" opponent controls")),
+    ))
+    .parse(input)
+}
+
+/// CR 303.4a + CR 702.5: Parse the Aura's "Enchant [types]" line into a single
+/// `Keyword::Enchant(TargetFilter)`. Multi-type lists ("Enchant creature, land,
+/// or planeswalker") produce a `TargetFilter::Or` of typed filters so the Aura
+/// can legally target any permanent matching any listed type. Single-type
+/// lines are left to the legacy `parse_enchant_target` path — this helper only
+/// claims the multi-type union the generic path cannot represent. An optional
+/// trailing controller clause ("you control" / "an opponent controls") applies
+/// uniformly to every leg.
+fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
+    let lower = line.trim().trim_end_matches('.').to_ascii_lowercase();
+
+    // `enchant ` + list + optional controller + terminator.
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("enchant ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, legs) = parse_enchant_type_list(rest).ok()?;
+    let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+
+    // Multi-type union only — single-type lines fall through to the legacy
+    // FromStr path so Pacifism / Rancor / Enchanted-Evening class cards
+    // continue to emit plain `Keyword::Enchant(Typed)` instead of `Or{[Typed]}`.
+    if legs.len() < 2 {
+        return None;
+    }
+
+    let filters: Vec<TargetFilter> = legs
+        .into_iter()
+        .map(|tf| {
+            let mut f = TypedFilter::new(tf);
+            if let Some(ref c) = controller {
+                f = f.controller(c.clone());
+            }
+            TargetFilter::Typed(f)
+        })
+        .collect();
+
+    Some(Keyword::Enchant(TargetFilter::Or { filters }))
 }
 
 /// CR 702.21a: Parse a non-mana ward cost from the em-dash remainder.
@@ -1515,5 +1629,68 @@ mod tests {
         let Keyword::Flashback(FlashbackCost::Mana(_)) = kw else {
             panic!("expected FlashbackCost::Mana, got {:?}", kw);
         };
+    }
+
+    /// CR 303.4a + CR 702.5: "Enchant creature, land, or planeswalker"
+    /// (Imprisoned in the Moon) must extract a single `Keyword::Enchant` with a
+    /// `TargetFilter::Or` union — not drop the keyword when later legs fail
+    /// to match a keyword name.
+    #[test]
+    fn extract_enchant_multi_type_union() {
+        let kws = extract_keyword_line(
+            "Enchant creature, land, or planeswalker",
+            &["enchant".to_string()],
+        )
+        .expect("multi-type enchant line should extract a keyword");
+        assert_eq!(kws.len(), 1, "expected one enchant keyword");
+        let Keyword::Enchant(TargetFilter::Or { filters }) = &kws[0] else {
+            panic!("expected Keyword::Enchant(Or), got {:?}", kws[0]);
+        };
+        assert_eq!(filters.len(), 3);
+        let got_types: Vec<_> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf.type_filters.clone(),
+                other => panic!("expected Typed leg, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got_types,
+            vec![
+                vec![TypeFilter::Creature],
+                vec![TypeFilter::Land],
+                vec![TypeFilter::Planeswalker],
+            ]
+        );
+    }
+
+    /// Single-type "Enchant creature" must continue to flow through the legacy
+    /// MTGJSON-parameterized path (FromStr on `Keyword::Enchant:creature`).
+    /// The new multi-type helper only claims lists — single-type lines are
+    /// skipped so Pacifism / Rancor / Enchanted-Evening class cards aren't
+    /// affected.
+    #[test]
+    fn extract_enchant_single_type_not_claimed_by_multi_helper() {
+        // Single-type enchant with no commas — helper must bail.
+        assert!(super::try_parse_multi_type_enchant("Enchant creature").is_none());
+        assert!(super::try_parse_multi_type_enchant("Enchant creature you control").is_none());
+    }
+
+    /// Controller suffix ("you control") must apply uniformly to every leg of
+    /// a multi-type enchant list.
+    #[test]
+    fn extract_enchant_multi_type_controller_suffix() {
+        let kw =
+            super::try_parse_multi_type_enchant("Enchant creature or planeswalker you control")
+                .expect("multi-type with controller suffix should parse");
+        let Keyword::Enchant(TargetFilter::Or { filters }) = kw else {
+            panic!("expected Or");
+        };
+        for leg in &filters {
+            let TargetFilter::Typed(tf) = leg else {
+                panic!("expected Typed");
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
     }
 }
