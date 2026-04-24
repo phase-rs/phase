@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { RichLabel } from "../mana/RichLabel.tsx";
+import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 
 export interface ChoiceOption {
   id: string;
@@ -13,6 +14,8 @@ interface ChoiceModalProps {
   options: ChoiceOption[];
   onChoose: (id: string) => void;
   onClose?: () => void;
+  /** When set, render a clipped preview of the card's Oracle text band. */
+  cardName?: string;
 }
 
 export function ChoiceModal({
@@ -21,6 +24,7 @@ export function ChoiceModal({
   options,
   onChoose,
   onClose,
+  cardName,
 }: ChoiceModalProps) {
   return (
     <AnimatePresence>
@@ -53,6 +57,11 @@ export function ChoiceModal({
               </p>
             )}
           </div>
+          {cardName && (
+            <div className="px-3 pt-3 lg:px-5 lg:pt-4">
+              <CardTextboxPreview cardName={cardName} />
+            </div>
+          )}
           <div className="px-3 py-3 lg:px-5 lg:py-5">
             <div className="flex flex-col gap-2">
               {options.map((opt) => (
