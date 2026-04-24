@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { fetchCardImageUrl } from "../../services/scryfall.ts";
+import { useCardImage } from "../../hooks/useCardImage.ts";
 
 // Rough fractions of card height where the text box sits on a standard frame.
 const TOP = 0.60;
@@ -15,14 +14,9 @@ const CARD_H = 680;
  * image up inside an aspect-locked container, with gradient fades at the edges.
  */
 export function CardTextboxPreview({ cardName }: { cardName: string }) {
-  const [url, setUrl] = useState<string | null>(null);
+  const { src } = useCardImage(cardName, { size: "normal" });
 
-  useEffect(() => {
-    setUrl(null);
-    fetchCardImageUrl(cardName, 0, "normal").then(setUrl).catch(() => {});
-  }, [cardName]);
-
-  if (!url) return null;
+  if (!src) return null;
 
   return (
     <div
@@ -30,7 +24,7 @@ export function CardTextboxPreview({ cardName }: { cardName: string }) {
       style={{ aspectRatio: `${CARD_W} / ${CARD_H * (BOTTOM - TOP)}` }}
     >
       <img
-        src={url}
+        src={src}
         alt=""
         draggable={false}
         className="absolute inset-x-0 top-0 w-full"
