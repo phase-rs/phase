@@ -202,3 +202,125 @@ fn class_structural_correctness() {
         "Level 3 ability should require ClassLevelIs {{ level: 2 }}"
     );
 }
+
+/// CR 701.23a + CR 107.1: Dual-filter library search lowers into a chain of
+/// `SearchLibrary → ChangeZone → SearchLibrary → ChangeZone → Shuffle`.
+/// Krosan Verge is the canonical case: activate produces TWO independent
+/// searches (Forest, then Plains), each entering the battlefield tapped.
+#[test]
+fn krosan_verge_lowers_to_dual_search_chain() {
+    use engine::types::ability::Effect;
+
+    let result = parse(
+        "Krosan Verge enters tapped.\n{2}, {T}, Sacrifice Krosan Verge: Search your library for a Forest card and a Plains card, put them onto the battlefield tapped, then shuffle.",
+        "Krosan Verge",
+        &[],
+        &["Land"],
+        &[],
+    );
+
+    let activated = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::SearchLibrary { .. }))
+        .expect("expected activated search ability");
+
+    // Walk the sub_ability chain and record the sequence of Effect variants.
+    let mut effects: Vec<&'static str> = Vec::new();
+    let mut subtypes: Vec<Option<String>> = Vec::new();
+    let mut cursor: Option<&engine::types::ability::AbilityDefinition> = Some(activated);
+    while let Some(def) = cursor {
+        let label = match &*def.effect {
+            Effect::SearchLibrary { filter, .. } => {
+                let subtype = match filter {
+                    engine::types::ability::TargetFilter::Typed(tf) => {
+                        tf.get_subtype().map(|s| s.to_string())
+                    }
+                    _ => None,
+                };
+                subtypes.push(subtype);
+                "SearchLibrary"
+            }
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                ..
+            } => {
+                assert_eq!(
+                    *destination,
+                    engine::types::zones::Zone::Battlefield,
+                    "ChangeZone destination should be Battlefield",
+                );
+                assert!(*enter_tapped, "found lands should enter tapped");
+                "ChangeZone"
+            }
+            Effect::Shuffle { .. } => "Shuffle",
+            other => panic!("unexpected effect in chain: {other:?}"),
+        };
+        effects.push(label);
+        cursor = def.sub_ability.as_deref();
+    }
+
+    assert_eq!(
+        effects,
+        vec![
+            "SearchLibrary",
+            "ChangeZone",
+            "SearchLibrary",
+            "ChangeZone",
+            "Shuffle",
+        ],
+        "expected dual-search chain with interleaved ChangeZones"
+    );
+    assert_eq!(
+        subtypes,
+        vec![Some("Forest".to_string()), Some("Plains".to_string())],
+        "expected Forest then Plains subtype filters"
+    );
+}
+
+/// CR 701.23a + CR 107.1: Corpse Harvester exercises the Hand-destination
+/// variant of the dual-search primitive: "a Zombie card and a Swamp card,
+/// reveal them, put them into your hand, then shuffle." Proves that the
+/// building block is not Krosan-Verge-specific.
+#[test]
+fn corpse_harvester_lowers_to_dual_search_into_hand() {
+    use engine::types::ability::Effect;
+
+    let result = parse(
+        "{1}{B}, {T}, Sacrifice a creature: Search your library for a Zombie card and a Swamp card, reveal them, put them into your hand, then shuffle.",
+        "Corpse Harvester",
+        &[],
+        &["Creature"],
+        &["Zombie"],
+    );
+
+    let activated = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::SearchLibrary { .. }))
+        .expect("expected activated search ability");
+
+    let mut cursor: Option<&engine::types::ability::AbilityDefinition> = Some(activated);
+    let mut search_count = 0;
+    let mut change_zone_count = 0;
+    while let Some(def) = cursor {
+        match &*def.effect {
+            Effect::SearchLibrary { .. } => search_count += 1,
+            Effect::ChangeZone { destination, .. } => {
+                assert_eq!(
+                    *destination,
+                    engine::types::zones::Zone::Hand,
+                    "Corpse Harvester destination should be Hand",
+                );
+                change_zone_count += 1;
+            }
+            Effect::Shuffle { .. } => {}
+            other => panic!("unexpected effect in chain: {other:?}"),
+        }
+        cursor = def.sub_ability.as_deref();
+    }
+
+    assert_eq!(search_count, 2, "expected two SearchLibrary effects");
+    assert_eq!(change_zone_count, 2, "expected two ChangeZone effects");
+}

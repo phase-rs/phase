@@ -975,6 +975,9 @@ pub(super) fn parse_search_and_creation_ast(
             reveal: details.reveal,
             target_player: details.target_player,
             up_to: details.up_to,
+            extra_filters: details.extra_filters,
+            multi_destination: details.multi_destination,
+            multi_enter_tapped: details.multi_enter_tapped,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -1079,6 +1082,15 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             target_player,
             up_to,
+            // Extras are consumed in `lower_imperative_family_ast` via
+            // `lower_multi_filter_search_library`, which builds a chained
+            // `ParsedEffectClause`. At this bare-Effect lowering site, multiple
+            // filters collapse to the primary — but that path is unreachable
+            // for multi-filter searches because the family-level lowering
+            // intercepts them first.
+            extra_filters: _,
+            multi_destination: _,
+            multi_enter_tapped: _,
         } => Effect::SearchLibrary {
             filter,
             count,
@@ -2254,6 +2266,80 @@ pub(super) fn lower_put_counter_list(
     });
     clause.sub_ability = sub_ability;
     clause.multi_target = multi_target;
+    clause
+}
+
+/// CR 701.23a + CR 107.1: Lower a multi-filter library search ("a X card and
+/// a Y card [and a Z card ...], put them onto the battlefield [tapped], then
+/// shuffle") into a `ParsedEffectClause`. The result shape is an interleaved
+/// chain of `SearchLibrary` and `ChangeZone` effects — one search per filter,
+/// each followed by a move-to-destination for the found card — terminated by
+/// the final `SearchLibrary`. The terminal `ChangeZone` for that last search
+/// is added downstream by the sequence parser's intrinsic continuation (the
+/// same path that handles single-filter searches), so the total resolved
+/// chain is: `Search(f1) → ChangeZone → Search(f2) → ... → Search(fN) →
+/// ChangeZone → [Shuffle]`.
+///
+/// Each search runs independently (CR 701.23 — search is a compound action
+/// per filter) and shares the same `reveal` / `target_player` / `up_to`
+/// semantics derived from the sentence.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lower_multi_filter_search_library(
+    primary_filter: TargetFilter,
+    count: QuantityExpr,
+    reveal: bool,
+    target_player: Option<TargetFilter>,
+    up_to: bool,
+    extra_filters: Vec<TargetFilter>,
+    destination: Zone,
+    enter_tapped: bool,
+) -> ParsedEffectClause {
+    // Build the chain right-to-left so each link owns its successor. The chain
+    // ends at a `SearchLibrary` (the last extra filter) so the outer intrinsic
+    // continuation can append the terminal `ChangeZone` for that last search.
+    let change_zone_effect = || Effect::ChangeZone {
+        origin: Some(Zone::Library),
+        destination,
+        target: TargetFilter::Any,
+        owner_library: false,
+        enter_transformed: false,
+        under_your_control: false,
+        enter_tapped,
+        enters_attacking: false,
+        up_to: false,
+    };
+
+    let mut tail: Option<Box<AbilityDefinition>> = None;
+    for extra_filter in extra_filters.into_iter().rev() {
+        // Append `Search(extra)` first (it is the successor of the ChangeZone
+        // we will prepend in the next step).
+        let mut search_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SearchLibrary {
+                filter: extra_filter,
+                count: count.clone(),
+                reveal,
+                target_player: target_player.clone(),
+                up_to,
+            },
+        );
+        search_def.sub_ability = tail;
+        // Prepend the `ChangeZone` that moves the PREVIOUS search's found card
+        // to the destination. This sits between the preceding SearchLibrary
+        // (either the primary or a prior extra) and this extra's search.
+        let mut change_zone_def = AbilityDefinition::new(AbilityKind::Spell, change_zone_effect());
+        change_zone_def.sub_ability = Some(Box::new(search_def));
+        tail = Some(Box::new(change_zone_def));
+    }
+
+    let mut clause = parsed_clause(Effect::SearchLibrary {
+        filter: primary_filter,
+        count,
+        reveal,
+        target_player,
+        up_to,
+    });
+    clause.sub_ability = tail;
     clause
 }
 
@@ -3579,6 +3665,32 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             multi_target,
         }) => lower_put_counter_list(entries, target, multi_target),
+        // CR 701.23a + CR 107.1: Dual/N-way search ("a X card and a Y card") lowers
+        // to a chain of independent `SearchLibrary` effects linked via sub_ability,
+        // mirroring `lower_put_counter_list`. Intercepted here because the bare
+        // `Effect` returned by `lower_search_and_creation_ast` cannot express a
+        // chain — only `ParsedEffectClause.sub_ability` can.
+        ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(
+            SearchCreationImperativeAst::SearchLibrary {
+                filter,
+                count,
+                reveal,
+                target_player,
+                up_to,
+                extra_filters,
+                multi_destination,
+                multi_enter_tapped,
+            },
+        )) if !extra_filters.is_empty() => lower_multi_filter_search_library(
+            filter,
+            count,
+            reveal,
+            target_player,
+            up_to,
+            extra_filters,
+            multi_destination,
+            multi_enter_tapped,
+        ),
         ImperativeFamilyAst::Shuffle(ast) => lower_shuffle_ast(ast),
         // CR 701.41a: Support N → PutCounter with multi-target "up to N".
         // On permanents (is_other=true): "up to N other target creatures"

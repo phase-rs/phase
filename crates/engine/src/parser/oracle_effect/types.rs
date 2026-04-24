@@ -83,6 +83,20 @@ pub(super) struct SearchLibraryDetails {
     pub(super) target_player: Option<TargetFilter>,
     /// CR 107.1c + CR 701.23d: "any number of" / "up to N" allow 0..=count picks.
     pub(super) up_to: bool,
+    /// CR 701.23a + CR 107.1: "a X card and a Y card" — additional filters, each
+    /// producing its own independent search. The primary filter is `filter`;
+    /// each `extra_filters` entry becomes a chained `SearchLibrary` sub-ability.
+    /// Empty for the common single-filter case.
+    pub(super) extra_filters: Vec<TargetFilter>,
+    /// CR 701.23a + CR 701.18a: Destination zone scanned from the imperative
+    /// text. Populated only when `extra_filters` is non-empty — used by the
+    /// multi-filter lowering to splice a `ChangeZone` between each search in
+    /// the chain. Single-filter searches get their destination from the
+    /// sequence-level continuation machinery and ignore this field.
+    pub(super) multi_destination: Zone,
+    /// CR 701.23a: Whether the interleaved `ChangeZone`s in a multi-filter
+    /// chain should enter tapped ("put them onto the battlefield tapped").
+    pub(super) multi_enter_tapped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,6 +540,16 @@ pub(super) enum SearchCreationImperativeAst {
         target_player: Option<TargetFilter>,
         /// CR 107.1c + CR 701.23d: "any number of" / "up to N" allow 0..=count picks.
         up_to: bool,
+        /// CR 701.23a + CR 107.1: Dual/N-way search — "a X card and a Y card".
+        /// Each entry is an additional independent library search chained after
+        /// the primary `filter`. Empty for the common single-filter case.
+        extra_filters: Vec<TargetFilter>,
+        /// CR 701.23a + CR 701.18a: Destination zone for each found card in a
+        /// multi-filter chain. Ignored when `extra_filters` is empty.
+        multi_destination: Zone,
+        /// CR 701.23a: "put them onto the battlefield tapped" — enters-tapped
+        /// flag for multi-filter chains. Ignored when `extra_filters` is empty.
+        multi_enter_tapped: bool,
     },
     Dig {
         count: QuantityExpr,
