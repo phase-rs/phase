@@ -1092,21 +1092,16 @@ fn try_parse_choose_one_of_inline(
 
     // Find the first top-level " or " split. Prefer a comma-qualified ", or "
     // as the clearer form; fall back to bare " or " when the text is short
-    // enough that misreading intra-phrase "or" is unlikely.
-    let split_index = split_around(tp.lower, ", or ")
-        .map(|(before, _)| before.len())
-        .or_else(|| split_around(tp.lower, " or ").map(|(before, _)| before.len()))?;
-
-    // The ", or " split has a 5-char separator; " or " has 4. Detect which by
-    // looking at the byte at split_index+2.
-    let sep_len = if tp.lower[split_index..].starts_with(", or ") {
-        5
-    } else {
-        4
-    };
+    // enough that misreading intra-phrase "or" is unlikely. Each needle
+    // literal appears exactly once — the separator's length is implied by
+    // what's missing between the two returned halves.
+    let (before_lower, after_lower) =
+        split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
+    let split_index = before_lower.len();
+    let after_offset = tp.lower.len() - after_lower.len();
 
     let left_orig = tp.original[..split_index].trim();
-    let right_orig = tp.original[split_index + sep_len..].trim();
+    let right_orig = tp.original[after_offset..].trim();
 
     // Both halves must be non-empty and look like imperatives. The left half
     // must not end with a subject marker that would make the "or" coordinate
@@ -7958,9 +7953,14 @@ pub(crate) fn normalize_verb_token(token: &str) -> String {
         // Vowel-y verbs (play→plays) take regular -s and fall through. Result is
         // checked against `PREDICATE_VERBS`; false positives like "series→sery"
         // are silent (no allowlist hit, no behavior change).
+        // allow-noncombinator: verb-morphology suffix check on a single
+        // pre-tokenized word (see PATTERNS.md §9 "already-tokenized input") —
+        // not parser dispatch.
         _ if token.ends_with("ies") && token.len() > 3 => {
             format!("{}y", &token[..token.len() - 3])
         }
+        // allow-noncombinator: verb-morphology suffix check on a single
+        // pre-tokenized word — not parser dispatch.
         _ if token.ends_with('s') && !token.ends_with("ss") => token[..token.len() - 1].to_string(),
         _ => token.to_string(),
     }

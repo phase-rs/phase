@@ -46,6 +46,13 @@ export function evaluate_deck_compatibility_js(request: any): any;
 export function export_game_state_json(): string;
 
 /**
+ * Return the authoritative list of user-selectable formats as a typed array.
+ * The frontend treats this as the single source of truth for rendering
+ * format pickers, badges, and default configs — no hand-maintained mirrors.
+ */
+export function getFormatRegistry(): any;
+
+/**
  * Get the AI's chosen action for the current game state.
  * `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard".
  * `player_id` is the seat index of the AI player (0-based).
@@ -249,6 +256,7 @@ export interface InitOutput {
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
+    readonly getFormatRegistry: () => any;
     readonly get_ai_action: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];
     readonly get_card_face_data: (a: number, b: number) => any;

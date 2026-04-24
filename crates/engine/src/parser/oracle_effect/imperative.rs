@@ -447,6 +447,9 @@ fn parse_discard_card_filter(lower: &str) -> Option<TargetFilter> {
     // Find the " card" / " cards" suffix — the type phrase lies between the
     // article and that suffix. Without a suffix, there is no type qualifier
     // (e.g. plain "a card" → `None`).
+    // allow-noncombinator: structural suffix cleanup on a sub-phrase already
+    // chunked by `strip_article` (see PATTERNS.md §9 "already-tokenized
+    // input") — not parser dispatch.
     let type_phrase = after_article
         .strip_suffix(" cards")
         .or_else(|| after_article.strip_suffix(" card"))?
