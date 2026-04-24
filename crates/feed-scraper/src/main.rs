@@ -44,6 +44,8 @@ fn main() {
 
     let formats: Vec<&str> = cli.format.split(',').map(|s| s.trim()).collect();
 
+    let mut had_failure = false;
+
     for format in &formats {
         let config = ScrapeConfig {
             format: (*format).to_string(),
@@ -54,6 +56,14 @@ fn main() {
         eprintln!("Scraping {format} metagame (top {})...", cli.top);
         let decks = scrape_metagame(&client, &config);
         eprintln!("Scraped {} decks for {format}", decks.len());
+
+        if decks.is_empty() {
+            eprintln!(
+                "ERROR: scrape returned zero decks for {format}; refusing to overwrite feed file"
+            );
+            had_failure = true;
+            continue;
+        }
 
         let now = chrono_lite_now();
         let feed = Feed {
@@ -81,8 +91,13 @@ fn main() {
 
         std::fs::write(&output_path, &json).unwrap_or_else(|e| {
             eprintln!("Failed to write {}: {e}", output_path.display());
+            had_failure = true;
         });
         eprintln!("Wrote {}", output_path.display());
+    }
+
+    if had_failure {
+        std::process::exit(1);
     }
 }
 
