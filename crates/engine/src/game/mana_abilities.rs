@@ -216,6 +216,12 @@ fn produce_mana_from_ability(
     for mana_type in produced_mana {
         mana_payment::produce_mana(state, source_id, mana_type, player, tapped, events);
     }
+
+    // CR 605.3b + CR 605.1a: A mana ability with a non-mana clause in its
+    // effect chain (e.g. painlands' "This land deals 1 damage to you.")
+    // resolves that chain inline — mana abilities don't use the stack, so
+    // the sub-ability runs as part of the same atomic resolution.
+    resolve_mana_ability_sub_chain(state, source_id, player, ability_def, events);
 }
 
 /// CR 605.3b: Mana abilities resolve immediately unless paying the cost requires a choice.
@@ -642,7 +648,33 @@ fn resolve_mana_ability_with_selected_choices(
         mana_payment::produce_mana(state, source_id, mana_type, player, tapped, events);
     }
 
+    // CR 605.3b + CR 605.1a: Resolve the sub-ability chain inline (painlands'
+    // "deals 1 damage to you", Llanowar Wastes-style self-damage, etc.).
+    resolve_mana_ability_sub_chain(state, source_id, player, ability_def, events);
+
     Ok(())
+}
+
+/// CR 605.3b + CR 605.1a: Run a mana ability's `sub_ability` chain inline.
+/// Mana abilities don't use the stack, so non-mana clauses ("This land deals
+/// 1 damage to you.") resolve atomically with the mana production. Walks the
+/// full chain via `resolve_ability_chain` so nested effects (DealDamage on
+/// controller, GainLife, etc.) route through the standard effect handlers.
+fn resolve_mana_ability_sub_chain(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(sub_def) = ability_def.sub_ability.as_deref() else {
+        return;
+    };
+    let resolved = super::ability_utils::build_resolved_from_def(sub_def, source_id, player);
+    // Errors during the sub-chain are non-fatal — mana has already been
+    // added to the pool and the cost has been paid. The damage/life clause
+    // of a painland cannot legitimately fail in a well-formed game state.
+    let _ = super::effects::resolve_ability_chain(state, &resolved, events, 0);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1320,6 +1352,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         )
         .cost(AbilityCost::Tap);
@@ -2162,6 +2195,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -2955,5 +2989,121 @@ mod tests {
             &mut events,
         );
         assert!(result.is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // CR 605.3b + CR 605.1a: Painland-style self-damage sub-abilities
+    // resolve inline with the mana ability.
+    // ---------------------------------------------------------------
+
+    fn make_painland(state: &mut GameState, player: PlayerId, color: ManaColor) -> ObjectId {
+        let land = create_object(
+            state,
+            CardId(7000),
+            player,
+            "Painland".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+
+        let sub = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+            },
+        );
+
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![color],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        ability.sub_ability = Some(Box::new(sub));
+        obj.abilities.push(ability);
+        land
+    }
+
+    #[test]
+    fn painland_deals_one_damage_when_tapped_for_color() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_painland(&mut state, player, ManaColor::White);
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+
+        let starting_life = state.players[player.0 as usize].life;
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, land, player, &def, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[player.0 as usize].life,
+            starting_life - 1,
+            "Painland must deal 1 damage to its controller"
+        );
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::White),
+            1,
+            "Painland must still produce the colored mana"
+        );
+        assert!(
+            state.objects.get(&land).unwrap().tapped,
+            "Painland must tap"
+        );
+    }
+
+    #[test]
+    fn painland_kills_controller_at_one_life_via_sba_trigger() {
+        // Activating the colored mana at 1 life drops the controller to 0.
+        // The life-drop event must be emitted — SBAs triggered on the next
+        // engine pass will eliminate the player.
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_painland(&mut state, player, ManaColor::White);
+        state.players[player.0 as usize].life = 1;
+
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, land, player, &def, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[player.0 as usize].life, 0,
+            "Controller must hit 0 life after the painland damage"
+        );
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::White),
+            1,
+            "Mana production must still occur"
+        );
     }
 }

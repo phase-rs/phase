@@ -4,10 +4,11 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_values};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
-    BasicLandType, CastingPermission, ContinuousModification, CopiableValues, Duration,
+    AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
+    ContinuousModification, CopiableValues, Duration, Effect, ManaContribution, ManaProduction,
     QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
-use crate::types::card_type::is_land_subtype;
+use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -1136,6 +1137,11 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
                     obj.card_types.subtypes.push(subtype.clone());
                 }
+                // CR 305.6: A land that gains a basic land type also gains the
+                // appropriate mana ability for that type. When a type is ADDED
+                // (as opposed to replaced via SetBasicLandType), the land keeps
+                // its existing abilities AND gains the basic mana ability.
+                inject_basic_mana_ability_for_subtype(obj, subtype);
             }
             ContinuousModification::RemoveSubtype { ref subtype } => {
                 obj.card_types.subtypes.retain(|s| s != subtype);
@@ -1152,8 +1158,11 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 for land_type in BasicLandType::all() {
                     let subtype = land_type.as_subtype_str().to_string();
                     if !obj.card_types.subtypes.iter().any(|s| s == &subtype) {
-                        obj.card_types.subtypes.push(subtype);
+                        obj.card_types.subtypes.push(subtype.clone());
                     }
+                    // CR 305.6: Inject the basic mana ability for each basic
+                    // land type that was added.
+                    inject_basic_mana_ability_for_subtype(obj, &subtype);
                 }
             }
             ContinuousModification::AddChosenSubtype { .. } => {
@@ -1161,6 +1170,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
                         obj.card_types.subtypes.push(subtype.clone());
                     }
+                    // CR 305.6: A chosen basic land type grants its mana ability.
+                    inject_basic_mana_ability_for_subtype(obj, subtype);
                 }
             }
             // CR 105.3: Set the object's color to the chosen color.
@@ -1270,6 +1281,63 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
         }
     }
+}
+
+/// CR 305.6: Inject the intrinsic basic-land mana ability for `subtype` when it
+/// is added additively to an object. No-op unless the object is a land and the
+/// subtype names a basic land type. Idempotent: if the object already has an
+/// activated mana ability producing only the matching color via a plain `{T}`
+/// cost (whether printed or previously injected by another layer pass), the
+/// injection is skipped so double-Urborg or Urborg + basic Swamp does not
+/// duplicate the ability.
+fn inject_basic_mana_ability_for_subtype(
+    obj: &mut crate::game::game_object::GameObject,
+    subtype: &str,
+) {
+    if !obj.card_types.core_types.contains(&CoreType::Land) {
+        return;
+    }
+    let Ok(land_type) = subtype.parse::<BasicLandType>() else {
+        return;
+    };
+    let color = land_type.mana_color();
+
+    // Idempotent: skip if an existing `{T}: Add {color}` ability is already
+    // present (base printed ability or a prior injection).
+    let already_present = obj.abilities.iter().any(|ability| {
+        if ability.kind != AbilityKind::Activated {
+            return false;
+        }
+        if !matches!(ability.cost, Some(AbilityCost::Tap)) {
+            return false;
+        }
+        matches!(
+            &*ability.effect,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { colors, .. },
+                ..
+            } if colors.as_slice() == [color]
+        )
+    });
+    if already_present {
+        return;
+    }
+
+    obj.abilities.push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![color],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Tap),
+    );
 }
 
 pub(crate) fn compute_current_copiable_values(
@@ -3931,6 +3999,201 @@ mod tests {
         assert!(
             !bear_obj.has_keyword(&Keyword::Haste),
             "Anger on battlefield (outside its active_zones) must not grant Haste"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // CR 305.6: Basic-land subtype additions inject their mana ability.
+    // ---------------------------------------------------------------
+
+    fn make_land_with_mana(
+        state: &mut GameState,
+        name: &str,
+        controller: PlayerId,
+        color: ManaColor,
+    ) -> ObjectId {
+        let land = create_object(
+            state,
+            CardId(9000),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![color],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        obj.base_abilities = vec![ability.clone()];
+        obj.abilities = vec![ability];
+        land
+    }
+
+    fn add_global_land_subtype_static(state: &mut GameState, host: ObjectId, subtype: &str) {
+        let obj = state.objects.get_mut(&host).unwrap();
+        obj.static_definitions.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::land()))
+                .modifications(vec![ContinuousModification::AddSubtype {
+                    subtype: subtype.to_string(),
+                }]),
+        );
+    }
+
+    fn count_mana_abilities(obj: &crate::game::game_object::GameObject, color: ManaColor) -> usize {
+        obj.abilities
+            .iter()
+            .filter(|ability| {
+                matches!(ability.kind, AbilityKind::Activated)
+                    && matches!(ability.cost, Some(AbilityCost::Tap))
+                    && matches!(
+                        &*ability.effect,
+                        Effect::Mana {
+                            produced: ManaProduction::Fixed { colors, .. },
+                            ..
+                        } if colors.as_slice() == [color]
+                    )
+            })
+            .count()
+    }
+
+    #[test]
+    fn urborg_adds_swamp_mana_ability_to_every_land() {
+        // Urborg, Tomb of Yawgmoth makes every land a Swamp IN ADDITION to
+        // its other types. A Mountain should retain `{T}: Add {R}` AND gain
+        // `{T}: Add {B}` (CR 305.6).
+        let mut state = setup();
+        let mountain = make_land_with_mana(&mut state, "Mountain", PlayerId(0), ManaColor::Red);
+        let urborg = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
+        add_global_land_subtype_static(&mut state, urborg, "Swamp");
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let mountain_obj = state.objects.get(&mountain).unwrap();
+        assert_eq!(
+            count_mana_abilities(mountain_obj, ManaColor::Red),
+            1,
+            "Mountain must retain its {{T}}: Add {{R}} ability"
+        );
+        assert_eq!(
+            count_mana_abilities(mountain_obj, ManaColor::Black),
+            1,
+            "Mountain must gain {{T}}: Add {{B}} from the injected Swamp subtype"
+        );
+    }
+
+    #[test]
+    fn yavimaya_adds_forest_mana_ability_to_plains() {
+        let mut state = setup();
+        let plains = make_land_with_mana(&mut state, "Plains", PlayerId(0), ManaColor::White);
+        let yavimaya = make_land_with_mana(&mut state, "Yavimaya", PlayerId(0), ManaColor::Green);
+        add_global_land_subtype_static(&mut state, yavimaya, "Forest");
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let plains_obj = state.objects.get(&plains).unwrap();
+        assert_eq!(count_mana_abilities(plains_obj, ManaColor::White), 1);
+        assert_eq!(count_mana_abilities(plains_obj, ManaColor::Green), 1);
+    }
+
+    #[test]
+    fn double_urborg_only_injects_one_swamp_mana_ability() {
+        // Idempotency: two copies of Urborg in play must not stack the Swamp
+        // mana ability twice on every land.
+        let mut state = setup();
+        let mountain = make_land_with_mana(&mut state, "Mountain", PlayerId(0), ManaColor::Red);
+        let urborg1 = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
+        add_global_land_subtype_static(&mut state, urborg1, "Swamp");
+        let urborg2 = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
+        add_global_land_subtype_static(&mut state, urborg2, "Swamp");
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let mountain_obj = state.objects.get(&mountain).unwrap();
+        assert_eq!(
+            count_mana_abilities(mountain_obj, ManaColor::Black),
+            1,
+            "Two Urborgs must inject exactly one Swamp mana ability"
+        );
+    }
+
+    #[test]
+    fn basic_swamp_receives_no_duplicate_swamp_ability_from_urborg() {
+        // An actual basic Swamp already has `{T}: Add {B}`. Urborg adding
+        // Swamp to it must not append a second `{T}: Add {B}`.
+        let mut state = setup();
+        let basic_swamp = make_land_with_mana(&mut state, "Swamp", PlayerId(0), ManaColor::Black);
+        state
+            .objects
+            .get_mut(&basic_swamp)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Swamp".to_string());
+        // Ensure base_card_types mirrors so layers reset doesn't lose it.
+        state
+            .objects
+            .get_mut(&basic_swamp)
+            .unwrap()
+            .base_card_types
+            .subtypes
+            .push("Swamp".to_string());
+        let urborg = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
+        add_global_land_subtype_static(&mut state, urborg, "Swamp");
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let swamp_obj = state.objects.get(&basic_swamp).unwrap();
+        assert_eq!(
+            count_mana_abilities(swamp_obj, ManaColor::Black),
+            1,
+            "Basic Swamp must keep a single {{T}}: Add {{B}} ability"
+        );
+    }
+
+    #[test]
+    fn urborg_does_not_inject_mana_onto_non_land() {
+        // Defensive: the injection must be guarded by CoreType::Land. An
+        // Urborg-like static whose filter accidentally matched a creature
+        // should not grant mana abilities.
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let host = make_land_with_mana(&mut state, "GhostHost", PlayerId(0), ManaColor::Black);
+        // Use a self-targeted static so we can exercise the AddSubtype path
+        // on a non-land directly.
+        let bear_obj = state.objects.get_mut(&bear).unwrap();
+        bear_obj.static_definitions.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddSubtype {
+                    subtype: "Swamp".to_string(),
+                }]),
+        );
+        // Silence host warning.
+        let _ = host;
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            count_mana_abilities(bear_obj, ManaColor::Black),
+            0,
+            "Non-land objects must not receive injected mana abilities"
         );
     }
 }
