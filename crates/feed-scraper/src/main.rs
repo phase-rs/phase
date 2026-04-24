@@ -32,6 +32,14 @@ struct Cli {
     /// Delay between requests in milliseconds
     #[arg(long, default_value_t = 1000)]
     delay: u64,
+
+    /// Minimum scraped-deck count required to overwrite the existing feed
+    /// file. A partial scrape (e.g., rate-limited after a few decks) that
+    /// returns non-zero but < this threshold is treated the same as empty:
+    /// the existing file is preserved and the process exits non-zero.
+    /// Default of 5 is a safe floor for top-10 Standard/Modern/etc. runs.
+    #[arg(long, default_value_t = 5)]
+    min_decks: usize,
 }
 
 fn main() {
@@ -57,9 +65,11 @@ fn main() {
         let decks = scrape_metagame(&client, &config);
         eprintln!("Scraped {} decks for {format}", decks.len());
 
-        if decks.is_empty() {
+        if decks.len() < cli.min_decks {
             eprintln!(
-                "ERROR: scrape returned zero decks for {format}; refusing to overwrite feed file"
+                "ERROR: scrape returned {} decks for {format} (minimum {}); refusing to overwrite feed file",
+                decks.len(),
+                cli.min_decks,
             );
             had_failure = true;
             continue;

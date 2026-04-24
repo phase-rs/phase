@@ -17,10 +17,13 @@ pub enum LegalityFormat {
     Historic,
     Brawl,
     StandardBrawl,
+    Timeless,
+    PauperCommander,
+    DuelCommander,
 }
 
 impl LegalityFormat {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Standard,
         Self::Commander,
         Self::Modern,
@@ -31,6 +34,9 @@ impl LegalityFormat {
         Self::Historic,
         Self::Brawl,
         Self::StandardBrawl,
+        Self::Timeless,
+        Self::PauperCommander,
+        Self::DuelCommander,
     ];
 
     pub fn as_key(self) -> &'static str {
@@ -45,6 +51,9 @@ impl LegalityFormat {
             Self::Historic => "historic",
             Self::Brawl => "brawl",
             Self::StandardBrawl => "standardbrawl",
+            Self::Timeless => "timeless",
+            Self::PauperCommander => "paupercommander",
+            Self::DuelCommander => "duel",
         }
     }
 
@@ -60,6 +69,9 @@ impl LegalityFormat {
             "historic" => Some(Self::Historic),
             "brawl" => Some(Self::Brawl),
             "standardbrawl" => Some(Self::StandardBrawl),
+            "timeless" => Some(Self::Timeless),
+            "paupercommander" => Some(Self::PauperCommander),
+            "duel" => Some(Self::DuelCommander),
             _ => None,
         }
     }
@@ -163,7 +175,10 @@ mod tests {
         let mut raw = HashMap::new();
         raw.insert("standard".to_string(), "Legal".to_string());
         raw.insert("commander".to_string(), "Banned".to_string());
-        raw.insert("duel".to_string(), "Legal".to_string());
+        // Unsupported MTGJSON keys: `oldschool` and `premodern` are community
+        // formats we do not yet model; they must be dropped silently.
+        raw.insert("oldschool".to_string(), "Legal".to_string());
+        raw.insert("premodern".to_string(), "Legal".to_string());
 
         let result = normalize_legalities(&raw);
         assert_eq!(

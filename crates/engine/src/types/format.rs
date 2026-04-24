@@ -39,7 +39,10 @@ pub enum GameFormat {
     Legacy,
     Vintage,
     Historic,
+    Timeless,
     Pauper,
+    PauperCommander,
+    DuelCommander,
     Brawl,
     HistoricBrawl,
     FreeForAll,
@@ -90,7 +93,10 @@ impl GameFormat {
             GameFormat::Legacy => Some(LegalityFormat::Legacy),
             GameFormat::Vintage => Some(LegalityFormat::Vintage),
             GameFormat::Historic => Some(LegalityFormat::Historic),
+            GameFormat::Timeless => Some(LegalityFormat::Timeless),
             GameFormat::Pauper => Some(LegalityFormat::Pauper),
+            GameFormat::PauperCommander => Some(LegalityFormat::PauperCommander),
+            GameFormat::DuelCommander => Some(LegalityFormat::DuelCommander),
             GameFormat::Brawl => Some(LegalityFormat::StandardBrawl),
             GameFormat::HistoricBrawl => Some(LegalityFormat::Brawl),
             GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => None,
@@ -110,10 +116,13 @@ impl GameFormat {
             | GameFormat::Legacy
             | GameFormat::Vintage
             | GameFormat::Historic
+            | GameFormat::Timeless
             | GameFormat::Pauper => SideboardPolicy::Limited(15),
-            GameFormat::Commander | GameFormat::Brawl | GameFormat::HistoricBrawl => {
-                SideboardPolicy::Forbidden
-            }
+            GameFormat::Commander
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
             GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => SideboardPolicy::Unlimited,
         }
     }
@@ -128,7 +137,11 @@ impl GameFormat {
     pub fn grants_free_first_mulligan(self) -> bool {
         matches!(
             self,
-            GameFormat::Commander | GameFormat::Brawl | GameFormat::HistoricBrawl,
+            GameFormat::Commander
+                | GameFormat::PauperCommander
+                | GameFormat::DuelCommander
+                | GameFormat::Brawl
+                | GameFormat::HistoricBrawl,
         )
     }
 
@@ -142,7 +155,10 @@ impl GameFormat {
             GameFormat::Legacy => "Legacy",
             GameFormat::Vintage => "Vintage",
             GameFormat::Historic => "Historic",
+            GameFormat::Timeless => "Timeless",
             GameFormat::Pauper => "Pauper",
+            GameFormat::PauperCommander => "Pauper Commander",
+            GameFormat::DuelCommander => "Duel Commander",
             GameFormat::Brawl => "Brawl",
             GameFormat::HistoricBrawl => "Historic Brawl",
             GameFormat::FreeForAll => "Free-for-All",
@@ -206,6 +222,14 @@ impl GameFormat {
                 default_config: FormatConfig::historic(),
             },
             FormatMetadata {
+                format: GameFormat::Timeless,
+                label: "Timeless",
+                short_label: "TML",
+                description: "Arena's eternal non-rotating format",
+                group: FormatGroup::Constructed,
+                default_config: FormatConfig::timeless(),
+            },
+            FormatMetadata {
                 format: GameFormat::Pauper,
                 label: "Pauper",
                 short_label: "PAU",
@@ -220,6 +244,22 @@ impl GameFormat {
                 description: "100-card singleton, 2\u{2013}4 players",
                 group: FormatGroup::Commander,
                 default_config: FormatConfig::commander(),
+            },
+            FormatMetadata {
+                format: GameFormat::DuelCommander,
+                label: "Duel Commander",
+                short_label: "DUC",
+                description: "Tournament 1v1 Commander, 30 life",
+                group: FormatGroup::Commander,
+                default_config: FormatConfig::duel_commander(),
+            },
+            FormatMetadata {
+                format: GameFormat::PauperCommander,
+                label: "Pauper Commander",
+                short_label: "PDH",
+                description: "Commons-only singleton Commander",
+                group: FormatGroup::Commander,
+                default_config: FormatConfig::pauper_commander(),
             },
             FormatMetadata {
                 format: GameFormat::Brawl,
@@ -313,6 +353,35 @@ impl FormatConfig {
         }
     }
 
+    /// Timeless: Arena's eternal non-rotating format, 60-card constructed.
+    pub fn timeless() -> Self {
+        FormatConfig {
+            format: GameFormat::Timeless,
+            ..Self::standard()
+        }
+    }
+
+    /// Pauper Commander: 100-card singleton commander format restricted to
+    /// commons (with an uncommon creature/planeswalker commander). Shares
+    /// Commander's structural rules (life, command zone, damage threshold).
+    pub fn pauper_commander() -> Self {
+        FormatConfig {
+            format: GameFormat::PauperCommander,
+            ..Self::commander()
+        }
+    }
+
+    /// Duel Commander: tournament 1v1 commander. 100-card singleton but 30
+    /// life, strict duel cap, distinct banned list from regular Commander.
+    pub fn duel_commander() -> Self {
+        FormatConfig {
+            format: GameFormat::DuelCommander,
+            starting_life: 30,
+            max_players: 2,
+            ..Self::commander()
+        }
+    }
+
     /// Historic: non-rotating constructed using the Arena Historic card pool.
     pub fn historic() -> Self {
         FormatConfig {
@@ -399,7 +468,10 @@ impl FormatConfig {
             GameFormat::Legacy => Self::legacy(),
             GameFormat::Vintage => Self::vintage(),
             GameFormat::Historic => Self::historic(),
+            GameFormat::Timeless => Self::timeless(),
             GameFormat::Pauper => Self::pauper(),
+            GameFormat::PauperCommander => Self::pauper_commander(),
+            GameFormat::DuelCommander => Self::duel_commander(),
             GameFormat::Brawl => Self::brawl(),
             GameFormat::HistoricBrawl => Self::historic_brawl(),
             GameFormat::FreeForAll => Self::free_for_all(),

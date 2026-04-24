@@ -257,6 +257,26 @@ fn evaluate_commander(
     request: &DeckCompatibilityRequest,
     unknown_cards: &BTreeSet<String>,
 ) -> CompatibilityCheck {
+    evaluate_commander_with_format(
+        db,
+        request,
+        unknown_cards,
+        LegalityFormat::Commander,
+        "Commander",
+    )
+}
+
+/// Shared commander-variant validator. Commander, Duel Commander, and Pauper
+/// Commander all use 100-card-singleton deck shape with a command zone; only
+/// the legality table and display label differ. DuelCommander's 30-life /
+/// 1v1-only rules are expressed in `FormatConfig`, not deck validation.
+fn evaluate_commander_with_format(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+    legality_format: LegalityFormat,
+    format_label: &str,
+) -> CompatibilityCheck {
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
@@ -265,7 +285,7 @@ fn evaluate_commander(
 
     if request.commander.is_empty() || request.commander.len() > 2 {
         reasons.push(format!(
-            "Commander decks require 1 or 2 commanders (found {})",
+            "{format_label} decks require 1 or 2 commanders (found {})",
             request.commander.len()
         ));
     }
@@ -306,13 +326,11 @@ fn evaluate_commander(
         }
     }
 
-    // CR 903.5e: Commander games do not use sideboards.
-    if matches!(
-        GameFormat::Commander.sideboard_policy(),
-        SideboardPolicy::Forbidden
-    ) && !request.sideboard.is_empty()
-    {
-        reasons.push("Commander decks should not include a sideboard".to_string());
+    // CR 903.5e (+ variant rules): Commander-style formats do not use sideboards.
+    if !request.sideboard.is_empty() {
+        reasons.push(format!(
+            "{format_label} decks should not include a sideboard"
+        ));
     }
 
     let represented_in_main = request
@@ -328,7 +346,7 @@ fn evaluate_commander(
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
     if total_cards != 100 {
         reasons.push(format!(
-            "Commander deck must have exactly 100 cards (found {total_cards})"
+            "{format_label} deck must have exactly 100 cards (found {total_cards})"
         ));
     }
 
@@ -350,18 +368,22 @@ fn evaluate_commander(
         if unknown_cards.contains(name) {
             continue;
         }
-        match db.legality_status(resolve_card_name(db, name), LegalityFormat::Commander) {
+        match db.legality_status(resolve_card_name(db, name), legality_format) {
             Some(status) if status.is_legal() => {}
             Some(status) => {
                 illegal_cards.insert(format!("{name} ({})", status_label(status)));
             }
             None => {
-                illegal_cards.insert(format!("{name} (not legal in Commander)"));
+                illegal_cards.insert(format!("{name} (not legal in {format_label})"));
             }
         }
     }
     if !illegal_cards.is_empty() {
-        reasons.push(summarize_cards("Not Commander legal", &illegal_cards, 6));
+        reasons.push(summarize_cards(
+            &format!("Not {format_label} legal"),
+            &illegal_cards,
+            6,
+        ));
     }
 
     // CR 903.4: Each non-commander card's color identity must be a subset of
@@ -599,6 +621,7 @@ fn evaluate_selected_format(
         | GameFormat::Legacy
         | GameFormat::Vintage
         | GameFormat::Historic
+        | GameFormat::Timeless
         | GameFormat::Pauper => {
             let check = evaluate_constructed(
                 db,
@@ -607,6 +630,23 @@ fn evaluate_selected_format(
                 format.legality_format().unwrap(),
                 format.label(),
                 format.sideboard_policy(),
+            );
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
+        GameFormat::PauperCommander | GameFormat::DuelCommander => {
+            // Both variants share Commander's structural rules (100-card
+            // singleton, command zone). We route them through the existing
+            // Commander check against the format's own legality table — the
+            // card pool differs from Commander but the deck shape is identical.
+            let check = evaluate_commander_with_format(
+                db,
+                request,
+                unknown_cards,
+                format.legality_format().unwrap(),
+                format.label(),
             );
             if !check.compatible {
                 reasons.extend(check.reasons);
