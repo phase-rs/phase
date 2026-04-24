@@ -971,6 +971,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::NameMatchesAnyPermanent { .. }
         | FilterProp::Other { .. } => false,
     }
 }
@@ -1129,6 +1130,37 @@ fn matches_filter_prop(
         // (e.g., the seed was just exiled by the preceding effect).
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
+        // CR 201.2 + CR 201.2a: Matches if `obj.name` equals the name of any
+        // permanent on the battlefield (optionally narrowed by controller).
+        // Name comparison is case-insensitive per `FilterProp::Named` /
+        // `FilterProp::SameName` conventions.
+        FilterProp::NameMatchesAnyPermanent { controller } => {
+            let controller_pid = controller.as_ref().and_then(|c| match c {
+                ControllerRef::You => source.controller,
+                ControllerRef::Opponent => None,
+                ControllerRef::TargetPlayer => source.ability.and_then(|a| {
+                    a.targets.iter().find_map(|t| match t {
+                        TargetRef::Player(pid) => Some(*pid),
+                        TargetRef::Object(_) => None,
+                    })
+                }),
+            });
+            state.objects.values().any(|perm| {
+                if perm.zone != crate::types::zones::Zone::Battlefield {
+                    return false;
+                }
+                let controller_ok = match (controller, controller_pid) {
+                    (Some(ControllerRef::You), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::Opponent), _) => {
+                        source.controller.is_some() && Some(perm.controller) != source.controller
+                    }
+                    (Some(ControllerRef::TargetPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                };
+                controller_ok && perm.name.eq_ignore_ascii_case(&obj.name)
+            })
+        }
         FilterProp::InZone { zone } => obj.zone == *zone,
         FilterProp::Owned { controller } => match controller {
             ControllerRef::You => source.controller == Some(obj.owner),
@@ -1500,7 +1532,10 @@ fn zone_change_record_matches_property(
         | FilterProp::HasAttachment { .. }
         | FilterProp::FaceDown
         | FilterProp::CountersGE { .. }
-        | FilterProp::HasAnyCounter => false,
+        | FilterProp::HasAnyCounter
+        // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
+        // — a zone-change snapshot cannot represent it. Fail closed.
+        | FilterProp::NameMatchesAnyPermanent { .. } => false,
 
         // Disjunctive composite: recurse into inner props under the same record.
         FilterProp::AnyOf { props } => props

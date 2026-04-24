@@ -1366,6 +1366,15 @@ pub enum FilterProp {
     /// looking up the name from `state.objects` (or `lki_cache` if the target
     /// has already left its zone).
     SameNameAsParentTarget,
+    /// CR 201.2 + CR 201.2a: Matches objects whose name equals the name of any
+    /// permanent currently on the battlefield. `controller` optionally narrows
+    /// the pool of permanents whose names are considered (None = any controller,
+    /// i.e. "shares a name with a permanent" unqualified). Used by "put a card
+    /// onto the battlefield if it has the same name as a permanent" patterns
+    /// (Mitotic Manipulation, and any analogous dig-with-name-match effect).
+    NameMatchesAnyPermanent {
+        controller: Option<ControllerRef>,
+    },
     /// CR 508.1b: Matches attacking creatures whose defending player equals the
     /// filter's source controller ("creatures attacking you"). Distinct from
     /// `Attacking`, which matches any attacker regardless of defender.

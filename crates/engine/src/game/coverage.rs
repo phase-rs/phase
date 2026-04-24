@@ -287,6 +287,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CmcEQ { value } => parts.push(format!("mv {}", fmt_quantity(value))),
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
+            FilterProp::NameMatchesAnyPermanent { controller } => match controller {
+                Some(c) => parts.push(format!("name matches {} permanent", fmt_controller(c))),
+                None => parts.push("name matches any permanent".into()),
+            },
             FilterProp::InZone { zone } => parts.push(format!("in {}", fmt_zone(zone))),
             FilterProp::Owned { controller } => parts.push(fmt_controller(controller)),
             FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
@@ -889,9 +893,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::Draw { count } => {
+        Effect::Draw { count, target } => {
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), fmt_quantity(count)));
+            }
+            if !matches!(target, TargetFilter::Controller) {
+                d.push(("target".into(), fmt_target(target)));
             }
         }
         Effect::ExileTop { player, count } => {
@@ -1095,7 +1102,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("destination".into(), format!("{destination:?}")));
             }
         }
-        Effect::Scry { count } | Effect::Surveil { count } => {
+        Effect::Scry { count, .. } | Effect::Surveil { count, .. } => {
             d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::GainLife { amount, player } => {
@@ -7380,6 +7387,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             )
             .condition(AbilityCondition::QuantityCheck {
