@@ -10,6 +10,7 @@
   <a href="https://preview.phase-rs.dev"><img alt="Play Preview" src="https://img.shields.io/badge/⚡_Play_Preview-Latest-f59e0b?style=for-the-badge"></a>
   <a href="https://phase-rs.dev"><img alt="Play Online" src="https://img.shields.io/badge/▶_Play_Online-Alpha-6366f1?style=for-the-badge"></a>
   <a href="https://github.com/phase-rs/phase/releases/latest"><img alt="Download" src="https://img.shields.io/badge/⬇_Download-Desktop-10b981?style=for-the-badge"></a>
+  <a href="https://ko-fi.com/phasers"><img alt="Support on Ko-fi" src="https://img.shields.io/badge/☕_Ko--fi-Support-FF5E5B?style=for-the-badge"></a>
 </p>
 
 <p align="center">
