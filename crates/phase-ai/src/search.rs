@@ -391,24 +391,34 @@ pub fn score_candidates(
         });
         ranked.truncate(branching);
 
-        ranked
-            .into_iter()
-            .map(|ranked| {
-                let score = if let Some(sim) = apply_candidate(state, &ranked.candidate) {
-                    let continuation_score =
-                        planner.evaluate_after_action(&sim, &mut services, &mut budget);
-                    continuation_score + (ranked.score * tactical_weight)
-                } else {
-                    // Action failed simulation — heavily penalize so the AI prefers
-                    // any valid alternative (e.g., CancelCast over a failing PassPriority
-                    // during ManaPayment when the cost is unaffordable).
-                    // Preserve tactical score as tiebreaker among equally-failing actions
-                    // (e.g., target selection where simulation lacks full engine context).
-                    ranked.score - 1000.0
-                };
-                (ranked.candidate.action, score)
-            })
-            .collect()
+        // Walk top-level candidates, but bail out of the full rollout phase
+        // once the deadline fires — remaining candidates keep their tactical
+        // score as the ranking signal instead of a full-search continuation.
+        // This caps wall-clock on the outer map the same way the deadline caps
+        // the inner rollout recursion.
+        let mut out: Vec<(GameAction, f64)> = Vec::with_capacity(ranked.len());
+        let mut deadline_hit = false;
+        for r in ranked {
+            let score = if deadline_hit || services.deadline.expired() {
+                deadline_hit = true;
+                // Skip the continuation search; keep the tactical signal.
+                r.score * tactical_weight
+            } else if let Some(sim) = apply_candidate(state, &r.candidate) {
+                let continuation_score =
+                    planner.evaluate_after_action(&sim, &mut services, &mut budget);
+                continuation_score + (r.score * tactical_weight)
+            } else {
+                // Action failed simulation — heavily penalize so the AI prefers
+                // any valid alternative (e.g., CancelCast over a failing PassPriority
+                // during ManaPayment when the cost is unaffordable).
+                // Preserve tactical score as tiebreaker among equally-failing actions
+                // (e.g., target selection where simulation lacks full engine context).
+                r.score - 1000.0
+            };
+            out.push((r.candidate.action, score));
+        }
+        let _ = deadline_hit;
+        out
     } else {
         // Heuristic-only scoring
         gated
@@ -435,23 +445,18 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
         ctx.player = player;
         return ctx;
     }
-    let mut ctx = AiContext::analyze_with(deck, &config.weights, &config.archetype_multipliers);
-    ctx.player = player;
-    // Re-key the session map under the actual AI player (analyze_with keys by PlayerId(0))
-    // and populate opponents' features so archetype lookups don't re-run
-    // `DeckProfile::analyze` per search call.
+    // `analyze_for_player` keys the session's synergy/features/plan maps under
+    // the actual AI player up-front, so no `Arc::make_mut` + HashMap rekey is
+    // needed when the AI isn't in seat 0.
+    let mut ctx = AiContext::analyze_for_player(
+        deck,
+        &config.weights,
+        &config.archetype_multipliers,
+        player,
+    );
+    // Populate opponent features so archetype lookups hit the cache instead
+    // of re-running `DeckProfile::analyze` per search call.
     let session = std::sync::Arc::make_mut(&mut ctx.session);
-    if player != engine::types::player::PlayerId(0) {
-        if let Some(graph) = session.synergy.remove(&engine::types::player::PlayerId(0)) {
-            session.synergy.insert(player, graph);
-        }
-        if let Some(features) = session.features.remove(&engine::types::player::PlayerId(0)) {
-            session.features.insert(player, features);
-        }
-        if let Some(plan) = session.plan.remove(&engine::types::player::PlayerId(0)) {
-            session.plan.insert(player, plan);
-        }
-    }
     for pool in &state.deck_pools {
         if pool.player != player {
             session.ensure_player_features(pool.player, &pool.current_main);

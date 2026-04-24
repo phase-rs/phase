@@ -1795,6 +1795,20 @@ pub struct MiracleOffer {
     pub cost: super::mana::ManaCost,
 }
 
+/// CR 702.190b: Placement data for a Sneak-cast **permanent** spell —
+/// captures the `(defender, attack_target)` pair from the returned creature's
+/// `AttackerInfo` at cost-payment time, so the permanent can enter the
+/// battlefield attacking the same target after resolution (by which point
+/// combat no longer remembers the returned creature).
+///
+/// Absent for instant/sorcery Sneak casts (CR 702.190b applies only to
+/// permanent spells).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SneakPlacement {
+    pub defender: PlayerId,
+    pub attack_target: AttackTarget,
+}
+
 /// How a spell was cast — determines zone routing and post-resolution behavior.
 /// Replaces individual boolean flags (cast_as_adventure, cast_as_warp) with a
 /// single enum that captures the casting context.
@@ -1840,15 +1854,21 @@ pub enum CastingVariant {
         /// `hand_cast_free_permissions_used`.
         frequency: super::statics::CastFrequency,
     },
-    /// CR 702.190a: Cast from graveyard via Sneak alt-cost. Legal only during
-    /// the declare-blockers step. The returned unblocked attacker is part of
-    /// the cost (bounced at `finalize_cast_to_stack`). CR 702.190b: on
-    /// resolution the permanent enters tapped and attacking the same defender
-    /// as the returned creature.
+    /// CR 702.190a: Cast from HAND via the Sneak alternative cost. Legal only
+    /// during the declare-blockers step. The returned unblocked attacker you
+    /// control is part of the cost, bounced to its owner's hand at
+    /// `finalize_cast_to_stack`.
+    ///
+    /// CR 702.190b applies only to **permanent spells**: on resolution the
+    /// permanent enters tapped and attacking the same defender as the
+    /// returned creature. Non-permanent spells (instants/sorceries) resolve
+    /// normally with no alongside-attacker placement, so `placement` is
+    /// `None` for those casts. This `Option` carries real per-card-class data
+    /// (not a discriminator) — see `SneakPlacement`.
     Sneak {
-        defender: PlayerId,
-        attack_target: AttackTarget,
         returned_creature: ObjectId,
+        /// CR 702.190b data for permanent spells; `None` for instants/sorceries.
+        placement: Option<SneakPlacement>,
     },
     /// CR 702.94a: Cast from hand via Miracle's alternative cost after revealing
     /// the card as the first card drawn this turn. The granting keyword carries
@@ -1988,7 +2008,7 @@ pub struct GameState {
 
     // Runtime continuous effects (from resolved spells/abilities, not printed card text)
     #[serde(default)]
-    pub transient_continuous_effects: Vec<TransientContinuousEffect>,
+    pub transient_continuous_effects: im::Vector<TransientContinuousEffect>,
     #[serde(default)]
     pub next_continuous_effect_id: u64,
 
@@ -2452,6 +2472,14 @@ pub struct ScheduledTurnControl {
     pub grant_extra_turn_after: bool,
 }
 
+// Pin `GameState: Send + Sync` at compile time. Blocks accidental imports of
+// `im-rc` (the single-threaded variant of `im`, which is !Send/!Sync) and
+// catches any future field addition that violates thread-safety.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<GameState>();
+};
+
 impl GameState {
     /// CR 702.26b: Returns battlefield object ids filtered to only phased-in
     /// permanents. Use this instead of `state.battlefield.iter()` anywhere a
@@ -2506,7 +2534,7 @@ impl GameState {
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,
-            transient_continuous_effects: Vec::new(),
+            transient_continuous_effects: im::Vector::new(),
             next_continuous_effect_id: 1,
             day_night: None,
             spells_cast_this_turn: 0,
@@ -2626,7 +2654,7 @@ impl GameState {
         self.next_continuous_effect_id += 1;
         let timestamp = self.next_timestamp();
         self.transient_continuous_effects
-            .push(TransientContinuousEffect {
+            .push_back(TransientContinuousEffect {
                 id,
                 source_id,
                 controller,

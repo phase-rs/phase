@@ -186,6 +186,33 @@ impl AiSession {
 
         Ok(projection)
     }
+
+    /// Cache-only projection lookup — returns `None` on miss without doing
+    /// the expensive multi-turn simulation. Policies that want projection
+    /// data but can't afford the miss cost (e.g., under a tight wall-clock
+    /// budget) should use this and fall back to a cheaper heuristic when
+    /// no cached projection exists. On `Ok(None)` the caller knows
+    /// definitively "not cached" and does not run the simulator.
+    pub fn cached_projection(
+        &self,
+        base: &GameState,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+        horizon: ProjectionHorizon,
+    ) -> Option<Arc<Projection>> {
+        let key = ProjectionKey {
+            state_hash: quick_state_hash(base),
+            turn_number: base.turn_number,
+            active_player: base.active_player,
+            ai_player,
+            target_opponent,
+            horizon,
+        };
+        self.projection_cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&key).map(Arc::clone))
+    }
 }
 
 /// Typed cross-decision policy memory. Adding new memory-carrying policies

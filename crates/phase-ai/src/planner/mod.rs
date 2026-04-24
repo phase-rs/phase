@@ -266,6 +266,11 @@ pub struct PlannerServices<'a> {
     /// Scope is the `PlannerServices` lifetime — one per `choose_action` call
     /// — so stale entries from prior turns never match.
     candidate_cache: HashMap<u64, std::sync::Arc<AiDecisionContext>>,
+    /// Top-level wall-clock deadline mirrored onto services so every hot-path
+    /// function (rollouts, tactical_score, evaluate_state_quiesced) can bail
+    /// without threading `SearchBudget` everywhere. Populated from the caller's
+    /// time budget at construction time; `Deadline::none()` when no budget.
+    pub deadline: engine::util::Deadline,
 }
 
 impl<'a> PlannerServices<'a> {
@@ -285,6 +290,16 @@ impl<'a> PlannerServices<'a> {
             OpponentModel::SampledReply => Box::new(SampledReplyUtilityReducer),
         };
 
+        let deadline = match (config.search.deterministic, config.search.time_budget_ms) {
+            (false, Some(ms)) => engine::util::Deadline::after(ms),
+            _ => engine::util::Deadline::none(),
+        };
+        // Mirror the same deadline onto AiContext so policies (which only see
+        // PolicyContext → AiContext) can gate expensive work — specifically
+        // the `velocity_score` opponent-turn projection that costs ~1.5s on
+        // large multi-player states.
+        let mut context = context;
+        context.deadline = deadline.clone();
         Self {
             ai_player,
             config,
@@ -293,6 +308,7 @@ impl<'a> PlannerServices<'a> {
             utility_reducer,
             eval_cache: HashMap::new(),
             candidate_cache: HashMap::new(),
+            deadline,
         }
     }
 
@@ -536,8 +552,11 @@ impl<'a> PlannerServices<'a> {
 
     /// Evaluate a leaf state with quiescence: if the stack is non-empty and only
     /// forced passes remain, resolve through them before evaluating.
+    /// Once the wall-clock deadline is blown, skip quiescence — the cached
+    /// static eval is a good-enough approximation and quiescence can itself
+    /// clone + simulate state through the stack.
     pub fn evaluate_state_quiesced(&mut self, state: &GameState) -> f64 {
-        if state.stack.is_empty() {
+        if state.stack.is_empty() || self.deadline.expired() {
             return self.evaluate_state_cached(state);
         }
         let quiesced = self.quiesce(state);
@@ -546,7 +565,7 @@ impl<'a> PlannerServices<'a> {
 
     /// Evaluate a leaf state for utility with quiescence.
     pub fn quiesced_leaf_eval(&mut self, state: &GameState) -> f64 {
-        if state.stack.is_empty() {
+        if state.stack.is_empty() || self.deadline.expired() {
             let value = self.evaluate_for_planner(state);
             return self.reduce_utility(state, &value);
         }
@@ -656,6 +675,12 @@ impl<'a> PlannerServices<'a> {
     }
 
     pub fn rollout_estimate(&mut self, state: &GameState, depth: u32) -> f64 {
+        // CR-agnostic: if the wall-clock budget is blown, short-circuit to the
+        // cheap leaf evaluator rather than descending further. Without this
+        // bail, rollout recursion ignores `time_budget_ms` entirely.
+        if self.deadline.expired() {
+            return self.quiesced_leaf_eval(state);
+        }
         if depth == 0 || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return self.quiesced_leaf_eval(state);
         }
@@ -753,6 +778,12 @@ impl BeamContinuationPlanner {
         };
 
         for ranked in ranked {
+            // Bail mid-loop on wall-clock budget: the outer beam can be wide
+            // (branching × depth), so checking only at entry lets a single node
+            // burn the full deadline before bubbling back up.
+            if services.deadline.expired() {
+                break;
+            }
             let Some(sim) = services.apply_candidate(state, &ranked.candidate) else {
                 continue;
             };
