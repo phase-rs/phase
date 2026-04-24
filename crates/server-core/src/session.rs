@@ -2,9 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
-use engine::game::deck_loading::{load_deck_into_state, DeckPayload, PlayerDeckPayload};
+use engine::database::CardDatabase;
+use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::game::finalize_public_state;
+use engine::game::load_and_hydrate_decks;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -283,7 +285,7 @@ impl GameSession {
         }
     }
 
-    pub fn start_game(&mut self) {
+    pub fn start_game(&mut self, db: &CardDatabase) {
         let player_deck = self.decks[0].clone().unwrap_or(PlayerDeckPayload {
             main_deck: Vec::new(),
             sideboard: Vec::new(),
@@ -306,13 +308,20 @@ impl GameSession {
             .collect();
 
         self.rebuild_pregame_state(self.player_count);
-        load_deck_into_state(
+        // Canonical init sequence — see `engine::game::load_and_hydrate_decks`.
+        // Replaces the prior `load_deck_into_state` + `rehydrate_game_from_card_db`
+        // pairing that each transport layer (WASM, server-core, Tauri) used to
+        // duplicate. Consolidating here is what prevents dual-faced cards
+        // (Adventure, Omen, MDFC, Transform, Meld) from silently regressing
+        // again when the init contract evolves.
+        load_and_hydrate_decks(
             &mut self.state,
             &DeckPayload {
                 player: player_deck,
                 opponent: opponent_deck,
                 ai_decks,
             },
+            Some(db),
         );
         self.state.log_player_names = self.display_names.clone();
         let _ = start_game(&mut self.state);
@@ -593,6 +602,7 @@ impl SessionManager {
         ai_requests: Vec<(u8, AiDifficulty, PlayerDeckPayload)>,
         card_names: Vec<String>,
         format_config: Option<FormatConfig>,
+        db: &CardDatabase,
     ) -> (String, String) {
         let total_players = 1 + ai_requests.len() as u8;
         let (game_code, player_token) = self.create_game_n_players(
@@ -621,7 +631,7 @@ impl SessionManager {
         }
 
         session.state.all_card_names = card_names.into();
-        session.start_game();
+        session.start_game(db);
 
         (game_code, player_token)
     }

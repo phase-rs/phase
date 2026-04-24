@@ -274,6 +274,51 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     }
 }
 
+/// Canonical init sequence for every transport layer: load the decks into
+/// the state, then hydrate runtime-only fields (back_face, layout_kind)
+/// from the CardDatabase.
+///
+/// Rehydration populates `GameObject::back_face` for dual-faced cards
+/// (Adventure, Omen, Modal DFC, Transform, Meld, Prepare). Without it,
+/// `is_adventure_card`, `swap_to_adventure_face`, and the MDFC face-choice
+/// gate all silently no-op because `back_face` stays `None`. The WASM
+/// bridge, `server-core`, and Tauri commands must all route through here
+/// so the three transports can't drift apart again (see the Sagu Wildling
+/// multiplayer regression that motivated this consolidation).
+///
+/// `db` is `Option` only because some call paths (Tauri desktop today)
+/// don't yet thread a CardDatabase into their init. Passing `None` emits
+/// a `tracing::warn!` so the gap is visible in logs rather than hidden.
+pub fn load_and_hydrate_decks(
+    state: &mut GameState,
+    payload: &DeckPayload,
+    db: Option<&CardDatabase>,
+) {
+    load_deck_into_state(state, payload);
+    match db {
+        Some(db) => {
+            super::printed_cards::rehydrate_game_from_card_db(state, db);
+        }
+        None => {
+            // Latch the warning so a long-running desktop session that
+            // starts many games doesn't spam the log on each match.
+            // The invariant "some transport is still not passing a db"
+            // only needs to be seen once per process.
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    "load_and_hydrate_decks called without a CardDatabase — \
+                     dual-faced cards (Adventure, Omen, MDFC, Transform, Meld) \
+                     will have back_face=None and their face-specific behavior \
+                     will be disabled. Thread a CardDatabase through this call \
+                     site to fix. (This warning is emitted once per process.)"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

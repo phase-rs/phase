@@ -1978,6 +1978,7 @@ async fn handle_client_message(
                         ai_requests,
                         db.card_names(),
                         format_config.clone(),
+                        db.as_ref(),
                     );
 
                     let session = mgr.sessions.get_mut(&game_code).unwrap();
@@ -2714,7 +2715,7 @@ async fn handle_client_message(
 
                 session.apply_seat_delta(seat_state, &delta);
                 if delta.now_started {
-                    session.start_game();
+                    session.start_game(db.as_ref());
                 }
                 let slot_info = session.player_slot_info();
                 let current_players = session.current_player_count();

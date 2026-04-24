@@ -10,8 +10,8 @@ use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
-    is_commander_eligible, load_deck_into_state, rehydrate_game_from_card_db, resolve_deck_list,
-    start_game, start_game_with_starting_player, validate_deck_for_format,
+    is_commander_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db,
+    resolve_deck_list, start_game, start_game_with_starting_player, validate_deck_for_format,
     DeckCompatibilityRequest, DeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
@@ -460,8 +460,7 @@ pub fn initialize_game(
                     }
                 }
 
-                load_deck_into_state(&mut state, &payload);
-                rehydrate_game_from_card_db(&mut state, db);
+                load_and_hydrate_decks(&mut state, &payload, Some(db));
                 state.all_card_names = db.card_names().into();
                 None
             });

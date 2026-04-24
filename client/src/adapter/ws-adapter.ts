@@ -48,7 +48,9 @@ export type WsAdapterEvent =
   | { type: "latencyChanged"; latencyMs: number | null }
   | { type: "sessionChanged"; session: WsSessionData | null }
   | { type: "gameCreated"; gameCode: string }
+  | { type: "passwordRequired"; gameCode: string }
   | { type: "waitingForOpponent" }
+  | { type: "opponentJoined"; opponentName?: string }
   | { type: "opponentDisconnected"; graceSeconds: number }
   | { type: "opponentReconnected" }
   | { type: "playerDisconnected"; playerId: PlayerId; graceSeconds: number }
@@ -105,6 +107,13 @@ export class WebSocketAdapter implements EngineAdapter {
    * the server confirms the resumed session.
    */
   private reconnectInFlight = false;
+  /**
+   * `true` between `GameCreated` (host path) and the first `GameStarted`.
+   * When `GameStarted` arrives with this flag set, emit `opponentJoined`
+   * exactly once so the UI can fire a browser notification. Cleared on
+   * first fire so re-connects and state updates don't re-notify.
+   */
+  private hostWaitingForOpponent = false;
 
   constructor(
     private readonly serverUrl: string,
@@ -246,6 +255,11 @@ export class WebSocketAdapter implements EngineAdapter {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
       }
+      // Clear the "host waiting for opponent" latch on socket close —
+      // otherwise a host who received GameCreated, disconnected before
+      // GameStarted, and then reconnected through a different path would
+      // fire `opponentJoined` spuriously on the replayed GameStarted.
+      this.hostWaitingForOpponent = false;
       if (this.pendingReject) {
         this.emit({ type: "actionPendingChanged", pending: false });
         this.pendingReject(
@@ -437,9 +451,43 @@ export class WebSocketAdapter implements EngineAdapter {
         const data = msg.data as { game_code: string; player_token: string };
         this._gameCode = data.game_code;
         this.playerToken = data.player_token;
+        this.hostWaitingForOpponent = true;
         this.emit({ type: "sessionChanged", session: this.currentSession() });
         this.emit({ type: "gameCreated", gameCode: data.game_code });
         this.emit({ type: "waitingForOpponent" });
+        break;
+      }
+
+      case "PasswordRequired": {
+        // Server says: this room is password-protected and the client
+        // either sent no password or a wrong one. Surface an event so the
+        // UI can prompt, and reject init so callers know the join failed
+        // for a recoverable reason. Recoverable because the UI just needs
+        // to collect a password and create a fresh adapter with it.
+        //
+        // Reconnect path: if this arrives while `reconnectInFlight` (e.g.
+        // server restarted and re-demands the password), clear the flag
+        // and surface `reconnectFailed` so the UI stops retrying silently.
+        // Otherwise the adapter would stay stuck waiting for a
+        // `GameStarted` that will never come.
+        const data = msg.data as { game_code: string };
+        this.emit({ type: "passwordRequired", gameCode: data.game_code });
+        if (this.reconnectInFlight) {
+          this.reconnectInFlight = false;
+          this.reconnectAttempt = 0;
+          this.emit({ type: "reconnectFailed" });
+        }
+        if (this.initReject) {
+          this.initReject(
+            new AdapterError(
+              "PASSWORD_REQUIRED",
+              "Room requires a password",
+              true,
+            ),
+          );
+          this.initResolve = null;
+          this.initReject = null;
+        }
         break;
       }
 
@@ -449,6 +497,12 @@ export class WebSocketAdapter implements EngineAdapter {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
           this.emit({ type: "reconnected" });
+        } else if (this.hostWaitingForOpponent) {
+          this.hostWaitingForOpponent = false;
+          this.emit({
+            type: "opponentJoined",
+            opponentName: data.opponent_name,
+          });
         }
         this.gameState = { ...data.state, derived: data.derived ?? data.state.derived };
         this._playerId = data.your_player;

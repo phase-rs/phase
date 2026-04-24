@@ -258,3 +258,95 @@ fn test_smoke_game_combat_damage() {
         "P1 should have 18 life after Grizzly Bears combat damage (20 - 2)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bug 3 diagnostic: Omen cards (TDM layout="adventure") must prompt
+// AdventureCastChoice when the back face is a castable Sorcery/Instant.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sagu_wildling_loads_both_faces_from_export() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+    if !path.exists() {
+        eprintln!("skipping: client/public/card-data.json not generated");
+        return;
+    }
+    let db = CardDatabase::from_export(&path).expect("export should load");
+    let sagu = db
+        .get_face_by_name("Sagu Wildling")
+        .expect("Sagu Wildling must be exported");
+    let roost = db
+        .get_face_by_name("Roost Seek")
+        .expect("Roost Seek must be exported");
+    assert_eq!(
+        sagu.scryfall_oracle_id, roost.scryfall_oracle_id,
+        "omen faces must share oracle_id"
+    );
+
+    let layout_kind = sagu
+        .scryfall_oracle_id
+        .as_deref()
+        .and_then(|id| db.get_layout_kind(id));
+    assert!(
+        layout_kind.is_some(),
+        "layout_index must map Sagu Wildling's oracle_id to a LayoutKind"
+    );
+}
+
+#[test]
+fn sagu_wildling_cast_from_hand_prompts_adventure_choice() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+    if !path.exists() {
+        eprintln!("skipping: client/public/card-data.json not generated");
+        return;
+    }
+    // Cache the parsed CardDatabase across test runs of this function — loading
+    // the real client/public/card-data.json is expensive. `OnceLock` gives us
+    // `&'static CardDatabase` without leaking a fresh allocation per invocation.
+    static DB: OnceLock<CardDatabase> = OnceLock::new();
+    let db = DB.get_or_init(|| {
+        CardDatabase::from_export(&path).expect("export should load")
+    });
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sagu_id = scenario.add_real_card(P0, "Sagu Wildling", Zone::Hand, db);
+    let mut runner = scenario.build();
+
+    // Mirror production: engine-wasm calls rehydrate after deck load.
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    // Give P0 enough mana to cast the adventure face ({G}) — not the creature ({4}{G}).
+    let dummy = engine::types::identifiers::ObjectId(0);
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, dummy, false, vec![]));
+
+    let obj = runner.state().objects.get(&sagu_id).expect("sagu present");
+    assert!(
+        obj.back_face.is_some(),
+        "back_face must be populated by rehydrate; got None. \
+         This is Bug 3 — runtime can't see the omen spell half."
+    );
+    let back = obj.back_face.as_ref().unwrap();
+    assert_eq!(back.name, "Roost Seek", "back face should be Roost Seek");
+
+    let card_id = obj.card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: sagu_id,
+            card_id,
+            targets: vec![],
+        })
+        .expect("cast should be accepted");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::AdventureCastChoice { .. }),
+        "Expected AdventureCastChoice when casting Omen card with only adventure-face mana, got {:?}",
+        result.waiting_for
+    );
+}

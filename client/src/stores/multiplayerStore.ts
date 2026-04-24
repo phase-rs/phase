@@ -713,7 +713,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               deck: asDeckPayload(deck),
               displayName: get().displayName || "Host",
               public: true,
-              password: null,
+              password: settings.password || null,
               timerSeconds: null,
               playerCount: settings.formatConfig.max_players,
               matchConfig: { match_type: settings.matchType },

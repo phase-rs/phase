@@ -257,6 +257,36 @@ const GameDispatchContext = createContext<(action: GameAction) => Promise<void>>
 // next initGame/resumeGame repopulates the store.
 let pendingStoreReset: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Fire a browser notification that an opponent joined the host's game.
+ * Suppressed when the tab is focused (user already sees it) or when
+ * permission is not granted. Silent on browsers that reject
+ * `new Notification()` outside a ServiceWorker (Safari, some mobile).
+ * Shared by the WS and P2P host-side join paths.
+ */
+function notifyOpponentJoined(opponentName?: string): void {
+  if (
+    typeof Notification === "undefined"
+    || Notification.permission !== "granted"
+    || typeof document === "undefined"
+    || document.visibilityState === "visible"
+  ) {
+    return;
+  }
+  try {
+    const body = opponentName
+      ? `${opponentName} joined your game. Come back and play!`
+      : "Your opponent has joined the game. Come back and play!";
+    const n = new Notification("Opponent joined", { body });
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+  } catch {
+    // Silent fallback.
+  }
+}
+
 function cancelPendingStoreReset(): void {
   if (pendingStoreReset !== null) {
     clearTimeout(pendingStoreReset);
@@ -387,6 +417,16 @@ export function GameProvider({
       }
 
       const wireP2PEvents = (adapter: P2PHostAdapter | P2PGuestAdapter) => {
+        // Host-only: proactively request notification permission while the
+        // user is at the "waiting for opponent" screen so the later
+        // `guestConnected` event can fire a notification (Bug 2).
+        if (
+          mode === "p2p-host"
+          && typeof Notification !== "undefined"
+          && Notification.permission === "default"
+        ) {
+          void Notification.requestPermission().catch(() => {});
+        }
         p2pUnsubscribe = adapter.onEvent((event) => {
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
@@ -399,6 +439,9 @@ export function GameProvider({
           }
           if (event.type === "stateChanged") {
             processRemoteUpdate(event.state, event.events, event.legalResult);
+          }
+          if (event.type === "guestConnected") {
+            notifyOpponentJoined();
           }
           onP2PEventRef.current?.(event);
         });
@@ -653,9 +696,28 @@ export function GameProvider({
       // Track adapter for cleanup (needed for StrictMode double-mount)
       let wsAdapter: WebSocketAdapter | null = null;
 
-      // Extract password from URL search params
+      // Password bridging: prefer sessionStorage over URL params so the
+      // password never appears in the URL bar, browser history, or
+      // outbound Referer headers. Fall back to URL params for first-load
+      // compatibility, and immediately strip the password from the URL
+      // via history.replaceState if we find it there.
       const urlParams = new URLSearchParams(window.location.search);
-      const password = urlParams.get("password") ?? undefined;
+      const sessionKey = `phase-join-password:${joinCode ?? ""}`;
+      let password: string | undefined =
+        (joinCode && window.sessionStorage.getItem(sessionKey)) || undefined;
+      if (!password && urlParams.has("password")) {
+        password = urlParams.get("password") ?? undefined;
+        if (password && joinCode) {
+          window.sessionStorage.setItem(sessionKey, password);
+        }
+        urlParams.delete("password");
+        const stripped = urlParams.toString();
+        const newPath =
+          window.location.pathname
+          + (stripped ? `?${stripped}` : "")
+          + window.location.hash;
+        window.history.replaceState(window.history.state, "", newPath);
+      }
 
       // Use smart server detection for initial connection
       const setupWs = async () => {
@@ -703,6 +765,45 @@ export function GameProvider({
               || (!event.state.match_phase && event.state.waiting_for.type === "GameOver")
             ) {
               clearActiveGame();
+            }
+          }
+          if (event.type === "gameCreated") {
+            // Host-side: proactively request browser notification permission
+            // while the user is staring at the "waiting for opponent" screen
+            // so we can fire a notification the moment a guest joins (Bug 2).
+            // No-op if already granted/denied or if unsupported (mobile,
+            // http: origins). Ignoring the permission result is intentional —
+            // we fall back silently on `opponentJoined`.
+            if (typeof Notification !== "undefined" && Notification.permission === "default") {
+              void Notification.requestPermission().catch(() => {});
+            }
+          }
+          if (event.type === "opponentJoined") {
+            notifyOpponentJoined(event.opponentName);
+          }
+          if (event.type === "passwordRequired") {
+            // Server rejected the join because the room is password-protected
+            // and we sent no / wrong password. Stash the new password in
+            // sessionStorage (same key `setupWs` reads from) and reload —
+            // the reload re-mounts GameProvider which re-reads the stash.
+            // We deliberately avoid putting the password in the URL: that
+            // would land it in browser history and in outbound Referer
+            // headers to any image CDN / Scryfall / analytics request.
+            const entered = window.prompt("This room requires a password:");
+            if (entered && joinCode) {
+              window.sessionStorage.setItem(
+                `phase-join-password:${joinCode}`,
+                entered,
+              );
+              window.location.reload();
+            } else {
+              if (joinCode) {
+                window.sessionStorage.removeItem(
+                  `phase-join-password:${joinCode}`,
+                );
+              }
+              useMultiplayerStore.getState().setConnectionStatus("disconnected");
+              window.location.href = "/multiplayer";
             }
           }
           if (event.type === "error" || event.type === "reconnectFailed") {

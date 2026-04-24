@@ -5,12 +5,9 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use std::collections::HashMap;
 use serde::Serialize;
-use engine::game::combat::has_summoning_sickness;
-use engine::game::coverage::unimplemented_mechanics;
+use engine::game::derived::derive_display_state;
 use engine::game::engine::apply;
-use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
-use engine::types::statics::StaticMode;
-use engine::game::{load_deck_into_state, start_game, DeckPayload};
+use engine::game::{load_and_hydrate_decks, start_game, DeckPayload};
 use engine::types::game_state::ActionResult;
 use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
@@ -35,7 +32,15 @@ pub fn initialize_game(
     game.match_config = match_config.unwrap_or_default();
 
     if let Some(payload) = deck_data {
-        load_deck_into_state(&mut game, &payload);
+        // Canonical init sequence shared with WASM + server-core transports.
+        // Passing `None` here is a known gap: dual-faced cards (Adventure,
+        // Omen, MDFC, Transform, Meld, Prepare) won't have `back_face`
+        // populated on Tauri desktop until an `AppState::card_db` is wired
+        // and threaded through. `load_and_hydrate_decks` emits a `warn!`
+        // so the gap is visible in logs rather than silent. TODO: load
+        // card-data.json into a `CardDatabase` at app startup and pass it
+        // here to unlock dual-faced cards on desktop.
+        load_and_hydrate_decks(&mut game, &payload, None);
     }
 
     let result = start_game(&mut game);
@@ -72,27 +77,13 @@ pub fn get_game_state(
     let mut guard = state.game.lock().map_err(|e| e.to_string())?;
     let game = guard.as_mut().ok_or("Game not initialized")?;
 
-    // Compute derived fields (same as WASM bridge)
-    let turn = game.turn_number;
-    for obj in game.objects.values_mut() {
-        obj.unimplemented_mechanics = unimplemented_mechanics(obj);
-        obj.has_summoning_sickness = has_summoning_sickness(obj, turn);
-    }
-
-    let peek_flags: Vec<bool> = game
-        .players
-        .iter()
-        .map(|p| {
-            let ctx = StaticCheckContext {
-                player_id: Some(p.id),
-                ..Default::default()
-            };
-            check_static_ability(game, StaticMode::MayLookAtTopOfLibrary, &ctx)
-        })
-        .collect();
-    for (i, flag) in peek_flags.into_iter().enumerate() {
-        game.players[i].can_look_at_top_of_library = flag;
-    }
+    // Populate display-only derived fields (unimplemented_mechanics,
+    // has_summoning_sickness, devotion, commander_tax, per-player
+    // can_look_at_top_of_library). Canonical implementation shared with
+    // the WASM bridge — see `engine::game::derived::derive_display_state`.
+    // Inline re-implementation was the source of CR-drift after the
+    // `has_summoning_sickness` signature change; one authority avoids it.
+    derive_display_state(game);
 
     // Return the wire envelope `{ state, derived }` — same shape produced
     // by the engine-wasm getter, so the frontend adapter unwraps identically
