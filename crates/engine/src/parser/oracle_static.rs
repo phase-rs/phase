@@ -6721,10 +6721,7 @@ fn parse_all_permanents_are_type(tp: &TextPair<'_>, description: &str) -> Option
 /// colorless). Composes existing building blocks: `nom_primitives::parse_color` for
 /// the color word, `parse_subtype` for plural-subtype canonicalization, and
 /// `typed_filter_for_subtype` for filter construction with the correct core type.
-fn parse_all_subject_are_color(
-    tp: &TextPair<'_>,
-    description: &str,
-) -> Option<StaticDefinition> {
+fn parse_all_subject_are_color(tp: &TextPair<'_>, description: &str) -> Option<StaticDefinition> {
     let rest_tp = nom_tag_tp(tp, "all ")?;
     let (subject_tp, predicate_tp) = rest_tp.split_around(" are ")?;
     let affected = parse_all_color_subject(&subject_tp)?;
@@ -6754,8 +6751,7 @@ fn parse_all_color_subject(subject_tp: &TextPair<'_>) -> Option<TargetFilter> {
     // it consumed — accept only when it consumes the entire subject.
     let original = subject_tp.original.trim();
     let (canonical, consumed) = parse_subtype(original)?;
-    (consumed == original.len())
-        .then(|| TargetFilter::Typed(typed_filter_for_subtype(&canonical)))
+    (consumed == original.len()).then(|| TargetFilter::Typed(typed_filter_for_subtype(&canonical)))
 }
 
 /// Parse a color predicate terminating an "All [subject] are [color]" static.
