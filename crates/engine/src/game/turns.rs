@@ -1382,6 +1382,62 @@ mod tests {
         assert!(!should_skip_draw(&state));
     }
 
+    /// End-to-end: drive the engine through End-step priority passes and verify
+    /// that with > 7 cards in hand, the resulting WaitingFor is DiscardToHandSize.
+    /// Mirrors the user-visible flow (no direct execute_cleanup call).
+    #[test]
+    fn end_step_pass_priority_surfaces_discard_to_hand_size() {
+        use crate::game::engine::apply;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::End;
+        state.waiting_for = WaitingFor::Priority { player: PlayerId(0) };
+
+        for i in 0..9 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Hand,
+            );
+        }
+        assert_eq!(state.players[0].hand.len(), 9);
+
+        // P0 passes end-step priority.
+        let r1 = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("p0 pass priority on End");
+        // Expect priority to move to P1 (still End step).
+        assert!(
+            matches!(r1.waiting_for, WaitingFor::Priority { player } if player == PlayerId(1)),
+            "after P0 pass, expected priority to P1, got {:?}",
+            r1.waiting_for
+        );
+
+        // P1 passes — this should advance End → Cleanup and trigger discard prompt.
+        let r2 = apply(&mut state, PlayerId(1), GameAction::PassPriority)
+            .expect("p1 pass priority on End");
+
+        match &r2.waiting_for {
+            WaitingFor::DiscardToHandSize { player, count, cards } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 2);
+                assert_eq!(cards.len(), 9);
+            }
+            other => panic!(
+                "expected DiscardToHandSize after End-step double-pass with 9 cards, got {:?}",
+                other
+            ),
+        }
+        // Hand untouched until selection made.
+        assert_eq!(state.players[0].hand.len(), 9);
+    }
+
     #[test]
     fn execute_cleanup_returns_discard_choice_when_over_seven() {
         let mut state = setup();

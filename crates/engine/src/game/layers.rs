@@ -3267,7 +3267,7 @@ mod tests {
         let ts = state.next_timestamp();
         state
             .transient_continuous_effects
-            .push(TransientContinuousEffect {
+            .push_back(TransientContinuousEffect {
                 id: 1,
                 source_id: id,
                 controller: PlayerId(0),
@@ -3297,7 +3297,7 @@ mod tests {
         let ts = state.next_timestamp();
         state
             .transient_continuous_effects
-            .push(TransientContinuousEffect {
+            .push_back(TransientContinuousEffect {
                 id: 1,
                 source_id: id,
                 controller: PlayerId(0),
