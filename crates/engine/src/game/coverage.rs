@@ -654,6 +654,14 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 Some(c) => format!("# of {kind_s} ({}) attached at ltb", fmt_controller(c)),
             }
         }
+        QuantityRef::PlayerCounter { kind, scope } => {
+            let scope_s = match scope {
+                CountScope::Controller => "you have",
+                CountScope::Opponents => "each opponent has",
+                CountScope::All => "each player has",
+            };
+            format!("# of {kind} counters {scope_s}")
+        }
     }
 }
 
@@ -3991,6 +3999,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("ColorsInCommandersColorIdentity", Handled)
         }
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
+        QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
     }
 }
 

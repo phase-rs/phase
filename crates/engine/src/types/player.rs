@@ -51,7 +51,7 @@ impl PlayerStatus {
 /// CR 122.1b: Named player counter types tracked by the engine.
 /// Poison counters route to the dedicated `poison_counters` field due to SBA rules (CR 704.5c).
 /// Energy counters are excluded — they use the dedicated `energy` field and `GainEnergy` effect.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlayerCounterKind {
     Poison,
     Experience,
@@ -213,7 +213,7 @@ impl Player {
     pub fn add_player_counters(&mut self, kind: &PlayerCounterKind, count: u32) {
         match kind {
             PlayerCounterKind::Poison => self.poison_counters += count,
-            _ => *self.player_counters.entry(kind.clone()).or_insert(0) += count,
+            _ => *self.player_counters.entry(*kind).or_insert(0) += count,
         }
     }
 

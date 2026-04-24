@@ -1,6 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
+use nom::sequence::preceded;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -96,10 +97,80 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
     let (pt, target_text) = parsed_number
         .map(|(rem, n)| (n as i32, rem.trim_start()))
         .unwrap_or((0, lower_rest));
-    // Default to "target land you control" when no explicit target remains.
-    // Handles: no text, punctuation-only, sequence connectors (", then ..."),
-    // variable amounts ("X, where X is..." — parse_number fails), or non-target text.
-    let has_explicit_target = if parsed_number.is_none() {
+    let target = resolve_earthbend_target(text, target_text, parsed_number.is_some());
+    (target, pt, pt)
+}
+
+/// Parse "earthbend [N | X[, where X is …]] [target <type>]" returning the
+/// counter count as a `QuantityExpr` so dynamic amounts (Toph's "earthbend X,
+/// where X is the number of experience counters you have") flow through to
+/// `Effect::PutCounter` instead of collapsing to `Fixed { value: 0 }`.
+///
+/// Dispatch order:
+/// 1. Literal N (`parse_number` succeeds) → `QuantityExpr::Fixed`.
+/// 2. `"x, where X is the number of <kind> counters <possessor>"` →
+///    `QuantityExpr::Ref { qty: QuantityRef::PlayerCounter { … } }`.
+/// 3. Bare `"x"` (no tail) → `QuantityExpr::Ref { qty: Variable { "X" } }`,
+///    matching the spell-cost X resolution path.
+/// 4. None of the above → `Fixed { value: 0 }` with the default target,
+///    preserving the prior behaviour for unsupported text shapes.
+///
+/// Used only by `try_parse_earthbend_clause` (the full-expansion path that
+/// emits Animate + PutCounter + delayed return). The literal-N AST path
+/// retains `parse_earthbend_params` to avoid perturbing its two callers.
+///
+/// `text` is the full original-case clause (including the leading
+/// "Earthbend "); `lower_rest` is the lowercased remainder after that prefix.
+/// The shared `resolve_earthbend_target` helper recovers the original-case
+/// target slice as `text[text.len() - target_text.len()..]`, which only lands
+/// at the correct byte boundary because ASCII lowercasing preserves byte
+/// length and the entire Oracle-text dispatcher operates on ASCII.
+pub(super) fn parse_earthbend_count_expr(
+    text: &str,
+    lower_rest: &str,
+) -> (TargetFilter, QuantityExpr) {
+    if let Ok((rem, n)) = nom_primitives::parse_number.parse(lower_rest) {
+        let target_text = rem.trim_start();
+        let target = resolve_earthbend_target(text, target_text, true);
+        return (target, QuantityExpr::Fixed { value: n as i32 });
+    }
+    if let Ok((rem, _)) = tag::<_, _, VerboseError<&str>>("x").parse(lower_rest) {
+        // CR 122.1: "X, where X is the number of <kind> counters <possessor>".
+        if let Ok((rem2, qty)) = preceded(
+            tag::<_, _, VerboseError<&str>>(", where x is "),
+            crate::parser::oracle_nom::quantity::parse_the_number_of_player_counters,
+        )
+        .parse(rem)
+        {
+            let target_text = rem2.trim_start();
+            let target = resolve_earthbend_target(text, target_text, true);
+            return (target, QuantityExpr::Ref { qty });
+        }
+        // CR 107.3a + CR 601.2b: bare X resolves through the spell-cost path.
+        let target_text = rem.trim_start();
+        let target = resolve_earthbend_target(text, target_text, true);
+        return (
+            target,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        );
+    }
+    (default_earthbend_target(), QuantityExpr::Fixed { value: 0 })
+}
+
+/// Shared target-text reduction for earthbend parsing. Distinguishes between
+/// "explicit target follows the numeric slot" and "use the default target".
+/// Factored out so `parse_earthbend_params` and `parse_earthbend_count_expr`
+/// can't drift in target detection.
+fn resolve_earthbend_target(
+    text: &str,
+    target_text: &str,
+    parsed_numeric_slot: bool,
+) -> TargetFilter {
+    let has_explicit_target = if !parsed_numeric_slot {
         false
     } else {
         let trimmed =
@@ -112,13 +183,12 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
                 .parse(trimmed)
                 .is_err()
     };
-    let target = if has_explicit_target {
+    if has_explicit_target {
         let (t, _) = parse_target(&text[text.len() - target_text.len()..]);
         t
     } else {
         default_earthbend_target()
-    };
-    (target, pt, pt)
+    }
 }
 
 pub(super) fn parse_numeric_imperative_ast(
@@ -4229,6 +4299,46 @@ mod tests {
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
         }
+    }
+
+    /// CR 122.1: literal-N earthbend keeps the `Fixed` count path intact.
+    #[test]
+    fn earthbend_count_expr_literal_n() {
+        let (target, count) = parse_earthbend_count_expr("2", "2");
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(target, default_earthbend_target());
+    }
+
+    /// CR 122.1: Toph's "earthbend X, where X is the number of experience
+    /// counters you have" produces a typed PlayerCounter ref, not Fixed 0.
+    #[test]
+    fn earthbend_count_expr_x_with_player_counter_tail() {
+        let tail = "x, where x is the number of experience counters you have";
+        let (_, count) = parse_earthbend_count_expr(tail, tail);
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Experience,
+                    scope: crate::types::ability::CountScope::Controller,
+                },
+            }
+        );
+    }
+
+    /// CR 107.3a + CR 601.2b: bare "earthbend X" without a where-clause defers
+    /// to the spell-cost X resolution path (Variable("X")), not Fixed 0.
+    #[test]
+    fn earthbend_count_expr_bare_x_falls_through_to_variable() {
+        let (_, count) = parse_earthbend_count_expr("x", "x");
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }
+        );
     }
 
     #[test]

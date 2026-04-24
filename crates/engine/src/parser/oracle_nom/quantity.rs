@@ -18,6 +18,7 @@ use crate::types::ability::{
     AggregateFunction, ControllerRef, CountScope, FilterProp, ObjectProperty, QuantityExpr,
     QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::player::PlayerCounterKind;
 
 /// Parse a quantity expression: either a fractional expression, a dynamic reference,
 /// or a fixed number. Fractional forms ("half X, rounded up/down") compose over the
@@ -418,6 +419,10 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
+        // CR 122.1: "[kind] counters <possessor>" must be tried BEFORE the
+        // generic type-filter arm so the typed player-counter ref wins over a
+        // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
+        parse_player_counter_ref_tail,
         parse_number_of_controlled_type,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
         // must be tried BEFORE the scoped-zone combinator so the target-referring
@@ -906,6 +911,54 @@ fn parse_speed_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(QuantityRef::Speed, tag("your speed")).parse(input)
 }
 
+/// CR 122.1: Parse "[kind] counters <possessor>" → `QuantityRef::PlayerCounter`.
+///
+/// Reached after `parse_the_number_of` consumes the leading `"the number of "`.
+/// Composes a typed kind alt and a typed possessor alt — no string matching
+/// downstream and no permutation-enumerated tag lists.
+fn parse_player_counter_ref_tail(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, kind) = parse_player_counter_kind(input)?;
+    let (rest, _) = tag(" counters ").parse(rest)?;
+    let (rest, scope) = parse_player_counter_possessor(rest)?;
+    Ok((rest, QuantityRef::PlayerCounter { kind, scope }))
+}
+
+/// CR 122.1: Parse the full "the number of [kind] counters <possessor>" phrase.
+///
+/// Public entry point used by trailing "where X is …" plumbing in the
+/// imperative parser (see `parse_earthbend_counter_count`). Mirrors the arm
+/// composed inside `parse_quantity_ref` so static and imperative parsing
+/// share a single grammar authority.
+pub fn parse_the_number_of_player_counters(input: &str) -> OracleResult<'_, QuantityRef> {
+    preceded(tag("the number of "), parse_player_counter_ref_tail).parse(input)
+}
+
+/// CR 122.1: Typed alt over named player-counter kinds. Each arm emits the
+/// `PlayerCounterKind` variant directly (no intermediate string).
+fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
+    alt((
+        value(PlayerCounterKind::Experience, tag("experience")),
+        value(PlayerCounterKind::Poison, tag("poison")),
+        value(PlayerCounterKind::Rad, tag("rad")),
+        value(PlayerCounterKind::Ticket, tag("ticket")),
+    ))
+    .parse(input)
+}
+
+/// CR 122.1 + CR 109.5: Typed possessor alt mapping to `CountScope`. Each arm
+/// emits the scope variant directly. Targeted-player phrasings ("target
+/// opponent has", "that player has") are intentionally not represented
+/// because no current card requires them; extending here is a typed
+/// addition, not a string-match retrofit.
+fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
+    alt((
+        value(CountScope::Controller, tag("you have")),
+        value(CountScope::Opponents, tag("each opponent has")),
+        value(CountScope::All, tag("each player has")),
+    ))
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1360,6 +1413,75 @@ mod tests {
             QuantityRef::ZoneCardCount {
                 zone: ZoneRef::Hand,
                 card_types: Vec::new(),
+                scope: CountScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 122.1: typed player-counter quantity refs cover every kind × scope
+    /// permutation through composed nom alts (no string permutation matrix).
+    #[test]
+    fn parses_player_counter_ref_for_each_kind_and_scope() {
+        let cases: &[(&str, PlayerCounterKind, CountScope)] = &[
+            (
+                "the number of experience counters you have",
+                PlayerCounterKind::Experience,
+                CountScope::Controller,
+            ),
+            (
+                "the number of poison counters you have",
+                PlayerCounterKind::Poison,
+                CountScope::Controller,
+            ),
+            (
+                "the number of rad counters you have",
+                PlayerCounterKind::Rad,
+                CountScope::Controller,
+            ),
+            (
+                "the number of ticket counters you have",
+                PlayerCounterKind::Ticket,
+                CountScope::Controller,
+            ),
+            (
+                "the number of experience counters each opponent has",
+                PlayerCounterKind::Experience,
+                CountScope::Opponents,
+            ),
+            (
+                "the number of poison counters each player has",
+                PlayerCounterKind::Poison,
+                CountScope::All,
+            ),
+        ];
+        for (phrase, kind, scope) in cases {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap_or_else(|e| {
+                panic!("phrase `{phrase}` failed to parse: {e:?}");
+            });
+            assert_eq!(
+                q,
+                QuantityRef::PlayerCounter {
+                    kind: *kind,
+                    scope: scope.clone(),
+                },
+                "{phrase}"
+            );
+            assert_eq!(rest, "", "{phrase}");
+        }
+    }
+
+    /// CR 122.1: the public entry point accepts the full "the number of …"
+    /// phrase so the imperative-side `parse_earthbend_count_expr` can hook in.
+    #[test]
+    fn parses_player_counter_via_public_entry_point() {
+        let (rest, q) =
+            parse_the_number_of_player_counters("the number of experience counters you have")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Experience,
                 scope: CountScope::Controller,
             }
         );

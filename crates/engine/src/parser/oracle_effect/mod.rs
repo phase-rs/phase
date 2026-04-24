@@ -980,7 +980,12 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (_, rest) = nom_on_lower(tp.original, tp.lower, |i| {
         value((), tag("earthbend ")).parse(i)
     })?;
-    let (target, counters, _) = imperative::parse_earthbend_params(tp.original, rest);
+    // `rest` is the original-case remainder; lowercase it for the nom-based
+    // dispatcher inside `parse_earthbend_count_expr`, which expects already-lowered
+    // input (matches the convention used by `parse_earthbend_params`'s sole
+    // imperative caller, which passes a `rest_lower` slice).
+    let lower_rest = rest.to_ascii_lowercase();
+    let (target, counter_count) = imperative::parse_earthbend_count_expr(tp.original, &lower_rest);
 
     let register_bending = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -1020,7 +1025,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         AbilityKind::Spell,
         Effect::PutCounter {
             counter_type: "P1P1".to_string(),
-            count: QuantityExpr::Fixed { value: counters },
+            count: counter_count,
             target: TargetFilter::ParentTarget,
         },
     )

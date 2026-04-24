@@ -293,6 +293,16 @@ fn resolve_ref(
     match qty {
         QuantityRef::HandSize => player.map_or(0, |p| usize_to_i32_saturating(p.hand.len())),
         QuantityRef::LifeTotal => player.map_or(0, |p| p.life),
+        // CR 122.1: Counter-kind lookup summed across scope players. Controller
+        // scope resolves to a single player; Opponents/All may span multiple.
+        // Per-player u32 is widened to u64 before summing; the i32::try_from
+        // saturates on the (only theoretically reachable) overflow.
+        QuantityRef::PlayerCounter { kind, scope } => {
+            let total: u64 = scoped_players(state, scope, controller)
+                .map(|p| u64::from(p.player_counter(kind)))
+                .sum();
+            i32::try_from(total).unwrap_or(i32::MAX)
+        }
         QuantityRef::GraveyardSize => {
             player.map_or(0, |p| usize_to_i32_saturating(p.graveyard.len()))
         }
@@ -1121,6 +1131,55 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
     use crate::types::SpellCastRecord;
+
+    /// CR 122.1: PlayerCounter resolves controller scope from the named player.
+    /// Opponents/All sums the kind across the matching scope (Toph's "you have"
+    /// is Controller; cousin patterns like "each opponent has" sum opponents).
+    #[test]
+    fn resolve_quantity_player_counter_experience_controller_and_sums() {
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0]
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 3);
+        state.players[1]
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 5);
+
+        let controller_expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Experience,
+                scope: CountScope::Controller,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &controller_expr, PlayerId(0), ObjectId(0)),
+            3
+        );
+
+        let opponents_expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Experience,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &opponents_expr, PlayerId(0), ObjectId(0)),
+            5
+        );
+
+        let all_expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Experience,
+                scope: CountScope::All,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_expr, PlayerId(0), ObjectId(0)),
+            8
+        );
+    }
 
     #[test]
     fn resolve_quantity_colors_in_commanders_color_identity() {

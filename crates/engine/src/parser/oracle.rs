@@ -4870,6 +4870,63 @@ mod tests {
         }
     }
 
+    /// CR 122.1: Toph's "earthbend X, where X is the number of experience
+    /// counters you have" must thread the dynamic count through to PutCounter,
+    /// not collapse to Fixed { value: 0 }. Walks the parsed chain:
+    /// Animate → PutCounter (count = PlayerCounter Experience Controller) →
+    /// CreateDelayedTrigger.
+    #[test]
+    fn earthbend_x_where_x_is_experience_counters() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{CountScope, QuantityExpr, QuantityRef};
+        use crate::types::player::PlayerCounterKind;
+
+        let def = parse_effect_chain(
+            "Earthbend X, where X is the number of experience counters you have.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Animate { .. }),
+            "outer effect should be Animate, got {:?}",
+            def.effect
+        );
+
+        let put_counters = def
+            .sub_ability
+            .as_deref()
+            .expect("Animate should have PutCounter sub_ability");
+        match &*put_counters.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerCounter {
+                            kind: PlayerCounterKind::Experience,
+                            scope: CountScope::Controller,
+                        },
+                    },
+                    "Toph's PutCounter count should be a typed PlayerCounter ref, not Fixed 0"
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+
+        let delayed = put_counters
+            .sub_ability
+            .as_deref()
+            .expect("PutCounter should chain into the delayed return trigger");
+        assert!(
+            matches!(&*delayed.effect, Effect::CreateDelayedTrigger { .. }),
+            "expected CreateDelayedTrigger, got {:?}",
+            delayed.effect,
+        );
+    }
+
     #[test]
     fn search_put_onto_battlefield_tapped() {
         use crate::parser::oracle_effect::parse_effect_chain;

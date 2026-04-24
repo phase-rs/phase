@@ -1598,6 +1598,9 @@ pub enum QuantityRef {
     PlayerCount { filter: PlayerFilter },
     /// Count of counters of a given type on the source object.
     /// Used for "for each [counter type] counter on ~" patterns.
+    ///
+    /// For counters on a *player* (experience, poison, rad, ticket), use
+    /// [`QuantityRef::PlayerCounter`] instead.
     CountersOnSelf { counter_type: String },
     /// Count of counters of a given type on the previously targeted object.
     /// Used for "for each [counter type] counter on that creature" anaphoric patterns.
@@ -1616,6 +1619,24 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         counter_type: Option<String>,
         filter: TargetFilter,
+    },
+    /// CR 122.1: Count of a named player-counter kind on a player (or summed across
+    /// scoped players). Distinct from `CountersOnSelf` / `CountersOnTarget` /
+    /// `CountersOnObjects`, which count counters on *objects* — player counters
+    /// live on `Player`.
+    ///
+    /// Kind-specific CR references:
+    /// - Poison: CR 122.1f + CR 704.5c (ten-or-more SBA).
+    /// - Rad:    CR 122.1i + CR 728.
+    /// - Experience and Ticket are covered only by the generic CR 122.1.
+    ///
+    /// Scope is currently limited to `Controller`, `Opponents`, and `All`.
+    /// Targeted-player variants ("target opponent has N experience counters")
+    /// are not yet represented; extending `CountScope` with a `TargetPlayer`
+    /// arm is a future change when a card forces it.
+    PlayerCounter {
+        kind: PlayerCounterKind,
+        scope: CountScope,
     },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
