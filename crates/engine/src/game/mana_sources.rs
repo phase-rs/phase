@@ -936,4 +936,57 @@ mod tests {
             "pain-land activations with damage continuations are not pure-mana undoable"
         );
     }
+
+    /// Covers the `Effect::LoseLife` arm of `effect_harms_controller`:
+    /// a mana ability whose continuation drains the controller's life
+    /// (rather than dealing damage) must still flag `harms_controller`.
+    #[test]
+    fn lose_life_mana_source_marks_controller_harm() {
+        use crate::types::ability::Effect as AbilityEffect;
+
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(305),
+            PlayerId(0),
+            "Hypothetical Drain Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                AbilityEffect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![ManaColor::Black, ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap)
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                AbilityEffect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: Some(crate::types::ability::TargetFilter::Controller),
+                },
+            )),
+        );
+
+        let options = activatable_land_mana_options(&state, land, PlayerId(0));
+        assert!(!options.is_empty());
+        assert!(
+            options.iter().all(|o| o.harms_controller),
+            "LoseLife(Controller) sub-effect should flag the source as controller-harming"
+        );
+        assert!(
+            options.iter().all(|o| !o.undoable),
+            "life-loss continuations are not pure-mana undoable"
+        );
+    }
 }

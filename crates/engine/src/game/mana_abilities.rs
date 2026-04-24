@@ -3086,4 +3086,124 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    /// CR 605.1a + CR 118.2a: An activated mana ability's controller is the
+    /// player who activated it, and a `Controller`-scoped damage sub-effect
+    /// must resolve against that activator. Opponent-controlled painlands
+    /// damage the opponent, not the original owner.
+    #[test]
+    fn pain_land_damage_routes_to_activator_not_original_owner() {
+        let mut state = GameState::new_two_player(42);
+        let brushland = create_object(
+            &mut state,
+            CardId(1001),
+            PlayerId(1), // opponent controls it
+            "Brushland".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&brushland).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        obj.abilities.push(brushland_colored_ability());
+
+        let pending = PendingManaAbility {
+            player: PlayerId(1),
+            source_id: brushland,
+            ability_index: 0,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+        };
+        let prompt = ManaChoicePrompt::SingleColor {
+            options: vec![ManaType::Green, ManaType::White],
+        };
+        let mut events = Vec::new();
+
+        let result = handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &prompt,
+            ManaChoice::SingleColor(ManaType::Green),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.players[1].life, 19,
+            "activator (PlayerId(1)) should take 1 damage"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "non-activator (PlayerId(0)) should be unharmed"
+        );
+    }
+
+    /// A 2-damage painland variant (Ancient Tomb shape) must route through
+    /// the same sub-ability continuation path as the 1-damage case — the
+    /// handler is parameterized over `amount`, not hardcoded.
+    #[test]
+    fn two_damage_painland_variant_deals_full_amount() {
+        let mut state = GameState::new_two_player(42);
+        let tomb = create_object(
+            &mut state,
+            CardId(1002),
+            PlayerId(0),
+            "Ancient Tomb".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&tomb).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 2 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap)
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                    damage_source: None,
+                },
+            )),
+        );
+
+        let ability = state.objects[&tomb].abilities[0].clone();
+        let mut events = Vec::new();
+        let result = activate_mana_ability(
+            &mut state,
+            tomb,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(result, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            2
+        );
+        assert_eq!(
+            state.players[0].life, 18,
+            "Ancient Tomb should deal 2 damage to its controller"
+        );
+    }
 }
