@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { RichLabel } from "../mana/RichLabel.tsx";
+import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 
 export interface ChoiceOption {
   id: string;
@@ -13,6 +14,8 @@ interface ChoiceModalProps {
   options: ChoiceOption[];
   onChoose: (id: string) => void;
   onClose?: () => void;
+  /** Card name to preview above the options. Omit to skip the preview. */
+  previewCardName?: string;
 }
 
 export function ChoiceModal({
@@ -21,6 +24,7 @@ export function ChoiceModal({
   options,
   onChoose,
   onClose,
+  previewCardName,
 }: ChoiceModalProps) {
   return (
     <AnimatePresence>
@@ -34,13 +38,13 @@ export function ChoiceModal({
         <div className="absolute inset-0 bg-black/60" onClick={onClose} />
 
         <motion.div
-          className="relative z-10 flex max-h-[calc(100vh_-_2rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-sm flex-col rounded-[16px] lg:rounded-[24px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md"
+          className="relative z-10 max-h-[calc(100vh_-_2rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-sm overflow-y-auto rounded-[16px] lg:rounded-[24px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md"
           initial={{ scale: 0.95, opacity: 0, y: 10 }}
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.95, opacity: 0, y: 10 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
         >
-          <div className="shrink-0 border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5">
+          <div className="border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5">
             <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
               Game Choice
             </div>
@@ -53,7 +57,12 @@ export function ChoiceModal({
               </p>
             )}
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 lg:px-5 lg:py-5">
+          {previewCardName && (
+            <div className="px-3 pt-3 lg:px-5 lg:pt-4">
+              <CardTextboxPreview cardName={previewCardName} />
+            </div>
+          )}
+          <div className="px-3 py-3 lg:px-5 lg:py-5">
             <div className="flex flex-col gap-2">
               {options.map((opt) => (
                 <button
