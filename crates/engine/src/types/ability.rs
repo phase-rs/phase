@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{de::Deserializer, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::card_type::{CardType, CoreType, Supertype};
@@ -1833,7 +1833,7 @@ pub enum PlayerFilter {
 
 /// An expression that produces an integer for quantity comparisons.
 /// Either a dynamic game-state lookup or a literal constant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QuantityExpr {
     /// A dynamic quantity looked up from the current game state.
@@ -1857,64 +1857,6 @@ pub enum QuantityExpr {
         factor: i32,
         inner: Box<QuantityExpr>,
     },
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum TaggedQuantityExpr {
-    Ref {
-        qty: QuantityRef,
-    },
-    Fixed {
-        value: i32,
-    },
-    HalfRounded {
-        inner: Box<QuantityExpr>,
-        rounding: RoundingMode,
-    },
-    Offset {
-        inner: Box<QuantityExpr>,
-        offset: i32,
-    },
-    Multiply {
-        factor: i32,
-        inner: Box<QuantityExpr>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum QuantityExprWire {
-    Tagged(TaggedQuantityExpr),
-    LegacyInt(i32),
-}
-
-impl From<TaggedQuantityExpr> for QuantityExpr {
-    fn from(value: TaggedQuantityExpr) -> Self {
-        match value {
-            TaggedQuantityExpr::Ref { qty } => Self::Ref { qty },
-            TaggedQuantityExpr::Fixed { value } => Self::Fixed { value },
-            TaggedQuantityExpr::HalfRounded { inner, rounding } => {
-                Self::HalfRounded { inner, rounding }
-            }
-            TaggedQuantityExpr::Offset { inner, offset } => Self::Offset { inner, offset },
-            TaggedQuantityExpr::Multiply { factor, inner } => Self::Multiply { factor, inner },
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for QuantityExpr {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match QuantityExprWire::deserialize(deserializer)? {
-            QuantityExprWire::Tagged(expr) => Ok(expr.into()),
-            // Backward compatibility for pre-tagged card-data.json exports that
-            // stored fixed quantities as bare integers (for example `"count": 1`).
-            QuantityExprWire::LegacyInt(value) => Ok(Self::Fixed { value }),
-        }
-    }
 }
 
 /// Comparison operator used in static conditions.
