@@ -17,6 +17,11 @@ export function PlayerHud() {
   const isPhasedOut = useGameStore(
     (s) => s.gameState?.players[playerId]?.status?.type === "PhasedOut",
   );
+  const isUnderAttack = useGameStore(
+    (s) => s.gameState?.combat?.attackers.some(
+      (a) => a.attack_target.type === "Player" && a.attack_target.data === playerId,
+    ) ?? false,
+  );
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
 
@@ -50,6 +55,7 @@ export function PlayerHud() {
         tone={hudTone}
         active={isMyTurn}
         seatColor={seatColor}
+        underAttack={isUnderAttack}
         onClick={isValidTarget ? handleTargetClick : undefined}
         trailing={
           <>

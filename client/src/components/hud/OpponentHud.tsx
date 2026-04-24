@@ -14,6 +14,7 @@ import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
+import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
 
 interface OpponentHudProps {
   opponentName?: string | null;
@@ -101,6 +102,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
     const opponentSeatColor = getSeatColor(opponentId, gameState?.seat_order);
+    const isOpponentUnderAttack = gameState?.combat?.attackers.some(
+      (a) => a.attack_target.type === "Player" && a.attack_target.data === opponentId,
+    ) ?? false;
 
     return (
       <div
@@ -115,6 +119,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           tone={hudTone}
           active={isOpponentTurn}
           seatColor={opponentSeatColor}
+          underAttack={isOpponentUnderAttack}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
@@ -203,6 +208,9 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
+  const isUnderAttack = gameState?.combat?.attackers.some(
+    (a) => a.attack_target.type === "Player" && a.attack_target.data === playerId,
+  ) ?? false;
   const player = gameState?.players[playerId];
   const isDisconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
@@ -268,6 +276,12 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
             ease: "easeInOut",
           }}
         />
+      )}
+      {isUnderAttack && (
+        <>
+          <UnderAttackOverlay />
+          <span className="sr-only">{label} is under attack</span>
+        </>
       )}
       <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
         <span className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">

@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
+import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
+
 type HudTone = "neutral" | "emerald" | "rose" | "cyan" | "amber";
 
 interface HudPlateProps {
@@ -16,6 +18,11 @@ interface HudPlateProps {
   /** Per-seat identity color. Rendered as a small dot adjacent to the label
    *  — orthogonal to `tone` (which encodes game-state: turn, target). */
   seatColor?: string;
+  /** Passive imposed state: one or more creatures are attacking this player.
+   *  Renders a red ring + pulse overlay layered atop the tone treatment, so
+   *  "it's my turn AND I'm under attack" stays legible. Motion suppressed
+   *  under prefers-reduced-motion. */
+  underAttack?: boolean;
 }
 
 const TONE_CLASSES: Record<HudTone, string> = {
@@ -53,6 +60,7 @@ export function HudPlate({
   trailing,
   active = false,
   seatColor,
+  underAttack = false,
 }: HudPlateProps) {
   const Component = onClick ? "button" : "div";
   const shouldReduceMotion = useReducedMotion();
@@ -84,6 +92,14 @@ export function HudPlate({
             ease: "easeInOut",
           }}
         />
+      )}
+      {/* Under-attack overlay — layered atop the active-turn pulse so "my
+          turn + I'm being attacked" renders both signals. */}
+      {underAttack && (
+        <>
+          <UnderAttackOverlay />
+          <span className="sr-only">{label} is under attack</span>
+        </>
       )}
       <div className="absolute inset-[1px] rounded-[16px] bg-gradient-to-b from-white/8 via-transparent to-black/10" />
       <div className="relative min-w-0">

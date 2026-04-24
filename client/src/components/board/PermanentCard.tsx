@@ -37,6 +37,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   const {
     activatableObjectIds,
     committedAttackerIds,
+    incomingAttackerCounts,
     manaTappableObjectIds,
     selectableManaCostCreatureIds,
     undoableTapObjectIds,
@@ -128,8 +129,15 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   const isAttacking = isSelectingAttacker || isCommittedAttacker;
   const isBlocking =
     combatMode === "blockers" && blockerAssignments.has(objectId);
+  // Passive imposed state: how many creatures are attacking this permanent?
+  // Nonzero means a Planeswalker / Battle target declaration points here.
+  const incomingAttackerCount = incomingAttackerCounts.get(objectId) ?? 0;
+  const isUnderAttack = incomingAttackerCount > 0;
 
-  // Glow ring styles (combat takes priority)
+  // Glow ring styles.
+  // Priority tiers: (1) action I'm taking — attacking / blocking, (2) passive
+  // imposed state — under attack, (3) affordances offered — mana cost selection,
+  // valid target, activatable, tap undo, (4) idle selection.
   let glowClass = "";
   if (isAttacking) {
     glowClass =
@@ -137,6 +145,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   } else if (isBlocking) {
     glowClass =
       "ring-2 ring-orange-500 shadow-[0_0_12px_3px_rgba(249,115,22,0.7)]";
+  } else if (isUnderAttack) {
+    glowClass =
+      "ring-2 ring-red-500 shadow-[0_0_14px_4px_rgba(220,38,38,0.55)]";
   } else if (isSelectedForManaCost) {
     glowClass =
       "ring-2 ring-emerald-400 shadow-[0_0_14px_4px_rgba(52,211,153,0.55)]";
@@ -360,6 +371,20 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
                   {toRoman(obj.class_level)}
                 </span>
               </div>
+            </div>
+          )}
+
+          {/* Under-attack badge — ⚔×N in top-left. A single attacker shows
+              just ⚔ (the ring carries the count of 1 well enough); multiple
+              attackers show the count so gang-attack lethality is parseable
+              at a glance. */}
+          {isUnderAttack && (
+            <div
+              className="absolute left-1 top-1 z-20 flex items-center gap-0.5 rounded bg-red-700/85 px-1 py-0.5 text-[10px] font-bold text-white shadow"
+              title={`Attacked by ${incomingAttackerCount} creature${incomingAttackerCount === 1 ? "" : "s"}`}
+            >
+              <span aria-hidden>⚔</span>
+              {incomingAttackerCount > 1 && <span>×{incomingAttackerCount}</span>}
             </div>
           )}
 
