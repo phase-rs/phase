@@ -127,6 +127,12 @@ export function get_stack_pressure(): any;
 /**
  * Initialize panic hook for better error messages in WASM.
  * Called automatically on first use — safe to call multiple times.
+ *
+ * We install our own hook (composing with `console_error_panic_hook`'s
+ * console output) so panics are *both* logged to devtools and captured
+ * for later retrieval. With `panic = 'abort'`, the hook runs before the
+ * WASM trap, so a thread-local written here is readable from the next JS
+ * call into the module.
  */
 export function init_panic_hook(): void;
 
@@ -248,6 +254,15 @@ export function sideboardPolicyForFormat(format: any): any;
  */
 export function submit_action(actor: number, action: any): any;
 
+/**
+ * Drain the last captured panic message (consuming it). Returns `null` when
+ * no panic has been observed since the last drain. JS calls this after a
+ * thrown `RuntimeError` to decide whether to surface the modal as a real
+ * engine crash (with the panic text + report link) or a transient
+ * state-loss (the legacy reload prompt).
+ */
+export function take_last_panic_message(): string | undefined;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -274,6 +289,7 @@ export interface InitOutput {
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
+    readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;
