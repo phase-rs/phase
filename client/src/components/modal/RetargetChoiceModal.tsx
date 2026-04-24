@@ -2,24 +2,12 @@ import { useCallback, useState } from "react";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
-import type { GameObject, TargetRef, WaitingFor } from "../../adapter/types.ts";
+import type { TargetRef, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { targetKey, targetLabel } from "./targetRef.ts";
 
 type RetargetChoice = Extract<WaitingFor, { type: "RetargetChoice" }>;
-
-function targetLabel(target: TargetRef, objects: Record<string, GameObject> | undefined): string {
-  if ("Object" in target) {
-    return objects?.[String(target.Object)]?.name ?? `Object ${target.Object}`;
-  }
-  return getPlayerDisplayName(target.Player);
-}
-
-function targetKey(target: TargetRef): string {
-  if ("Object" in target) return `obj-${target.Object}`;
-  return `player-${target.Player}`;
-}
 
 export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) {
   const dispatch = useGameDispatch();

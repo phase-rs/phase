@@ -2,19 +2,12 @@ import { useCallback, useState } from "react";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
-import type { DistributionUnit, GameObject, TargetRef, WaitingFor } from "../../adapter/types.ts";
+import type { DistributionUnit, TargetRef, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { targetLabel } from "./targetRef.ts";
 
 type DistributeAmong = Extract<WaitingFor, { type: "DistributeAmong" }>;
-
-function targetLabel(target: TargetRef, objects: Record<string, GameObject> | undefined): string {
-  if ("Object" in target) {
-    return objects?.[String(target.Object)]?.name ?? `Object ${target.Object}`;
-  }
-  return getPlayerDisplayName(target.Player);
-}
 
 function unitLabel(unit: DistributionUnit): string {
   if (unit.type === "Counters") return `${unit.data} counter`;
