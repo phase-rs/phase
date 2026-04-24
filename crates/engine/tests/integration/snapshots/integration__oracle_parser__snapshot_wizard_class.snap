@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
-assertion_line: 154
 expression: result
 ---
 {
@@ -169,7 +168,9 @@ expression: result
       "optional": false,
       "damage_kind": "Any",
       "secondary": false,
-      "valid_target": null,
+      "valid_target": {
+        "type": "Controller"
+      },
       "valid_source": null,
       "description": "Whenever you draw a card, put a +1/+1 counter on target creature you control.",
       "constraint": null,
