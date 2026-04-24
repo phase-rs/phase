@@ -3,6 +3,7 @@ import { memo, useMemo } from "react";
 import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -27,9 +28,11 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   const isCompactHeight = useIsCompactHeight();
 
   const cardName = obj?.name ?? "";
+  const imageLookup = obj ? cardImageLookup(obj) : { name: "", faceIndex: 0 };
   const isToken = obj?.card_id === 0;
-  const { src, isLoading } = useCardImage(cardName, {
+  const { src, isLoading } = useCardImage(imageLookup.name, {
     size: "art_crop",
+    faceIndex: imageLookup.faceIndex,
     isToken,
     tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
   });

@@ -223,7 +223,7 @@ function CardPreviewInner({
       <MobilePreviewOverlay
         cardName={cardName}
         backFaceName={backFaceName}
-        faceIndex={faceIndex}
+        faceIndex={defaultFaceIndex}
         obj={obj}
         onDismiss={dismissPreview}
       />
