@@ -744,6 +744,11 @@ export type GameAction =
   | { type: "ChooseWarpCost"; data: { use_warp: boolean } }
   | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpellAsMadness"; data: { object_id: ObjectId; card_id: CardId } }
+  // CR 702.190a: Cast a spell from hand via the Sneak alternative cost during
+  // the declare-blockers step, returning an unblocked attacker you control.
+  // Applies to any card type; CR 702.190b enter-attacking-alongside is
+  // handled engine-side for permanent spells only.
+  | { type: "CastSpellAsSneak"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_card_id: CardId; creature_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }

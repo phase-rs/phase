@@ -52,13 +52,18 @@ export function PlayerHand() {
     canActForWaitingState && s.waitingFor?.type === "Priority",
   );
 
-  // Build a set of object_ids that have PlayLand or CastSpell legal actions.
+  // Build a set of object_ids that have PlayLand, CastSpell, or
+  // CastSpellAsSneak legal actions. Sneak casts (CR 702.190a) originate from
+  // the hand via `hand_object` rather than `object_id`, so they need an
+  // explicit branch to light up the card's castable indicator.
   // Coerce to Number since serde_wasm_bindgen may serialize u64 as BigInt.
   const playableObjectIds = useMemo(() => {
     const ids = new Set<number>();
     for (const action of legalActions) {
       if (action.type === "PlayLand" || action.type === "CastSpell") {
         ids.add(Number((action as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.object_id));
+      } else if (action.type === "CastSpellAsSneak") {
+        ids.add(Number(action.data.hand_object));
       }
     }
     return ids;
