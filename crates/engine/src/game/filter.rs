@@ -566,13 +566,20 @@ fn zone_change_filter_inner(
         }
         TargetFilter::Named { name } => record.name == *name,
 
-        // Relational / stack / battlefield-live selectors. A zone-change
-        // subject has already left its zone; these selectors reference either
-        // live state (stack entries, current attachments) or trigger-context
-        // players that are resolved by the caller before this function runs.
-        // When reached here they do not match a zone-change record.
-        TargetFilter::AttachedTo
-        | TargetFilter::LastCreated
+        // CR 603.10a + CR 603.6e + CR 702.6: `AttachedTo` against a zone-change
+        // record resolves via the record's `attachments` snapshot — the list of
+        // objects attached to the leaving permanent at the instant before the
+        // move. This covers "whenever equipped creature dies" (Skullclamp) and
+        // "whenever enchanted creature dies" (Aura look-back triggers): the
+        // trigger source is still on the battlefield, but SBA (CR 704.5n /
+        // CR 704.5m) has already cleared its live `attached_to` pointer by the
+        // time `process_triggers` runs. Matching against the snapshot is the
+        // authoritative last-known-information path.
+        TargetFilter::AttachedTo => record
+            .attachments
+            .iter()
+            .any(|att| att.object_id == source_id),
+        TargetFilter::LastCreated
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
