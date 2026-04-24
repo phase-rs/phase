@@ -157,7 +157,7 @@ fn scenario_mcts_plays_available_land_deterministically() {
         let obj = state.objects.get_mut(&land_id).unwrap();
         obj.zone = engine::types::zones::Zone::Hand;
         state.battlefield.retain(|&id| id != land_id);
-        state.players[0].hand.push(land_id);
+        state.players[0].hand.push_back(land_id);
     }
 
     let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -336,7 +336,7 @@ fn scenario_very_hard_wasm_passes_on_redundant_removal() {
         state.active_player = P0;
         state.priority_player = P0;
         state.waiting_for = WaitingFor::Priority { player: P0 };
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(301),
             source_id: ObjectId(300),
             controller: P0,

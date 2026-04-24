@@ -346,6 +346,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -526,6 +527,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -564,6 +566,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
         );
         fetch_ability.cost = Some(AbilityCost::Composite {
@@ -610,6 +613,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         ));
         let deck = vec![entry(face, 1)];

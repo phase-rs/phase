@@ -1,5 +1,3 @@
-use rand::seq::SliceRandom;
-
 use crate::game::effects::resolve_effect;
 use crate::types::ability::{AbilityKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
@@ -20,8 +18,9 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
     events.push(GameEvent::MulliganStarted);
 
     // Shuffle both libraries
-    for player in &mut state.players {
-        player.library.shuffle(&mut state.rng);
+    let GameState { players, rng, .. } = &mut *state;
+    for player in players.iter_mut() {
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
     }
 
     // Draw 7 for each player in seat order
@@ -46,14 +45,18 @@ pub fn handle_mulligan_decision(
     mulligan_count: u8,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    // CR 103.5c: In multiplayer (3+ players), the first mulligan is free —
-    // it doesn't count toward the number of cards put on the bottom.
-    let is_multiplayer = state.seat_order.len() > 2;
+    // CR 103.5c: Multiplayer games (3+ seats) always grant a free first
+    // mulligan. In 2-player games, CR 103.5c additionally covers Brawl;
+    // the Commander Rules Committee's supplementary rule extends the
+    // free-first-mulligan affordance to Commander and Historic Brawl duels.
+    // See `GameFormat::grants_free_first_mulligan` for the duel predicate.
+    let free_first_mulligan =
+        state.seat_order.len() > 2 || state.format_config.format.grants_free_first_mulligan();
 
     if keep {
         // CR 103.5: Bottom N cards where N = mulligans taken,
-        // minus 1 in multiplayer for the free first mulligan (CR 103.5c).
-        let bottom_count = if is_multiplayer {
+        // minus 1 when the first mulligan is free.
+        let bottom_count = if free_first_mulligan {
             mulligan_count.saturating_sub(1)
         } else {
             mulligan_count
@@ -77,8 +80,8 @@ pub fn handle_mulligan_decision(
             // Shuffle hand into library, draw 7
             shuffle_hand_into_library(state, player, events);
             draw_n(state, player, STARTING_HAND_SIZE, events);
-            // Must bottom 7 cards (minus 1 for free mulligan in multiplayer)
-            let bottom = if is_multiplayer {
+            // Must bottom 7 cards (minus 1 when the first mulligan is free).
+            let bottom = if free_first_mulligan {
                 MAX_MULLIGANS - 1
             } else {
                 MAX_MULLIGANS
@@ -209,19 +212,21 @@ fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &m
         .find(|p| p.id == player)
         .expect("player exists")
         .hand
-        .clone();
+        .iter()
+        .copied()
+        .collect();
 
     for card_id in hand_ids {
         zones::move_to_zone(state, card_id, Zone::Library, events);
     }
 
     // Shuffle library
-    let player_data = state
-        .players
+    let GameState { players, rng, .. } = state;
+    let player_data = players
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists");
-    player_data.library.shuffle(&mut state.rng);
+    crate::util::im_ext::shuffle_vector(&mut player_data.library, rng);
 }
 
 fn draw_n(state: &mut GameState, player_id: PlayerId, count: usize, events: &mut Vec<GameEvent>) {
@@ -398,7 +403,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(state.players[0].hand.len(), 6); // 7 - 1
                                                     // Card should be at bottom of library
-        assert_eq!(*state.players[0].library.last().unwrap(), card_to_bottom,);
+        assert_eq!(*state.players[0].library.back().unwrap(), card_to_bottom,);
     }
 
     #[test]
@@ -579,6 +584,113 @@ mod tests {
             r.is_ok(),
             "AI P1 should be authorized to submit MulliganDecision, got {:?}",
             r
+        );
+    }
+
+    /// Commander Rules Committee free-mulligan rule (supplements CR 103.5;
+    /// CR 103.5c covers only multiplayer and Brawl). A 2-player Commander
+    /// duel grants a free first mulligan — keeping after one mulligan must
+    /// not require putting any cards on the bottom.
+    #[test]
+    fn commander_first_mulligan_is_free_in_duel() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 2, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::Untap;
+        for player_idx in 0..2u8 {
+            for i in 0..20 {
+                create_object(
+                    &mut state,
+                    CardId((player_idx as u64) * 100 + i as u64),
+                    PlayerId(player_idx),
+                    format!("Card {} P{}", i, player_idx),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let mut events = Vec::new();
+        let _waiting = start_mulligan(&mut state, &mut events);
+
+        // Mulligan once
+        let _w = handle_mulligan_decision(&mut state, PlayerId(0), false, 0, &mut events);
+        // Keep after one mulligan — free mulligan must produce 0 bottom cards
+        let waiting = handle_mulligan_decision(&mut state, PlayerId(0), true, 1, &mut events);
+        assert!(
+            !matches!(waiting, WaitingFor::MulliganBottomCards { .. }),
+            "Commander duel: first mulligan should be free — expected no MulliganBottomCards, got {:?}",
+            waiting
+        );
+    }
+
+    /// CR 103.5c: A Brawl duel grants a free first mulligan (CR 103.5c
+    /// explicitly covers Brawl games). Regression test for the predicate
+    /// `GameFormat::grants_free_first_mulligan`.
+    #[test]
+    fn brawl_first_mulligan_is_free_in_duel() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::brawl(), 2, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::Untap;
+        for player_idx in 0..2u8 {
+            for i in 0..20 {
+                create_object(
+                    &mut state,
+                    CardId((player_idx as u64) * 100 + i as u64),
+                    PlayerId(player_idx),
+                    format!("Card {} P{}", i, player_idx),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let mut events = Vec::new();
+        let _waiting = start_mulligan(&mut state, &mut events);
+
+        let _w = handle_mulligan_decision(&mut state, PlayerId(0), false, 0, &mut events);
+        let waiting = handle_mulligan_decision(&mut state, PlayerId(0), true, 1, &mut events);
+        assert!(
+            !matches!(waiting, WaitingFor::MulliganBottomCards { .. }),
+            "Brawl duel: first mulligan should be free — expected no MulliganBottomCards, got {:?}",
+            waiting
+        );
+    }
+
+    /// Regression guard: non-Commander/Brawl duels (e.g. Standard 1v1) must
+    /// NOT receive the free first mulligan — CR 103.5c only applies to
+    /// multiplayer (3+ players) and Brawl. Keeping after one mulligan in a
+    /// Standard duel must require bottoming exactly one card.
+    #[test]
+    fn standard_duel_has_no_free_mulligan() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::Untap;
+        for player_idx in 0..2u8 {
+            for i in 0..20 {
+                create_object(
+                    &mut state,
+                    CardId((player_idx as u64) * 100 + i as u64),
+                    PlayerId(player_idx),
+                    format!("Card {} P{}", i, player_idx),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let mut events = Vec::new();
+        let _waiting = start_mulligan(&mut state, &mut events);
+
+        // Mulligan once, then keep
+        let _w = handle_mulligan_decision(&mut state, PlayerId(0), false, 0, &mut events);
+        let waiting = handle_mulligan_decision(&mut state, PlayerId(0), true, 1, &mut events);
+        assert!(
+            matches!(waiting, WaitingFor::MulliganBottomCards { count: 1, .. }),
+            "Standard duel: after 1 mulligan, expected to bottom 1 card (no free mulligan), got {:?}",
+            waiting
         );
     }
 }

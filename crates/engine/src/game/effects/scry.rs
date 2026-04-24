@@ -4,20 +4,35 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 
 /// CR 701.22a: Scry N — look at top N, put any number on bottom in any order, rest on top in any order.
+///
+/// CR 601.2c + CR 115.1: When the parsed `Effect::Scry { target }` is a
+/// player-target filter (e.g. `TargetFilter::Player` from "Target player scrys
+/// 2"), the scrying player is whichever `TargetRef::Player` was chosen during
+/// spell announcement. `ResolvedAbility::target_player()` extracts that choice
+/// and falls back to `ability.controller` when the target is a context-ref
+/// (Controller, SelfRef, etc.) — preserving the historical "controller scries"
+/// behavior for plain "scry N" / "you scry" patterns.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let scry_num: usize = match &ability.effect {
-        Effect::Scry { count } => resolve_quantity_with_targets(state, count, ability) as usize,
-        _ => 1,
+    let (scry_num, scry_player): (usize, _) = match &ability.effect {
+        Effect::Scry { count, target } => (
+            resolve_quantity_with_targets(state, count, ability) as usize,
+            if target.is_context_ref() {
+                ability.controller
+            } else {
+                ability.target_player()
+            },
+        ),
+        _ => (1, ability.controller),
     };
 
     let player = state
         .players
         .iter()
-        .find(|p| p.id == ability.controller)
+        .find(|p| p.id == scry_player)
         .ok_or(EffectError::PlayerNotFound)?;
 
     let count = scry_num.min(player.library.len());
@@ -31,15 +46,20 @@ pub fn resolve(
     }
 
     events.push(GameEvent::PlayerPerformedAction {
-        player_id: ability.controller,
+        player_id: scry_player,
         action: PlayerActionKind::Scry,
     });
 
     // Collect the top N card IDs for the player to choose from
-    let cards: Vec<_> = player.library[..count].to_vec();
+    let cards: Vec<_> = player
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>();
 
     state.waiting_for = WaitingFor::ScryChoice {
-        player: ability.controller,
+        player: scry_player,
         cards,
     };
 
@@ -63,6 +83,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::Scry {
                 count: crate::types::ability::QuantityExpr::Fixed { value: scry_num },
+                target: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -82,7 +103,12 @@ mod tests {
                 Zone::Library,
             );
         }
-        let top_2: Vec<_> = state.players[0].library[..2].to_vec();
+        let top_2: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(2)
+            .copied()
+            .collect::<Vec<_>>();
 
         let ability = make_scry_ability(2);
         let mut events = Vec::new();

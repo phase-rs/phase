@@ -31,6 +31,13 @@ pub struct AiContext {
     /// The player whose perspective this context represents. Used to look up
     /// per-player session data (synergy, features, plan).
     pub player: PlayerId,
+    /// Wall-clock deadline for this decision, mirrored from PlannerServices
+    /// so any policy (which only sees PolicyContext → AiContext) can gate
+    /// expensive work — the `velocity_score` multi-turn projection is the
+    /// canonical example: it costs ~1.5s/call on large states, so once the
+    /// deadline ticks down we fall back to cached-only lookups and a
+    /// heuristic score.
+    pub deadline: engine::util::Deadline,
 }
 
 static EMPTY_SYNERGY_GRAPH: std::sync::OnceLock<SynergyGraph> = std::sync::OnceLock::new();
@@ -43,13 +50,26 @@ impl AiContext {
 
     /// Analyze a deck list with custom archetype multipliers.
     /// The returned context uses `PlayerId(0)` as the perspective; callers
-    /// that know the AI's player ID should set `context.player` afterward.
+    /// that know the AI's player ID should use `analyze_for_player` instead
+    /// so the session map is keyed correctly without an `Arc::make_mut` remap.
     pub fn analyze_with(
         deck: &[DeckEntry],
         base_weights: &EvalWeightSet,
         multipliers: &ArchetypeMultipliers,
     ) -> Self {
-        let player = PlayerId(0);
+        Self::analyze_for_player(deck, base_weights, multipliers, PlayerId(0))
+    }
+
+    /// Analyze a deck list for a specific AI player. Keys the session's
+    /// `synergy` / `features` / `plan` maps directly under `player`, avoiding
+    /// the `Arc::make_mut` + HashMap-rekey dance that `build_ai_context` used
+    /// to perform when the AI wasn't seat 0 (common in 3+ player games).
+    pub fn analyze_for_player(
+        deck: &[DeckEntry],
+        base_weights: &EvalWeightSet,
+        multipliers: &ArchetypeMultipliers,
+        player: PlayerId,
+    ) -> Self {
         let deck_profile = DeckProfile::analyze(deck);
         let adjusted_weights = EvalWeightSet {
             early: deck_profile.adjust_weights_with(multipliers, &base_weights.early),
@@ -65,6 +85,7 @@ impl AiContext {
             opponent_threat: None,
             session,
             player,
+            deadline: engine::util::Deadline::none(),
         }
     }
 
@@ -78,6 +99,7 @@ impl AiContext {
             opponent_threat: None,
             session: Arc::new(AiSession::empty()),
             player: PlayerId(0),
+            deadline: engine::util::Deadline::none(),
         }
     }
 

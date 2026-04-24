@@ -99,7 +99,7 @@ pub fn find_legal_targets(
                 }
                 Zone::Exile => add_zone_targets(
                     state,
-                    &state.exile,
+                    state.exile.iter().copied(),
                     filter,
                     source_controller,
                     source_id,
@@ -110,7 +110,7 @@ pub fn find_legal_targets(
                     for player in &state.players {
                         add_zone_targets(
                             state,
-                            &player.graveyard,
+                            player.graveyard.iter().copied(),
                             filter,
                             source_controller,
                             source_id,
@@ -123,7 +123,7 @@ pub fn find_legal_targets(
                     for player in &state.players {
                         add_zone_targets(
                             state,
-                            &player.hand,
+                            player.hand.iter().copied(),
                             filter,
                             source_controller,
                             source_id,
@@ -136,7 +136,7 @@ pub fn find_legal_targets(
                     for player in &state.players {
                         add_zone_targets(
                             state,
-                            &player.library,
+                            player.library.iter().copied(),
                             filter,
                             source_controller,
                             source_id,
@@ -331,6 +331,13 @@ pub(crate) fn extract_player_from_event(
             TargetRef::Player(pid) => Some(*pid),
             TargetRef::Object(oid) => state.objects.get(oid).map(|obj| obj.controller),
         },
+        // CR 500.2 + CR 603.7c: Phase-change triggers like "at the beginning of
+        // each player's upkeep" bind "that player" / `TriggeringPlayer` to the
+        // active player — the player whose phase is currently beginning.
+        // Without this, Ruthless Winnower ("that player sacrifices a non-Elf
+        // creature") would have no player anchor and the sacrifice filter
+        // would match across all players.
+        GameEvent::PhaseChanged { .. } => Some(state.active_player),
         _ => None,
     }
 }
@@ -377,7 +384,7 @@ fn add_stack_abilities(state: &GameState, source_id: ObjectId, targets: &mut Vec
 
 fn add_zone_targets(
     state: &GameState,
-    object_ids: &[ObjectId],
+    object_ids: impl IntoIterator<Item = ObjectId>,
     filter: &TargetFilter,
     source_controller: PlayerId,
     source_id: ObjectId,
@@ -386,7 +393,7 @@ fn add_zone_targets(
 ) {
     let ctx =
         super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
-    for &obj_id in object_ids {
+    for obj_id in object_ids {
         if super::filter::matches_target_filter(state, obj_id, filter, &ctx) {
             let obj = match state.objects.get(&obj_id) {
                 Some(o) => o,
@@ -628,7 +635,7 @@ pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .filter(|id| state.objects.get(id).is_some_and(|obj| obj.is_phased_in()))
             .collect(),
         Zone::Stack => state.stack.iter().map(|e| e.id).collect(),
-        Zone::Exile => state.exile.clone(),
+        Zone::Exile => state.exile.iter().copied().collect(),
         Zone::Graveyard => state
             .players
             .iter()
@@ -1045,7 +1052,7 @@ mod tests {
             "Test Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(0),
@@ -1083,7 +1090,7 @@ mod tests {
             "Artifact Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(1),
@@ -1126,7 +1133,7 @@ mod tests {
             let spell = state.objects.get_mut(&spell_id).unwrap();
             spell.card_types.core_types.push(CoreType::Instant);
         }
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(1),

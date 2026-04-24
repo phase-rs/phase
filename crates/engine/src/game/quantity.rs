@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
     matches_target_filter, spell_record_matches_filter, type_filter_matches, FilterContext,
 };
@@ -18,6 +19,7 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -134,7 +136,7 @@ fn resolve_event_scoped_ref(
         } => {
             let id = crate::game::targeting::extract_source_from_event(event)?;
             let obj = state.objects.get(&id)?;
-            Some(obj.mana_spent_to_cast_amount as i32)
+            Some(u32_to_i32_saturating(obj.mana_spent_to_cast_amount))
         }
         _ => None,
     }
@@ -289,16 +291,30 @@ fn resolve_ref(
     };
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
-        QuantityRef::HandSize => player.map_or(0, |p| p.hand.len() as i32),
+        QuantityRef::HandSize => player.map_or(0, |p| usize_to_i32_saturating(p.hand.len())),
         QuantityRef::LifeTotal => player.map_or(0, |p| p.life),
-        QuantityRef::GraveyardSize => player.map_or(0, |p| p.graveyard.len() as i32),
+        // CR 122.1: Counter-kind lookup summed across scope players. Controller
+        // scope resolves to a single player; Opponents/All may span multiple.
+        // Per-player u32 is widened to u64 before summing; the i32::try_from
+        // saturates on the (only theoretically reachable) overflow.
+        QuantityRef::PlayerCounter { kind, scope } => {
+            let total: u64 = scoped_players(state, scope, controller)
+                .map(|p| u64::from(p.player_counter(kind)))
+                .sum();
+            i32::try_from(total).unwrap_or(i32::MAX)
+        }
+        QuantityRef::GraveyardSize => {
+            player.map_or(0, |p| usize_to_i32_saturating(p.graveyard.len()))
+        }
         QuantityRef::LifeAboveStarting => {
             player.map_or(0, |p| p.life - state.format_config.starting_life)
         }
         // CR 103.4: The format's starting life total.
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
         // CR 118.4: Total life lost this turn by the controller.
-        QuantityRef::LifeLostThisTurn => player.map_or(0, |p| p.life_lost_this_turn as i32),
+        QuantityRef::LifeLostThisTurn => {
+            player.map_or(0, |p| u32_to_i32_saturating(p.life_lost_this_turn))
+        }
         QuantityRef::Speed => i32::from(effective_speed(state, controller)),
         QuantityRef::ObjectCount { filter } => {
             // CR 400.1: If the filter constrains to a specific zone via InZone,
@@ -306,10 +322,42 @@ fn resolve_ref(
             let zone = filter
                 .extract_in_zone()
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
-            crate::game::targeting::zone_object_ids(state, zone)
-                .iter()
-                .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
-                .count() as i32
+            usize_to_i32_saturating(
+                crate::game::targeting::zone_object_ids(state, zone)
+                    .iter()
+                    .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
+                    .count(),
+            )
+        }
+        // CR 201.2 + CR 603.4: Count of distinct names among matching objects.
+        // Field of the Dead: "seven or more lands with different names". Two
+        // objects with the same printed name count once.
+        //
+        // CR 201.2a: Sameness is defined by printed name, so read `base_name`
+        // (not the layer-applied `name`) to match how CR defines object
+        // identity. Objects with no name do not share a name with any other
+        // object, including one another — they are each individually unique,
+        // so they are counted but not deduped.
+        QuantityRef::ObjectCountDistinctNames { filter } => {
+            let zone = filter
+                .extract_in_zone()
+                .unwrap_or(crate::types::zones::Zone::Battlefield);
+            let mut distinct_named: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut unnamed_count: usize = 0;
+            for id in crate::game::targeting::zone_object_ids(state, zone) {
+                if !matches_target_filter(state, id, filter, &filter_ctx) {
+                    continue;
+                }
+                if let Some(obj) = state.objects.get(&id) {
+                    if obj.base_name.is_empty() {
+                        unnamed_count += 1;
+                    } else {
+                        distinct_named.insert(obj.base_name.clone());
+                    }
+                }
+            }
+            usize_to_i32_saturating(distinct_named.len() + unnamed_count)
         }
         QuantityRef::PlayerCount { filter } => {
             resolve_player_count(state, filter, controller, source_id)
@@ -319,7 +367,7 @@ fn resolve_ref(
             .get(&source_id)
             .map(|obj| {
                 let ct = parse_counter_type(counter_type);
-                obj.counters.get(&ct).copied().unwrap_or(0) as i32
+                u32_to_i32_saturating(obj.counters.get(&ct).copied().unwrap_or(0))
             })
             .unwrap_or(0),
         // CR 107.3a + CR 601.2b + CR 107.3i: "X" resolves to the value chosen at
@@ -339,7 +387,7 @@ fn resolve_ref(
         // "chosen number") keep their single-responsibility path through
         // `last_named_choice`.
         QuantityRef::Variable { name } if name == "X" => chosen_x
-            .map(|x| x as i32)
+            .map(u32_to_i32_saturating)
             .or_else(|| {
                 state
                     .current_trigger_event
@@ -347,7 +395,7 @@ fn resolve_ref(
                     .and_then(crate::game::targeting::extract_source_from_event)
                     .and_then(|id| state.objects.get(&id))
                     .and_then(|obj| obj.cost_x_paid)
-                    .map(|x| x as i32)
+                    .map(u32_to_i32_saturating)
             })
             .unwrap_or(0),
         QuantityRef::Variable { .. } => state
@@ -395,7 +443,9 @@ fn resolve_ref(
                         ObjectProperty::Power => obj.power.unwrap_or(0),
                         ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
                         // CR 202.3e: Use mana_value() which correctly excludes X.
-                        ObjectProperty::ManaValue => obj.mana_cost.mana_value() as i32,
+                        ObjectProperty::ManaValue => {
+                            u32_to_i32_saturating(obj.mana_cost.mana_value())
+                        }
                     })
                 } else {
                     None
@@ -419,7 +469,7 @@ fn resolve_ref(
                         None
                     }
                 })
-                .map(|obj| obj.counters.get(&ct).copied().unwrap_or(0) as i32)
+                .map(|obj| u32_to_i32_saturating(obj.counters.get(&ct).copied().unwrap_or(0)))
                 .unwrap_or(0)
         }
         // CR 122.1: Sum counters of every type on the first targeted object.
@@ -434,7 +484,7 @@ fn resolve_ref(
                     None
                 }
             })
-            .map(|obj| obj.counters.values().copied().sum::<u32>() as i32)
+            .map(|obj| u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()))
             .unwrap_or(0),
         QuantityRef::CountersOnObjects {
             counter_type,
@@ -452,8 +502,12 @@ fn resolve_ref(
                 .filter_map(|&id| {
                     if matches_target_filter(state, id, filter, &filter_ctx) {
                         state.objects.get(&id).map(|obj| match &ct {
-                            Some(ct) => obj.counters.get(ct).copied().unwrap_or(0) as i32,
-                            None => obj.counters.values().copied().sum::<u32>() as i32,
+                            Some(ct) => {
+                                u32_to_i32_saturating(obj.counters.get(ct).copied().unwrap_or(0))
+                            }
+                            None => {
+                                u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>())
+                            }
                         })
                     } else {
                         None
@@ -475,9 +529,9 @@ fn resolve_ref(
                 .and_then(|obj| obj.power)
                 .unwrap_or(0)
         }
-        QuantityRef::Devotion { colors } => {
-            crate::game::devotion::count_devotion(state, controller, colors) as i32
-        }
+        QuantityRef::Devotion { colors } => u32_to_i32_saturating(
+            crate::game::devotion::count_devotion(state, controller, colors),
+        ),
         QuantityRef::TargetLifeTotal => {
             // CR 119.3 + CR 107.2: Find the first player target and return their life total.
             targets
@@ -505,14 +559,18 @@ fn resolve_ref(
                     .iter()
                     .find(|p| p.id == pid)
                     .map_or(0, |p| match zone {
-                        ZoneRef::Library => p.library.len() as i32,
-                        ZoneRef::Graveyard => p.graveyard.len() as i32,
-                        ZoneRef::Hand => p.hand.len() as i32,
-                        ZoneRef::Exile => state
-                            .exile
-                            .iter()
-                            .filter(|&&id| state.objects.get(&id).is_some_and(|o| o.owner == pid))
-                            .count() as i32,
+                        ZoneRef::Library => usize_to_i32_saturating(p.library.len()),
+                        ZoneRef::Graveyard => usize_to_i32_saturating(p.graveyard.len()),
+                        ZoneRef::Hand => usize_to_i32_saturating(p.hand.len()),
+                        ZoneRef::Exile => usize_to_i32_saturating(
+                            state
+                                .exile
+                                .iter()
+                                .filter(|&&id| {
+                                    state.objects.get(&id).is_some_and(|o| o.owner == pid)
+                                })
+                                .count(),
+                        ),
                     })
             } else {
                 0
@@ -556,7 +614,7 @@ fn resolve_ref(
                     }
                 }
             }
-            seen.len() as i32
+            usize_to_i32_saturating(seen.len())
         }
         QuantityRef::DistinctCardTypesExiledBySource => {
             let mut seen = HashSet::new();
@@ -567,14 +625,14 @@ fn resolve_ref(
                     }
                 }
             }
-            seen.len() as i32
+            usize_to_i32_saturating(seen.len())
         }
         // CR 603.10a + CR 607.2a: Count cards linked as "exiled with" the
         // source. LTB triggers read the trigger-event snapshot; other contexts
         // read the live exile-link store.
-        QuantityRef::CardsExiledBySource => {
-            crate::game::players::linked_exile_cards_for_source(state, source_id).len() as i32
-        }
+        QuantityRef::CardsExiledBySource => usize_to_i32_saturating(
+            crate::game::players::linked_exile_cards_for_source(state, source_id).len(),
+        ),
         // CR 604.3: Count cards in a zone matching optional type filters.
         QuantityRef::ZoneCardCount {
             zone,
@@ -626,12 +684,14 @@ fn resolve_ref(
             .tracked_object_sets
             .iter()
             .max_by_key(|(id, _)| id.0)
-            .map(|(_, ids)| ids.len() as i32)
+            .map(|(_, ids)| usize_to_i32_saturating(ids.len()))
             .unwrap_or(0),
         // CR 400.7 + CR 608.2c: Read the per-resolution counter populated by
         // ChangeZoneAll when it exiles cards from a hand. Used by "draws a card
         // for each card exiled from their hand this way" (Deadly Cover-Up).
-        QuantityRef::ExiledFromHandThisResolution => state.exiled_from_hand_this_resolution as i32,
+        QuantityRef::ExiledFromHandThisResolution => {
+            u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
+        }
         // CR 603.7c: Numeric value from the triggering event.
         // Falls back to last_effect_count for sub_ability continuations where
         // current_trigger_event has no amount (e.g., "discard up to N, then draw that many").
@@ -677,8 +737,13 @@ fn resolve_ref(
                 state
                     .objects
                     .get(&id)
-                    .map(|obj| obj.mana_cost.mana_value() as i32)
-                    .or_else(|| state.lki_cache.get(&id).map(|lki| lki.mana_value as i32))
+                    .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                    .or_else(|| {
+                        state
+                            .lki_cache
+                            .get(&id)
+                            .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                    })
             })
             .unwrap_or(0),
         // CR 107.3a + CR 601.2b + CR 603.7c: The announced value of X for the
@@ -694,7 +759,7 @@ fn resolve_ref(
             .and_then(crate::game::targeting::extract_source_from_event)
             .and_then(|id| state.objects.get(&id))
             .and_then(|obj| obj.cost_x_paid)
-            .map(|x| x as i32)
+            .map(u32_to_i32_saturating)
             .unwrap_or(0),
         // CR 601.2h + CR 603.4: Total mana actually spent to cast the triggering
         // spell. Reads `GameObject::mana_spent_to_cast_amount` on the spell
@@ -706,7 +771,7 @@ fn resolve_ref(
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event)
             .and_then(|id| state.objects.get(&id))
-            .map(|obj| obj.mana_spent_to_cast_amount as i32)
+            .map(|obj| u32_to_i32_saturating(obj.mana_spent_to_cast_amount))
             .unwrap_or(0),
         // CR 601.2h: Total mana actually spent to cast the ability's source
         // object. Used by spell effects that reference their own cost at
@@ -717,7 +782,7 @@ fn resolve_ref(
         QuantityRef::ManaSpentOnSelf => state
             .objects
             .get(&ctx.self_object())
-            .map(|obj| obj.mana_spent_to_cast_amount as i32)
+            .map(|obj| u32_to_i32_saturating(obj.mana_spent_to_cast_amount))
             .unwrap_or(0),
         // CR 601.2h + CR 202.2: Number of distinct colors of mana spent to cast
         // the "self" object. Resolves against the entering object when in an
@@ -728,7 +793,7 @@ fn resolve_ref(
         QuantityRef::ColorsSpentOnSelf => state
             .objects
             .get(&ctx.self_object())
-            .map(|obj| obj.colors_spent_to_cast.distinct_colors() as i32)
+            .map(|obj| usize_to_i32_saturating(obj.colors_spent_to_cast.distinct_colors()))
             .unwrap_or(0),
         // CR 903.4 + CR 903.4f: Number of distinct colors in the controller's
         // commander(s)' combined color identity. Returns 0 when the controller
@@ -736,8 +801,28 @@ fn resolve_ref(
         // player doesn't have a commander"). War Room's pay-life cost reads
         // this; an undefined identity pays 0 life (and per Scryfall ruling,
         // the ability is still activatable).
-        QuantityRef::ColorsInCommandersColorIdentity => {
-            super::commander::commander_color_identity(state, controller).len() as i32
+        QuantityRef::ColorsInCommandersColorIdentity => usize_to_i32_saturating(
+            super::commander::commander_color_identity(state, controller).len(),
+        ),
+        // CR 106.1 + CR 109.1: Count distinct colors (W/U/B/R/G) among permanents
+        // matching the filter. "Gold"/"multicolor"/"colorless" are not colors, so
+        // each ManaColor contributes at most once per colored permanent.
+        QuantityRef::DistinctColorsAmongPermanents { filter } => {
+            let zone = filter
+                .extract_in_zone()
+                .unwrap_or(crate::types::zones::Zone::Battlefield);
+            let mut seen: HashSet<ManaColor> = HashSet::new();
+            for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
+                if !matches_target_filter(state, id, filter, &filter_ctx) {
+                    continue;
+                }
+                if let Some(obj) = state.objects.get(&id) {
+                    for color in &obj.color {
+                        seen.insert(*color);
+                    }
+                }
+            }
+            usize_to_i32_saturating(seen.len())
         }
         // CR 305.6: Count distinct basic land types among lands the controller controls.
         QuantityRef::BasicLandTypeCount => {
@@ -756,7 +841,7 @@ fn resolve_ref(
                     }
                 }
             }
-            found.len() as i32
+            usize_to_i32_saturating(found.len())
         }
         // CR 117.1: Count spells cast this turn by the controller, optionally filtered.
         QuantityRef::SpellsCastThisTurn { ref filter } => {
@@ -764,45 +849,59 @@ fn resolve_ref(
             match spells {
                 None => 0,
                 Some(list) => match filter {
-                    None => list.len() as i32,
-                    Some(filter) => list
-                        .iter()
-                        .filter(|record| spell_record_matches_filter(record, filter, controller))
-                        .count() as i32,
+                    None => usize_to_i32_saturating(list.len()),
+                    Some(filter) => usize_to_i32_saturating(
+                        list.iter()
+                            .filter(|record| {
+                                spell_record_matches_filter(record, filter, controller)
+                            })
+                            .count(),
+                    ),
                 },
             }
         }
         // Count permanents matching filter that entered the battlefield this turn.
         // Uses `entered_battlefield_turn` field on GameObject.
-        QuantityRef::EnteredThisTurn { ref filter } => state
-            .objects
-            .values()
-            .filter(|o| {
-                o.zone == crate::types::zones::Zone::Battlefield
-                    && o.entered_battlefield_turn == Some(state.turn_number)
-                    && matches_target_filter(state, o.id, filter, &filter_ctx)
-            })
-            .count() as i32,
+        QuantityRef::EnteredThisTurn { ref filter } => usize_to_i32_saturating(
+            state
+                .objects
+                .values()
+                .filter(|o| {
+                    o.zone == crate::types::zones::Zone::Battlefield
+                        && o.entered_battlefield_turn == Some(state.turn_number)
+                        && matches_target_filter(state, o.id, filter, &filter_ctx)
+                })
+                .count(),
+        ),
         // CR 710.2: Crimes committed this turn — uses tracked counter on player.
         QuantityRef::CrimesCommittedThisTurn => {
-            player.map_or(0, |p| p.crimes_committed_this_turn as i32)
+            player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
         // Life gained this turn — uses tracked counter on player.
-        QuantityRef::LifeGainedThisTurn => player.map_or(0, |p| p.life_gained_this_turn as i32),
+        QuantityRef::LifeGainedThisTurn => {
+            player.map_or(0, |p| u32_to_i32_saturating(p.life_gained_this_turn))
+        }
         // CR 400.7: Count of permanents controlled by player that left the battlefield this turn.
-        QuantityRef::PermanentsLeftBattlefieldThisTurn => state
-            .zone_changes_this_turn
-            .iter()
-            .filter(|r| r.from_zone == Zone::Battlefield && r.controller == controller)
-            .count() as i32,
+        QuantityRef::PermanentsLeftBattlefieldThisTurn => usize_to_i32_saturating(
+            state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|r| r.from_zone == Some(Zone::Battlefield) && r.controller == controller)
+                .count(),
+        ),
         // CR 400.7: Count of nonland permanents (any controller) that left the battlefield this turn.
-        QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn => state
-            .zone_changes_this_turn
-            .iter()
-            .filter(|r| r.from_zone == Zone::Battlefield && !r.core_types.contains(&CoreType::Land))
-            .count() as i32,
+        QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn => usize_to_i32_saturating(
+            state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|r| {
+                    r.from_zone == Some(Zone::Battlefield)
+                        && !r.core_types.contains(&CoreType::Land)
+                })
+                .count(),
+        ),
         // CR 500: Cumulative turns taken by this player.
-        QuantityRef::TurnsTaken => player.map_or(0, |p| p.turns_taken as i32),
+        QuantityRef::TurnsTaken => player.map_or(0, |p| u32_to_i32_saturating(p.turns_taken)),
         // Chosen number stored on the source object via ChosenAttribute::Number.
         QuantityRef::ChosenNumber => state
             .objects
@@ -815,15 +914,17 @@ fn resolve_ref(
             })
             .unwrap_or(0),
         // CR 700.7: Count creatures that died (battlefield → graveyard) this turn.
-        QuantityRef::CreaturesDiedThisTurn => state
-            .zone_changes_this_turn
-            .iter()
-            .filter(|r| {
-                r.core_types.contains(&CoreType::Creature)
-                    && r.from_zone == Zone::Battlefield
-                    && r.to_zone == Zone::Graveyard
-            })
-            .count() as i32,
+        QuantityRef::CreaturesDiedThisTurn => usize_to_i32_saturating(
+            state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|r| {
+                    r.core_types.contains(&CoreType::Creature)
+                        && r.from_zone == Some(Zone::Battlefield)
+                        && r.to_zone == Zone::Graveyard
+                })
+                .count(),
+        ),
         // CR 508.1a: Whether the controller declared attackers this turn.
         QuantityRef::AttackedThisTurn => {
             if state.players_attacked_this_turn.contains(&controller) {
@@ -847,7 +948,7 @@ fn resolve_ref(
             .players
             .iter()
             .filter(|p| p.id != controller)
-            .map(|p| p.life_lost_this_turn as i32)
+            .map(|p| u32_to_i32_saturating(p.life_lost_this_turn))
             .sum(),
         // CR 122.1: Whether the controller added any counter to any permanent this turn.
         QuantityRef::CounterAddedThisTurn => {
@@ -873,14 +974,14 @@ fn resolve_ref(
             .players
             .iter()
             .filter(|p| p.id != controller)
-            .map(|p| p.hand.len() as i32)
+            .map(|p| usize_to_i32_saturating(p.hand.len()))
             .max()
             .unwrap_or(0),
         // CR 309.7: Number of dungeons the controller has completed.
         QuantityRef::DungeonsCompleted => state
             .dungeon_progress
             .get(&controller)
-            .map_or(0, |p| p.completed.len() as i32),
+            .map_or(0, |p| usize_to_i32_saturating(p.completed.len())),
         // CR 107.3m: The X paid when the source was cast. Stashed on the object
         // by `finalize_cast` so it survives stack → battlefield. Falls back to
         // the resolving ability's `chosen_x` (for stack-resolution contexts
@@ -889,8 +990,8 @@ fn resolve_ref(
             .objects
             .get(&source_id)
             .and_then(|obj| obj.cost_x_paid)
-            .map(|x| x as i32)
-            .or_else(|| chosen_x.map(|x| x as i32))
+            .map(u32_to_i32_saturating)
+            .or_else(|| chosen_x.map(u32_to_i32_saturating))
             .unwrap_or(0),
         // CR 603.10a + CR 603.6e: Count attachments present on the leaving object
         // at zone-change time (look-back). Reads the `attachments` snapshot on
@@ -907,24 +1008,26 @@ fn resolve_ref(
             let GameEvent::ZoneChanged { record, .. } = ev else {
                 return 0;
             };
-            record
-                .attachments
-                .iter()
-                .filter(|snap| snap.kind == *kind)
-                .filter(|snap| match ctrl {
-                    None => true,
-                    Some(ControllerRef::You) => snap.controller == controller,
-                    Some(ControllerRef::Opponent) => snap.controller != controller,
-                    Some(ControllerRef::TargetPlayer) => ability
-                        .and_then(|a| {
-                            a.targets.iter().find_map(|t| match t {
-                                crate::types::ability::TargetRef::Player(pid) => Some(*pid),
-                                crate::types::ability::TargetRef::Object(_) => None,
+            usize_to_i32_saturating(
+                record
+                    .attachments
+                    .iter()
+                    .filter(|snap| snap.kind == *kind)
+                    .filter(|snap| match ctrl {
+                        None => true,
+                        Some(ControllerRef::You) => snap.controller == controller,
+                        Some(ControllerRef::Opponent) => snap.controller != controller,
+                        Some(ControllerRef::TargetPlayer) => ability
+                            .and_then(|a| {
+                                a.targets.iter().find_map(|t| match t {
+                                    crate::types::ability::TargetRef::Player(pid) => Some(*pid),
+                                    crate::types::ability::TargetRef::Object(_) => None,
+                                })
                             })
-                        })
-                        .is_some_and(|pid| pid == snap.controller),
-                })
-                .count() as i32
+                            .is_some_and(|pid| pid == snap.controller),
+                    })
+                    .count(),
+            )
         }
     }
 }
@@ -965,45 +1068,49 @@ pub(crate) fn resolve_player_count(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> i32 {
-    state
-        .players
-        .iter()
-        .filter(|p| {
-            !p.is_eliminated
-                && match filter {
-                    PlayerFilter::Controller => p.id == controller,
-                    PlayerFilter::Opponent => p.id != controller,
-                    PlayerFilter::OpponentLostLife => {
-                        p.id != controller && p.life_lost_this_turn > 0
-                    }
-                    PlayerFilter::OpponentGainedLife => {
-                        p.id != controller && p.life_gained_this_turn > 0
-                    }
-                    PlayerFilter::All => true,
-                    PlayerFilter::HighestSpeed => {
-                        let highest_speed = state
-                            .players
+    usize_to_i32_saturating(
+        state
+            .players
+            .iter()
+            .filter(|p| {
+                !p.is_eliminated
+                    && match filter {
+                        PlayerFilter::Controller => p.id == controller,
+                        PlayerFilter::Opponent => p.id != controller,
+                        PlayerFilter::OpponentLostLife => {
+                            p.id != controller && p.life_lost_this_turn > 0
+                        }
+                        PlayerFilter::OpponentGainedLife => {
+                            p.id != controller && p.life_gained_this_turn > 0
+                        }
+                        PlayerFilter::All => true,
+                        PlayerFilter::HighestSpeed => {
+                            let highest_speed = state
+                                .players
+                                .iter()
+                                .map(|player| effective_speed(state, player.id))
+                                .max()
+                                .unwrap_or(0);
+                            effective_speed(state, p.id) == highest_speed
+                        }
+                        PlayerFilter::ZoneChangedThisWay => state
+                            .last_zone_changed_ids
                             .iter()
-                            .map(|player| effective_speed(state, player.id))
-                            .max()
-                            .unwrap_or(0);
-                        effective_speed(state, p.id) == highest_speed
+                            .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                        PlayerFilter::OwnersOfCardsExiledBySource => {
+                            crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
+                        }
+                        PlayerFilter::TriggeringPlayer => state
+                            .current_trigger_event
+                            .as_ref()
+                            .and_then(|e| {
+                                crate::game::targeting::extract_player_from_event(e, state)
+                            })
+                            .is_some_and(|pid| pid == p.id),
                     }
-                    PlayerFilter::ZoneChangedThisWay => state
-                        .last_zone_changed_ids
-                        .iter()
-                        .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
-                    PlayerFilter::OwnersOfCardsExiledBySource => {
-                        crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
-                    }
-                    PlayerFilter::TriggeringPlayer => state
-                        .current_trigger_event
-                        .as_ref()
-                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
-                        .is_some_and(|pid| pid == p.id),
-                }
-        })
-        .count() as i32
+            })
+            .count(),
+    )
 }
 
 #[cfg(test)]
@@ -1024,6 +1131,55 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
     use crate::types::SpellCastRecord;
+
+    /// CR 122.1: PlayerCounter resolves controller scope from the named player.
+    /// Opponents/All sums the kind across the matching scope (Toph's "you have"
+    /// is Controller; cousin patterns like "each opponent has" sum opponents).
+    #[test]
+    fn resolve_quantity_player_counter_experience_controller_and_sums() {
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0]
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 3);
+        state.players[1]
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 5);
+
+        let controller_expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Experience,
+                scope: CountScope::Controller,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &controller_expr, PlayerId(0), ObjectId(0)),
+            3
+        );
+
+        let opponents_expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Experience,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &opponents_expr, PlayerId(0), ObjectId(0)),
+            5
+        );
+
+        let all_expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Experience,
+                scope: CountScope::All,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_expr, PlayerId(0), ObjectId(0)),
+            8
+        );
+    }
 
     #[test]
     fn resolve_quantity_colors_in_commanders_color_identity() {
@@ -1058,6 +1214,52 @@ mod tests {
 
         // Other player (no commander of their own) still reports 0.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 0);
+    }
+
+    /// CR 201.2 + CR 603.4: distinct-name count for Field of the Dead.
+    /// Two lands sharing a name count once; overall = # of unique names.
+    #[test]
+    fn resolve_quantity_object_count_distinct_names() {
+        let mut state = GameState::new_two_player(42);
+        for (name, count) in &[("Plains", 3), ("Island", 2), ("Field of the Dead", 1)] {
+            for _ in 0..*count {
+                let id = create_object(
+                    &mut state,
+                    CardId(100),
+                    PlayerId(0),
+                    (*name).to_string(),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Land];
+            }
+        }
+        // Plus one opponent Plains — must not count because filter is controller=You.
+        let opp_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(1),
+            "Plains".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_id)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Land],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountDistinctNames { filter },
+        };
+        // 3 distinct names controlled by P0: Plains, Island, Field of the Dead.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
+        // P1's POV: only the one opponent Plains would be theirs, so 1.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 1);
     }
 
     #[test]
@@ -1141,11 +1343,11 @@ mod tests {
                     kind: AttachmentKind::Aura,
                 },
             ],
-            ..ZoneChangeRecord::test_minimal(dying_id, Zone::Battlefield, Zone::Graveyard)
+            ..ZoneChangeRecord::test_minimal(dying_id, Some(Zone::Battlefield), Zone::Graveyard)
         };
         state.current_trigger_event = Some(GameEvent::ZoneChanged {
             object_id: dying_id,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(record),
         });
@@ -2053,7 +2255,7 @@ mod tests {
             crate::types::mana::ManaCost::generic(4);
         state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
             object_id: source,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 linked_exile_snapshot: vec![
@@ -2073,7 +2275,7 @@ mod tests {
                         mana_value: 4,
                     },
                 ],
-                ..ZoneChangeRecord::test_minimal(source, Zone::Battlefield, Zone::Graveyard)
+                ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
             }),
         });
 

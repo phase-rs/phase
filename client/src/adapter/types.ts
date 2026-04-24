@@ -15,7 +15,24 @@ export type DungeonId =
 
 // ── Game Format ─────────────────────────────────────────────────────────
 
-export type GameFormat = "Standard" | "Commander" | "Pioneer" | "Historic" | "Pauper" | "Brawl" | "HistoricBrawl" | "FreeForAll" | "TwoHeadedGiant";
+export type GameFormat =
+  | "Standard"
+  | "Commander"
+  | "Pioneer"
+  | "Modern"
+  | "Legacy"
+  | "Vintage"
+  | "Historic"
+  | "Timeless"
+  | "Pauper"
+  | "PauperCommander"
+  | "DuelCommander"
+  | "Brawl"
+  | "HistoricBrawl"
+  | "FreeForAll"
+  | "TwoHeadedGiant";
+
+export type FormatGroup = "Constructed" | "Commander" | "Multiplayer";
 
 export interface FormatConfig {
   format: GameFormat;
@@ -28,6 +45,21 @@ export interface FormatConfig {
   commander_damage_threshold: number | null;
   range_of_influence: number | null;
   team_based: boolean;
+}
+
+/**
+ * Authoritative per-format metadata produced by the engine's
+ * `get_format_registry` WASM export. Adding a format is a single engine-side
+ * edit; frontend components consume this list rather than maintaining parallel
+ * format tables.
+ */
+export interface FormatMetadata {
+  format: GameFormat;
+  label: string;
+  short_label: string;
+  description: string;
+  group: FormatGroup;
+  default_config: FormatConfig;
 }
 
 // ── Lobby ────────────────────────────────────────────────────────────────
@@ -449,6 +481,19 @@ export interface StackEntry {
   kind: StackEntryKind;
 }
 
+/**
+ * Engine-authored coalesced view of the stack. Adjacent entries with the
+ * same source + kind + description + target signature collapse into one
+ * group with a `×count` badge. Authoritative derivation lives in
+ * `crates/engine/src/game/stack.rs::stack_display_groups`; the frontend
+ * never re-implements the grouping rule.
+ */
+export interface StackDisplayGroup {
+  representative: ObjectId;
+  count: number;
+  member_ids: ObjectId[];
+}
+
 // ── Pending Cast (for target selection) ──────────────────────────────────
 
 export interface PendingCast {
@@ -534,7 +579,7 @@ export type WaitingFor =
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
-  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown } }
+  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
@@ -699,6 +744,11 @@ export type GameAction =
   | { type: "ChooseWarpCost"; data: { use_warp: boolean } }
   | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpellAsMadness"; data: { object_id: ObjectId; card_id: CardId } }
+  // CR 702.190a: Cast a spell from hand via the Sneak alternative cost during
+  // the declare-blockers step, returning an unblocked attacker you control.
+  // Applies to any card type; CR 702.190b enter-attacking-alongside is
+  // handled engine-side for permanent spells only.
+  | { type: "CastSpellAsSneak"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_card_id: CardId; creature_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
@@ -714,6 +764,7 @@ export type GameAction =
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }
+  | { type: "SetPhaseStops"; data: { stops: Phase[] } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
@@ -809,6 +860,35 @@ export type GameEvent =
 
 // ── Game State ───────────────────────────────────────────────────────────
 
+/**
+ * Engine-authored presentation projections — a single commander-damage
+ * badge entry. Mirrors `engine::game::derived_views::CommanderDamageView`.
+ */
+export interface CommanderDamageView {
+  victim: PlayerId;
+  commander: ObjectId;
+  damage: number;
+}
+
+/**
+ * Engine-authored projections computed at each state snapshot. Rides
+ * alongside GameState through every adapter path. Frontend components
+ * consume this shape directly and never compute grouping/filtering
+ * themselves (CLAUDE.md: engine owns all logic). Mirrors
+ * `engine::game::derived_views::DerivedViews`.
+ */
+export interface DerivedViews {
+  /** Keyed by attacking commander's current controller (PlayerId as string). */
+  commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
+  /**
+   * Engine-authored coalesced view of the stack. Empty (and omitted from
+   * the wire payload) when the stack is empty. StackDisplay consumes this
+   * directly — never re-compute the grouping client-side. Mirrors
+   * `engine::game::derived_views::DerivedViews::stack_display_groups`.
+   */
+  stack_display_groups?: StackDisplayGroup[];
+}
+
 export interface GameState {
   turn_number: number;
   active_player: PlayerId;
@@ -828,6 +908,14 @@ export interface GameState {
   lands_played_this_turn: number;
   max_lands_per_turn: number;
   priority_pass_count: number;
+  /**
+   * Engine-authored derived projections, attached by adapters from the
+   * wire-format `ClientGameState.derived` sibling field. Optional because
+   * some wire paths (legacy cached state, older server builds) may not
+   * carry it. Consumers MUST treat absence as "no data" and MUST NOT
+   * synthesize grouped values client-side — that's a CLAUDE.md violation.
+   */
+  derived?: DerivedViews;
   pending_replacement: unknown | null;
   layers_dirty: boolean;
   next_timestamp: number;
@@ -856,6 +944,7 @@ export interface GameState {
   restrictions?: GameRestriction[];
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
+  phase_stops?: Record<number, Phase[]>;
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
     target_player: PlayerId;
@@ -877,12 +966,20 @@ export type AutoPassMode =
 export class AdapterError extends Error {
   readonly code: string;
   readonly recoverable: boolean;
+  /**
+   * Optional Rust panic message captured by `take_last_panic_message` after
+   * a WASM trap. Only set when `code === ENGINE_PANIC`. Carrying the panic
+   * here (rather than only via the message) lets the modal render the full
+   * diagnostic without the recovery layer needing to thread it back.
+   */
+  readonly panic?: string;
 
-  constructor(code: string, message: string, recoverable: boolean) {
+  constructor(code: string, message: string, recoverable: boolean, panic?: string) {
     super(message);
     this.name = "AdapterError";
     this.code = code;
     this.recoverable = recoverable;
+    this.panic = panic;
   }
 }
 
@@ -893,10 +990,21 @@ export const AdapterErrorCode = {
    * The engine had a game, then lost it. Distinct from NOT_INITIALIZED
    * (never had one). Triggered by the Rust sentinel `NOT_INITIALIZED: ...`
    * prefix — indicates the thread-local `GAME_STATE` is `None` mid-session
-   * (worker restart, PWA update desync, panic recovery). Recoverable via
-   * `adapter.restoreState(lastKnownGoodState)`.
+   * (worker restart, PWA update desync). Recoverable via
+   * `adapter.restoreState(lastKnownGoodState)` only when no panic preceded
+   * the loss; if a panic did precede it, classify as ENGINE_PANIC instead
+   * because retrying the same input will re-panic.
    */
   STATE_LOST: "STATE_LOST",
+  /**
+   * The engine panicked. State loss followed (the take/set thread-local
+   * pattern can't return state on a WASM trap), but unlike STATE_LOST this
+   * is NOT a transient situation — the same action against the same state
+   * will panic again. The adapter pulls `take_last_panic_message()` from
+   * the worker before classifying so the modal can show the real cause and
+   * offer a pre-filled bug report.
+   */
+  ENGINE_PANIC: "ENGINE_PANIC",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
 } as const;
@@ -953,7 +1061,7 @@ export interface EngineAdapter {
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
-  getAiAction(difficulty: string, playerId?: number): Promise<GameAction | null> | GameAction | null;
+  getAiAction(difficulty: string, playerId: number): Promise<GameAction | null> | GameAction | null;
   restoreState(state: GameState): void;
   dispose(): void;
 }

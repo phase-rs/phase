@@ -318,7 +318,7 @@ mod tests {
             "Lightning Bolt".to_string(),
             Zone::Stack,
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(0),

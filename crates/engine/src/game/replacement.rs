@@ -460,7 +460,7 @@ fn draw_replacement_count(
         .as_deref()?;
 
     match &*execute.effect {
-        Effect::Draw { count: qty } if execute.sub_ability.is_none() => {
+        Effect::Draw { count: qty, .. } if execute.sub_ability.is_none() => {
             let resolved = resolve_draw_replacement_quantity(qty, *count)?;
             Some(resolved.max(0) as u32)
         }
@@ -2379,7 +2379,7 @@ mod tests {
         obj.replacement_definitions = replacements.into();
         state.objects.insert(obj_id, obj);
         if zone == Zone::Battlefield {
-            state.battlefield.push(obj_id);
+            state.battlefield.push_back(obj_id);
         }
         state
     }
@@ -2481,8 +2481,8 @@ mod tests {
 
         state.objects.insert(ObjectId(10), obj1);
         state.objects.insert(ObjectId(20), obj2);
-        state.battlefield.push(ObjectId(10));
-        state.battlefield.push(ObjectId(20));
+        state.battlefield.push_back(ObjectId(10));
+        state.battlefield.push_back(ObjectId(20));
 
         let target = GameObject::new(
             ObjectId(30),
@@ -2562,6 +2562,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
+                    target: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -2602,6 +2603,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
+                    target: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -2635,6 +2637,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
+                    target: TargetFilter::Controller,
                 },
             ));
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -3263,7 +3266,7 @@ mod tests {
         );
         other_source.replacement_definitions = vec![untap_repl].into();
         state.objects.insert(ObjectId(11), other_source);
-        state.battlefield.push(ObjectId(11));
+        state.battlefield.push_back(ObjectId(11));
 
         let registry = build_replacement_registry();
         let mut events = Vec::new();
@@ -3411,7 +3414,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.insert(ObjectId(30), target);
-        state.battlefield.push(ObjectId(30));
+        state.battlefield.push_back(ObjectId(30));
 
         let mut events = Vec::new();
         let proposed =
@@ -3456,7 +3459,7 @@ mod tests {
         );
         obj.replacement_definitions = repls.into();
         state.objects.insert(obj_id, obj);
-        state.battlefield.push(obj_id);
+        state.battlefield.push_back(obj_id);
         state
     }
 
@@ -3589,7 +3592,7 @@ mod tests {
         );
         source_obj.controller = PlayerId(1);
         state.objects.insert(ObjectId(50), source_obj);
-        state.battlefield.push(ObjectId(50));
+        state.battlefield.push_back(ObjectId(50));
 
         let proposed = damage_event(3);
         let registry = build_replacement_registry();
@@ -3617,7 +3620,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.insert(ObjectId(50), source_obj);
-        state.battlefield.push(ObjectId(50));
+        state.battlefield.push_back(ObjectId(50));
 
         let proposed = damage_event(3);
         let registry = build_replacement_registry();
@@ -3684,7 +3687,7 @@ mod tests {
         );
         opp_creature.card_types.core_types.push(CoreType::Creature);
         state.objects.insert(ObjectId(60), opp_creature);
-        state.battlefield.push(ObjectId(60));
+        state.battlefield.push_back(ObjectId(60));
 
         let proposed = ProposedEvent::Damage {
             source_id: ObjectId(50),
@@ -4182,7 +4185,10 @@ mod tests {
     #[test]
     fn only_if_quantity_applies_when_condition_is_true() {
         let mut state = GameState::new_two_player(42);
-        state.players[0].hand.truncate(1);
+        let h = &mut state.players[0].hand;
+        if h.len() > 1 {
+            h.truncate(1);
+        }
         let cond = ReplacementCondition::OnlyIfQuantity {
             lhs: QuantityExpr::Ref {
                 qty: crate::types::ability::QuantityRef::HandSize,
@@ -4224,10 +4230,14 @@ mod tests {
                         }),
                         offset: 1,
                     },
+                    target: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
-        state.players[0].hand.truncate(1);
+        let h = &mut state.players[0].hand;
+        if h.len() > 1 {
+            h.truncate(1);
+        }
 
         let proposed = ProposedEvent::Draw {
             player_id: PlayerId(1),
@@ -4326,7 +4336,7 @@ mod tests {
         );
         creature.card_types.core_types.push(CoreType::Creature);
         state2.objects.insert(ObjectId(60), creature);
-        state2.battlefield.push(ObjectId(60));
+        state2.battlefield.push_back(ObjectId(60));
 
         let proposed_creature = ProposedEvent::Damage {
             source_id: ObjectId(50),
@@ -4464,7 +4474,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.insert(land_id, land);
-        state.battlefield.push(land_id);
+        state.battlefield.push_back(land_id);
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::produce_mana(land_id, PlayerId(0), ManaType::Green);

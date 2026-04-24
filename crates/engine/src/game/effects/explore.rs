@@ -266,7 +266,7 @@ pub fn resolve(
         // CR 701.44a: Land revealed — put the card into the player's hand. No counter.
         if let Some(player) = state.players.iter_mut().find(|p| p.id == controller) {
             player.library.retain(|id| *id != top_card_id);
-            player.hand.push(top_card_id);
+            player.hand.push_back(top_card_id);
         }
         if let Some(obj) = state.objects.get_mut(&top_card_id) {
             obj.zone = crate::types::zones::Zone::Hand;

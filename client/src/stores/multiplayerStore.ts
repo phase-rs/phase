@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { FormatConfig, GameFormat, LobbyGame, MatchType, PlayerId } from "../adapter/types";
+import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
 import {
   clearWsSession,
@@ -306,115 +307,29 @@ export function isServerCompatible(info: ServerInfo | null): boolean {
   return info.protocolVersion === PROTOCOL_VERSION;
 }
 
+// Build the FORMAT_DEFAULTS map from the engine-authored FORMAT_REGISTRY.
+// Adding a user-selectable format only needs a registry entry; its default
+// config flows here automatically. TwoHeadedGiant isn't in the registry
+// (not user-selectable yet) but the enum variant is still valid and callers
+// may look it up, so it's appended explicitly.
+const TWO_HEADED_GIANT_DEFAULT: FormatConfig = {
+  format: "TwoHeadedGiant",
+  starting_life: 30,
+  min_players: 4,
+  max_players: 4,
+  deck_size: 60,
+  singleton: false,
+  command_zone: false,
+  commander_damage_threshold: null,
+  range_of_influence: null,
+  team_based: true,
+};
+
 export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = {
-  Standard: {
-    format: "Standard",
-    starting_life: 20,
-    min_players: 2,
-    max_players: 2,
-    deck_size: 60,
-    singleton: false,
-    command_zone: false,
-    commander_damage_threshold: null,
-    range_of_influence: null,
-    team_based: false,
-  },
-  Pioneer: {
-    format: "Pioneer",
-    starting_life: 20,
-    min_players: 2,
-    max_players: 2,
-    deck_size: 60,
-    singleton: false,
-    command_zone: false,
-    commander_damage_threshold: null,
-    range_of_influence: null,
-    team_based: false,
-  },
-  Historic: {
-    format: "Historic",
-    starting_life: 20,
-    min_players: 2,
-    max_players: 2,
-    deck_size: 60,
-    singleton: false,
-    command_zone: false,
-    commander_damage_threshold: null,
-    range_of_influence: null,
-    team_based: false,
-  },
-  Pauper: {
-    format: "Pauper",
-    starting_life: 20,
-    min_players: 2,
-    max_players: 2,
-    deck_size: 60,
-    singleton: false,
-    command_zone: false,
-    commander_damage_threshold: null,
-    range_of_influence: null,
-    team_based: false,
-  },
-  Commander: {
-    format: "Commander",
-    starting_life: 40,
-    min_players: 2,
-    max_players: 4,
-    deck_size: 100,
-    singleton: true,
-    command_zone: true,
-    commander_damage_threshold: 21,
-    range_of_influence: null,
-    team_based: false,
-  },
-  Brawl: {
-    format: "Brawl",
-    starting_life: 25,
-    min_players: 2,
-    max_players: 2,
-    deck_size: 60,
-    singleton: true,
-    command_zone: true,
-    commander_damage_threshold: 21,
-    range_of_influence: null,
-    team_based: false,
-  },
-  HistoricBrawl: {
-    format: "HistoricBrawl",
-    starting_life: 25,
-    min_players: 2,
-    max_players: 2,
-    deck_size: 60,
-    singleton: true,
-    command_zone: true,
-    commander_damage_threshold: 21,
-    range_of_influence: null,
-    team_based: false,
-  },
-  FreeForAll: {
-    format: "FreeForAll",
-    starting_life: 20,
-    min_players: 3,
-    max_players: 6,
-    deck_size: 60,
-    singleton: false,
-    command_zone: false,
-    commander_damage_threshold: null,
-    range_of_influence: null,
-    team_based: false,
-  },
-  TwoHeadedGiant: {
-    format: "TwoHeadedGiant",
-    starting_life: 30,
-    min_players: 4,
-    max_players: 4,
-    deck_size: 60,
-    singleton: false,
-    command_zone: false,
-    commander_damage_threshold: null,
-    range_of_influence: null,
-    team_based: true,
-  },
+  ...(Object.fromEntries(
+    FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
+  ) as Record<Exclude<GameFormat, "TwoHeadedGiant">, FormatConfig>),
+  TwoHeadedGiant: TWO_HEADED_GIANT_DEFAULT,
 };
 
 export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>()(

@@ -242,7 +242,7 @@ pub fn manifest(
 
     let top_card_id = player_state
         .library
-        .first()
+        .front()
         .copied()
         .ok_or_else(|| EngineError::InvalidAction("Library is empty".to_string()))?;
 
@@ -257,7 +257,7 @@ pub fn manifest(
                     .players
                     .iter()
                     .find(|p| p.id == player)
-                    .map(|p| p.library.first() == Some(&obj.id))
+                    .map(|p| p.library.front() == Some(&obj.id))
                     .unwrap_or(false)
         })
         .map(|(id, _)| *id)
@@ -303,6 +303,7 @@ mod tests {
             crate::types::ability::AbilityKind::Activated,
             crate::types::ability::Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
             },
         )];
         obj.color = vec![ManaColor::Green];

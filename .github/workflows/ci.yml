@@ -93,6 +93,17 @@ jobs:
           cargo run --bin coverage-report -- data/ --all > data/coverage-data.json
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
 
+      - name: Coverage regression check (engine vs parser-honesty)
+        # Fails the build if a previously-supported card loses support because
+        # the engine now lacks a handler (non-ParseWarning gap). Parser-honesty
+        # flips (new ParseWarning:*) and genuinely-gained cards are informational.
+        # Baseline is main's last-good coverage-data.json published to R2.
+        run: |
+          ./scripts/coverage-regression-check.sh \
+            "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-data.json" \
+            data/coverage-data.json \
+            --fail-on-engine
+
       - name: Upload data to R2 (preview)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:

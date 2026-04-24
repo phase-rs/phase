@@ -105,26 +105,46 @@ fn evasion_score(
 /// Predator Ooze, tokens-spawning engines) become high-priority removal
 /// targets automatically — no per-card AI code. Failure to project or
 /// non-opponent target → 0.
+///
+/// **Deadline-gated**: the underlying `project_to` simulates the opponent's
+/// next turn. On large multi-player states this costs ~1.5s per uncached
+/// opponent. When the wall-clock deadline has expired or the remaining
+/// budget is too tight to absorb another uncached projection, fall back
+/// to cache-only lookups and return 0 on miss — preserves the evasion
+/// signal and doesn't blow the user-visible turn-time budget for a
+/// nice-to-have bonus. The threshold comes from
+/// `SearchConfig::projection_min_budget_ms` so it's tunable per difficulty.
 fn velocity_score(
     ctx: &PolicyContext<'_>,
     target: &engine::game::game_object::GameObject,
     target_id: engine::types::identifiers::ObjectId,
 ) -> f64 {
-    // AI should not remove its own creatures based on their growth.
     if target.controller == ctx.ai_player {
         return 0.0;
     }
 
-    // Project against the target's controller so the growth we read is
-    // specifically what THAT player will do on their next turn.
-    let Ok(projection) = ctx.context.session.get_or_project(
-        ctx.state,
-        ctx.ai_player,
-        target.controller,
-        ProjectionHorizon::OpponentBeginCombat,
-    ) else {
-        return 0.0;
-    };
+    // Prefer a cached projection; only fall through to the live simulator
+    // when the budget clearly affords it. The hot path in multi-opponent
+    // target selection is several uncached (ai_player, target_opponent)
+    // pairs back-to-back — without this gate they each pay the ~1.5s
+    // simulation cost serially.
+    let session = &ctx.context.session;
+    let horizon = ProjectionHorizon::OpponentBeginCombat;
+    let projection =
+        match session.cached_projection(ctx.state, ctx.ai_player, target.controller, horizon) {
+            Some(cached) => cached,
+            None => {
+                if !ctx.can_afford_projection() {
+                    return 0.0;
+                }
+                let Ok(fresh) =
+                    session.get_or_project(ctx.state, ctx.ai_player, target.controller, horizon)
+                else {
+                    return 0.0;
+                };
+                fresh
+            }
+        };
 
     let samples = crate::projection::threat_velocity(ctx.state, &projection, target.controller);
 

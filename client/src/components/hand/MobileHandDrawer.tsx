@@ -46,6 +46,9 @@ export function MobileHandDrawer() {
     for (const action of legalActions) {
       if (action.type === "PlayLand" || action.type === "CastSpell") {
         ids.add(Number((action as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.object_id));
+      } else if (action.type === "CastSpellAsSneak") {
+        // CR 702.190a: Sneak casts originate from `hand_object` (not `object_id`).
+        ids.add(Number(action.data.hand_object));
       }
     }
     return ids;

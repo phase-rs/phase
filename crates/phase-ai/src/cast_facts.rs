@@ -407,6 +407,7 @@ mod tests {
                     AbilityKind::Spell,
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: engine::types::ability::TargetFilter::Controller,
                     },
                 )),
         );
@@ -417,6 +418,7 @@ mod tests {
                     AbilityKind::Spell,
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: engine::types::ability::TargetFilter::Controller,
                     },
                 )),
             );
@@ -471,6 +473,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         );
         object.abilities.push(draw.clone());
@@ -499,6 +502,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         ));
         object.abilities.push(AbilityDefinition::new(
@@ -525,18 +529,21 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         );
         let mut draw_with_else = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         );
         draw_with_else.else_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         )));
         object.abilities.push(draw);

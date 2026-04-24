@@ -1359,6 +1359,7 @@ mod tests {
                         crate::types::ability::AbilityKind::Spell,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: crate::types::ability::TargetFilter::Controller,
                         },
                     ));
                 trigger.valid_source = Some(crate::types::ability::TargetFilter::Typed(
@@ -1411,6 +1412,7 @@ mod tests {
                         crate::types::ability::AbilityKind::Spell,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: crate::types::ability::TargetFilter::Controller,
                         },
                     ));
                 trigger.valid_source = Some(crate::types::ability::TargetFilter::Typed(

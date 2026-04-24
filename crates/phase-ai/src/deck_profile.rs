@@ -322,6 +322,7 @@ mod tests {
                 mana_cost: ManaCost::generic(mv),
                 abilities: vec![make_ability(Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
+                    target: engine::types::ability::TargetFilter::Controller,
                 })],
                 ..Default::default()
             },

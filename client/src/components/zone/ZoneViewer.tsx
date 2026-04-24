@@ -5,6 +5,7 @@ import { CardImage } from "../card/CardImage.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
 import { ScrollableCardStrip } from "../modal/ChoiceOverlay.tsx";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
@@ -115,6 +116,7 @@ function ZoneCard({
 }) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const hoverProps = useInspectHoverProps();
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
     useCallback(() => {
       inspectObject(obj.id);
@@ -132,8 +134,7 @@ function ZoneCard({
             : "hover:ring-1 hover:ring-white/20"
       }`}
       data-card-hover
-      onMouseEnter={() => inspectObject(obj.id)}
-      onMouseLeave={() => inspectObject(null)}
+      {...hoverProps(obj.id)}
       onClick={isValidTarget
         ? () => { if (!longPressFired.current) onTarget(); else longPressFired.current = false; }
         : undefined}

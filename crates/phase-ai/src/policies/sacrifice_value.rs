@@ -80,6 +80,7 @@ mod tests {
             ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 0 },
+                    target: engine::types::ability::TargetFilter::Controller,
                 },
                 Vec::new(),
                 ObjectId(100),

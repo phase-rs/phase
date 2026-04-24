@@ -84,7 +84,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         count: token.count,
         owner: TargetFilter::Controller,
         attach_to: token.attach_to,
-        enters_attacking: false,
+        enters_attacking: token.enters_attacking,
         supertypes: vec![],
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
@@ -132,6 +132,32 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         (text, None)
     };
 
+    // CR 508.4 + CR 506.3a: Strip inline "that's tapped and attacking" /
+    // "that is tapped and attacking" / "thats tapped and attacking" suffix
+    // (all three apostrophe variants Oracle normalizes to). This is the
+    // single-clause form; the trailing "It enters tapped and attacking"
+    // sentence form is patched via `ContinuationAst::EntersTappedAttacking`.
+    let lower_trimmed = text.to_lowercase();
+    // Single combinator for the whole clause: relative-pronoun variants
+    // factored into one `alt`, shared tail appears once, `eof` anchors the
+    // match at the string's end.
+    let tapped_attacking_clause = |i| -> OracleResult<'_, ()> {
+        let (i, _) = alt((tag(" that's"), tag(" that is"), tag(" thats"))).parse(i)?;
+        let (i, _) = tag(" tapped and attacking").parse(i)?;
+        let (i, _) = nom::combinator::eof(i)?;
+        Ok((i, ()))
+    };
+    // Nom parses forward; scan byte positions (only those starting with the
+    // leading space the clause requires) for the first place where the clause
+    // consumes the remainder to EOF. That byte offset is the body length.
+    let body_len = (0..lower_trimmed.len()).find(|&pos| {
+        lower_trimmed.as_bytes().get(pos) == Some(&b' ')
+            && tapped_attacking_clause(&lower_trimmed[pos..]).is_ok()
+    });
+    let (text, enters_attacking) = match body_len {
+        Some(len) => (&text[..len], true),
+        None => (text, false),
+    };
     let (mut count, leading_name, mut rest) =
         if let Some((count, rest)) = parse_token_count_prefix(text) {
             (count, None, rest)
@@ -140,7 +166,10 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         } else {
             return None;
         };
-    let mut tapped = false;
+    // CR 508.4: Seed `tapped` from the inline "tapped and attacking" suffix
+    // detected earlier so the "tapped " / "untapped " leading-word loop below
+    // can still flip it if the token text also carries a leading "tapped".
+    let mut tapped = enters_attacking;
 
     loop {
         let trimmed = rest.trim_start();
@@ -266,6 +295,7 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         count,
         attach_to,
         static_abilities,
+        enters_attacking,
     })
 }
 

@@ -85,7 +85,7 @@ pub fn resolve(
 
 /// Resolve parse-time restriction templates into concrete `ManaRestriction` values.
 /// CR 106.6: Some spells or abilities that produce mana restrict how that mana can be spent.
-fn resolve_restrictions(
+pub(crate) fn resolve_restrictions(
     templates: &[ManaSpendRestriction],
     state: &GameState,
     source_id: crate::types::identifiers::ObjectId,
@@ -262,7 +262,62 @@ fn resolve_mana_types_impl(
             };
             vec![mana_color_to_type(first); amount]
         }
+        // CR 106.1 + CR 109.1: Produce one mana of each distinct color (W/U/B/R/G)
+        // found among permanents matching `filter`. Used by Faeburrow Elder.
+        // Returns empty when no colored permanent matches (CR 106.5).
+        ManaProduction::DistinctColorsAmongPermanents { filter } => {
+            distinct_colors_among_permanents(state, ability, controller, source_id, filter)
+                .into_iter()
+                .map(|c| mana_color_to_type(&c))
+                .collect()
+        }
     }
+}
+
+/// CR 106.1 + CR 109.1: Shared helper returning the distinct colors (W/U/B/R/G)
+/// present among permanents matching `filter`. Colorless permanents contribute
+/// nothing. Used by both the mana ability resolver and `mana_sources` so that
+/// cost-payment and direct activation see the same option set.
+pub(crate) fn distinct_colors_among_permanents(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    controller: crate::types::player::PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
+    filter: &crate::types::ability::TargetFilter,
+) -> Vec<crate::types::mana::ManaColor> {
+    use crate::game::filter::{matches_target_filter, FilterContext};
+    let _ = controller;
+    let filter_ctx = match ability {
+        Some(a) => FilterContext::from_ability(a),
+        None => FilterContext::from_source(state, source_id),
+    };
+    let zone = filter
+        .extract_in_zone()
+        .unwrap_or(crate::types::zones::Zone::Battlefield);
+    let mut seen: std::collections::HashSet<crate::types::mana::ManaColor> =
+        std::collections::HashSet::new();
+    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
+        if !matches_target_filter(state, id, filter, &filter_ctx) {
+            continue;
+        }
+        if let Some(obj) = state.objects.get(&id) {
+            for color in &obj.color {
+                seen.insert(*color);
+            }
+        }
+    }
+    // Stable order for determinism (WUBRG).
+    use crate::types::mana::ManaColor;
+    [
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ]
+    .into_iter()
+    .filter(|c| seen.contains(c))
+    .collect()
 }
 
 /// CR 605.1a + CR 406.1 + CR 610.3: Resolve the legal `ManaType` set for a

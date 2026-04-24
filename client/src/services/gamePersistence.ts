@@ -4,10 +4,26 @@ import type { FormatConfig, GameState, MatchConfig } from "../adapter/types";
 import type { SeatState } from "../multiplayer/seatTypes";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
+/** Snapshot of an AI seat's configuration at game-start time. The per-seat
+ *  deck has already been baked into the engine's persisted `GameState`, so
+ *  `deckName` is retained only as an informational label for UI/resume tooling.
+ *  `difficulty` is the load-bearing field: the AI controller needs it on resume
+ *  to reconstruct the per-seat policy. */
+export interface AiSeatMeta {
+  difficulty: string;
+  deckName: string | null;
+}
+
 export interface ActiveGameMeta {
   id: string;
   mode: "ai" | "local" | "online" | "p2p-host" | "p2p-join";
+  /** Default AI difficulty — retained for back-compat and for 2-player URL
+   *  routing. When `aiSeats` is present it is the authoritative per-seat
+   *  source; `difficulty` mirrors `aiSeats[0].difficulty`. */
   difficulty: string;
+  /** Per-AI-seat config for multi-opponent AI games. Absent for online/P2P
+   *  modes and for pre-migration saved games. */
+  aiSeats?: AiSeatMeta[];
   /** Bare 5-char room code for P2P guest resume. */
   p2pRoomCode?: string;
 }

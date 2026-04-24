@@ -14,6 +14,7 @@ import type {
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
+import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
 
 export type SettingsHighlight = "board-background";
 
@@ -34,6 +35,7 @@ const SETTINGS_TABS = [
   { id: "combat", label: "Combat" },
   { id: "audio", label: "Audio" },
   { id: "multiplayer", label: "Multiplayer" },
+  { id: "data", label: "Data" },
 ] as const;
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
@@ -436,9 +438,101 @@ export function PreferencesModal({
                   </p>
                 </SettingsSection>
               )}
+
+              {activeTab === "data" && <DataSection />}
             </div>
           </div>
     </ModalPanelShell>
+  );
+}
+
+function DataSection() {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const onExport = useCallback(() => {
+    setError(null);
+    try {
+      downloadBackup();
+      setStatus("Backup downloaded.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  const onImport = useCallback(
+    async (file: File, mode: ImportMode) => {
+      setError(null);
+      setStatus(null);
+      try {
+        const result = await importBackupFromFile(file, mode);
+        const base =
+          `Imported ${result.decksImported} deck(s)` +
+          (result.preferencesReplaced ? " and preferences." : ".");
+        const malformedSuffix =
+          result.malformedKeys.length > 0
+            ? ` Skipped ${result.malformedKeys.length} malformed entr${result.malformedKeys.length === 1 ? "y" : "ies"}.`
+            : "";
+        setStatus(base + malformedSuffix);
+        // Zustand stores read from localStorage at boot — reload so every
+        // subscriber picks up the restored data instead of holding stale state.
+        setTimeout(() => {
+          window.location.reload();
+        }, 600);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [],
+  );
+
+  return (
+    <SettingsSection title="Backup & Restore">
+      <p className="text-xs text-slate-400">
+        Export bundles your preferences, imported decks, and feed subscriptions
+        into a single JSON file. Import restores them on another machine. IndexedDB
+        caches (feed cache, audio cache, saved games) are not included — those
+        rebuild automatically.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button
+          onClick={onExport}
+          className="rounded-[14px] border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10"
+        >
+          Export backup…
+        </button>
+        <button
+          onClick={() => {
+            fileInputRef.current?.click();
+          }}
+          className="rounded-[14px] border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10"
+        >
+          Import backup…
+        </button>
+      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (!file) return;
+          const mode: ImportMode = window.confirm(
+            "Overwrite existing preferences and decks?\n\n" +
+              "OK: replace everything with the backup (destructive).\n" +
+              "Cancel: merge — keep existing decks, add new ones from the backup.",
+          )
+            ? "overwrite"
+            : "merge";
+          void onImport(file, mode);
+        }}
+      />
+      {status && <p className="text-xs text-emerald-400">{status}</p>}
+      {error && <p className="text-xs text-rose-400">{error}</p>}
+    </SettingsSection>
   );
 }
 

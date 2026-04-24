@@ -37,7 +37,12 @@ pub fn resolve(
         .find(|p| p.id == target_player)
         .ok_or(EffectError::PlayerNotFound)?;
     let count = count.min(player.library.len());
-    let top_cards: Vec<_> = player.library[..count].to_vec();
+    let top_cards: Vec<_> = player
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>();
 
     for object_id in top_cards {
         zones::move_to_zone(state, object_id, Zone::Exile, events);

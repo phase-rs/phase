@@ -1162,6 +1162,31 @@ pub(super) fn parse_followup_continuation_ast(
                 ])),
             })
         }
+        // CR 201.2 + CR 608.2c: "[You may] put one of those cards onto the
+        // battlefield if it has the same name as a permanent" after Dig —
+        // Mitotic-Manipulation-style name-match selection. Patches the
+        // preceding Dig with destination=Battlefield, keep_count=1, up_to=true
+        // (always optional — "may" or implicit "if"), and a filter that
+        // restricts selectable cards to those sharing a name with any
+        // permanent currently on the battlefield.
+        Effect::Dig { .. }
+            if (nom_primitives::scan_contains(&lower, "one of those cards")
+                || nom_primitives::scan_contains(&lower, "one of them"))
+                && nom_primitives::scan_contains(&lower, "onto the battlefield")
+                && (nom_primitives::scan_contains(&lower, "the same name as a permanent")
+                    || nom_primitives::scan_contains(&lower, "shares a name with a permanent")) =>
+        {
+            use crate::types::ability::{FilterProp, TypedFilter};
+            Some(ContinuationAst::DigFromAmong {
+                count: 1,
+                up_to: true,
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::NameMatchesAnyPermanent { controller: None },
+                ])),
+                destination: Some(Zone::Battlefield),
+                rest_destination: None,
+            })
+        }
         // "put the rest on the bottom" / "put them back" / "put those cards into your graveyard"
         // after Dig — sets rest_destination on the preceding Dig effect.
         Effect::Dig { .. }
@@ -1922,6 +1947,33 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Graveyard),
+            })
+        );
+    }
+
+    /// CR 201.2 + CR 608.2c: Mitotic-Manipulation-style name-match selection
+    /// after a Dig emits a `DigFromAmong` continuation that patches the
+    /// preceding Dig with destination = Battlefield, keep_count = 1,
+    /// up_to = true (the "may" / "if" optional selection), and a
+    /// `NameMatchesAnyPermanent` filter.
+    #[test]
+    fn put_one_of_those_cards_onto_battlefield_if_same_name() {
+        use crate::types::ability::{FilterProp, TypedFilter};
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "You may put one of those cards onto the battlefield if it has the same name as a permanent.",
+            &dig,
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::DigFromAmong {
+                count: 1,
+                up_to: true,
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::NameMatchesAnyPermanent { controller: None },
+                ])),
+                destination: Some(Zone::Battlefield),
+                rest_destination: None,
             })
         );
     }

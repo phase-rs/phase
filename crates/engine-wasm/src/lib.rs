@@ -121,11 +121,64 @@ fn with_state<R>(f: impl FnOnce(&GameState) -> R) -> Result<R, JsValue> {
     })
 }
 
+thread_local! {
+    /// Last panic message + location, captured by our panic hook below.
+    /// JS reads this via `take_last_panic_message` after a WASM trap so the
+    /// "Engine connection lost" modal can show the real cause + offer a
+    /// pre-filled bug report instead of asking the user to reload blind.
+    static LAST_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// Initialize panic hook for better error messages in WASM.
 /// Called automatically on first use — safe to call multiple times.
+///
+/// We install our own hook (composing with `console_error_panic_hook`'s
+/// console output) so panics are *both* logged to devtools and captured
+/// for later retrieval. With `panic = 'abort'`, the hook runs before the
+/// WASM trap, so a thread-local written here is readable from the next JS
+/// call into the module.
 #[wasm_bindgen(start)]
 pub fn init_panic_hook() {
-    console_error_panic_hook::set_once();
+    use std::sync::Once;
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let payload = info.payload();
+            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Box<dyn Any> panic payload".to_string()
+            };
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown location>".to_string());
+            let formatted = format!("panicked at {location}: {msg}");
+            // Capture FIRST so the message lands even if the console mirror
+            // re-panics (its formatter allocates; an OOM panic could trip it).
+            // `try_borrow_mut` keeps a re-entrant write from blowing up — at
+            // worst we lose the second panic's text, never the first.
+            LAST_PANIC.with(|cell| {
+                if let Ok(mut slot) = cell.try_borrow_mut() {
+                    *slot = Some(formatted);
+                }
+            });
+            // Mirror to the browser console with full backtrace + symbol names.
+            console_error_panic_hook::hook(info);
+        }));
+    });
+}
+
+/// Drain the last captured panic message (consuming it). Returns `null` when
+/// no panic has been observed since the last drain. JS calls this after a
+/// thrown `RuntimeError` to decide whether to surface the modal as a real
+/// engine crash (with the panic text + report link) or a transient
+/// state-loss (the legacy reload prompt).
+#[wasm_bindgen]
+pub fn take_last_panic_message() -> Option<String> {
+    LAST_PANIC.with(|cell| cell.borrow_mut().take())
 }
 
 /// Clear the game state without dropping the WASM instance or card database.
@@ -315,6 +368,14 @@ pub fn sideboard_policy_for_format(format: JsValue) -> Result<JsValue, JsValue> 
     Ok(to_js(&format.sideboard_policy()))
 }
 
+/// Return the authoritative list of user-selectable formats as a typed array.
+/// The frontend treats this as the single source of truth for rendering
+/// format pickers, badges, and default configs — no hand-maintained mirrors.
+#[wasm_bindgen(js_name = getFormatRegistry)]
+pub fn get_format_registry() -> JsValue {
+    to_js(&GameFormat::registry())
+}
+
 /// Evaluate deck compatibility and format legality using the loaded card database.
 /// Returns strict Standard/Commander checks, BO3 readiness, and selected-format compatibility.
 #[wasm_bindgen]
@@ -464,21 +525,36 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     }
 }
 
-/// Get the current game state as JSON.
-/// Derived display fields (summoning sickness, devotion, etc.) are computed
-/// automatically by the engine in apply()/start_game().
+/// Get the current game state as a `ClientGameState` wire envelope
+/// (`{ state, derived }`). The `derived` block holds engine-authored
+/// presentation projections — commander-damage grouping, etc. — so the
+/// frontend never computes game logic. Derivation happens just-in-time per
+/// call and does not mutate `GameState`. See
+/// `engine::game::derived_views::ClientGameStateRef`.
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
-    match with_state(to_js) {
+    match with_state(|state| {
+        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
+            state,
+        ))
+    }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
     }
 }
 
-/// Get a filtered view of the current game state for the given player.
+/// Filtered-viewer variant of `get_game_state`. Runs the viewer filter
+/// first (hides opponent hand/library per standard multiplayer redaction),
+/// then derives views over the filtered state so the wire shape is
+/// identical to `get_game_state` regardless of filter path.
 #[wasm_bindgen]
 pub fn get_filtered_game_state(viewer: u8) -> JsValue {
-    match with_state(|state| to_js(&filter_state_for_viewer(state, PlayerId(viewer)))) {
+    match with_state(|state| {
+        let filtered = filter_state_for_viewer(state, PlayerId(viewer));
+        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
+            &filtered,
+        ))
+    }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
     }
@@ -502,6 +578,37 @@ pub fn get_legal_actions_js() -> JsValue {
         Err(_) => JsValue::NULL,
     }
 }
+
+/// Current stack pressure bucket for animation pacing (Normal/Elevated/Rapid/Instant).
+/// Not a rules concept — presentation policy owned by the engine for consistency
+/// across browser/desktop/server consumers. Returned as a string to avoid
+/// tsify enum-sharing overhead; frontend maps the string to a multiplier.
+#[wasm_bindgen]
+pub fn get_stack_pressure() -> JsValue {
+    match with_state(|state| {
+        let s = match engine::game::stack::stack_pressure(state) {
+            engine::game::stack::StackPressure::Normal => "Normal",
+            engine::game::stack::StackPressure::Elevated => "Elevated",
+            engine::game::stack::StackPressure::Rapid => "Rapid",
+            engine::game::stack::StackPressure::Instant => "Instant",
+        };
+        JsValue::from_str(s)
+    }) {
+        Ok(v) => v,
+        Err(_) => JsValue::NULL,
+    }
+}
+
+// `get_stack_display_groups` and `get_commander_damage_received` were both
+// retired when their grouping moved into the authoritative
+// `ClientGameState.derived` wire envelope produced by `get_game_state` /
+// `get_filtered_game_state`. Leaving the standalone exports alongside would
+// have created two paths to the same derived value — "duplicate logic
+// across adapters" per CLAUDE.md — and the async RPC path also required a
+// generation-counter race guard on the frontend to survive rapid stack
+// mutations. Riding the same snapshot that carries `state.stack` makes the
+// grouping atomically consistent with the stack it describes.
+// See `engine::game::derived_views`.
 
 /// Export the current game state as a JSON string.
 /// Used by the engine worker to transfer state to AI workers for root parallelism.

@@ -228,6 +228,56 @@ impl FromStr for CastFrequency {
     }
 }
 
+/// CR 603.2d: The cause-predicate axis for trigger-doubling static abilities.
+///
+/// "An effect that states a triggered ability of an object triggers additional
+/// times" may be restricted to triggers caused by specific events
+/// (Panharmonicon: artifact/creature entering the battlefield; Isshin:
+/// creature attacking). A wildcard `Any` cause covers hypothetical unrestricted
+/// doublers.
+///
+/// This is a typed enum rather than a boolean because the design space is
+/// open-ended: new cards routinely introduce novel cause predicates, and
+/// `bool` fields cannot grow to accommodate them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggerCause {
+    /// Unrestricted doubler — matches any trigger cause.
+    Any,
+    /// CR 603.6a: Trigger was caused by a permanent entering the battlefield
+    /// (Panharmonicon-class). The `core_types` list narrows the entering
+    /// permanent's type — for Panharmonicon this is
+    /// `[Artifact, Creature]`; for a hypothetical creature-only Panharmonicon
+    /// it would be `[Creature]`.
+    EntersBattlefield {
+        #[serde(default)]
+        core_types: Vec<super::card_type::CoreType>,
+    },
+    /// CR 508.1 + CR 308.1: Trigger was caused by a creature attacking
+    /// (Isshin-class). Matches `GameEvent::AttackersDeclared` regardless of
+    /// attack target (player, planeswalker, or battle).
+    CreatureAttacking,
+    /// CR 603.6c + CR 700.4: Trigger was caused by a creature dying — a
+    /// creature moving from the battlefield to the graveyard
+    /// (Drivnod-class). Matches `GameEvent::ZoneChanged` from `Battlefield`
+    /// to `Graveyard` for an object whose snapshot included `Creature` in
+    /// its core types.
+    CreatureDying,
+}
+
+impl fmt::Display for TriggerCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TriggerCause::Any => write!(f, "Any"),
+            TriggerCause::EntersBattlefield { core_types } => {
+                let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();
+                write!(f, "EntersBattlefield([{}])", names.join(","))
+            }
+            TriggerCause::CreatureAttacking => write!(f, "CreatureAttacking"),
+            TriggerCause::CreatureDying => write!(f, "CreatureDying"),
+        }
+    }
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,7 +367,13 @@ pub enum StaticMode {
     CantDraw {
         who: ProhibitionScope,
     },
-    Panharmonicon,
+    /// CR 603.2d: "If [cause], a triggered ability of a permanent you control
+    /// triggers an additional time." Panharmonicon, Isshin Two Heavens as One,
+    /// and the class of trigger-doublers. The `cause` predicate narrows which
+    /// trigger-spawning events qualify.
+    DoubleTriggers {
+        cause: TriggerCause,
+    },
     IgnoreHexproof,
     /// CR 509.1a + CR 509.1b: This creature can block additional creatures.
     /// `None` = any number, `Some(n)` = n additional creatures beyond the default 1.
@@ -428,6 +484,11 @@ pub enum StaticMode {
     FlashBack,
     /// CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
     Shroud,
+    /// CR 702.11: Hexproof — affected player/permanent cannot be the target of
+    /// spells or abilities an opponent controls. Applied at the player scope
+    /// ("You have hexproof.") mirroring `Shroud`; permanent-scope hexproof
+    /// grants flow through `ContinuousModification::AddKeyword` instead.
+    Hexproof,
     /// CR 702.20: Vigilance — attacking doesn't cause this creature to tap.
     Vigilance,
     /// CR 702.111: Menace — can't be blocked except by two or more creatures.
@@ -509,6 +570,15 @@ pub enum StaticMode {
     /// Used for creatures like Ornithopter of Paradise and various Walls that can
     /// attack/block but deal 0 combat damage.
     AssignNoCombatDamage,
+    /// CR 502.3 + CR 113.6: Continuous static that grants a second untap pass
+    /// during each OTHER player's untap step. The source's controller untaps
+    /// the permanents matching `StaticDefinition.affected` — NOT the active
+    /// player's permanents. Canonical card: Seedborn Muse ("Untap all
+    /// permanents you control during each other player's untap step.").
+    /// Runtime: `turns::execute_untap` runs a second pass after the active
+    /// player's normal untap, scanning the battlefield for this variant on
+    /// permanents whose controller != active_player.
+    UntapsDuringEachOtherPlayersUntapStep,
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -542,6 +612,7 @@ impl Hash for StaticMode {
                 frequency.hash(state);
             }
             StaticMode::SkipStep { step } => step.hash(state),
+            StaticMode::DoubleTriggers { cause } => cause.hash(state),
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ReduceCost { .. }
@@ -590,7 +661,7 @@ impl fmt::Display for StaticMode {
             StaticMode::MustAttack => write!(f, "MustAttack"),
             StaticMode::MustBlock => write!(f, "MustBlock"),
             StaticMode::CantDraw { who } => write!(f, "CantDraw({who})"),
-            StaticMode::Panharmonicon => write!(f, "Panharmonicon"),
+            StaticMode::DoubleTriggers { cause } => write!(f, "DoubleTriggers({cause})"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
             StaticMode::GraveyardCastPermission {
                 frequency,
@@ -636,6 +707,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
             StaticMode::FlashBack => write!(f, "FlashBack"),
             StaticMode::Shroud => write!(f, "Shroud"),
+            StaticMode::Hexproof => write!(f, "Hexproof"),
             StaticMode::Vigilance => write!(f, "Vigilance"),
             StaticMode::Menace => write!(f, "Menace"),
             StaticMode::Reach => write!(f, "Reach"),
@@ -675,6 +747,9 @@ impl fmt::Display for StaticMode {
             StaticMode::SpendManaAsAnyColor => write!(f, "SpendManaAsAnyColor"),
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
+            StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
+                write!(f, "UntapsDuringEachOtherPlayersUntapStep")
+            }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }
@@ -738,7 +813,16 @@ impl FromStr for StaticMode {
             "CantLoseLife" => StaticMode::CantLoseLife,
             "MustAttack" => StaticMode::MustAttack,
             "MustBlock" => StaticMode::MustBlock,
-            "Panharmonicon" => StaticMode::Panharmonicon,
+            // CR 603.2d: Legacy name for backward-compat with any already-serialized
+            // card data. Canonical form is `DoubleTriggers(EntersBattlefield(...))`.
+            "Panharmonicon" => StaticMode::DoubleTriggers {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![
+                        super::card_type::CoreType::Artifact,
+                        super::card_type::CoreType::Creature,
+                    ],
+                },
+            },
             "IgnoreHexproof" => StaticMode::IgnoreHexproof,
             "GraveyardCastPermission" => StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
@@ -784,6 +868,7 @@ impl FromStr for StaticMode {
             "CantBeDestroyed" => StaticMode::CantBeDestroyed,
             "FlashBack" => StaticMode::FlashBack,
             "Shroud" => StaticMode::Shroud,
+            "Hexproof" => StaticMode::Hexproof,
             "Vigilance" => StaticMode::Vigilance,
             "Menace" => StaticMode::Menace,
             "Reach" => StaticMode::Reach,
@@ -813,6 +898,9 @@ impl FromStr for StaticMode {
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
+            "UntapsDuringEachOtherPlayersUntapStep" => {
+                StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            }
             // Parameterized
             other => {
                 if let Some(inner) = other
@@ -964,9 +1052,16 @@ mod tests {
             StaticMode::from_str("CantAttack").unwrap(),
             StaticMode::CantAttack
         );
+        // CR 603.2d: Legacy "Panharmonicon" string rehydrates to the canonical
+        // typed form with the Panharmonicon cause predicate.
+        use super::super::card_type::CoreType;
         assert_eq!(
             StaticMode::from_str("Panharmonicon").unwrap(),
-            StaticMode::Panharmonicon
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![CoreType::Artifact, CoreType::Creature],
+                },
+            }
         );
         assert_eq!(
             StaticMode::from_str("IgnoreHexproof").unwrap(),
@@ -1019,6 +1114,7 @@ mod tests {
             StaticMode::CantBeDestroyed,
             StaticMode::FlashBack,
             StaticMode::Shroud,
+            StaticMode::Hexproof,
             StaticMode::Vigilance,
             StaticMode::Menace,
             StaticMode::Reach,

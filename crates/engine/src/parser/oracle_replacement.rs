@@ -52,6 +52,16 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
+    // --- Reveal-lands: "As ~ enters, you may reveal a [FILTER] card from your hand.
+    //     If you don't, ~ enters tapped." (Port Town, Gilt-Leaf Palace, Temple cycle) ---
+    // Structurally parallel to shock lands: Mandatory replacement whose execute is
+    // `RevealFromHand { filter, on_decline: Tap SelfRef }`. The `on_decline` branch
+    // mirrors shock lands' decline handler. Must be checked BEFORE shock lands so
+    // the "pay N life" pattern isn't fooled by a shared "you may" framing.
+    if let Some(def) = parse_reveal_land(&norm_lower, &normalized, &text) {
+        return Some(def);
+    }
+
     // --- Shock lands: "As ~ enters, you may pay N life. If you don't, it enters tapped." ---
     // Must be checked BEFORE the generic "enters tapped" pattern.
     if let Some(def) = parse_shock_land(&norm_lower, &text) {
@@ -275,6 +285,114 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
+}
+
+/// CR 603.6b + CR 701.20a: Parse the reveal-land pattern.
+///
+/// Matches "As ~ enters, you may reveal a [FILTER] card from your hand.
+/// If you don't, ~ enters tapped." — covering Port Town, Gilt-Leaf Palace, and
+/// the full 10-Temple reveal-land cycle (Temple of Abandon, Temple of Enlightenment,
+/// etc.). Also symmetric "if you do, [effect]" variants reuse the same primitive.
+///
+/// Returns a `Mandatory` Moved replacement whose `execute` is a
+/// `RevealFromHand { filter, on_decline: Tap SelfRef }` effect. The engine-side
+/// resolver sets `WaitingFor::RevealChoice { optional: true, ... }` on the
+/// controller's eligible hand cards and routes an empty pick (decline) or an
+/// empty eligible set through the `on_decline` chain.
+fn parse_reveal_land(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Nom combinator: recognize the leading "as ~ enters, you may reveal " framing.
+    // `nom_on_lower` bridges the already-lowercase matcher into the normalized
+    // (case-preserving, self-refs replaced with `~`) source; indexing is consistent
+    // because `normalized.to_lowercase()` equals `norm_lower` bijectively on ASCII.
+    let ((), after_reveal) = nom_on_lower(normalized, norm_lower, |i| {
+        value(
+            (),
+            (
+                alt((
+                    tag("as ~ enters, you may reveal "),
+                    tag("as ~ enters the battlefield, you may reveal "),
+                )),
+                // Leading article on the filter: "a Plains or Island card", "an Elf card".
+                alt((tag("a "), tag("an "))),
+            ),
+        )
+        .parse(i)
+    })?;
+
+    // Split the filter phrase from the remaining decline sentence at
+    // " card from your hand". Nom's `take_until` advances past the prefix;
+    // consumed byte count maps back into the original-case slice.
+    let after_reveal_lower = after_reveal.to_lowercase();
+    let ((), after_filter) = nom_on_lower(after_reveal, &after_reveal_lower, |i| {
+        value(
+            (),
+            take_until::<_, _, VerboseError<&str>>(" card from your hand"),
+        )
+        .parse(i)
+    })?;
+    let consumed = after_reveal.len() - after_filter.len();
+    let filter_phrase = &after_reveal[..consumed];
+    let remainder = after_filter;
+    let remainder_lower = remainder.to_lowercase();
+
+    // The tail must be exactly the decline sentence. Accept both "it enters
+    // tapped" (pronoun) and "~ enters tapped" (normalized) variants; trailing
+    // punctuation is tolerated by `trim_end`.
+    let ((), tail) = nom_on_lower(remainder, &remainder_lower, |i| {
+        value(
+            (),
+            (
+                tag(" card from your hand. if you don't, "),
+                alt((tag("~ "), tag("it "))),
+                alt((tag("enters tapped"), tag("enters the battlefield tapped"))),
+            ),
+        )
+        .parse(i)
+    })?;
+    if !tail.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    // Parse the filter phrase (e.g., "Plains or Island", "Elf") into a TargetFilter.
+    // `parse_type_phrase` handles union types via `TargetFilter::Or` and single
+    // subtypes via `TargetFilter::Typed`. Reject phrases we cannot classify —
+    // better to fall through to a generic enter-tapped parse than to synthesize
+    // a misbehaving filter.
+    let (filter, filter_remainder) = parse_type_phrase(filter_phrase.trim());
+    if !filter_remainder.trim().is_empty() {
+        return None;
+    }
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+
+    // The accept branch: a RevealFromHand effect that, when resolved, prompts
+    // the controller to pick a matching card or decline. on_decline taps self.
+    let tap_self = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
+            target: TargetFilter::SelfRef,
+        },
+    );
+
+    let reveal = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RevealFromHand {
+            filter,
+            on_decline: Some(Box::new(tap_self)),
+        },
+    );
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(reveal)
+            .valid_card(TargetFilter::SelfRef)
+            .description(original_text.to_string()),
+    )
 }
 
 /// Parse shock land pattern: "As ~ enters, you may pay N life. If you don't, it enters tapped."
@@ -2206,6 +2324,7 @@ fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<Replace
                         }),
                         offset,
                     },
+                    target: TargetFilter::Controller,
                 },
             ))
             .description(text.to_string()),
@@ -3136,6 +3255,53 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn reveal_land_port_town_emits_reveal_from_hand_with_or_filter() {
+        let def = parse_replacement_line(
+            "As Port Town enters, you may reveal a Plains or Island card from your hand. If you don't, Port Town enters tapped.",
+            "Port Town",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        // Mandatory + single execute step: the "may reveal / else tap" is encoded inside
+        // the RevealFromHand effect's on_decline, not via ReplacementMode::Optional.
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+
+        let execute = def.execute.as_ref().unwrap();
+        let (filter, on_decline) = match &*execute.effect {
+            Effect::RevealFromHand { filter, on_decline } => (filter, on_decline),
+            other => panic!("expected RevealFromHand, got {other:?}"),
+        };
+        // Union of Plains and Island — the reveal-land class uses TargetFilter::Or.
+        assert!(matches!(filter, TargetFilter::Or { .. }));
+        // Decline = Tap SelfRef (the "if you don't, ~ enters tapped" branch).
+        let decline = on_decline.as_ref().unwrap();
+        assert!(matches!(
+            *decline.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+    }
+
+    #[test]
+    fn reveal_land_gilt_leaf_palace_emits_single_subtype_filter() {
+        let def = parse_replacement_line(
+            "As Gilt-Leaf Palace enters, you may reveal an Elf card from your hand. If you don't, Gilt-Leaf Palace enters tapped.",
+            "Gilt-Leaf Palace",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        let filter = match &*execute.effect {
+            Effect::RevealFromHand { filter, .. } => filter,
+            other => panic!("expected RevealFromHand, got {other:?}"),
+        };
+        // Single-subtype filter: tribal reveal-lands use TargetFilter::Typed, not Or.
+        assert!(matches!(filter, TargetFilter::Typed(_)));
     }
 
     #[test]
@@ -4642,7 +4808,8 @@ mod tests {
         assert!(matches!(
             def.execute.as_deref().map(|ability| &*ability.effect),
             Some(Effect::Draw {
-                count: QuantityExpr::Offset { inner, offset }
+                count: QuantityExpr::Offset { inner, offset },
+                ..
             }) if matches!(
                 &**inner,
                 QuantityExpr::Ref {

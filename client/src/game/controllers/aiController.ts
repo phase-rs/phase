@@ -4,7 +4,7 @@ import type { GameAction } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { debugLog } from "../debugLog";
 import { dispatchAction } from "../dispatch";
-import { attemptStateRehydrate, notifyEngineLost } from "../engineRecovery";
+import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
 import type { OpponentController } from "./types";
 
 /**
@@ -15,9 +15,16 @@ import type { OpponentController } from "./types";
  */
 const MAX_TOTAL_FAILURES = 6;
 
-export interface AIControllerConfig {
+/** Per-seat config: each AI player has its own difficulty. Multiple seats
+ *  can share a difficulty; the map is keyed by `playerId` so lookups match
+ *  the `waiting_for.data.player` value that drives scheduling. */
+export interface AISeatBinding {
+  playerId: number;
   difficulty: string;
-  playerIds: number[];
+}
+
+export interface AIControllerConfig {
+  seats: AISeatBinding[];
 }
 
 export interface AIController extends OpponentController {
@@ -45,7 +52,8 @@ export function createAIController(config: AIControllerConfig): AIController {
   let totalFailures = 0;
   const MAX_CONSECUTIVE_FAILURES = 3;
 
-  const aiPlayerIds = new Set(config.playerIds);
+  const difficultyByPlayerId = new Map(config.seats.map((s) => [s.playerId, s.difficulty]));
+  const aiPlayerIds = new Set(difficultyByPlayerId.keys());
 
   /** Stable identity key for a WaitingFor — type + player so Priority{0} ≠ Priority{1}. */
   function waitingForKey(wf: { type: string; data?: { player?: number } }): string {
@@ -150,9 +158,12 @@ export function createAIController(config: AIControllerConfig): AIController {
     // This turns additive latency (delay + compute) into max(delay, compute),
     // which matters most for VeryHard where the pool search takes 1-2 seconds.
     const { adapter } = useGameStore.getState();
+    // Each seat has its own difficulty — a controller driving three AI players
+    // can simultaneously run Easy, Medium, and VeryHard policies.
+    const difficulty = difficultyByPlayerId.get(playerId) ?? "Medium";
     const actionPromise: Promise<GameAction | null> = Promise.resolve(
-  adapter?.getAiAction(config.difficulty, playerId) ?? null,
-);
+      adapter?.getAiAction(difficulty, playerId) ?? null,
+    );
     // Suppress unhandled-rejection warnings if stop() cancels the timeout
     // before it fires and nothing else awaits this promise.
     actionPromise.catch(() => {});
@@ -171,6 +182,14 @@ export function createAIController(config: AIControllerConfig): AIController {
         try {
           action = await actionPromise;
         } catch (err) {
+          // Engine panic: re-running the same AI search against the same
+          // (deterministic) state will re-panic. This is the path the
+          // user-reported "ai-getAction-retry" came from — short-circuit
+          // with the captured panic so the modal can show the real cause.
+          if (isEnginePanic(err)) {
+            await routePanic("ai-getAction-panic", err.panic);
+            throw err;
+          }
           if (!isStateLost(err)) throw err;
           // Engine lost state between scheduleAction and the timeout firing.
           // Try to rehydrate from the store snapshot and recompute the AI
@@ -184,9 +203,13 @@ export function createAIController(config: AIControllerConfig): AIController {
             throw err;
           }
           try {
-            action = await adapter!.getAiAction(config.difficulty, playerId);
+            action = await adapter!.getAiAction(difficulty, playerId);
           } catch (retryErr) {
-            notifyEngineLost("ai-getAction-retry");
+            if (isEnginePanic(retryErr)) {
+              await routePanic("ai-getAction-retry-panic", retryErr.panic);
+            } else {
+              notifyEngineLost("ai-getAction-retry");
+            }
             throw retryErr;
           }
         }
@@ -228,6 +251,13 @@ export function createAIController(config: AIControllerConfig): AIController {
   function start() {
     active = true;
     debugLog(`AI controller started for players [${[...aiPlayerIds].join(",")}]`, "warn");
+    // Event-driven design: subscribe to WaitingFor changes and let each
+    // seat's turn naturally surface via the store. This means reconnect
+    // is implicit — whichever seat holds priority after a reconnect
+    // triggers `checkAndSchedule`, regardless of how many AI seats the
+    // controller supervises. No per-seat iteration needed; the bug that
+    // previously stalled P3/P4 was caused by `getAiAction` accepting a
+    // default `playerId` elsewhere, not by this loop.
     unsubscribe = useGameStore.subscribe(
       (s) => s.waitingFor,
       () => {

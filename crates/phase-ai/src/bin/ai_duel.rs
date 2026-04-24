@@ -229,7 +229,10 @@ fn run_game(
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
-    let config = create_config_for_players(difficulty, Platform::Native, 2);
+    // Pin deterministic mode for regression runs: search is bounded by
+    // max_nodes only, so duel outcomes don't observe wall-clock variance
+    // across hardware. Production code leaves this off to use time budgets.
+    let config = create_config_for_players(difficulty, Platform::Native, 2).into_deterministic();
     let ai_configs: HashMap<PlayerId, _> = [(PlayerId(0), config.clone()), (PlayerId(1), config)]
         .into_iter()
         .collect();

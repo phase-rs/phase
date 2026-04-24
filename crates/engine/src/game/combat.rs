@@ -6,7 +6,7 @@ use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::parser::oracle_target::parse_target;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -550,6 +550,16 @@ pub fn validate_blockers(
         {
             return Err(format!(
                 "{:?} cannot block {:?} (horsemanship: blocker lacks horsemanship)",
+                blocker_id, attacker_id
+            ));
+        }
+
+        // CR 702.14c: Landwalk — attacker can't be blocked as long as the
+        // defending player (blocker's controller per CR 509.1a) controls a land
+        // of the specified type.
+        if is_landwalk_unblockable(state, attacker, blocker.controller) {
+            return Err(format!(
+                "{:?} cannot block {:?} (landwalk: defending player controls a matching land)",
                 blocker_id, attacker_id
             ));
         }
@@ -1361,12 +1371,76 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 702.14c: A creature with landwalk can't be blocked as long as the defending
+/// player controls a land with the matching type/supertype. The `Keyword::Landwalk`
+/// variant's inner string is the qualifier: basic land subtypes ("Plains", "Island",
+/// "Swamp", "Mountain", "Forest"), other subtypes ("Desert"), or supertype qualifiers
+/// ("Legendary", "Snow", "Nonbasic").
+///
+/// Returns `true` if the attacker is unblockable by the defending player due to
+/// some form of landwalk.
+pub fn is_landwalk_unblockable(
+    state: &GameState,
+    attacker: &GameObject,
+    defending_player: PlayerId,
+) -> bool {
+    // Collect all landwalk qualifiers the attacker has. Multiple instances of the
+    // same landwalk are redundant (CR 702.14e) but multiple *kinds* can co-exist
+    // (e.g., "plainswalk and islandwalk") — any match makes the attacker unblockable.
+    let qualifiers: Vec<&str> = attacker
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Landwalk(q) => Some(q.as_str()),
+            _ => None,
+        })
+        .collect();
+    if qualifiers.is_empty() {
+        return false;
+    }
+
+    // CR 702.14c: Check every land the defending player controls on the battlefield.
+    for &obj_id in &state.battlefield {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        if obj.controller != defending_player {
+            continue;
+        }
+        if !obj.card_types.core_types.contains(&CoreType::Land) {
+            continue;
+        }
+        // CR 702.26b: Phased-out permanents don't exist for this check.
+        if obj.is_phased_out() {
+            continue;
+        }
+        for qualifier in &qualifiers {
+            if land_matches_landwalk_qualifier(obj, qualifier) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// CR 702.14a: Match a land against a landwalk qualifier.
+/// Basic/non-basic land subtypes match via `subtypes`; "Legendary"/"Snow" match via
+/// supertypes; "Nonbasic" matches any land lacking the Basic supertype.
+fn land_matches_landwalk_qualifier(land: &GameObject, qualifier: &str) -> bool {
+    match qualifier {
+        "Legendary" => land.card_types.supertypes.contains(&Supertype::Legendary),
+        "Snow" => land.card_types.supertypes.contains(&Supertype::Snow),
+        "Nonbasic" => !land.card_types.supertypes.contains(&Supertype::Basic),
+        subtype => land.card_types.subtypes.iter().any(|s| s == subtype),
+    }
+}
+
 /// Check per-pair blocking legality (evasion abilities, CR 509.1b).
 /// Does NOT check menace (which is a multi-blocker constraint).
 /// CR 509.1a–b: Check if a specific blocker can legally block a specific attacker,
 /// accounting for all blocking restrictions (CantBeBlocked, CantBeBlockedExceptBy,
 /// CantBeBlockedBy, Protection, Flying/Reach, Shadow, Fear, Intimidate, Skulk,
-/// Horsemanship, CantBlock/CantAttackOrBlock).
+/// Horsemanship, Landwalk, CantBlock/CantAttackOrBlock).
 pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: ObjectId) -> bool {
     let Some(blocker) = state.objects.get(&blocker_id) else {
         return false;
@@ -1474,6 +1548,11 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     }
     if attacker.has_keyword(&Keyword::Horsemanship) && !blocker.has_keyword(&Keyword::Horsemanship)
     {
+        return false;
+    }
+    // CR 702.14c: Landwalk — unblockable as long as defending player (blocker's
+    // controller per CR 509.1a) controls a land of the matching type.
+    if is_landwalk_unblockable(state, attacker, blocker.controller) {
         return false;
     }
     true
@@ -1906,6 +1985,191 @@ mod tests {
         assert!(validate_blockers(&state, &[(blocker1, attacker)]).is_err());
         // Two blockers: legal
         assert!(validate_blockers(&state, &[(blocker1, attacker), (blocker2, attacker)]).is_ok());
+    }
+
+    /// Helper for landwalk tests — create a land with the given subtypes/supertypes
+    /// on the battlefield controlled by `owner`.
+    fn create_land(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        subtypes: &[&str],
+        supertypes: &[crate::types::card_type::Supertype],
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            crate::types::identifiers::CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        for st in subtypes {
+            obj.card_types.subtypes.push((*st).to_string());
+        }
+        for sp in supertypes {
+            obj.card_types.supertypes.push(*sp);
+        }
+        id
+    }
+
+    /// CR 702.14c: Plainswalk makes an attacker unblockable when defender controls a Plains.
+    #[test]
+    fn plainswalk_unblockable_when_defender_controls_plains() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Plainswalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Plains".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _plains = create_land(&mut state, PlayerId(1), "Plains", &["Plains"], &[]);
+
+        assert!(!can_block_pair(&state, blocker, attacker));
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+    }
+
+    /// CR 702.14c: Plainswalk does nothing when defender controls no Plains.
+    #[test]
+    fn plainswalk_blockable_when_defender_has_no_plains() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Plainswalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Plains".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        assert!(can_block_pair(&state, blocker, attacker));
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    /// CR 702.14c: Landwalk only cares about land type it specifies — islandwalk
+    /// is not evaded by the defender controlling a Plains.
+    #[test]
+    fn islandwalk_unaffected_by_plains() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Islandwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Island".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _plains = create_land(&mut state, PlayerId(1), "Plains", &["Plains"], &[]);
+
+        assert!(can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14d: Landwalk only considers defending player's lands — if the
+    /// attacker's controller has a Plains, plainswalk does nothing.
+    #[test]
+    fn plainswalk_ignores_attackers_lands() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Plainswalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Plains".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        // Attacker's owner controls the Plains, not defender.
+        let _plains = create_land(&mut state, PlayerId(0), "Plains", &["Plains"], &[]);
+
+        assert!(can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14a: Multiple landwalk kinds — any matching type makes attacker unblockable.
+    #[test]
+    fn multiple_landwalk_any_match_unblockable() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Dual Walker", 2, 2);
+        let kws = &mut state.objects.get_mut(&attacker).unwrap().keywords;
+        kws.push(Keyword::Landwalk("Plains".to_string()));
+        kws.push(Keyword::Landwalk("Island".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
+
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14a: Legendary landwalk — defender controlling a legendary land makes
+    /// attacker unblockable regardless of subtype.
+    #[test]
+    fn legendary_landwalk_matches_legendary_land() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Legend Walker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Legendary".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _karakas = create_land(
+            &mut state,
+            PlayerId(1),
+            "Karakas",
+            &["Plains"],
+            &[Supertype::Legendary],
+        );
+
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14a: Nonbasic landwalk — defender controlling any nonbasic land
+    /// (no Basic supertype) makes the attacker unblockable.
+    #[test]
+    fn nonbasic_landwalk_matches_nonbasic_land() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Nonbasic Walker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Nonbasic".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        // Nonbasic land (no Basic supertype).
+        let _underground_sea = create_land(
+            &mut state,
+            PlayerId(1),
+            "Underground Sea",
+            &["Island", "Swamp"],
+            &[],
+        );
+
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14a: Nonbasic landwalk does nothing if defender only controls basic lands.
+    #[test]
+    fn nonbasic_landwalk_blockable_when_only_basics() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Nonbasic Walker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Nonbasic".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _plains = create_land(
+            &mut state,
+            PlayerId(1),
+            "Plains",
+            &["Plains"],
+            &[Supertype::Basic],
+        );
+
+        assert!(can_block_pair(&state, blocker, attacker));
     }
 
     #[test]

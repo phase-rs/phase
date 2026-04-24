@@ -95,6 +95,12 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                         | crate::types::ability::CastingPermission::PlayFromExile { .. }
                         | crate::types::ability::CastingPermission::ExileWithEnergyCost
                         | crate::types::ability::CastingPermission::WarpExile { .. }
+                        // CR 702.170d + CR 400.7: Plotted permission is scoped
+                        // to the exile zone. Once the card leaves exile (cast
+                        // resolves, or another effect moves it), drop the
+                        // permission so a later return-to-exile doesn't
+                        // inherit a stale turn_plotted value.
+                        | crate::types::ability::CastingPermission::Plotted { .. }
                 )
             });
             state.exile_links.retain(|link| link.exiled_id != object_id);
@@ -209,7 +215,7 @@ pub fn move_to_zone(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
-    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, from, to);
+    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), to);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     // CR 603.10a + CR 607.2a: Leaves-the-battlefield triggers look back to the
@@ -290,7 +296,7 @@ pub fn move_to_zone(
 
     events.push(GameEvent::ZoneChanged {
         object_id,
-        from,
+        from: Some(from),
         to,
         record: Box::new(zone_change_record),
     });
@@ -352,7 +358,7 @@ pub fn move_to_library_at_index(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
-    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, from, Zone::Library);
+    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), Zone::Library);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
 
@@ -371,7 +377,7 @@ pub fn move_to_library_at_index(
             let clamped = i.min(player.library.len());
             player.library.insert(clamped, object_id);
         }
-        None => player.library.push(object_id),
+        None => player.library.push_back(object_id),
     }
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
@@ -382,7 +388,7 @@ pub fn move_to_library_at_index(
 
     events.push(GameEvent::ZoneChanged {
         object_id,
-        from,
+        from: Some(from),
         to: Zone::Library,
         record: Box::new(zone_change_record),
     });
@@ -421,17 +427,17 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
                 .find(|p| p.id == owner)
                 .expect("owner exists");
             match zone {
-                Zone::Library => player.library.push(object_id),
-                Zone::Hand => player.hand.push(object_id),
-                Zone::Graveyard => player.graveyard.push(object_id),
+                Zone::Library => player.library.push_back(object_id),
+                Zone::Hand => player.hand.push_back(object_id),
+                Zone::Graveyard => player.graveyard.push_back(object_id),
                 _ => unreachable!(),
             }
         }
         // CR 400.4a: Instants/sorceries blocked by early check in move_to_zone.
-        Zone::Battlefield => state.battlefield.push(object_id),
+        Zone::Battlefield => state.battlefield.push_back(object_id),
         Zone::Stack => {} // Stack entries are managed separately via StackEntry
-        Zone::Exile => state.exile.push(object_id),
-        Zone::Command => state.command_zone.push(object_id),
+        Zone::Exile => state.exile.push_back(object_id),
+        Zone::Command => state.command_zone.push_back(object_id),
     }
 }
 
@@ -561,10 +567,10 @@ mod tests {
                 record,
             } => {
                 assert_eq!(*object_id, id);
-                assert_eq!(*from, Zone::Hand);
+                assert_eq!(*from, Some(Zone::Hand));
                 assert_eq!(*to, Zone::Battlefield);
                 assert_eq!(record.object_id, id);
-                assert_eq!(record.from_zone, Zone::Hand);
+                assert_eq!(record.from_zone, Some(Zone::Hand));
                 assert_eq!(record.to_zone, Zone::Battlefield);
             }
             _ => panic!("expected ZoneChanged event"),
@@ -689,11 +695,11 @@ mod tests {
             events[0],
             GameEvent::ZoneChanged {
                 object_id: id,
-                from: Zone::Hand,
+                from: Some(Zone::Hand),
                 to: Zone::Graveyard,
                 record: Box::new(ZoneChangeRecord {
                     name: "Card".to_string(),
-                    ..ZoneChangeRecord::test_minimal(id, Zone::Hand, Zone::Graveyard)
+                    ..ZoneChangeRecord::test_minimal(id, Some(Zone::Hand), Zone::Graveyard)
                 }),
             }
         );

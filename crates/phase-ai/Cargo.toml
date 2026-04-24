@@ -29,4 +29,8 @@ path = "src/bin/ai_tune.rs"
 name = "ai-commander"
 path = "src/bin/ai_commander.rs"
 
+[[bin]]
+name = "ai-bench-state"
+path = "src/bin/ai_bench_state.rs"
+
 [dev-dependencies]

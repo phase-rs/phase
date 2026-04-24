@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
-import type { FormatConfig, GameFormat, MatchType } from "../adapter/types";
+import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
+import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
@@ -21,31 +22,15 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
 
-// --- Format pill definitions ---
-
-type FormatGroup = "constructed" | "commander" | "multiplayer";
-
-interface FormatInfo {
-  format: GameFormat;
-  label: string;
-  group: FormatGroup;
-}
-
-const FORMATS: FormatInfo[] = [
-  { format: "Standard", label: "Standard", group: "constructed" },
-  { format: "Pioneer", label: "Pioneer", group: "constructed" },
-  { format: "Historic", label: "Historic", group: "constructed" },
-  { format: "Pauper", label: "Pauper", group: "constructed" },
-  { format: "Commander", label: "Commander", group: "commander" },
-  { format: "Brawl", label: "Brawl", group: "commander" },
-  { format: "HistoricBrawl", label: "Historic Brawl", group: "commander" },
-  { format: "FreeForAll", label: "Free-for-All", group: "multiplayer" },
-];
+// --- Format pill styling ---
+//
+// The list of formats itself comes from `FORMAT_REGISTRY` (engine-authored).
+// Only visual styling per group lives here.
 
 const GROUP_PILL_ACTIVE: Record<FormatGroup, string> = {
-  constructed: "border-indigo-300/30 bg-indigo-500/20 text-indigo-100",
-  commander: "border-amber-300/30 bg-amber-500/20 text-amber-100",
-  multiplayer: "border-emerald-300/30 bg-emerald-500/20 text-emerald-100",
+  Constructed: "border-indigo-300/30 bg-indigo-500/20 text-indigo-100",
+  Commander: "border-amber-300/30 bg-amber-500/20 text-amber-100",
+  Multiplayer: "border-emerald-300/30 bg-emerald-500/20 text-emerald-100",
 };
 
 const PILL_INACTIVE = "border-white/10 text-slate-400 hover:border-white/18 hover:text-white";
@@ -68,7 +53,6 @@ export function GameSetupPage() {
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
 
   // Preferences (persisted)
-  const difficulty = usePreferencesStore((s) => s.aiDifficulty);
   const lastFormat = usePreferencesStore((s) => s.lastFormat);
   const lastMatchType = usePreferencesStore((s) => s.lastMatchType);
   const lastPlayerCount = usePreferencesStore((s) => s.lastPlayerCount);
@@ -125,11 +109,26 @@ export function GameSetupPage() {
     if (!activeDeckName || !formatConfig) return;
     touchDeckPlayed(activeDeckName);
     const gameId = crypto.randomUUID();
-    saveActiveGame({ id: gameId, mode: "ai", difficulty });
+    // Snapshot the per-seat AI config from preferences into the active-game
+    // record. `AiOpponentConfig`'s `ensureAiSeatCount` effect normally syncs
+    // the seat list before the user can click Start, but we re-invoke it
+    // here defensively — zustand setters are synchronous, so this is a
+    // no-op when the effect already ran and a correctness guarantee if the
+    // click beat the effect to the commit boundary.
+    const opponentCount = Math.max(1, playerCount - 1);
+    const prefs = usePreferencesStore.getState();
+    prefs.ensureAiSeatCount(opponentCount);
+    const prefSeats = usePreferencesStore.getState().aiSeats.slice(0, opponentCount);
+    const aiSeats = prefSeats.map((s) => ({
+      difficulty: s.difficulty,
+      deckName: s.deckName === "Random" ? null : s.deckName,
+    }));
+    const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
+    saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${difficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
     );
   };
 
@@ -166,7 +165,7 @@ export function GameSetupPage() {
             Start a match.
           </h1>
           <div className="flex flex-wrap justify-center gap-2">
-            {FORMATS.map(({ format, label, group }) => (
+            {FORMAT_REGISTRY.map(({ format, label, group }) => (
               <button
                 key={format}
                 onClick={() => applyFormat(format)}
@@ -357,7 +356,10 @@ export function GameSetupPage() {
               <div className="border-t border-white/8" />
 
               {/* AI opponent configuration */}
-              <AiOpponentConfig format={formatConfig?.format} />
+              <AiOpponentConfig
+                format={formatConfig?.format}
+                opponentCount={Math.max(1, playerCount - 1)}
+              />
 
               {/* Separator */}
               <div className="border-t border-white/8" />

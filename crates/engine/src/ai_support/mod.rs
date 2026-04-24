@@ -1,10 +1,10 @@
 mod candidates;
 mod context;
 mod copy;
+pub mod filter;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::game::engine::apply_as_current;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
@@ -22,16 +22,20 @@ pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
     project_copy_mana_spent_for_x,
 };
+pub use filter::{
+    BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
+};
 
+/// Filter `candidate_actions` down to the actions that are actually legal now.
+///
+/// Runs the default [`FilterPipeline`] — cheap structural checks first, then
+/// an `apply_as_current` simulation as a catch-all. The `cheap ⊆ sim`
+/// invariant (enforced by `filter::tests::basic_legality_is_subset_of_simulation`)
+/// guarantees that no candidate accepted by the simulation is silently
+/// dropped by a cheap filter.
 pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
-    candidate_actions(state)
-        .into_iter()
-        .filter(|candidate| !cheap_reject_candidate(state, &candidate.action))
-        .filter(|candidate| {
-            let mut sim = state.clone();
-            apply_as_current(&mut sim, candidate.action.clone()).is_ok()
-        })
-        .collect()
+    let pipeline = FilterPipeline::default_pipeline();
+    pipeline.apply(state, candidate_actions(state))
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
@@ -160,10 +164,20 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         ) => selection_mismatch(chosen, cards, None),
         (
             WaitingFor::RevealChoice {
-                player: _, cards, ..
+                player: _,
+                cards,
+                optional,
+                ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, cards, Some(1)),
+        ) => {
+            // CR 701.20a: Optional reveals accept an empty selection as "decline".
+            if *optional && chosen.is_empty() {
+                false
+            } else {
+                selection_mismatch(chosen, cards, Some(1))
+            }
+        }
         (
             WaitingFor::SearchChoice {
                 player: _,
@@ -353,15 +367,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
     }
 }
 
-fn selection_mismatch(
+fn selection_mismatch<'a>(
     chosen: &[ObjectId],
-    options: &[ObjectId],
+    options: impl IntoIterator<Item = &'a ObjectId>,
     exact_count: Option<usize>,
 ) -> bool {
     if exact_count.is_some_and(|count| chosen.len() != count) {
         return true;
     }
-    let option_set: HashSet<ObjectId> = options.iter().copied().collect();
+    let option_set: HashSet<ObjectId> = options.into_iter().copied().collect();
     let mut seen = HashSet::new();
     chosen
         .iter()
@@ -444,7 +458,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // MTGA-style: auto-pass when own spell/ability is on top of the stack.
     // The player almost never wants to respond to their own spell — let it resolve.
     // Full control mode (checked by the frontend) overrides this.
-    if let Some(top) = state.stack.last() {
+    if let Some(top) = state.stack.back() {
         if top.controller == player {
             return true;
         }

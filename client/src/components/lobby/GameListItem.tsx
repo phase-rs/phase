@@ -1,4 +1,5 @@
-import type { GameFormat, LobbyGame } from "../../adapter/types";
+import type { FormatGroup, GameFormat, LobbyGame } from "../../adapter/types";
+import { formatMetadata } from "../../data/formatRegistry";
 
 // Re-export so existing `import { LobbyGame } from "./GameListItem"` call
 // sites continue to resolve without needing to update every consumer in
@@ -16,29 +17,17 @@ interface GameListItemProps {
   compatible?: boolean;
 }
 
-const FORMAT_BADGE_CLASSES: Record<GameFormat, string> = {
-  Standard: "bg-blue-500/20 text-blue-300",
+// Badge color keyed on the format's group so we don't maintain a
+// per-format table. Short-label text comes from FORMAT_REGISTRY.short_label.
+const GROUP_BADGE_CLASSES: Record<FormatGroup, string> = {
+  Constructed: "bg-cyan-500/20 text-cyan-300",
   Commander: "bg-indigo-500/20 text-indigo-300",
-  Pioneer: "bg-cyan-500/20 text-cyan-300",
-  Historic: "bg-sky-500/20 text-sky-300",
-  Pauper: "bg-slate-500/20 text-slate-300",
-  Brawl: "bg-purple-500/20 text-purple-300",
-  HistoricBrawl: "bg-violet-500/20 text-violet-300",
-  FreeForAll: "bg-amber-500/20 text-amber-300",
-  TwoHeadedGiant: "bg-emerald-500/20 text-emerald-300",
+  Multiplayer: "bg-amber-500/20 text-amber-300",
 };
 
-const FORMAT_LABELS: Record<GameFormat, string> = {
-  Standard: "STD",
-  Commander: "CMD",
-  Pioneer: "PIO",
-  Historic: "HIS",
-  Pauper: "PAU",
-  Brawl: "BRL",
-  HistoricBrawl: "HBR",
-  FreeForAll: "FFA",
-  TwoHeadedGiant: "2HG",
-};
+// Fallback styling for formats not in the registry (currently TwoHeadedGiant),
+// which the lobby can still receive as a legal GameFormat value on the wire.
+const UNKNOWN_FORMAT_BADGE = "bg-slate-500/20 text-slate-300";
 
 function formatWaitTime(createdAt: number): string {
   const now = Math.floor(Date.now() / 1000);
@@ -52,8 +41,9 @@ function formatWaitTime(createdAt: number): string {
 
 export function GameListItem({ game, onJoin, compatible = true }: GameListItemProps) {
   const format = game.format ?? "Standard";
-  const badgeClass = FORMAT_BADGE_CLASSES[format];
-  const formatLabel = FORMAT_LABELS[format];
+  const meta = formatMetadata(format);
+  const badgeClass = meta ? GROUP_BADGE_CLASSES[meta.group] : UNKNOWN_FORMAT_BADGE;
+  const formatLabel = meta?.short_label ?? format.slice(0, 3).toUpperCase();
 
   // A game is "full" when every configured seat is occupied (humans + AI).
   // The server unregisters full games on the last join, so in the happy path

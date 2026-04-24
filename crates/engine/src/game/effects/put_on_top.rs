@@ -143,7 +143,7 @@ mod tests {
 
         // Record order before: [id1, id2, id3]
         let lib = &state.players[0].library;
-        let before_order: Vec<_> = lib.to_vec();
+        let before_order: Vec<_> = lib.iter().copied().collect();
         assert_eq!(before_order, vec![id1, id2, id3]);
 
         // Put id2 on top
@@ -162,7 +162,7 @@ mod tests {
 
         // Expected: [id2, id1, id3] — id2 on top, rest preserved in order
         let lib = &state.players[0].library;
-        let after_order: Vec<_> = lib.to_vec();
+        let after_order: Vec<_> = lib.iter().copied().collect();
         assert_eq!(after_order, vec![id2, id1, id3]);
     }
 
@@ -360,7 +360,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // "third from the top" = index 2: [id1, id2, id4, id3]
-        let lib: Vec<_> = state.players[0].library.to_vec();
+        let lib: Vec<_> = state.players[0].library.iter().copied().collect::<Vec<_>>();
         assert_eq!(lib, vec![id1, id2, id4, id3]);
         assert_eq!(state.objects[&id4].zone, Zone::Library);
     }

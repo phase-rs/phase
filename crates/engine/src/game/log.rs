@@ -27,7 +27,7 @@ fn should_exclude_event(event: &GameEvent, _state: &GameState) -> bool {
     match event {
         // Individual card draws from library leak card identity — CardsDrawn summary suffices
         GameEvent::ZoneChanged {
-            from: crate::types::zones::Zone::Library,
+            from: Some(crate::types::zones::Zone::Library),
             ..
         } => true,
         // CardDrawn also reveals which specific card was drawn
@@ -261,9 +261,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *object_id),
         ],
 
+        // CR 111.1 + CR 603.6a: `from: None` indicates token creation (no prior
+        // zone). Render without a source zone to avoid "moves from None to
+        // Battlefield" — the `TokenCreated` event carries the created-token
+        // name/controller for richer logging.
         GameEvent::ZoneChanged {
             object_id,
-            from,
+            from: Some(from),
             to,
             ..
         } => vec![
@@ -271,6 +275,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" moves from "),
             LogSegment::Zone(*from),
             text(" to "),
+            LogSegment::Zone(*to),
+        ],
+        GameEvent::ZoneChanged {
+            object_id,
+            from: None,
+            to,
+            ..
+        } => vec![
+            card_seg(state, *object_id),
+            text(" enters "),
             LogSegment::Zone(*to),
         ],
 

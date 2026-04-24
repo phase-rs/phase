@@ -527,6 +527,16 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         }
     }
 
+    // CR 106.1 + CR 109.1: "color among [type-phrase]" — distinct colors among
+    // matching objects. Used by Faeburrow Elder's "+1/+1 for each color among
+    // permanents you control" and by the Converge mechanic adjacent class.
+    if let Ok((after_among, _)) = tag::<_, _, VerboseError<&str>>("color among ").parse(clause) {
+        let (filter, remainder) = parse_type_phrase(after_among);
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Some(QuantityRef::DistinctColorsAmongPermanents { filter });
+        }
+    }
+
     // "card put into a graveyard this way" / "creature card exiled this way" / etc.
     // "this way" references objects from the preceding effect's tracked set.
     if clause.contains("this way") {
@@ -566,6 +576,38 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     if clause.contains("counter on that") {
         if let Some(qty) = parse_quantity_ref(clause) {
             return Some(qty);
+        }
+    }
+
+    // CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it" —
+    // objects matching a type filter AND bearing at least one counter of the given
+    // type. The filter is the type-phrase plus a `FilterProp::CountersGE { count: 1 }`.
+    // This must be checked BEFORE the self-counter fallback below, which would
+    // otherwise misroute any clause containing "counter on" to CountersOnSelf and
+    // discard the subject type phrase (Inspiring Call bug: "creature you control
+    // with a +1/+1 counter on it" → CountersOnSelf{ "creature you control with a +1/+1" }).
+    if let Ok((_, type_part)) = take_until::<_, _, VerboseError<&str>>(" with ").parse(clause) {
+        let suffix_part = &clause[type_part.len() + 1..]; // starts at "with "
+        if let Some((counter_prop, consumed)) =
+            crate::parser::oracle_target::parse_counter_suffix(suffix_part)
+        {
+            // The counter suffix must consume the rest of the clause (possibly with
+            // trailing whitespace / punctuation already stripped by trim_end_matches).
+            if suffix_part[consumed..].trim().is_empty() {
+                let (filter, type_rest) = parse_type_phrase(type_part);
+                if type_rest.trim().is_empty() {
+                    // Compose: attach the counter property onto the typed filter.
+                    // parse_type_phrase always emits TargetFilter::Typed for non-Any
+                    // returns, so the other branch is defensive.
+                    if let TargetFilter::Typed(typed) = filter {
+                        let mut props = typed.properties.clone();
+                        props.push(counter_prop);
+                        return Some(QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(typed.properties(props)),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -1170,6 +1212,49 @@ mod tests {
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
         );
+    }
+
+    /// CR 106.1 + CR 109.1: "for each color among permanents you control" must
+    /// lower to `DistinctColorsAmongPermanents`, not `ObjectCount` over a bogus
+    /// "color" subject. Faeburrow Elder class.
+    #[test]
+    fn for_each_color_among_permanents() {
+        let qty = parse_for_each_clause("color among permanents you control").unwrap();
+        match qty {
+            QuantityRef::DistinctColorsAmongPermanents { filter } => {
+                assert!(
+                    matches!(filter, TargetFilter::Typed(_)),
+                    "expected Typed filter, got {filter:?}"
+                );
+            }
+            other => panic!("Expected DistinctColorsAmongPermanents, got {other:?}"),
+        }
+    }
+
+    /// CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it"
+    /// lowers to `ObjectCount` over a filter that includes `FilterProp::CountersGE`,
+    /// not `CountersOnSelf` over a bogus counter-type string. Inspiring Call class.
+    #[test]
+    fn for_each_creature_with_counter_on_it() {
+        let qty = parse_for_each_clause("creature you control with a +1/+1 counter on it").unwrap();
+        match qty {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(typed) => {
+                    assert_eq!(typed.controller, Some(ControllerRef::You));
+                    assert!(
+                        typed.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::CountersGE { counter_type, .. }
+                                if counter_type == &crate::types::counter::CounterType::Plus1Plus1
+                        )),
+                        "expected CountersGE(P1P1), got properties {:?}",
+                        typed.properties
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("Expected ObjectCount, got {other:?}"),
+        }
     }
 
     #[test]

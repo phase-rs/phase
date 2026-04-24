@@ -391,6 +391,7 @@ mod tests {
             1,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         );
         let (context, config) = make_context(0.8);
@@ -425,12 +426,13 @@ mod tests {
         let dummy_ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
             Vec::new(),
             ObjectId(999),
             AI,
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(9000),
             source_id: ObjectId(999),
             controller: AI,

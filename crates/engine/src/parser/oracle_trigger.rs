@@ -197,6 +197,24 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
         .parse(input)
     }
 
+    /// CR 119.1 + CR 109.4: "deals [combat] damage to a player" also introduces
+    /// a player target, so "that player controls" in the effect refers to it
+    /// (Dokuchi Silencer's "destroy target creature or planeswalker that player
+    /// controls"). Mirrors `parse_attack_verb` — both verbs produce the same
+    /// downstream scope.
+    fn parse_damage_phrase(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+        alt((
+            value(
+                (),
+                tag::<_, _, VerboseError<&str>>("deals combat damage to "),
+            ),
+            value((), tag("deals damage to ")),
+            value((), tag("deal combat damage to ")),
+            value((), tag("deal damage to ")),
+        ))
+        .parse(input)
+    }
+
     // Walk word boundaries — the actor/verb pair may be preceded by "whenever",
     // "when", or quantifiers like "one or more creatures you control".
     let mut remaining = cond_lower;
@@ -209,6 +227,18 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
                 {
                     return true;
                 }
+            }
+        }
+        // CR 119.1: "[anything] deals [combat] damage to a player" — introduces
+        // the damaged player as the target-referring player. The subject can be
+        // SelfRef ("~"), equipped creature ("equipped creature"), or any typed
+        // subject, so match on the verb phrase alone.
+        if let Ok((after_damage, ())) = parse_damage_phrase(remaining) {
+            if tag::<_, _, VerboseError<&str>>("a player")
+                .parse(after_damage)
+                .is_ok()
+            {
+                return true;
             }
         }
         // structural: not dispatch — advance to the next word boundary so the
@@ -334,6 +364,25 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // player-scope iterator in `resolve_ability_chain` rebinds `controller`
     // for the duration of the effect.
     rewire_player_scoped_execute_to_triggering_player(&mut def);
+
+    // CR 109.4 + CR 603.7c: When the execute ability references
+    // `ControllerRef::TargetPlayer` in a filter (e.g. Ruthless Winnower's
+    // "that player sacrifices a non-Elf creature" → `Sacrifice { target:
+    // Typed { controller: TargetPlayer } }`) and the trigger has no
+    // `valid_target`, surface `TargetFilter::Player` on the trigger so the
+    // triggering player (upkeep's active player, damaged player, etc.) is
+    // auto-bound to the first `TargetRef::Player` slot from the trigger
+    // event. Without this, `collect_target_slots` would surface a
+    // companion player-choice slot and the controller would be prompted to
+    // pick — which is wrong for phase and damage triggers whose acting
+    // player is implicit.
+    if def.valid_target.is_none() {
+        if let Some(execute) = def.execute.as_deref() {
+            if execute_references_target_player(&execute.effect) {
+                def.valid_target = Some(TargetFilter::Player);
+            }
+        }
+    }
 
     // Check for constraint phrases in the full text.
     // Text-based constraints take precedence; fall back to any constraint already set
@@ -1668,6 +1717,33 @@ fn rewire_player_scoped_execute_to_triggering_player(def: &mut TriggerDefinition
     if routable {
         execute.player_scope = Some(PlayerFilter::TriggeringPlayer);
     }
+}
+
+/// CR 109.4 + CR 603.7c: Returns `true` when any filter inside the execute
+/// ability's effect chain references `ControllerRef::TargetPlayer`. Walks
+/// sub-abilities so triggers like Dokuchi Silencer (outer Discard, inner
+/// Destroy targeting "that player controls") and Ruthless Winnower
+/// (Sacrifice with `TargetPlayer`-scoped filter) both trigger the companion
+/// `valid_target = Player` surface in `parse_trigger_line`.
+fn execute_references_target_player(effect: &crate::types::ability::Effect) -> bool {
+    fn filter_references(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(TypedFilter { controller, .. }) => {
+                matches!(controller, Some(ControllerRef::TargetPlayer))
+            }
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_references)
+            }
+            TargetFilter::Not { filter } => filter_references(filter),
+            _ => false,
+        }
+    }
+    if let Some(filter) = effect.target_filter() {
+        if filter_references(filter) {
+            return true;
+        }
+    }
+    false
 }
 
 fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
@@ -4205,6 +4281,11 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
 }
 
 /// "you draw your <ordinal> card each turn"
+///
+/// CR 121.2 + CR 603.2: The "you" subject restricts the trigger to the
+/// controller's draws. `valid_target` carries a `ControllerRef::You` filter so
+/// `match_drawn` / `valid_player_matches` reject events where the drawing
+/// player is not the trigger controller — mirroring the opponent arm below.
 fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "you draw your ";
     let after = strip_after(lower, prefix)?;
@@ -4218,6 +4299,9 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
     {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
         def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
         return Some((TriggerMode::Drawn, def));
     }
@@ -4852,7 +4936,19 @@ fn try_parse_sacrifice_trigger(
     let (after_verb, actor) = parse_sacrifice_actor.parse(event).ok()?;
 
     let (filter, remainder) = parse_trigger_subject(after_verb);
-    if !remainder.trim().is_empty() {
+
+    // CR 603.2 + CR 603.7: Optional trailing turn constraint — "during your
+    // turn", "during an opponent's turn", etc. Szarel, Genesis Shepherd and
+    // similar cards append this to a sacrifice trigger; the constraint
+    // narrows when the trigger fires without changing its event structure.
+    // Strip the "during " conjunction with nom, then delegate to
+    // `parse_turn_constraint` which recognizes the turn-possessive phrases.
+    let turn_constraint = tag::<_, _, VerboseError<&str>>("during ")
+        .parse(remainder.trim())
+        .ok()
+        .and_then(|(body, _)| parse_turn_constraint(body));
+
+    if turn_constraint.is_none() && !remainder.trim().is_empty() {
         return None;
     }
 
@@ -4862,6 +4958,9 @@ fn try_parse_sacrifice_trigger(
         Some(cr) => add_controller(filter, cr),
         None => filter,
     });
+    if let Some(constraint) = turn_constraint {
+        def.constraint = Some(constraint);
+    }
     Some((TriggerMode::Sacrificed, def))
 }
 
@@ -5819,6 +5918,28 @@ mod tests {
     }
 
     #[test]
+    fn trigger_attacker_it_gets_is_single_target_pump() {
+        // CR 608.2c: "Whenever a creature you control attacks, it gets +2/+0 until end of turn."
+        // "it" refers to the triggering attacker → single-object TriggeringSource,
+        // which must lower to Effect::Pump (single target), NOT Effect::PumpAll.
+        let def = parse_trigger_line(
+            "Whenever a creature you control attacks, it gets +2/+2 until end of turn.",
+            "Fervent Charge",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        match &*exec.effect {
+            Effect::Pump { target, .. } => {
+                assert_eq!(*target, TargetFilter::TriggeringSource);
+            }
+            other => panic!(
+                "expected Effect::Pump with TriggeringSource, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
     fn trigger_execute_pump_all_creatures() {
         // Regression: trigger bodies with "creatures you control get +1/+1 until end of turn"
         // must produce a PumpAll execute effect, not null.
@@ -6713,6 +6834,21 @@ mod tests {
     }
 
     #[test]
+    fn trigger_sacrifice_with_during_your_turn_constraint() {
+        // CR 603.2 + CR 603.7: Szarel, Genesis Shepherd — sacrifice trigger
+        // with a trailing turn constraint. The parser must extract the
+        // constraint rather than reject the whole line because the subject
+        // wasn't the final token.
+        use crate::types::ability::TriggerConstraint;
+        let def = parse_trigger_line(
+            "Whenever you sacrifice another nontoken permanent during your turn, you gain 1 life.",
+            "Szarel, Genesis Shepherd",
+        );
+        assert_eq!(def.mode, TriggerMode::Sacrificed);
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
     fn trigger_you_tap_a_land_for_mana() {
         let def = parse_trigger_line("Whenever you tap a land for mana, add {G}.", "Mana Flare");
         assert_eq!(def.mode, TriggerMode::TapsForMana);
@@ -6779,9 +6915,37 @@ mod tests {
             "Some Card",
         );
         assert_eq!(def.mode, TriggerMode::Drawn);
+        // CR 603.2: "you draw" scopes the trigger to the controller's draws.
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
         assert_eq!(
             def.constraint,
             Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        );
+    }
+
+    #[test]
+    fn trigger_nth_draw_you_in_a_turn_phrasing() {
+        // CR 603.2: "When you draw your Nth card in a turn" (Sneaky Snacker phrasing)
+        // must scope to the controller's draws, not any player's.
+        let def = parse_trigger_line(
+            "When you draw your third card in a turn, return this card from your graveyard to the battlefield tapped.",
+            "Sneaky Snacker",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
         );
     }
 

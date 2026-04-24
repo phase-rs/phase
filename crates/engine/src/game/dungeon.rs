@@ -175,7 +175,14 @@ pub fn room_effects(
         // ── Lost Mine of Phandelver ─────────────────────────────────────
         // 0: Cave Entrance — "Scry 1"
         (DungeonId::LostMineOfPhandelver, 0) => (
-            simple(Effect::Scry { count: fixed(1) }, source_id, controller),
+            simple(
+                Effect::Scry {
+                    count: fixed(1),
+                    target: TargetFilter::Controller,
+                },
+                source_id,
+                controller,
+            ),
             vec![],
         ),
         // 1: Goblin Lair — "Create a 1/1 red Goblin creature token"
@@ -243,7 +250,14 @@ pub fn room_effects(
         ),
         // 6: Temple of Dumathoin — "Draw a card"
         (DungeonId::LostMineOfPhandelver, 6) => (
-            simple(Effect::Draw { count: fixed(1) }, source_id, controller),
+            simple(
+                Effect::Draw {
+                    count: fixed(1),
+                    target: TargetFilter::Controller,
+                },
+                source_id,
+                controller,
+            ),
             vec![],
         ),
 
@@ -262,7 +276,14 @@ pub fn room_effects(
         ),
         // 1: Dungeon Level — "Scry 1"
         (DungeonId::DungeonOfTheMadMage, 1) => (
-            simple(Effect::Scry { count: fixed(1) }, source_id, controller),
+            simple(
+                Effect::Scry {
+                    count: fixed(1),
+                    target: TargetFilter::Controller,
+                },
+                source_id,
+                controller,
+            ),
             vec![],
         ),
         // 2: Goblin Bazaar — "Create a Treasure token"
@@ -350,7 +371,14 @@ pub fn room_effects(
         ),
         // 7: Deep Mines — "Scry 3"
         (DungeonId::DungeonOfTheMadMage, 7) => (
-            simple(Effect::Scry { count: fixed(3) }, source_id, controller),
+            simple(
+                Effect::Scry {
+                    count: fixed(3),
+                    target: TargetFilter::Controller,
+                },
+                source_id,
+                controller,
+            ),
             vec![],
         ),
         // 8: Mad Wizard's Lair — "Draw three cards and reveal them. You may cast one of them
@@ -473,7 +501,14 @@ pub fn room_effects(
         ),
         // 2: Lost Well — "Scry 2"
         (DungeonId::Undercity, 2) => (
-            simple(Effect::Scry { count: fixed(2) }, source_id, controller),
+            simple(
+                Effect::Scry {
+                    count: fixed(2),
+                    target: TargetFilter::Controller,
+                },
+                source_id,
+                controller,
+            ),
             vec![],
         ),
         // 3: Trap! — "Target player loses 5 life"
@@ -507,7 +542,14 @@ pub fn room_effects(
         ),
         // 6: Archives — "Draw a card"
         (DungeonId::Undercity, 6) => (
-            simple(Effect::Draw { count: fixed(1) }, source_id, controller),
+            simple(
+                Effect::Draw {
+                    count: fixed(1),
+                    target: TargetFilter::Controller,
+                },
+                source_id,
+                controller,
+            ),
             vec![],
         ),
         // 7: Catacombs — "Create a 4/1 black Skeleton creature token with menace"
@@ -565,7 +607,14 @@ pub fn room_effects(
         ),
         // 3: Auntie's Teahouse — "Scry 3"
         (DungeonId::BaldursGateWilderness, 3) => (
-            simple(Effect::Scry { count: fixed(3) }, source_id, controller),
+            simple(
+                Effect::Scry {
+                    count: fixed(3),
+                    target: TargetFilter::Controller,
+                },
+                source_id,
+                controller,
+            ),
             vec![],
         ),
         // 4: Defiled Temple — "You may sacrifice a permanent. If you do, draw a card."
@@ -582,7 +631,10 @@ pub fn room_effects(
             ability.optional = true;
 
             let mut draw = ResolvedAbility::new(
-                Effect::Draw { count: fixed(1) },
+                Effect::Draw {
+                    count: fixed(1),
+                    target: TargetFilter::Controller,
+                },
                 vec![],
                 source_id,
                 controller,
@@ -662,7 +714,14 @@ pub fn room_effects(
         ),
         // 9: Last Light Inn — "Draw two cards"
         (DungeonId::BaldursGateWilderness, 9) => (
-            simple(Effect::Draw { count: fixed(2) }, source_id, controller),
+            simple(
+                Effect::Draw {
+                    count: fixed(2),
+                    target: TargetFilter::Controller,
+                },
+                source_id,
+                controller,
+            ),
             vec![],
         ),
         // 10: Reithwin Tollhouse — "Roll 2d4 and create that many Treasure tokens."
@@ -895,6 +954,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             count: fixed(1),
             reveal: true,
             target_player: None,
+            up_to: false,
         },
         source_id,
         controller,
@@ -1414,6 +1474,7 @@ mod tests {
                 Effect::SearchLibrary {
                     count: QuantityExpr::Fixed { value: 1 },
                     reveal: true,
+                    up_to: false,
                     ..
                 }
             ),

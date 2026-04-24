@@ -49,7 +49,12 @@ pub fn resolve(
         return Ok(());
     }
 
-    let cards: Vec<_> = player.library[..count].to_vec();
+    let cards: Vec<_> = player
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>();
     let keep_count = keep_num.min(cards.len());
 
     // CR 701.20a: Pure-peek pattern (keep_count = 0): "look at the top card" with no
@@ -156,7 +161,12 @@ mod tests {
                 Zone::Library,
             );
         }
-        let top_5: Vec<_> = state.players[0].library[..5].to_vec();
+        let top_5: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>();
 
         let ability = make_dig_ability(5);
         let mut events = Vec::new();
@@ -218,7 +228,12 @@ mod tests {
             );
             card_ids.push(id);
         }
-        let cards_on_top: Vec<_> = state.players[0].library[..5].to_vec();
+        let cards_on_top: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>();
         let kept: Vec<_> = cards_on_top[..2].to_vec();
 
         // Simulate Zimone's Dig setup: keep up to 2, no inline destination,
@@ -320,6 +335,196 @@ mod tests {
                 assert_eq!(selectable_cards.len(), 2);
             }
             other => panic!("Expected DigChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 201.2 + CR 201.2a: `FilterProp::NameMatchesAnyPermanent` must restrict
+    /// the Dig's selectable set to library cards whose printed name equals the
+    /// name of some permanent on the battlefield. Controllers of the on-board
+    /// permanents don't matter when `controller = None` — any permanent
+    /// anywhere on the battlefield counts. This is the Mitotic Manipulation
+    /// primitive: `filter = NameMatchesAnyPermanent { controller: None }`.
+    #[test]
+    fn dig_with_name_matches_any_permanent_filter() {
+        use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr, TypedFilter};
+        let mut state = GameState::new_two_player(42);
+        // Library has three cards: "Forest", "Goblin", "Island".
+        for (i, name) in ["Forest", "Goblin", "Island"].iter().enumerate() {
+            create_object(
+                &mut state,
+                CardId(i as u64 + 1),
+                PlayerId(0),
+                (*name).into(),
+                Zone::Library,
+            );
+        }
+        // Opponent controls a "Forest" permanent on the battlefield; controller
+        // doesn't matter when controller=None.
+        create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(1),
+            "Forest".into(),
+            Zone::Battlefield,
+        );
+
+        let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::NameMatchesAnyPermanent { controller: None },
+        ]));
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: Some(Zone::Battlefield),
+                keep_count: Some(1),
+                up_to: true,
+                filter: filter.clone(),
+                rest_destination: Some(Zone::Library),
+                reveal: false,
+            },
+            vec![],
+            ObjectId(200),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DigChoice {
+                selectable_cards,
+                cards,
+                kept_destination,
+                rest_destination,
+                ..
+            } => {
+                assert_eq!(cards.len(), 3, "all 3 library cards are revealed");
+                assert_eq!(
+                    selectable_cards.len(),
+                    1,
+                    "only Forest matches an on-battlefield permanent"
+                );
+                let forest_obj = state
+                    .objects
+                    .get(&selectable_cards[0])
+                    .expect("selectable object exists");
+                assert_eq!(forest_obj.name, "Forest");
+                assert_eq!(*kept_destination, Some(Zone::Battlefield));
+                assert_eq!(*rest_destination, Some(Zone::Library));
+            }
+            other => panic!("Expected DigChoice, got {:?}", other),
+        }
+
+        // Verify the controller-scoped variant: with controller=You, the filter
+        // only matches permanents controlled by the ability's controller. The
+        // on-board "Forest" is controlled by PlayerId(1), so no library card
+        // should match.
+        let filter_you = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::NameMatchesAnyPermanent {
+                controller: Some(ControllerRef::You),
+            },
+        ]));
+        let ability_you = ResolvedAbility::new(
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: Some(Zone::Battlefield),
+                keep_count: Some(1),
+                up_to: true,
+                filter: filter_you,
+                rest_destination: Some(Zone::Library),
+                reveal: false,
+            },
+            vec![],
+            ObjectId(201),
+            PlayerId(0),
+        );
+        let mut events2 = Vec::new();
+        resolve(&mut state, &ability_you, &mut events2).unwrap();
+        match &state.waiting_for {
+            WaitingFor::DigChoice {
+                selectable_cards, ..
+            } => {
+                assert_eq!(
+                    selectable_cards.len(),
+                    0,
+                    "no library card shares a name with a permanent you control"
+                );
+            }
+            other => panic!("Expected DigChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c + CR 701.20e: Dig with `destination = Some(Battlefield)` and
+    /// `rest_destination = Some(Library)` must route the chosen card to the
+    /// battlefield (ETB triggers fire) and the unchosen cards to the bottom of
+    /// the owner's library. This is the Mitotic Manipulation primitive at
+    /// resolution time — no sub_ability chain required.
+    #[test]
+    fn dig_resolves_kept_to_battlefield_and_rest_to_library_bottom() {
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::types::actions::GameAction;
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        let cards_on_top: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>();
+        let kept = vec![cards_on_top[2]]; // pick the middle card
+        let rest_ids: Vec<_> = cards_on_top
+            .iter()
+            .filter(|id| !kept.contains(id))
+            .copied()
+            .collect();
+
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            selectable_cards: cards_on_top.clone(),
+            cards: cards_on_top.clone(),
+            keep_count: 1,
+            up_to: true,
+            kept_destination: Some(Zone::Battlefield),
+            rest_destination: Some(Zone::Library),
+            source_id: Some(ObjectId(100)),
+        };
+        let action = GameAction::SelectCards {
+            cards: kept.clone(),
+        };
+        let mut events = Vec::new();
+        let outcome =
+            handle_resolution_choice(&mut state, waiting, action, &mut events).expect("ok");
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+
+        // Kept card is on the battlefield.
+        let kept_obj = state.objects.get(&kept[0]).expect("kept object exists");
+        assert_eq!(kept_obj.zone, Zone::Battlefield);
+        // Rest of the cards are at the bottom of PlayerId(0)'s library.
+        let library = &state.players[0].library;
+        let bottom: Vec<_> = library
+            .iter()
+            .rev()
+            .take(rest_ids.len())
+            .rev()
+            .copied()
+            .collect();
+        for id in &rest_ids {
+            assert!(
+                bottom.contains(id),
+                "card {:?} must be at library bottom",
+                id
+            );
+            let obj = state.objects.get(id).expect("rest object exists");
+            assert_eq!(obj.zone, Zone::Library);
         }
     }
 }

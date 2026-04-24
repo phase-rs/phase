@@ -318,7 +318,7 @@ mod tests {
         );
         obj.counters.insert(CounterType::Plus1Plus1, 3);
         state.objects.insert(obj_id, obj);
-        state.battlefield.push(obj_id);
+        state.battlefield.push_back(obj_id);
 
         let mut events = Vec::new();
         let ability = make_double_ability(
@@ -358,7 +358,7 @@ mod tests {
         obj.counters
             .insert(CounterType::Generic("charge".to_string()), 1);
         state.objects.insert(obj_id, obj);
-        state.battlefield.push(obj_id);
+        state.battlefield.push_back(obj_id);
 
         let mut events = Vec::new();
         let ability = make_double_ability(

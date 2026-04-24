@@ -113,6 +113,46 @@ impl AiSession {
         Arc::new(Self::from_game(state))
     }
 
+    /// Populate per-player features on demand. No-op if already populated.
+    /// Used by callers that build a session incrementally (e.g., via
+    /// `AiContext::analyze_with`, which only seeds the AI's own deck).
+    ///
+    /// **Staleness note**: this no-ops on re-calls for an already-populated
+    /// player. That's safe because `AiSession` is currently rebuilt per
+    /// `choose_action` call (see `AiContext::analyze_with` in
+    /// `crates/phase-ai/src/context.rs`), so cached features cannot outlive
+    /// a single decision. If future work promotes `AiSession` to a
+    /// cross-decision lifetime (e.g., Phase 4's `SessionCompute`), add an
+    /// `invalidate_player_features(player)` hook and call it from any site
+    /// that mutates `state.deck_pools`.
+    pub fn ensure_player_features(&mut self, player: PlayerId, deck: &[DeckEntry]) {
+        if self.features.contains_key(&player) || deck.is_empty() {
+            return;
+        }
+        let features = features_for(deck);
+        let snapshot = derive_snapshot(&features);
+        self.features.insert(player, features);
+        self.plan.insert(player, snapshot);
+        self.synergy.insert(player, SynergyGraph::build(deck));
+    }
+
+    /// Drop cached per-player features so a subsequent `ensure_player_features`
+    /// call repopulates from fresh deck data. Currently unused (see the
+    /// staleness note on `ensure_player_features`); provided so future
+    /// cross-decision session lifetimes have a ready hook.
+    pub fn invalidate_player_features(&mut self, player: PlayerId) {
+        self.features.remove(&player);
+        self.plan.remove(&player);
+        self.synergy.remove(&player);
+    }
+
+    /// Return a player's cached archetype, if present. Typed accessor that
+    /// hides the internal `features` HashMap layout — callers should prefer
+    /// this over direct field access.
+    pub fn archetype(&self, player: PlayerId) -> Option<crate::deck_profile::DeckArchetype> {
+        self.features.get(&player).map(|f| f.archetype)
+    }
+
     /// Retrieve a cached projection, computing it on miss. Turn-scoped
     /// key means stale entries never match. Read-path is lock-free;
     /// write-path briefly acquires a write lock.
@@ -145,6 +185,33 @@ impl AiSession {
         }
 
         Ok(projection)
+    }
+
+    /// Cache-only projection lookup — returns `None` on miss without doing
+    /// the expensive multi-turn simulation. Policies that want projection
+    /// data but can't afford the miss cost (e.g., under a tight wall-clock
+    /// budget) should use this and fall back to a cheaper heuristic when
+    /// no cached projection exists. On `Ok(None)` the caller knows
+    /// definitively "not cached" and does not run the simulator.
+    pub fn cached_projection(
+        &self,
+        base: &GameState,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+        horizon: ProjectionHorizon,
+    ) -> Option<Arc<Projection>> {
+        let key = ProjectionKey {
+            state_hash: quick_state_hash(base),
+            turn_number: base.turn_number,
+            active_player: base.active_player,
+            ai_player,
+            target_opponent,
+            horizon,
+        };
+        self.projection_cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&key).map(Arc::clone))
     }
 }
 

@@ -51,7 +51,7 @@ impl PlayerStatus {
 /// CR 122.1b: Named player counter types tracked by the engine.
 /// Poison counters route to the dedicated `poison_counters` field due to SBA rules (CR 704.5c).
 /// Energy counters are excluded — they use the dedicated `energy` field and `GainEnergy` effect.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlayerCounterKind {
     Poison,
     Experience,
@@ -93,9 +93,9 @@ pub struct Player {
     pub mana_pool: ManaPool,
 
     // Per-player zones
-    pub library: Vec<ObjectId>,
-    pub hand: Vec<ObjectId>,
-    pub graveyard: Vec<ObjectId>,
+    pub library: im::Vector<ObjectId>,
+    pub hand: im::Vector<ObjectId>,
+    pub graveyard: im::Vector<ObjectId>,
 
     // Tracking
     pub has_drawn_this_turn: bool,
@@ -171,9 +171,9 @@ impl Default for Player {
             id: PlayerId(0),
             life: 20,
             mana_pool: ManaPool::default(),
-            library: Vec::new(),
-            hand: Vec::new(),
-            graveyard: Vec::new(),
+            library: im::Vector::new(),
+            hand: im::Vector::new(),
+            graveyard: im::Vector::new(),
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
             poison_counters: 0,
@@ -213,7 +213,7 @@ impl Player {
     pub fn add_player_counters(&mut self, kind: &PlayerCounterKind, count: u32) {
         match kind {
             PlayerCounterKind::Poison => self.poison_counters += count,
-            _ => *self.player_counters.entry(kind.clone()).or_insert(0) += count,
+            _ => *self.player_counters.entry(*kind).or_insert(0) += count,
         }
     }
 

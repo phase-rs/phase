@@ -617,6 +617,13 @@ pub enum ManaProduction {
         )]
         contribution: ManaContribution,
     },
+    /// CR 106.1 + CR 109.1: Produce one mana of each distinct color among
+    /// permanents matching a filter. "Gold", "multicolor", and "colorless" are
+    /// not colors (CR 105.1), so each of W/U/B/R/G contributes at most once.
+    /// Used by Faeburrow Elder's "{T}: For each color among permanents you
+    /// control, add one mana of that color." Mirrors the structure of
+    /// `QuantityRef::DistinctColorsAmongPermanents`.
+    DistinctColorsAmongPermanents { filter: TargetFilter },
 }
 
 /// CR 607.2a + CR 406.6 + CR 610.3: Which exile-link relation a mana ability reads
@@ -704,6 +711,9 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         #[serde(default = "default_mana_contribution")]
                         contribution: ManaContribution,
                     },
+                    DistinctColorsAmongPermanents {
+                        filter: TargetFilter,
+                    },
                 }
                 let helper: ManaProductionHelper =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -764,6 +774,9 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         count,
                         contribution,
                     },
+                    ManaProductionHelper::DistinctColorsAmongPermanents { filter } => {
+                        ManaProduction::DistinctColorsAmongPermanents { filter }
+                    }
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -926,6 +939,16 @@ pub enum CastingPermission {
     /// CR 702.185a: Warp — card may be cast from exile at its normal mana cost,
     /// but only after the specified turn ends. Persists for as long as card remains exiled.
     WarpExile { castable_after_turn: u32 },
+    /// CR 702.170a + CR 702.170d: Plot — card was exiled from its owner's hand via
+    /// the plot special action (or granted this marker by another effect). On any
+    /// turn after `turn_plotted`, the owner may cast it from exile without paying
+    /// its mana cost during their own main phase while the stack is empty
+    /// (sorcery-speed). The `turn_plotted` field is stamped from `state.turn_number`
+    /// at resolution time by `grant_permission::resolve` (placeholder `0` at
+    /// definition time); it is read by `has_exile_cast_permission` to gate the
+    /// "later turn" check. Persists for as long as the card remains in exile
+    /// (cleared by `zones::apply_zone_exit_cleanup` when the card leaves exile).
+    Plotted { turn_plotted: u32 },
 }
 
 /// CR 611.2a + CR 108.3: Identifies which player a `CastingPermission` is granted
@@ -1343,6 +1366,15 @@ pub enum FilterProp {
     /// looking up the name from `state.objects` (or `lki_cache` if the target
     /// has already left its zone).
     SameNameAsParentTarget,
+    /// CR 201.2 + CR 201.2a: Matches objects whose name equals the name of any
+    /// permanent currently on the battlefield. `controller` optionally narrows
+    /// the pool of permanents whose names are considered (None = any controller,
+    /// i.e. "shares a name with a permanent" unqualified). Used by "put a card
+    /// onto the battlefield if it has the same name as a permanent" patterns
+    /// (Mitotic Manipulation, and any analogous dig-with-name-match effect).
+    NameMatchesAnyPermanent {
+        controller: Option<ControllerRef>,
+    },
     /// CR 508.1b: Matches attacking creatures whose defending player equals the
     /// filter's source controller ("creatures attacking you"). Distinct from
     /// `Attacking`, which matches any attacker regardless of defender.
@@ -1565,11 +1597,19 @@ pub enum QuantityRef {
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
     ObjectCount { filter: TargetFilter },
+    /// CR 201.2 + CR 603.4: Count of distinct names among objects matching a
+    /// filter. Used for "seven or more lands with different names" (Field of
+    /// the Dead) and similar distinct-name threshold predicates. Two objects
+    /// with the same name count once.
+    ObjectCountDistinctNames { filter: TargetFilter },
     /// Count of players matching a player-level filter.
     /// Used for "for each opponent who lost life this turn" and similar patterns.
     PlayerCount { filter: PlayerFilter },
     /// Count of counters of a given type on the source object.
     /// Used for "for each [counter type] counter on ~" patterns.
+    ///
+    /// For counters on a *player* (experience, poison, rad, ticket), use
+    /// [`QuantityRef::PlayerCounter`] instead.
     CountersOnSelf { counter_type: String },
     /// Count of counters of a given type on the previously targeted object.
     /// Used for "for each [counter type] counter on that creature" anaphoric patterns.
@@ -1588,6 +1628,24 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         counter_type: Option<String>,
         filter: TargetFilter,
+    },
+    /// CR 122.1: Count of a named player-counter kind on a player (or summed across
+    /// scoped players). Distinct from `CountersOnSelf` / `CountersOnTarget` /
+    /// `CountersOnObjects`, which count counters on *objects* — player counters
+    /// live on `Player`.
+    ///
+    /// Kind-specific CR references:
+    /// - Poison: CR 122.1f + CR 704.5c (ten-or-more SBA).
+    /// - Rad:    CR 122.1i + CR 728.
+    /// - Experience and Ticket are covered only by the generic CR 122.1.
+    ///
+    /// Scope is currently limited to `Controller`, `Opponents`, and `All`.
+    /// Targeted-player variants ("target opponent has N experience counters")
+    /// are not yet represented; extending `CountScope` with a `TargetPlayer`
+    /// arm is a future change when a card forces it.
+    PlayerCounter {
+        kind: PlayerCounterKind,
+        scope: CountScope,
     },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
@@ -1776,6 +1834,13 @@ pub enum QuantityRef {
     /// by War Room's "pay life equal to the number of colors in your
     /// commanders' color identity" activation cost.
     ColorsInCommandersColorIdentity,
+    /// CR 106.1 + CR 109.1: Number of distinct colors among permanents matching
+    /// a filter. "Gold", "multicolor", and "colorless" are not colors (CR 105.1),
+    /// so each of W/U/B/R/G is counted at most once. Used by Faeburrow Elder's
+    /// "+1/+1 for each color among permanents you control" CDA and its companion
+    /// mana ability. Composes with `ObjectCount`-style filter predicates and is
+    /// the dual to `ManaProduction::DistinctColorsAmongPermanents`.
+    DistinctColorsAmongPermanents { filter: TargetFilter },
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
@@ -2731,9 +2796,18 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         damage_source: Option<DamageSource>,
     },
+    /// CR 121.1: Draw a card.
+    /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
+    /// other non-context-ref filter), the drawing player is chosen during spell
+    /// announcement. The default `TargetFilter::Controller` preserves the
+    /// historical "controller draws" semantics for `"draw a card"` /
+    /// `"you draw a card"` patterns where no `target` field appears in the
+    /// serialized AST.
     Draw {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
     },
     Pump {
         #[serde(default = "default_pt_value_zero")]
@@ -2886,9 +2960,17 @@ pub enum Effect {
         #[serde(default = "default_zone_graveyard")]
         destination: Zone,
     },
+    /// CR 701.22a: Scry N — look at the top N cards, then put any number on
+    /// the bottom in any order and the rest on top in any order.
+    /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
+    /// other non-context-ref filter), the scrying player is chosen during
+    /// spell announcement. The default `TargetFilter::Controller` preserves
+    /// "you scry" / "scry N" semantics where no player is targeted.
     Scry {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
     },
     PumpAll {
         #[serde(default = "default_pt_value_zero")]
@@ -3004,9 +3086,17 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.25a: Surveil N — look at the top N cards, then put any number
+    /// into the graveyard and the rest on top in any order.
+    /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
+    /// other non-context-ref filter), the surveiling player is chosen during
+    /// spell announcement. The default `TargetFilter::Controller` preserves
+    /// "you surveil" / "surveil N" semantics where no player is targeted.
     Surveil {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
     },
     Fight {
         #[serde(default = "default_target_filter_any")]
@@ -3224,6 +3314,13 @@ pub enum Effect {
         /// the player may discard 1 card matching this filter instead of `count` cards.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unless_filter: Option<TargetFilter>,
+        /// CR 701.9a + CR 608.2c: Restriction on which cards can satisfy the discard
+        /// (e.g., Dokuchi Silencer's "discard a creature card"). Mirrors the
+        /// `filter` slot on `AbilityCost::Discard` — when set, only cards matching
+        /// this filter are legal to discard. `None` means any card in the
+        /// discarding player's hand is legal (the default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
     Shuffle {
         #[serde(default = "default_target_filter_controller")]
@@ -3249,6 +3346,12 @@ pub enum Effect {
         /// Used by Bribery, Acquire, Praetor's Grasp, etc.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_player: Option<TargetFilter>,
+        /// CR 107.1c + CR 701.23d: When true, the searcher may find up to `count`
+        /// matching cards (including zero). When false, they must find exactly
+        /// `count` matching cards (or as many as possible if fewer exist). Set
+        /// by "any number of ..." and "up to N ..." Oracle phrasings.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
     },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
@@ -3258,6 +3361,22 @@ pub enum Effect {
         /// None = reveal entire hand. Some = reveal this many cards. CR 701.20a.
         #[serde(default)]
         count: Option<QuantityExpr>,
+    },
+    /// CR 701.20a: "You may reveal a [FILTER] card from your hand" — optional self-reveal
+    /// from the controller's own hand. Distinct from `RevealHand` (target player, used for
+    /// opponent-facing effects like Thoughtseize). If the controller's hand contains no
+    /// card matching `filter`, or if the controller declines the prompt, `on_decline` runs.
+    /// Used by reveal-lands (Port Town, Gilt-Leaf Palace, and the 10-Temple cycle) where
+    /// the "if you don't" branch taps the source. Composable: `on_decline` is any
+    /// `AbilityDefinition`, so symmetric "if you do, [effect]" variants reuse the same
+    /// primitive simply by swapping accept and decline.
+    RevealFromHand {
+        #[serde(default = "default_target_filter_any")]
+        filter: TargetFilter,
+        /// The ability run when the controller cannot or chooses not to reveal a
+        /// matching card. `None` = decline is a no-op.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_decline: Option<Box<AbilityDefinition>>,
     },
     /// CR 701.20: Reveal a specific object (resolved from `target`) to all players.
     /// Distinct from `RevealHand` (zone-wide) and `RevealTop` (library depth-N).
@@ -3822,6 +3941,27 @@ pub enum Effect {
         #[serde(default)]
         tapped: bool,
     },
+    /// CR 700.2 + CR 608.2d: Inline "you may [effect A] or [effect B]" —
+    /// controller chooses at resolution which of the two (or more) branches to
+    /// execute. Building block for optional binary-choice imperatives like
+    /// Highway Robbery's "You may discard a card or sacrifice a land" and
+    /// analogous "you may X or Y" patterns that are not expressed as a bulleted
+    /// `Choose one —` modal block. Each branch is a full `AbilityDefinition`
+    /// so it carries its own cost, target, and sub-ability chain. The outer
+    /// imperative is already marked `optional: true` when "you may" is
+    /// stripped; this effect represents the branching choice once the
+    /// controller opts in.
+    ///
+    /// Resolution: controller picks exactly one branch by index; the chosen
+    /// branch's effect resolves normally. Runtime resolver is not yet wired —
+    /// the typed shape is emitted so the parser stops silently dropping the
+    /// second branch; full runtime support can follow without changing the
+    /// card data format.
+    ChooseOneOf {
+        /// The branches the controller may choose between. Each element is a
+        /// self-contained ability (effect + optional cost + optional target).
+        branches: Vec<AbilityDefinition>,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -4007,6 +4147,9 @@ impl Effect {
         match self {
             // --- Effects with a `target: TargetFilter` field ---
             Effect::DealDamage { target, .. }
+            | Effect::Draw { target, .. }
+            | Effect::Scry { target, .. }
+            | Effect::Surveil { target, .. }
             | Effect::Pump { target, .. }
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }
@@ -4067,6 +4210,13 @@ impl Effect {
 
             Effect::ExileTop { player, .. } => Some(player),
 
+            // CR 111.2 + CR 601.2c: "Target player creates ..." token modes
+            // (e.g. Ashling's Command mode 4, Brigid's Command, Prismari Command)
+            // surface their token-creation target as the `owner` filter — the
+            // player who creates the token is its owner. The default
+            // `TargetFilter::Controller` preserves "you create ..." semantics.
+            Effect::Token { owner, .. } => Some(owner),
+
             // GenericEffect and LoseLife have Option<TargetFilter>
             Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
                 target.as_ref()
@@ -4076,10 +4226,7 @@ impl Effect {
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
             | Effect::IncreaseSpeed { .. }
-            | Effect::Draw { .. }
-            | Effect::Token { .. }
             | Effect::GainLife { .. }
-            | Effect::Scry { .. }
             | Effect::PumpAll { .. }
             | Effect::DamageAll { .. }
             | Effect::DamageEachPlayer { .. }
@@ -4088,7 +4235,6 @@ impl Effect {
             | Effect::UntapAll { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::Dig { .. }
-            | Effect::Surveil { .. }
             | Effect::PutCounterAll { .. }
             | Effect::DoublePTAll { .. }
             | Effect::Explore
@@ -4152,7 +4298,11 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
-            | Effect::Unimplemented { .. } => None,
+            | Effect::ChooseOneOf { .. }
+            | Effect::Unimplemented { .. }
+            // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
+            // it has no discrete `target` field for the generic targeting layer.
+            | Effect::RevealFromHand { .. } => None,
             // CR 701.23a: SearchLibrary has an optional player target for opponent search.
             Effect::SearchLibrary { target_player, .. } => target_player.as_ref(),
         }
@@ -4227,6 +4377,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Transform { .. } => "Transform",
         Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::RevealHand { .. } => "RevealHand",
+        Effect::RevealFromHand { .. } => "RevealFromHand",
         Effect::Reveal { .. } => "Reveal",
         Effect::RevealTop { .. } => "RevealTop",
         Effect::ExileTop { .. } => "ExileTop",
@@ -4305,6 +4456,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::Conjure { .. } => "Conjure",
+        Effect::ChooseOneOf { .. } => "ChooseOneOf",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -4458,6 +4610,7 @@ pub enum EffectKind {
     GiveControl,
     RemoveFromCombat,
     Conjure,
+    ChooseOneOf,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -4541,6 +4694,7 @@ impl From<&Effect> for EffectKind {
             Effect::Transform { .. } => EffectKind::Transform,
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::RevealHand { .. } => EffectKind::Reveal,
+            Effect::RevealFromHand { .. } => EffectKind::Reveal,
             Effect::Reveal { .. } => EffectKind::Reveal,
             Effect::RevealTop { .. } => EffectKind::Reveal,
             Effect::ExileTop { .. } => EffectKind::ExileTop,
@@ -4617,6 +4771,7 @@ impl From<&Effect> for EffectKind {
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::Conjure { .. } => EffectKind::Conjure,
+            Effect::ChooseOneOf { .. } => EffectKind::ChooseOneOf,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
@@ -4958,8 +5113,23 @@ impl AbilityDefinition {
         self
     }
 
+    /// CR 602.5d: "Activate only as a sorcery" — set both the display flag (for
+    /// UI consumers) and push `ActivationRestriction::AsSorcery` so the legality
+    /// gate in `game::restrictions::check_activation_restrictions` actually
+    /// enforces the timing at runtime. Single authority for "this ability is
+    /// sorcery speed" — covers Equip (CR 702.6a), Fortify (CR 702.67a),
+    /// Reconfigure (CR 702.151a), Level Up (CR 702.87a), Scavenge (CR 702.97a),
+    /// planeswalker loyalty (CR 606.3), and any future keyword that is required
+    /// to be activated at sorcery speed.
     pub fn sorcery_speed(mut self) -> Self {
         self.sorcery_speed = true;
+        if !self
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery)
+        {
+            self.activation_restrictions
+                .push(ActivationRestriction::AsSorcery);
+        }
         self
     }
 
@@ -6431,6 +6601,7 @@ mod tests {
         let sub = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -6506,6 +6677,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             ))),
             valid_card: Some(TargetFilter::SelfRef),
@@ -6617,6 +6789,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         ))
         .duration(Duration::UntilEndOfTurn)
@@ -6933,6 +7106,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(1),
@@ -7218,6 +7392,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             );
             assert!(def.cost_categories().is_empty());
@@ -7229,6 +7404,7 @@ mod tests {
                 AbilityKind::Activated,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             )
             .cost(AbilityCost::Sacrifice {
@@ -7253,6 +7429,7 @@ mod modal_ability_tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         );
         let mode2 = AbilityDefinition::new(

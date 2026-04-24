@@ -58,13 +58,18 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
     // These target a player, searching that player's library instead of the controller's.
     let target_player = parse_search_target_player(lower);
 
+    // CR 107.1c: "any number of [FILTER] cards" — searcher may find 0..=matching.len()
+    // cards. Detected before "up to N" since they share no overlap: "any number of"
+    // emits a sentinel count that is capped to the matching-set size at resolution.
+    let any_number_tail = scan_after_tag(lower, "any number of ");
+
     // Extract count from "up to N" / "up to X" (must be done before filter extraction
     // since "for up to five creature cards" needs to skip the count to find the type).
     // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
     let up_to_match = scan_preceded(lower, "up to ", nom_quantity::parse_quantity_expr_number);
 
     // Fallback: "for N cards" / "for X cards" without "up to".
-    let for_match = if up_to_match.is_none() {
+    let for_match = if up_to_match.is_none() && any_number_tail.is_none() {
         scan_preceded(lower, "for ", nom_quantity::parse_quantity_expr_number)
             // Require a word break after the number (" cards" / " creature ...").
             // Guards against matching "for a", "for an", etc. where parse_number fails
@@ -74,20 +79,26 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
         None
     };
 
-    let (count, count_end_in_for) = match (up_to_match, for_match) {
-        (Some((expr, off)), _) => (expr, Some(off)),
-        (None, Some((expr, _))) => (expr, None),
-        (None, None) => (QuantityExpr::Fixed { value: 1 }, None),
+    // CR 107.1c + CR 701.23d: up_to=true ⇒ searcher picks 0..=count (vs. exactly count).
+    // "any number of" uses i32::MAX as an unbounded ceiling — the resolver floors it
+    // against matching.len(), so the effective ceiling is always the legal-option set.
+    let (count, count_end_in_for, up_to) = match (any_number_tail, up_to_match, for_match) {
+        (Some(off), _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
+        (None, Some((expr, off)), _) => (expr, Some(off), true),
+        (None, None, Some((expr, _))) => (expr, None, false),
+        (None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
     };
 
-    // Extract the type filter from after "for a/an" or from the tail after "up to N".
-    let filter = if let Some(after_for) = strip_after(lower, "for a ") {
+    // Extract the type filter from after "for a/an" or from the tail after "up to N"
+    // or "any number of".
+    let filter = if let Some(type_start) = count_end_in_for {
+        // "for up to five creature cards" or "for any number of dragon creature cards"
+        // — type text starts after the number / quantity phrase
+        parse_search_filter(&lower[type_start..])
+    } else if let Some(after_for) = strip_after(lower, "for a ") {
         parse_search_filter(after_for)
     } else if let Some(after_for) = strip_after(lower, "for an ") {
         parse_search_filter(after_for)
-    } else if let Some(type_start) = count_end_in_for {
-        // "for up to five creature cards" — type text starts after the number
-        parse_search_filter(&lower[type_start..])
     } else {
         TargetFilter::Any
     };
@@ -97,7 +108,30 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
         count,
         reveal,
         target_player,
+        up_to,
     }
+}
+
+/// Locate `tag_prefix` at a word boundary in `lower` and return the byte offset of
+/// the character immediately following the prefix. Mirrors `scan_preceded`'s boundary
+/// rules but does not apply a nom combinator — the tail is the filter text itself.
+fn scan_after_tag(lower: &str, tag_prefix: &str) -> Option<usize> {
+    let mut search_from = 0;
+    while search_from <= lower.len() {
+        let idx = lower[search_from..]
+            .find(tag_prefix)
+            .map(|i| search_from + i)?;
+        let at_boundary = idx == 0
+            || matches!(
+                lower.as_bytes()[idx - 1],
+                b' ' | b',' | b';' | b'(' | b'.' | b'\n' | b'\t'
+            );
+        if at_boundary {
+            return Some(idx + tag_prefix.len());
+        }
+        search_from = idx + 1;
+    }
+    None
 }
 
 /// CR 701.23a: Detect player-targeting search patterns like "search target opponent's library"
@@ -714,6 +748,45 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::SameName)));
+    }
+
+    #[test]
+    fn search_any_number_of_dragon_creature_cards_sets_up_to_and_filter() {
+        // CR 107.1c: Sarkhan, Dragonsoul [-9]: "Search your library for any number
+        // of Dragon creature cards, put them onto the battlefield, then shuffle."
+        let details = parse_search_library_details(
+            "search your library for any number of dragon creature cards, put them onto the battlefield, then shuffle",
+        );
+        assert!(details.up_to, "any number of should set up_to=true");
+        assert_eq!(details.count, QuantityExpr::Fixed { value: i32::MAX });
+        match details.filter {
+            TargetFilter::Typed(ref tf) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.get_subtype(), Some("Dragon"));
+            }
+            ref other => panic!("expected Typed creature filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_up_to_n_sets_up_to_true() {
+        // "Search your library for up to three cards" — player may pick 0..=3.
+        let details = parse_search_library_details(
+            "search your library for up to three creature cards, reveal them",
+        );
+        assert!(details.up_to, "up to N should set up_to=true");
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
+    }
+
+    #[test]
+    fn search_for_a_card_does_not_set_up_to() {
+        // "Search your library for a creature card" — exactly one required pick
+        // (CR 701.23d: must find if present).
+        let details = parse_search_library_details(
+            "search your library for a creature card, put it onto the battlefield",
+        );
+        assert!(!details.up_to, "exact-count search should not set up_to");
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
     }
 
     #[test]

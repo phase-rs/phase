@@ -259,7 +259,7 @@ pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) 
 
 fn player_impact(effect: &Effect) -> f64 {
     match effect {
-        Effect::Draw { count } => quantity_weight(count, 1.25),
+        Effect::Draw { count, .. } => quantity_weight(count, 1.25),
         Effect::Discard { count, .. } => -quantity_weight(count, 1.5),
         Effect::DiscardCard { count, .. } => -(*count as f64 * 1.5),
         Effect::GainLife { amount, .. } => quantity_weight(amount, 0.15),

@@ -16,6 +16,7 @@ import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore"
 import type { AiArchetypeFilter } from "../stores/preferencesStore";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
+import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
@@ -28,11 +29,34 @@ import {
   clearGame,
   clearActiveGame,
   clearP2PHostSession,
+  loadActiveGame,
   loadGame,
   loadP2PHostSession,
   saveActiveGame,
   useGameStore,
 } from "../stores/gameStore";
+import type { AISeatBinding } from "../game/controllers/aiController";
+
+/** Build per-seat AI controller bindings for a game about to start. Reads
+ *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
+ *  game start by the setup page); falls back to a flat `difficulty` applied
+ *  to every seat when no snapshot exists (e.g. resuming a pre-multi-AI save). */
+function resolveAiSeatBindings(
+  gameId: string,
+  playerCount: number | undefined,
+  fallbackDifficulty: string | undefined,
+): AISeatBinding[] | undefined {
+  const count = playerCount ?? 2;
+  const opponentCount = Math.max(0, count - 1);
+  if (opponentCount === 0) return undefined;
+  const meta = loadActiveGame();
+  const snapshot = meta?.id === gameId ? meta.aiSeats : undefined;
+  const fallback = fallbackDifficulty ?? "Medium";
+  return Array.from({ length: opponentCount }, (_, i) => ({
+    playerId: i + 1,
+    difficulty: snapshot?.[i]?.difficulty ?? fallback,
+  }));
+}
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 
 function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
@@ -89,51 +113,70 @@ async function applyAiFilters(
   return keep;
 }
 
+interface PickOptions {
+  /** Explicit deck name pinned by the user; `AI_DECK_RANDOM` means "pick from pool". */
+  requestedDeckName: string;
+  /** `FeedDeck.name` values already assigned to earlier AI seats. Random picks
+   *  prefer candidates *not* in this set; if the pool is exhausted the last
+   *  seats reuse names rather than erroring. */
+  excludeNames: Set<string>;
+  archetypeFilter: AiArchetypeFilter;
+  coverageFloor: number;
+}
+
+/** Random-pick a `FeedDeck` from `pool`, preferring names not already in
+ *  `excludeNames`. Returns the full `FeedDeck` so the caller can record its
+ *  name to extend the excludeNames set for subsequent seats. */
+function randomPickDistinct(pool: FeedDeck[], excludeNames: Set<string>): FeedDeck {
+  const fresh = pool.filter((d) => !excludeNames.has(d.name));
+  const source = fresh.length > 0 ? fresh : pool;
+  return source[Math.floor(Math.random() * source.length)];
+}
+
+/** Pick a single AI opponent's deck for one seat. Seat-agnostic: all per-seat
+ *  state is passed in, and the function returns both the parsed deck and the
+ *  picked `FeedDeck.name` (or `null` when the fallback paths land on a local
+ *  or mirrored deck — those have no stable cross-seat name to dedup against). */
 async function pickOpponentDeck(
   playerDeck: ParsedDeck,
+  opts: PickOptions,
   formatConfig?: FormatConfig,
-): Promise<ParsedDeck> {
-  const { aiDeckName, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+): Promise<{ deck: ParsedDeck; name: string | null }> {
+  const { requestedDeckName, excludeNames, archetypeFilter, coverageFloor } = opts;
 
   // 1. Honor an explicit named selection — bypass all filters and feed fallbacks.
-  if (aiDeckName !== AI_DECK_RANDOM) {
+  //    Seats may intentionally share a pinned deck, so `excludeNames` does not
+  //    apply here; dedup is a Random-pool concern only.
+  if (requestedDeckName !== AI_DECK_RANDOM) {
     const pool = collectFormatFeedDecks(formatConfig);
     const starter = getCachedFeed("starter-decks")?.decks ?? [];
     const match =
-      pool.find((d) => d.name === aiDeckName) ?? starter.find((d) => d.name === aiDeckName);
-    if (match) return feedDeckToParsedDeck(match);
+      pool.find((d) => d.name === requestedDeckName)
+      ?? starter.find((d) => d.name === requestedDeckName);
+    if (match) return { deck: feedDeckToParsedDeck(match), name: match.name };
     // Selection no longer exists — fall through to Random.
   }
 
   // 2. Format-specific feeds, filtered by archetype + coverage preferences.
   const formatDecks = collectFormatFeedDecks(formatConfig);
   if (formatDecks.length > 0) {
-    const filtered = await applyAiFilters(formatDecks, aiArchetypeFilter, aiCoverageFloor);
+    const filtered = await applyAiFilters(formatDecks, archetypeFilter, coverageFloor);
     const pool = filtered.length > 0 ? filtered : formatDecks;
-    const playerNames = new Set(playerDeck.main.map((e) => e.name));
-    const candidates = pool.filter((d) => !d.main.every((c) => playerNames.has(c.name)));
-    const pick = candidates.length > 0
-      ? candidates[Math.floor(Math.random() * candidates.length)]
-      : pool[Math.floor(Math.random() * pool.length)];
-    return feedDeckToParsedDeck(pick);
+    const pick = randomPickDistinct(pool, excludeNames);
+    return { deck: feedDeckToParsedDeck(pick), name: pick.name };
   }
 
   // 3. Fall back to starter-decks feed.
   const feed = getCachedFeed("starter-decks");
   const feedDecks = feed?.decks ?? [];
-
   if (feedDecks.length > 0) {
-    const filtered = await applyAiFilters(feedDecks, aiArchetypeFilter, aiCoverageFloor);
+    const filtered = await applyAiFilters(feedDecks, archetypeFilter, coverageFloor);
     const pool = filtered.length > 0 ? filtered : feedDecks;
-    const playerNames = new Set(playerDeck.main.map((e) => e.name));
-    const candidates = pool.filter((d) => !d.main.every((c) => playerNames.has(c.name)));
-    const pick = candidates.length > 0
-      ? candidates[Math.floor(Math.random() * candidates.length)]
-      : pool[Math.floor(Math.random() * pool.length)];
-    return feedDeckToParsedDeck(pick);
+    const pick = randomPickDistinct(pool, excludeNames);
+    return { deck: feedDeckToParsedDeck(pick), name: pick.name };
   }
 
-  // 4. Local deck storage fallback (no AI filter applied — no metadata available).
+  // 4. Local deck storage fallback — no metadata, no stable deck name.
   const savedCandidates: ParsedDeck[] = [];
   const commandZoneFormat = formatConfig?.command_zone === true;
   for (let i = 0; i < localStorage.length; i++) {
@@ -149,23 +192,55 @@ async function pickOpponentDeck(
     }
   }
   if (savedCandidates.length > 0) {
-    return savedCandidates[Math.floor(Math.random() * savedCandidates.length)];
+    return {
+      deck: savedCandidates[Math.floor(Math.random() * savedCandidates.length)],
+      name: null,
+    };
   }
 
   // 5. Last resort: mirror the player's deck.
-  return playerDeck;
+  return { deck: playerDeck, name: null };
 }
 
-/** Build a DeckList (name-only) for the WASM engine to resolve. */
-async function buildDeckList(deck: ParsedDeck, formatConfig?: FormatConfig): Promise<{
+/** Build a DeckList (name-only) for the WASM engine to resolve. Picks one
+ *  deck per AI seat (`playerCount - 1` total), honoring each seat's pinned
+ *  deck selection and dedup-ing Random picks by `FeedDeck.name`. */
+async function buildDeckList(
+  deck: ParsedDeck,
+  playerCount: number,
+  formatConfig?: FormatConfig,
+): Promise<{
   player: { main_deck: string[]; sideboard: string[]; commander: string[] };
   opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
   ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
 }> {
+  const { aiSeats, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+  const opponentCount = Math.max(1, playerCount - 1);
+  const excludeNames = new Set<string>();
+  const picks: ParsedDeck[] = [];
+  for (let i = 0; i < opponentCount; i++) {
+    // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
+    // through to seat 0 would re-introduce the original bug: if the user
+    // pinned one deck for a 2-player session and a 4-player resume-fallback
+    // fires, every missing seat would clone that pinned deck.
+    const requestedDeckName = aiSeats[i]?.deckName ?? AI_DECK_RANDOM;
+    const result = await pickOpponentDeck(
+      deck,
+      {
+        requestedDeckName,
+        excludeNames,
+        archetypeFilter: aiArchetypeFilter,
+        coverageFloor: aiCoverageFloor,
+      },
+      formatConfig,
+    );
+    picks.push(result.deck);
+    if (result.name) excludeNames.add(result.name);
+  }
   return {
     player: expandParsedDeck(deck),
-    opponent: expandParsedDeck(await pickOpponentDeck(deck, formatConfig)),
-    ai_decks: [],
+    opponent: expandParsedDeck(picks[0]),
+    ai_decks: picks.slice(1).map(expandParsedDeck),
   };
 }
 
@@ -244,6 +319,10 @@ export function GameProvider({
   onResumeReset,
   children,
 }: GameProviderProps) {
+  // Sync the persistent phaseStops preference into engine-owned state so the
+  // engine remains the single authority for auto-pass / empty-blocker decisions.
+  usePhaseStopsSync();
+
   // Refs for callback props — these are notifications that should never
   // cause the game setup effect to re-run.
   const onWsEventRef = useRef(onWsEvent);
@@ -327,7 +406,7 @@ export function GameProvider({
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
-        const deckList = await buildDeckList(parsedDeck, formatConfig);
+        const deckList = await buildDeckList(parsedDeck, effectivePlayerCount, formatConfig);
         signal.throwIfAborted();
 
         // Resources that may need undoing on abort/error. `broker` is
@@ -708,7 +787,12 @@ export function GameProvider({
           if (cancelled) return;
           await resumeGame(gameId, adapter, savedState);
           if (cancelled) return;
-          controller = createGameLoopController({ mode, difficulty, playerCount });
+          controller = createGameLoopController({
+            mode,
+            difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
+            playerCount,
+          });
           controller.start();
           audioManager.setContext("battlefield");
         } catch (err) {
@@ -727,14 +811,19 @@ export function GameProvider({
             onNoDeckRef.current?.();
             return;
           }
-          const deckList = await buildDeckList(parsedDeck, formatConfig);
+          const deckList = await buildDeckList(parsedDeck, playerCount ?? 2, formatConfig);
           try {
             await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
             if (!adapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
             }
-            controller = createGameLoopController({ mode, difficulty, playerCount });
+            controller = createGameLoopController({
+              mode,
+              difficulty,
+              aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
+              playerCount,
+            });
             controller.start();
             audioManager.setContext("battlefield");
           } catch (initErr) {
@@ -752,14 +841,19 @@ export function GameProvider({
         return;
       }
 
-      const deckList = await buildDeckList(parsedDeck, formatConfig);
+      const deckList = await buildDeckList(parsedDeck, playerCount ?? 2, formatConfig);
       try {
         await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
         if (cancelled) return;
         if (!adapter.cardDbLoaded) {
           onCardDataMissingRef.current?.();
         }
-        controller = createGameLoopController({ mode, difficulty, playerCount });
+        controller = createGameLoopController({
+          mode,
+          difficulty,
+          aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
+          playerCount,
+        });
         controller.start();
         audioManager.setContext("battlefield");
       } catch (err) {

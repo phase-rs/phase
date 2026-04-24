@@ -29,6 +29,7 @@ const mockWorkerClient = {
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
   ping: vi.fn().mockResolvedValue("phase-rs engine ready"),
+  takeLastPanic: vi.fn().mockResolvedValue(null),
   dispose: vi.fn(),
 };
 
@@ -89,6 +90,73 @@ describe("WasmAdapter", () => {
         0,
         { type: "PassPriority" },
       );
+    });
+
+    // Regression: state-loss classification splits on whether the panic
+    // hook captured a message. ENGINE_PANIC must NOT be retried (re-running
+    // the same input re-panics — the user-reported "ai-getAction-retry"
+    // failure mode); STATE_LOST stays recoverable. Both pivots happen
+    // inside `classifyEngineErrorAsync` and depend on `takeLastPanic`.
+    describe("state-loss classification", () => {
+      const stateLostError = new Error(
+        "NOT_INITIALIZED: get_game_state returned null",
+      );
+
+      it("classifies as ENGINE_PANIC when panic was captured", async () => {
+        await adapter.initialize();
+        mockWorkerClient.submitAction.mockRejectedValueOnce(stateLostError);
+        mockWorkerClient.takeLastPanic.mockResolvedValueOnce(
+          "panicked at engine/src/foo.rs:42:1: assertion failed",
+        );
+
+        try {
+          await adapter.submitAction({ type: "PassPriority" }, 0);
+          expect.fail("expected ENGINE_PANIC");
+        } catch (err) {
+          expect(err).toBeInstanceOf(AdapterError);
+          const adapterError = err as AdapterError;
+          expect(adapterError.code).toBe(AdapterErrorCode.ENGINE_PANIC);
+          expect(adapterError.recoverable).toBe(false);
+          expect(adapterError.panic).toContain("assertion failed");
+        }
+      });
+
+      it("classifies as STATE_LOST when no panic captured", async () => {
+        await adapter.initialize();
+        mockWorkerClient.submitAction.mockRejectedValueOnce(stateLostError);
+        mockWorkerClient.takeLastPanic.mockResolvedValueOnce(null);
+
+        try {
+          await adapter.submitAction({ type: "PassPriority" }, 0);
+          expect.fail("expected STATE_LOST");
+        } catch (err) {
+          expect(err).toBeInstanceOf(AdapterError);
+          const adapterError = err as AdapterError;
+          expect(adapterError.code).toBe(AdapterErrorCode.STATE_LOST);
+          expect(adapterError.recoverable).toBe(true);
+          expect(adapterError.panic).toBeUndefined();
+        }
+      });
+
+      it("falls back to STATE_LOST when takeLastPanic itself rejects", async () => {
+        // Defensive path — if the worker has truly died, the takePanic
+        // request rejects (via onerror) and we must not propagate that
+        // rejection. The user gets the legacy STATE_LOST flow rather than
+        // a confusing secondary error.
+        await adapter.initialize();
+        mockWorkerClient.submitAction.mockRejectedValueOnce(stateLostError);
+        mockWorkerClient.takeLastPanic.mockRejectedValueOnce(
+          new Error("worker disposed"),
+        );
+
+        try {
+          await adapter.submitAction({ type: "PassPriority" }, 0);
+          expect.fail("expected STATE_LOST fallback");
+        } catch (err) {
+          expect(err).toBeInstanceOf(AdapterError);
+          expect((err as AdapterError).code).toBe(AdapterErrorCode.STATE_LOST);
+        }
+      });
     });
   });
 
@@ -158,7 +226,7 @@ describe("WasmAdapter", () => {
   describe("getAiAction", () => {
     it("delegates to worker client", async () => {
       await adapter.initialize();
-      await adapter.getAiAction("Medium");
+      await adapter.getAiAction("Medium", 1);
       expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Medium", 1);
     });
   });

@@ -1592,7 +1592,7 @@ mod tests {
                 .description("Shield".to_string()),
         );
         state.objects.insert(id, shield);
-        state.battlefield.push(id);
+        state.battlefield.push_back(id);
         id
     }
 

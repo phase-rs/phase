@@ -219,7 +219,7 @@ mod tests {
     fn put_on_battlefield(state: &mut GameState, obj: GameObject) -> ObjectId {
         let id = obj.id;
         state.objects.insert(id, obj);
-        state.battlefield.push(id);
+        state.battlefield.push_back(id);
         id
     }
 

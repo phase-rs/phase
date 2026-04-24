@@ -281,6 +281,50 @@ pub fn check_activation_restrictions(
     Ok(())
 }
 
+/// CR 302.6 + CR 602.5a: A creature's activated ability with the tap symbol ({T}) or
+/// untap symbol ({Q}) in its activation cost can't be activated unless the creature has
+/// been under its controller's control continuously since their most recent turn began.
+/// Creatures with haste (CR 702.10c) are exempt.
+///
+/// This is a universal rule applied to every activated ability whose cost contains Tap
+/// or Untap, regardless of Oracle text — it is not an `ActivationRestriction` variant
+/// because it is not derivable from printed text. Delegates the summoning-sickness
+/// determination to the canonical `combat::has_summoning_sickness` helper.
+///
+/// Non-creature permanents with tap costs (e.g., Sensei's Divining Top) are unaffected:
+/// `combat::has_summoning_sickness` returns false for non-creatures, matching the
+/// wording "A creature's activated ability…". Animated permanents that are currently
+/// creatures are correctly subject to the rule because the check reads the current
+/// `GameObject::card_types` after layer evaluation.
+pub(crate) fn check_summoning_sickness_for_cost(
+    state: &crate::types::game_state::GameState,
+    source: &GameObject,
+    cost: &AbilityCost,
+) -> Result<(), EngineError> {
+    if !cost_contains_tap_or_untap(cost) {
+        return Ok(());
+    }
+    if super::combat::has_summoning_sickness(source, state.turn_number) {
+        return Err(EngineError::ActionNotAllowed(
+            "Creature has summoning sickness: activated abilities with {T} or {Q} \
+             can't be activated this turn (CR 302.6)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Recursively inspects an `AbilityCost` for a `Tap` or `Untap` component, descending
+/// into `Composite` costs. Used exclusively by `check_summoning_sickness_for_cost` to
+/// gate the CR 302.6 check — no other caller should need to enumerate cost components.
+fn cost_contains_tap_or_untap(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Tap | AbilityCost::Untap => true,
+        AbilityCost::Composite { costs } => costs.iter().any(cost_contains_tap_or_untap),
+        _ => false,
+    }
+}
+
 /// CR 602.5b: If an activated ability has a restriction on its use (e.g., "Activate only once
 /// each turn"), the restriction continues to apply even if its controller changes.
 pub fn record_ability_activation(
@@ -536,7 +580,7 @@ fn evaluate_condition(
             .any(|searched| *searched != player),
         ParsedCondition::BeenAttackedThisStep => state.players_attacked_this_step.contains(&player),
         ParsedCondition::GraveyardCardCountAtLeast { count } => {
-            player_graveyard_ids(state, player).len() >= *count
+            player_graveyard_ids(state, player).count() >= *count
         }
         ParsedCondition::GraveyardCardTypeCountAtLeast { count } => {
             distinct_graveyard_card_type_count(state, player) >= *count
@@ -705,7 +749,7 @@ fn evaluate_condition(
         // CR 700.4: "Dies" = creature moved from battlefield to graveyard.
         ParsedCondition::CreatureDiedThisTurn => state.zone_changes_this_turn.iter().any(|r| {
             r.core_types.contains(&CoreType::Creature)
-                && r.from_zone == Zone::Battlefield
+                && r.from_zone == Some(Zone::Battlefield)
                 && r.to_zone == Zone::Graveyard
         }),
         ParsedCondition::YouHadCreatureEnterThisTurn => state
@@ -729,7 +773,7 @@ fn evaluate_condition(
             state
                 .zone_changes_this_turn
                 .iter()
-                .filter(|r| r.from_zone == Zone::Graveyard && r.owner == player)
+                .filter(|r| r.from_zone == Some(Zone::Graveyard) && r.owner == player)
                 .count() as u32
                 >= *count
         }
@@ -906,13 +950,13 @@ fn player_hand_size(state: &crate::types::game_state::GameState, player: PlayerI
 fn player_graveyard_ids(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
-) -> &[ObjectId] {
+) -> impl Iterator<Item = &ObjectId> + '_ {
     state
         .players
         .iter()
         .find(|candidate| candidate.id == player)
-        .map(|candidate| candidate.graveyard.as_slice())
-        .unwrap_or(&[])
+        .into_iter()
+        .flat_map(|candidate| candidate.graveyard.iter())
 }
 
 fn distinct_graveyard_card_type_count(
@@ -936,7 +980,7 @@ fn graveyard_has_subtype_card(
     player: PlayerId,
     subtype: &str,
 ) -> bool {
-    player_graveyard_ids(state, player).iter().any(|object_id| {
+    player_graveyard_ids(state, player).any(|object_id| {
         state.objects.get(object_id).is_some_and(|obj| {
             obj.card_types
                 .subtypes
@@ -1218,7 +1262,7 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                     ObjectId(99),
-                    Zone::Battlefield,
+                    Some(Zone::Battlefield),
                     Zone::Graveyard,
                 )
             });
@@ -1269,7 +1313,7 @@ mod tests {
                     name: format!("Card {}", i),
                     ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                         ObjectId(100 + i),
-                        Zone::Graveyard,
+                        Some(Zone::Graveyard),
                         Zone::Exile,
                     )
                 });
@@ -1327,6 +1371,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
             },
         );
 

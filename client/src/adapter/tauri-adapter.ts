@@ -66,8 +66,16 @@ export class TauriAdapter implements EngineAdapter {
   async getState(): Promise<GameState> {
     this.assertInitialized();
     try {
-      const state = await this.invoke!("get_game_state");
-      return state as GameState;
+      // Tauri `get_game_state` returns ClientGameState { state, derived };
+      // flatten to the store-side shape (derived as optional on GameState).
+      const wrapped = (await this.invoke!("get_game_state")) as
+        | { state: GameState; derived?: GameState["derived"] }
+        | GameState;
+      if (wrapped != null && typeof wrapped === "object" && "state" in wrapped) {
+        const w = wrapped as { state: GameState; derived?: GameState["derived"] };
+        return { ...w.state, derived: w.derived ?? w.state.derived };
+      }
+      return wrapped as GameState;
     } catch (error) {
       throw new AdapterError(
         AdapterErrorCode.WASM_ERROR,
@@ -87,9 +95,15 @@ export class TauriAdapter implements EngineAdapter {
     }
   }
 
-  async getAiAction(difficulty: string): Promise<GameAction | null> {
+  async getAiAction(
+    difficulty: string,
+    playerId: number,
+  ): Promise<GameAction | null> {
     this.assertInitialized();
-    const result = await this.invoke!("get_ai_action", { difficulty });
+    const result = await this.invoke!("get_ai_action", {
+      difficulty,
+      playerId,
+    });
     return (result as GameAction) ?? null;
   }
 

@@ -17,10 +17,13 @@ pub enum LegalityFormat {
     Historic,
     Brawl,
     StandardBrawl,
+    Timeless,
+    PauperCommander,
+    DuelCommander,
 }
 
 impl LegalityFormat {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Standard,
         Self::Commander,
         Self::Modern,
@@ -31,6 +34,9 @@ impl LegalityFormat {
         Self::Historic,
         Self::Brawl,
         Self::StandardBrawl,
+        Self::Timeless,
+        Self::PauperCommander,
+        Self::DuelCommander,
     ];
 
     pub fn as_key(self) -> &'static str {
@@ -45,6 +51,9 @@ impl LegalityFormat {
             Self::Historic => "historic",
             Self::Brawl => "brawl",
             Self::StandardBrawl => "standardbrawl",
+            Self::Timeless => "timeless",
+            Self::PauperCommander => "paupercommander",
+            Self::DuelCommander => "duel",
         }
     }
 
@@ -60,6 +69,9 @@ impl LegalityFormat {
             "historic" => Some(Self::Historic),
             "brawl" => Some(Self::Brawl),
             "standardbrawl" => Some(Self::StandardBrawl),
+            "timeless" => Some(Self::Timeless),
+            "paupercommander" => Some(Self::PauperCommander),
+            "duel" => Some(Self::DuelCommander),
             _ => None,
         }
     }
@@ -163,7 +175,12 @@ mod tests {
         let mut raw = HashMap::new();
         raw.insert("standard".to_string(), "Legal".to_string());
         raw.insert("commander".to_string(), "Banned".to_string());
-        raw.insert("duel".to_string(), "Legal".to_string());
+        // Deliberately nonsense keys so this test remains meaningful even if
+        // we later add support for any real-but-currently-unsupported format
+        // like `oldschool` or `premodern`. The contract being tested is
+        // "unknown keys are dropped", not "any specific format is unknown".
+        raw.insert("nonexistent_fmt_a".to_string(), "Legal".to_string());
+        raw.insert("nonexistent_fmt_b".to_string(), "Legal".to_string());
 
         let result = normalize_legalities(&raw);
         assert_eq!(

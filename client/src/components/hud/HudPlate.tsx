@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
+import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
+
 type HudTone = "neutral" | "emerald" | "rose" | "cyan" | "amber";
 
 interface HudPlateProps {
@@ -13,6 +15,14 @@ interface HudPlateProps {
    *  pulsing glow (suppressed under prefers-reduced-motion, but the heavy
    *  ring always applies so the signal is still legible). */
   active?: boolean;
+  /** Per-seat identity color. Rendered as a small dot adjacent to the label
+   *  — orthogonal to `tone` (which encodes game-state: turn, target). */
+  seatColor?: string;
+  /** Passive imposed state: one or more creatures are attacking this player.
+   *  Renders a red ring + pulse overlay layered atop the tone treatment, so
+   *  "it's my turn AND I'm under attack" stays legible. Motion suppressed
+   *  under prefers-reduced-motion. */
+  underAttack?: boolean;
 }
 
 const TONE_CLASSES: Record<HudTone, string> = {
@@ -49,6 +59,8 @@ export function HudPlate({
   children,
   trailing,
   active = false,
+  seatColor,
+  underAttack = false,
 }: HudPlateProps) {
   const Component = onClick ? "button" : "div";
   const shouldReduceMotion = useReducedMotion();
@@ -81,9 +93,24 @@ export function HudPlate({
           }}
         />
       )}
+      {/* Under-attack overlay — layered atop the active-turn pulse so "my
+          turn + I'm being attacked" renders both signals. */}
+      {underAttack && (
+        <>
+          <UnderAttackOverlay />
+          <span className="sr-only">{label} is under attack</span>
+        </>
+      )}
       <div className="absolute inset-[1px] rounded-[16px] bg-gradient-to-b from-white/8 via-transparent to-black/10" />
       <div className="relative min-w-0">
-        <div className="mb-0.5 flex items-center justify-center">
+        <div className="mb-0.5 flex items-center justify-center gap-1.5">
+          {seatColor && (
+            <span
+              aria-hidden
+              className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
+              style={{ backgroundColor: seatColor }}
+            />
+          )}
           <span className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/68">
             {label}
           </span>

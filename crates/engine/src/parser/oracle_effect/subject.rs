@@ -828,30 +828,48 @@ fn merge_partial_type_phrase_filter(filter: TargetFilter, remainder: &str) -> Ta
 }
 
 /// Build a Pump or PumpAll effect from a subject application and P/T values.
+///
+/// CR 608.2c: Single-object subject references (`SelfRef`, `TriggeringSource`,
+/// `AttachedTo`, `ParentTarget`) identify one specific permanent and must
+/// lower to `Effect::Pump`. Only class filters (e.g., `Typed { Creature, You }`)
+/// that match multiple permanents lower to `Effect::PumpAll`.
 fn build_pump_effect(
     application: &SubjectApplication,
     power: PtValue,
     toughness: PtValue,
 ) -> Effect {
     if let Some(target) = application.target.clone() {
-        Effect::Pump {
+        return Effect::Pump {
             power,
             toughness,
             target,
-        }
-    } else if application.affected == TargetFilter::SelfRef {
-        Effect::Pump {
-            power,
-            toughness,
-            target: TargetFilter::SelfRef,
-        }
-    } else {
-        Effect::PumpAll {
+        };
+    }
+    if is_single_object_ref(&application.affected) {
+        return Effect::Pump {
             power,
             toughness,
             target: application.affected.clone(),
-        }
+        };
     }
+    Effect::PumpAll {
+        power,
+        toughness,
+        target: application.affected.clone(),
+    }
+}
+
+/// Returns `true` when a `TargetFilter` refers to exactly one object at
+/// resolution time (not a class filter). Used by `build_pump_effect` and other
+/// builders that must distinguish single-target from class-targeting effects.
+fn is_single_object_ref(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::SelfRef
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttachedTo
+            | TargetFilter::ParentTarget
+    )
 }
 
 /// Split compound predicates like "get +1/+1 until end of turn and you gain 1 life"

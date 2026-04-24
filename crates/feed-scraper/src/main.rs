@@ -32,6 +32,14 @@ struct Cli {
     /// Delay between requests in milliseconds
     #[arg(long, default_value_t = 1000)]
     delay: u64,
+
+    /// Minimum scraped-deck count required to overwrite the existing feed
+    /// file. A partial scrape (e.g., rate-limited after a few decks) that
+    /// returns non-zero but < this threshold is treated the same as empty:
+    /// the existing file is preserved and the process exits non-zero.
+    /// Default of 5 is a safe floor for top-10 Standard/Modern/etc. runs.
+    #[arg(long, default_value_t = 5)]
+    min_decks: usize,
 }
 
 fn main() {
@@ -44,6 +52,8 @@ fn main() {
 
     let formats: Vec<&str> = cli.format.split(',').map(|s| s.trim()).collect();
 
+    let mut had_failure = false;
+
     for format in &formats {
         let config = ScrapeConfig {
             format: (*format).to_string(),
@@ -54,6 +64,16 @@ fn main() {
         eprintln!("Scraping {format} metagame (top {})...", cli.top);
         let decks = scrape_metagame(&client, &config);
         eprintln!("Scraped {} decks for {format}", decks.len());
+
+        if decks.len() < cli.min_decks {
+            eprintln!(
+                "ERROR: scrape returned {} decks for {format} (minimum {}); refusing to overwrite feed file",
+                decks.len(),
+                cli.min_decks,
+            );
+            had_failure = true;
+            continue;
+        }
 
         let now = chrono_lite_now();
         let feed = Feed {
@@ -81,8 +101,13 @@ fn main() {
 
         std::fs::write(&output_path, &json).unwrap_or_else(|e| {
             eprintln!("Failed to write {}: {e}", output_path.display());
+            had_failure = true;
         });
         eprintln!("Wrote {}", output_path.display());
+    }
+
+    if had_failure {
+        std::process::exit(1);
     }
 }
 

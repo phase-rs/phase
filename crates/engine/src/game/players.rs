@@ -87,7 +87,7 @@ pub fn linked_exile_cards_for_source(
 ) -> Vec<LinkedExileSnapshot> {
     if let Some(GameEvent::ZoneChanged {
         object_id,
-        from: Zone::Battlefield,
+        from: Some(Zone::Battlefield),
         record,
         ..
     }) = state.current_trigger_event.as_ref()

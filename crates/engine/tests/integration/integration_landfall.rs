@@ -423,7 +423,7 @@ fn relocate_to_graveyard(
         .find(|p| p.id == owner)
         .expect("owner exists")
         .graveyard
-        .push(id);
+        .push_back(id);
     state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
 }
 

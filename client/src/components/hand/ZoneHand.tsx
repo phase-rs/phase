@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import type { GameAction, ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -209,8 +210,6 @@ export function ZoneHand({ zone }: ZoneHandProps) {
                 zone={zone}
                 index={i}
                 onClick={playCard}
-                onMouseEnter={inspectObject}
-                onMouseLeave={() => inspectObject(null)}
               />
             ))}
           </motion.div>
@@ -243,19 +242,17 @@ interface ZoneHandCardProps {
   zone: "exile" | "graveyard";
   index: number;
   onClick: (objectId: number) => void;
-  onMouseEnter: (objectId: number | null) => void;
-  onMouseLeave: () => void;
 }
 
-function ZoneHandCard({ objectId, cardName, zone, index, onClick, onMouseEnter, onMouseLeave }: ZoneHandCardProps) {
+function ZoneHandCard({ objectId, cardName, zone, index, onClick }: ZoneHandCardProps) {
   const { src } = useCardImage(cardName, { size: "normal" });
+  const hoverProps = useInspectHoverProps();
 
   return (
     <button
       data-card-hover
       onClick={() => onClick(objectId)}
-      onMouseEnter={() => onMouseEnter(objectId)}
-      onMouseLeave={onMouseLeave}
+      {...hoverProps(objectId)}
       className="group relative cursor-pointer transition-transform hover:z-10 hover:scale-105"
       title={`Cast from ${ZONE_LABELS[zone]}: ${cardName}`}
       style={{

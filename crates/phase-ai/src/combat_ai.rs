@@ -390,7 +390,10 @@ pub fn choose_blockers_with_profile(
     let mut used_blockers = Vec::new();
     let objective = determine_block_objective(state, player, attacker_ids, profile);
 
-    // Collect available blockers
+    // Collect available blockers and their pre-computed values in one pass.
+    // `evaluate_creature` previously ran for each blocker on every pass
+    // (first-pass selection, survives/kills ranking, gang-block sorting).
+    // Hoisting it here makes the inner loops pure lookups.
     let available_blockers: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -406,6 +409,11 @@ pub fn choose_blockers_with_profile(
             }
         })
         .collect();
+    let blocker_values: HashMap<ObjectId, f64> = available_blockers
+        .iter()
+        .map(|&id| (id, evaluate_creature(state, id)))
+        .collect();
+    let blocker_value = |id: &ObjectId| -> f64 { blocker_values.get(id).copied().unwrap_or(0.0) };
 
     // Sort attackers by value (highest first) to prioritize blocking high-value threats
     let mut sorted_attackers: Vec<(ObjectId, f64)> = attacker_ids
@@ -469,7 +477,7 @@ pub fn choose_blockers_with_profile(
                 let (kills, survives) = evaluate_block_outcome(blocker, attacker);
                 // Prefer: survives and kills > survives > kills > neither
                 let priority = (survives as u8) * 2 + (kills as u8);
-                Some((bid, priority, evaluate_creature(state, bid)))
+                Some((bid, priority, blocker_value(&bid)))
             })
             .max_by(|a, b| {
                 a.1.cmp(&b.1)
@@ -560,7 +568,7 @@ pub fn choose_blockers_with_profile(
             })
             .filter_map(|&bid| {
                 let b = state.objects.get(&bid)?;
-                Some((bid, b.power.unwrap_or(0), evaluate_creature(state, bid)))
+                Some((bid, b.power.unwrap_or(0), blocker_value(&bid)))
             })
             .collect();
         gang_candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));

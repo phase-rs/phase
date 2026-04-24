@@ -32,7 +32,7 @@
 import { debugLog } from "./debugLog";
 import { useGameStore } from "../stores/gameStore";
 import { loadCheckpoints } from "../services/gamePersistence";
-import type { GameState } from "../adapter/types";
+import { AdapterError, AdapterErrorCode, type GameState } from "../adapter/types";
 
 /**
  * Attempt to repopulate the engine's thread-local state from the last-known
@@ -107,13 +107,37 @@ export async function attemptStateRehydrate(): Promise<boolean> {
  * root React app) render a modal when the listener fires; the user's
  * response triggers a hard reload, which `GameProvider` handles at startup
  * by resuming from IDB (or from the persisted P2P host session for hosts).
+ *
+ * `panic` is the captured Rust panic message (file:line + payload) when the
+ * loss was caused by an engine crash — present for ENGINE_PANIC, absent for
+ * transient STATE_LOST. The modal switches between "real crash + report"
+ * and "transient loss + reload" based on this field.
  */
-type EngineLostListener = (reason: string) => void;
+export interface EngineLostEvent {
+  reason: string;
+  panic?: string;
+}
+
+type EngineLostListener = (event: EngineLostEvent) => void;
 const engineLostListeners = new Set<EngineLostListener>();
+const nonFatalPanicListeners = new Set<EngineLostListener>();
 
 export function onEngineLost(listener: EngineLostListener): () => void {
   engineLostListeners.add(listener);
   return () => engineLostListeners.delete(listener);
+}
+
+/**
+ * Subscribe to non-fatal engine panics — a Rust panic happened but the
+ * engine kept working (either the panic was in a side path like trace
+ * instrumentation, or a rehydrate from the store snapshot succeeded).
+ * The user sees a dismissible toast, not the blocking "Engine crashed"
+ * modal. Report-link + diagnostic still available so a triager can act
+ * on the panic if it was load-bearing.
+ */
+export function onNonFatalPanic(listener: EngineLostListener): () => void {
+  nonFatalPanicListeners.add(listener);
+  return () => nonFatalPanicListeners.delete(listener);
 }
 
 /**
@@ -122,9 +146,48 @@ export function onEngineLost(listener: EngineLostListener): () => void {
  * when the AI controller hits its hard-failure cap. A single reload carries
  * the user back to a clean state: `GameProvider` resumes from IDB on mount.
  *
- * De-duped: the handler in `EngineRecoveryBoundary` only shows the modal
- * once per tab session. Repeated calls within the same session are no-ops.
+ * De-duped: the handler in `EngineLostModal` only shows the modal once per
+ * tab session. Repeated calls within the same session are no-ops.
  */
-export function notifyEngineLost(reason: string): void {
-  for (const fn of engineLostListeners) fn(reason);
+export function notifyEngineLost(reason: string, panic?: string): void {
+  for (const fn of engineLostListeners) fn({ reason, panic });
+}
+
+/**
+ * Route a captured panic through a rehydrate-first triage: if the engine's
+ * state survived (or can be rebuilt from the store snapshot), emit a
+ * non-fatal notification so the user keeps playing. Only on rehydrate
+ * failure does the blocking "Engine crashed" modal fire.
+ *
+ * Covers the common case where the panic happened in a side path
+ * (instrumentation, a debug assertion in a helper) and the engine's
+ * thread-local game state is still intact — the user saw the scary modal
+ * even though nothing was actually broken. This keeps the modal reserved
+ * for genuinely unrecoverable crashes.
+ */
+export async function routePanic(reason: string, panic?: string): Promise<void> {
+  const rehydrated = await attemptStateRehydrate().catch(() => false);
+  if (rehydrated) {
+    for (const fn of nonFatalPanicListeners) fn({ reason, panic });
+    return;
+  }
+  notifyEngineLost(reason, panic);
+}
+
+/**
+ * True when the error is a Rust panic that was captured by the worker's
+ * panic hook. Caller MUST treat this as terminal — retrying the same
+ * input will re-panic. Defined here so `dispatch.ts` and `aiController.ts`
+ * share one classifier instead of duplicating it.
+ *
+ * Tightened to `instanceof AdapterError` so a non-adapter object that
+ * happens to share the field shape (deserialized wire payload, mocked
+ * error in a test, etc.) doesn't trigger panic-flow short-circuits.
+ */
+export function isEnginePanic(err: unknown): err is AdapterError & { panic: string } {
+  return (
+    err instanceof AdapterError
+    && err.code === AdapterErrorCode.ENGINE_PANIC
+    && typeof err.panic === "string"
+  );
 }

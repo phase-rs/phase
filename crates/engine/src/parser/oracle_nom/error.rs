@@ -94,6 +94,7 @@ mod tests {
     fn draw_one() -> Effect {
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
+            target: crate::types::ability::TargetFilter::Controller,
         }
     }
 

@@ -38,7 +38,7 @@ pub fn resolve(
 
     // Take the top `count` cards (library[0] = top, per zones.rs convention)
     let count = count.min(library.len());
-    let revealed_ids = library[..count].to_vec();
+    let revealed_ids: Vec<_> = library.iter().take(count).copied().collect();
 
     // CR 701.20b: Revealing a card doesn't cause it to leave the zone it's in.
     for &card_id in &revealed_ids {

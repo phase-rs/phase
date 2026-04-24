@@ -1009,6 +1009,7 @@ mod tests {
         let sub = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
             Vec::new(),
             ObjectId(100),
@@ -1097,6 +1098,7 @@ mod tests {
         let sub = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
             Vec::new(),
             ObjectId(100),
@@ -1244,6 +1246,7 @@ mod tests {
             engine::types::ability::AbilityKind::Spell,
             Effect::Draw {
                 count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         )];
 
@@ -1303,6 +1306,7 @@ mod tests {
             engine::types::ability::AbilityKind::Spell,
             Effect::Draw {
                 count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         )];
 

@@ -210,7 +210,7 @@ mod tests {
         }
 
         // Opponent: no creatures, 2 cards in hand, 5 untapped lands
-        state.players[1].hand = vec![
+        state.players[1].hand = engine::im::vector![
             engine::types::identifiers::ObjectId(90),
             engine::types::identifiers::ObjectId(91),
         ];
@@ -384,7 +384,7 @@ mod tests {
         }
 
         // Opponent: no creatures, 2 cards in hand, 5 lands — high wrath risk.
-        state.players[1].hand = vec![
+        state.players[1].hand = engine::im::vector![
             engine::types::identifiers::ObjectId(90),
             engine::types::identifiers::ObjectId(91),
         ];

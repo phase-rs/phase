@@ -210,6 +210,18 @@ export class EngineWorkerClient {
     return this.request<string>({ type: "ping" });
   }
 
+  /**
+   * Drain the panic message captured by the Rust panic hook in engine-wasm.
+   * Returns `null` if no panic has been observed since the last drain.
+   *
+   * The adapter calls this after a thrown STATE_LOST sentinel: if a panic
+   * is present, the failure is a real engine crash (re-running the same
+   * input will re-panic) and recovery must surface it instead of retrying.
+   */
+  async takeLastPanic(): Promise<string | null> {
+    return this.request<string | null>({ type: "takeLastPanic" });
+  }
+
   dispose(): void {
     for (const [, entry] of this.pending) {
       entry.reject(new Error("Worker disposed"));

@@ -481,6 +481,17 @@ fn mana_options_from_production(
                 .map(mana_color_to_type)
                 .collect()
         }
+        // CR 106.1 + CR 109.1: Faeburrow-style "one of each color among permanents
+        // you control". Delegates to the shared resolver so the cost-payment path
+        // and direct activation see identical option sets.
+        ManaProduction::DistinctColorsAmongPermanents { filter } => {
+            super::effects::mana::distinct_colors_among_permanents(
+                state, None, controller, object_id, filter,
+            )
+            .iter()
+            .map(mana_color_to_type)
+            .collect()
+        }
     }
 }
 

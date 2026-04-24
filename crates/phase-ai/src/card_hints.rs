@@ -359,7 +359,7 @@ mod tests {
         let mut state = make_state();
         state.active_player = PlayerId(1); // Opponent's turn
                                            // Put something on the stack so the counterspell has a target
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(999),
             source_id: ObjectId(998),
             controller: PlayerId(1),
@@ -368,6 +368,7 @@ mod tests {
                 ability: Some(ResolvedAbility::new(
                     Effect::Draw {
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                        target: engine::types::ability::TargetFilter::Controller,
                     },
                     Vec::new(),
                     ObjectId(998),
@@ -633,6 +634,7 @@ mod tests {
                 count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             })],
         );
 

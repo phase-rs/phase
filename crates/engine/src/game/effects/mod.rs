@@ -89,6 +89,7 @@ pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
 pub mod reveal;
+pub mod reveal_from_hand;
 pub mod reveal_hand;
 pub mod reveal_top;
 pub mod reveal_until;
@@ -328,6 +329,7 @@ pub fn resolve_effect(
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::Seek { .. } => seek::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
+        Effect::RevealFromHand { .. } => reveal_from_hand::resolve(state, ability, events),
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
@@ -437,6 +439,18 @@ pub fn resolve_effect(
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
+        Effect::ChooseOneOf { .. } => {
+            // CR 700.2: Runtime resolver for `ChooseOneOf` is not yet wired —
+            // full support requires a new `WaitingFor::ChooseOneOfBranch`
+            // state + effect resolver + UI integration. The typed shape is
+            // emitted by the parser (Highway Robbery and analogous binary
+            // "you may A or B" imperatives) so it is preserved in card data
+            // for future runtime activation. Treat as a no-op at resolution
+            // for now — the outer `optional: true` on the ability means the
+            // controller can simply decline.
+            eprintln!("Warning: ChooseOneOf resolver not yet implemented — treating as no-op");
+            Ok(())
+        }
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -1889,6 +1903,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -1917,6 +1932,7 @@ mod tests {
         let sub = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -1985,6 +2001,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -2573,6 +2590,7 @@ mod tests {
         let base_chain = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -2583,6 +2601,7 @@ mod tests {
         let instead_chain = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -2650,6 +2669,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -2686,6 +2706,7 @@ mod tests {
                 random: false,
                 up_to: false,
                 unless_filter: None,
+                filter: None,
             },
             vec![],
             ObjectId(100),
@@ -2725,6 +2746,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -2771,6 +2793,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -2828,6 +2851,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -2892,6 +2916,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -3056,7 +3081,7 @@ mod tests {
         state.objects.get_mut(&exiled_c).unwrap().mana_cost = ManaCost::generic(4);
         state.current_trigger_event = Some(GameEvent::ZoneChanged {
             object_id: source,
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(crate::types::game_state::ZoneChangeRecord {
                 linked_exile_snapshot: vec![
@@ -3078,7 +3103,7 @@ mod tests {
                 ],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                     source,
-                    Zone::Battlefield,
+                    Some(Zone::Battlefield),
                     Zone::Graveyard,
                 )
             }),
@@ -3171,6 +3196,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -3193,6 +3219,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -3208,6 +3235,7 @@ mod tests {
         let opponent_ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(2),
@@ -3226,6 +3254,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -3313,7 +3342,7 @@ mod tests {
             "Spell".to_string(),
             Zone::Library,
         );
-        state.players[0].library.push(lib_card);
+        state.players[0].library.push_back(lib_card);
 
         // Grandchild: grant PlayFromExile to the tracked set. Forces every
         // zone-changing ancestor to publish (transitive descendant check).

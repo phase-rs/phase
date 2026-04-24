@@ -442,6 +442,7 @@ fn translate_discard(
         random,
         up_to: false,
         unless_filter: None,
+        filter: None,
     })
 }
 
@@ -479,7 +480,10 @@ fn translate_scry(
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
     let count = resolve_quantity(params, "ScryNum", resolver);
-    Ok(Effect::Scry { count })
+    Ok(Effect::Scry {
+        count,
+        target: TargetFilter::Controller,
+    })
 }
 
 // CR 701.25a: Surveil.
@@ -488,7 +492,10 @@ fn translate_surveil(
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
     let count = resolve_quantity(params, "SurveilNum", resolver);
-    Ok(Effect::Surveil { count })
+    Ok(Effect::Surveil {
+        count,
+        target: TargetFilter::Controller,
+    })
 }
 
 // CR 701.6a: Counter a spell or ability on the stack.

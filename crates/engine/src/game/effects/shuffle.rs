@@ -1,5 +1,3 @@
-use rand::seq::SliceRandom;
-
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -60,14 +58,14 @@ pub fn resolve(
         crate::game::static_abilities::player_has_static_other(state, target_player, "CantShuffle");
 
     if !suppressed {
-        let player = state
-            .players
+        let GameState { players, rng, .. } = state;
+        let player = players
             .iter_mut()
             .find(|p| p.id == target_player)
             .ok_or(EffectError::PlayerNotFound)?;
 
         // CR 701.24a: Randomize cards so that no player knows their order.
-        player.library.shuffle(&mut state.rng);
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -137,14 +135,14 @@ mod tests {
                 Zone::Library,
             );
         }
-        let original_ids: Vec<_> = state.players[0].library.clone();
+        let original_ids: Vec<_> = state.players[0].library.iter().copied().collect();
 
         let ability = make_shuffle_ability(vec![]);
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let shuffled_ids = &state.players[0].library;
+        let shuffled_ids: Vec<_> = state.players[0].library.iter().copied().collect();
         assert_eq!(shuffled_ids.len(), original_ids.len());
         let mut sorted_original = original_ids.clone();
         let mut sorted_shuffled = shuffled_ids.clone();

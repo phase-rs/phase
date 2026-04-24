@@ -94,8 +94,18 @@ export function PlayerArea({
     const obj = gameState.objects[id];
     return obj?.is_emblem && obj.controller === playerId;
   });
+  // Scale the commander column to the land scale (not the support scale) so
+  // presence/absence of a commander doesn't change the middle-row height. The
+  // support row's height is otherwise driven by the tallest card in it, and
+  // the commander card at OTHER_BASE_SCALE (1.0) is ~28% taller than adjacent
+  // lands at LAND_BASE_SCALE (0.78), which squeezes the creatures row via
+  // flex-1. Stacked CommanderDamage entries compound the warp.
+  const commanderScale = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
   const commanderSection = isCommander ? (
-    <div className="flex shrink-0 flex-col items-end gap-1">
+    <div
+      className="flex shrink-0 flex-col items-end gap-1"
+      style={zoneStyle(commanderScale)}
+    >
       <CommanderCardZone playerId={playerId} />
       <CommanderDamage playerId={playerId} />
     </div>

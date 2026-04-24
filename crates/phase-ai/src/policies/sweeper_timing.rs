@@ -228,6 +228,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         ));
         oid

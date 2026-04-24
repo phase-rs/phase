@@ -555,6 +555,11 @@ fn make_quantity_ge(qty: QuantityRef, n: u32) -> StaticCondition {
 /// Parse "you control" condition patterns.
 fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        // CR 201.2 + CR 603.4: "you control N or more [type] with different names"
+        // → QuantityComparison(ObjectCountDistinctNames >= N). Tried before the
+        // plain ObjectCount arm so the `with different names` suffix is not
+        // mis-classified as a raw count threshold. Field of the Dead canonical.
+        parse_control_count_ge_distinct_names,
         // "you control N or more [type]" → QuantityComparison(ObjectCount >= N)
         parse_control_count_ge,
         // "you control N or fewer [type]" → QuantityComparison(ObjectCount <= N)
@@ -567,6 +572,45 @@ fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_you_control_no,
     ))
     .parse(input)
+}
+
+/// CR 201.2 + CR 603.4: Parse "you control N or more [type] with different names"
+/// → `QuantityComparison { ObjectCountDistinctNames(filter) >= N }`.
+///
+/// Field of the Dead: "if you control seven or more lands with different
+/// names". Two objects with the same printed name count once. General enough
+/// to cover any `<article> <type> with different names` suffix, so the class
+/// extends to other distinct-name threshold cards without per-card code.
+fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let rest = rest.trim_start();
+    let (rest, _) = tag("or more ").parse(rest)?;
+    let type_text = rest.trim_end_matches('.');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+            )],
+        }));
+    }
+    // Require the exact "with different names" suffix on the remainder.
+    let trimmed = remainder.trim_start();
+    let (after_suffix, _) = tag("with different names").parse(trimmed)?;
+    let filter = inject_controller_you(filter);
+    let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCountDistinctNames { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
 }
 
 /// Canonical combinator: "you control N or more [type]" → QuantityComparison.
@@ -1605,6 +1649,53 @@ mod tests {
         let (rest, c) = parse_inner_condition("you control a land").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    #[test]
+    fn test_you_control_n_or_more_with_different_names() {
+        // CR 201.2 + CR 603.4: distinct-name threshold (Field of the Dead).
+        let (rest, c) =
+            parse_inner_condition("you control seven or more lands with different names").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 7 });
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountDistinctNames { filter },
+                    } => match filter {
+                        TargetFilter::Typed(t) => {
+                            assert_eq!(t.controller, Some(ControllerRef::You));
+                        }
+                        _ => panic!("expected Typed filter, got {:?}", filter),
+                    },
+                    _ => panic!("expected ObjectCountDistinctNames, got {:?}", lhs),
+                }
+            }
+            _ => panic!("expected QuantityComparison, got {:?}", c),
+        }
+    }
+
+    #[test]
+    fn test_you_control_n_or_more_plain_count_still_works() {
+        // Regression: the plain "N or more" path must not be shadowed by the
+        // distinct-names combinator when no suffix is present.
+        let (rest, c) = parse_inner_condition("you control seven or more lands").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

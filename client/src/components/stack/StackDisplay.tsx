@@ -2,12 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { StackEntry } from "./StackEntry.tsx";
+import {
+  pressureMultiplier,
+  stackPressureFromLength,
+} from "../../utils/stackPressure.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
-import type { ObjectId, StackEntry as StackEntryType, WaitingFor } from "../../adapter/types.ts";
+import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, WaitingFor } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 
 const EMPTY_STACK: StackEntryType[] = [];
+const EMPTY_GROUPS: StackDisplayGroup[] = [];
 
 // CR 601.2a + CR 601.2b-f: Post-announcement, the spell sits on the engine's
 // stack while modes/targets/costs are chosen. This helper identifies the
@@ -63,6 +68,15 @@ function getViewportSize() {
 export function StackDisplay() {
   const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
   const waitingFor = useGameStore((s) => s.waitingFor);
+  // Engine-authored stack grouping rides on the same state snapshot that
+  // carries `state.stack` (see `engine::game::derived_views`). Reading
+  // directly from the selector makes the grouped view atomically
+  // consistent with the stack it describes — no async RPC, no race guard,
+  // no generation counter. Absent `derived` (legacy cached state) falls
+  // through to one-per-entry rendering below.
+  const groups = useGameStore(
+    (s) => s.gameState?.derived?.stack_display_groups ?? EMPTY_GROUPS,
+  );
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [viewport, setViewport] = useState(getViewportSize);
   const [hoveredStackEntryId, setHoveredStackEntryId] = useState<ObjectId | null>(null);
@@ -93,8 +107,22 @@ export function StackDisplay() {
 
   if (stack.length === 0) return null;
 
-  const displayStack = stack;
-  const rawCardSize = getStackCardSize(stack.length);
+  // When engine-authored groups are available and actually coalesce anything,
+  // render one entry per group (with ×N badge) instead of per raw entry.
+  // Falling back to the raw stack when groups are unavailable preserves the
+  // prior behavior for adapters that don't proxy the call yet.
+  const entryById = new Map(stack.map((e) => [e.id, e] as const));
+  const groupedStack: { entry: StackEntryType; count: number }[] =
+    groups.length > 0 && groups.some((g) => g.count > 1)
+      ? groups
+          .map((g) => {
+            const entry = entryById.get(g.representative);
+            return entry ? { entry, count: g.count } : null;
+          })
+          .filter((x): x is { entry: StackEntryType; count: number } => x !== null)
+      : stack.map((entry) => ({ entry, count: 1 }));
+  const displayStack = groupedStack.map((g) => g.entry);
+  const rawCardSize = getStackCardSize(displayStack.length);
   const widthScale =
     viewport.width < 640 ? 0.58 :
       viewport.width < 1024 ? 0.72 :
@@ -204,18 +232,28 @@ export function StackDisplay() {
               }}
             >
               <AnimatePresence mode="popLayout">
-                {displayStack.map((entry, index) => (
-                  <StackEntry
-                    key={entry.id}
-                    entry={entry}
-                    index={index}
-                    isTop={index === displayStack.length - 1}
-                    isPending={pendingCastId != null && entry.id === pendingCastId}
-                    cardSize={cardSize}
-                    onHoverChange={(hovered) => handleStackEntryHover(entry.id, hovered)}
-                    style={entryStyles[index]}
-                  />
-                ))}
+                {(() => {
+                  // Mass-trigger pacing: engine-authored StackPressure thresholds
+                  // (10/30/100) collapse per-entry animation under stack pressure.
+                  // See crates/engine/src/game/stack.rs + utils/stackPressure.ts.
+                  const pacing = pressureMultiplier(
+                    stackPressureFromLength(displayStack.length),
+                  );
+                  return groupedStack.map(({ entry, count }, index) => (
+                    <StackEntry
+                      key={entry.id}
+                      entry={entry}
+                      index={index}
+                      isTop={index === displayStack.length - 1}
+                      isPending={pendingCastId != null && entry.id === pendingCastId}
+                      cardSize={cardSize}
+                      onHoverChange={(hovered) => handleStackEntryHover(entry.id, hovered)}
+                      style={entryStyles[index]}
+                      pacingMultiplier={pacing}
+                      groupCount={count}
+                    />
+                  ));
+                })()}
               </AnimatePresence>
             </div>
           </div>

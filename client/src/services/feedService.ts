@@ -202,15 +202,11 @@ export async function initializeFeeds(): Promise<void> {
 
     try {
       const feed = await fetchFeed(sub.url);
-      if (feed.version !== sub.lastVersion || !getCachedFeed(sub.sourceId)?.decks.length) {
-        const registrySource = FEED_REGISTRY.find((r) => r.id === sub.sourceId);
-        const normalizedFeed = { ...feed, id: sub.sourceId, format: registrySource?.format ?? feed.format };
-        await setCachedFeed(sub.sourceId, normalizedFeed);
-        syncFeedDecksToStorage(normalizedFeed);
-        sub.lastVersion = feed.version;
-      }
-      // Always stamp lastRefreshedAt on a successful fetch so the TTL check
-      // doesn't re-fetch every boot when content is unchanged.
+      const registrySource = FEED_REGISTRY.find((r) => r.id === sub.sourceId);
+      const normalizedFeed = { ...feed, id: sub.sourceId, format: registrySource?.format ?? feed.format };
+      await setCachedFeed(sub.sourceId, normalizedFeed);
+      syncFeedDecksToStorage(normalizedFeed);
+      sub.lastVersion = feed.version;
       sub.lastRefreshedAt = Date.now();
       if (sub.error !== undefined) sub.error = undefined;
       changed = true;

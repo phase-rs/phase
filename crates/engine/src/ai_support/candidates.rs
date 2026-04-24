@@ -463,24 +463,51 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
         }
         WaitingFor::SurveilChoice { player, cards } => select_cards_variants(*player, cards, None),
-        WaitingFor::RevealChoice { player, cards, .. } => {
-            select_cards_variants(*player, cards, Some(1))
+        WaitingFor::RevealChoice {
+            player,
+            cards,
+            optional,
+            ..
+        } => {
+            // CR 701.20a: Normal reveal forces exactly one pick. Optional reveal
+            // (e.g., reveal-lands) additionally permits an empty selection to
+            // signal "I decline to reveal" — the source's decline branch fires.
+            let mut variants = select_cards_variants(*player, cards, Some(1));
+            if *optional {
+                variants.push(candidate(
+                    GameAction::SelectCards { cards: vec![] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            variants
         }
         WaitingFor::SearchChoice {
             player,
             cards,
             count,
+            up_to,
             ..
-        } => combinations(cards, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => {
+            // CR 107.1c + CR 701.23d: "any number of" / "up to N" searches enumerate
+            // combination sizes 0..=count; exact-count searches enumerate only `count`.
+            let sizes: Vec<usize> = if *up_to {
+                (0..=*count).collect()
+            } else {
+                vec![*count]
+            };
+            sizes
+                .into_iter()
+                .flat_map(|size| combinations(cards, size))
+                .map(|combo| {
+                    candidate(
+                        GameAction::SelectCards { cards: combo },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         // CR 700.2: Choose card(s) from a tracked set (exiled/revealed cards).
         WaitingFor::ChooseFromZoneChoice {
             player,
@@ -1901,10 +1928,14 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
-    // CR 702.190a: Offer Sneak-casts from graveyard during declare blockers.
-    // For each GY object the player owns with an effective Sneak cost (intrinsic
-    // or granted via a GraveyardCastPermission rider), pair it with each of the
-    // player's unblocked attackers as the cost-payment creature.
+    // CR 702.190a: Offer Sneak-casts from HAND during declare blockers. For
+    // each hand object the player owns with an effective Sneak cost
+    // (intrinsic or granted via an off-zone keyword rider), pair it with each
+    // of the player's unblocked attackers as the cost-payment creature.
+    // Applies to any card type — CR 702.190a does not restrict the printed
+    // keyword to permanent spells; CR 702.190b's enter-attacking-alongside
+    // only applies when the cast spell is a permanent (handled at
+    // resolution).
     if state.active_player == player && state.phase == Phase::DeclareBlockers {
         let unblocked: Vec<ObjectId> = crate::game::combat::unblocked_attackers(state)
             .into_iter()
@@ -1916,32 +1947,34 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
             })
             .collect();
         if !unblocked.is_empty() {
-            let gy_ids: Vec<ObjectId> = state
+            let hand_ids: Vec<ObjectId> = state
                 .players
                 .iter()
                 .find(|p| p.id == player)
-                .map(|p| p.graveyard.to_vec())
+                .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
-            let any_color =
-                crate::game::static_abilities::player_can_spend_as_any_color(state, player);
-            let max_life = crate::game::life_costs::max_phyrexian_life_payments(state, player);
-            for gy_id in gy_ids {
-                let Some(cost) = keywords::effective_sneak_cost(state, gy_id) else {
+            for hand_id in hand_ids {
+                let Some(cost) = keywords::effective_sneak_cost(state, hand_id) else {
                     continue;
                 };
-                let pool = &state.players[player.0 as usize].mana_pool;
-                if !crate::game::mana_payment::can_pay_for_spell(
-                    pool, &cost, None, any_color, max_life,
-                ) {
+                // CR 601.2f: Mana-cost affordability must consider mana that
+                // can be produced by activating mana abilities during the cost
+                // step, not just mana currently floating in the pool.
+                // Delegates to the same auto-tap aware check used by the
+                // normal `CastSpell` emitter (`can_cast_object_now` →
+                // `can_pay_cost_after_auto_tap`) so a Sneak cast with 0
+                // floating mana but enough untapped sources is surfaced.
+                if !crate::game::casting::can_pay_cost_after_auto_tap(state, player, hand_id, &cost)
+                {
                     continue;
                 }
-                let Some(card_id) = state.objects.get(&gy_id).map(|o| o.card_id) else {
+                let Some(card_id) = state.objects.get(&hand_id).map(|o| o.card_id) else {
                     continue;
                 };
                 for &creature_id in &unblocked {
                     actions.push(candidate(
                         GameAction::CastSpellAsSneak {
-                            gy_object: gy_id,
+                            hand_object: hand_id,
                             card_id,
                             creature_to_return: creature_id,
                         },
@@ -2215,7 +2248,7 @@ fn named_choice_actions(
 
 fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<CandidateAction> {
     let p = &state.players[player.0 as usize];
-    let hand: Vec<_> = p.hand.clone();
+    let hand: Vec<_> = p.hand.iter().copied().collect();
 
     if count == 0 || hand.is_empty() {
         return vec![candidate(
@@ -2904,6 +2937,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
                     },
                 )
                 .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),

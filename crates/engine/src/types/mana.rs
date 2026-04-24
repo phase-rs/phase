@@ -64,6 +64,26 @@ pub struct SpellMeta {
     pub cast_from_zone: Option<crate::types::zones::Zone>,
 }
 
+/// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
+/// spell being cast" from "paying for an ability being activated" so the
+/// restriction check can route through `allows_spell` vs `allows_activation`.
+///
+/// Casting-restricted mana (e.g., "creature-spell-only") must reject ability
+/// activations; activation-restricted mana (e.g., "activate abilities only")
+/// must reject spell casts. Using the correct variant per payment site is the
+/// single authority that enforces this bifurcation.
+#[derive(Debug, Clone, Copy)]
+pub enum PaymentContext<'a> {
+    /// Payment for a spell being cast — consult `allows_spell`.
+    Spell(&'a SpellMeta),
+    /// Payment for an activated ability — consult `allows_activation` using
+    /// the source permanent's core types and subtypes.
+    Activation {
+        source_types: &'a [String],
+        source_subtypes: &'a [String],
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaRestriction {
     /// "Spend this mana only to cast creature spells" / "only to cast artifact spells".
@@ -107,10 +127,15 @@ impl ManaRestriction {
                     .any(|s| s.eq_ignore_ascii_case(required_subtype));
                 is_creature && has_subtype
             }
-            // CR 106.6: The spell-casting half of the OR — allows if the spell has the type.
+            // CR 106.6: The spell-casting half of the OR — allows if the spell has the
+            // required type, consulting both core card types (Creature, Instant, ...)
+            // and subtypes (Elemental, Goblin, ...). Flamebraider's "Elemental" names
+            // a creature subtype; "Artifact" would name a core type. The check treats
+            // both buckets uniformly because Oracle text doesn't distinguish the two.
             ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => meta
                 .types
                 .iter()
+                .chain(meta.subtypes.iter())
                 .any(|t| t.eq_ignore_ascii_case(required_type)),
             // Activation-only mana cannot be used to cast spells.
             ManaRestriction::OnlyForActivation => false,
@@ -131,24 +156,41 @@ impl ManaRestriction {
     }
 
     /// Returns `true` if this restriction permits spending mana to activate an ability
-    /// on a permanent whose types include `source_types`.
+    /// on a permanent whose core types include `source_types` and subtypes include
+    /// `source_subtypes`.
     /// CR 106.6: Used for "or activate abilities of creatures" restrictions.
-    pub fn allows_activation(&self, source_types: &[String]) -> bool {
+    pub fn allows_activation(&self, source_types: &[String], source_subtypes: &[String]) -> bool {
         match self {
             // Spell-only restrictions don't permit ability activation.
             ManaRestriction::OnlyForSpellType(_)
             | ManaRestriction::OnlyForCreatureType(_)
             | ManaRestriction::OnlyForSpellWithKeywordKind(_)
             | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _) => false,
-            // CR 106.6: The ability-activation half of the OR.
+            // CR 106.6: The ability-activation half of the OR. "Elemental sources"
+            // includes objects with creature type Elemental — consult subtypes too.
             ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => source_types
                 .iter()
+                .chain(source_subtypes.iter())
                 .any(|t| t.eq_ignore_ascii_case(required_type)),
             // Activation-only mana always allows ability activation.
             ManaRestriction::OnlyForActivation => true,
             // X-cost mana can be used for abilities with {X} in their cost.
             // TODO: Check if the ability has {X} in its cost once that data is available.
             ManaRestriction::OnlyForXCosts => false,
+        }
+    }
+
+    /// CR 106.6: Unified dispatch — use the spell half of a restriction for
+    /// spell payments, the activation half for ability payments. Every
+    /// runtime payment site must flow through this method so the two halves
+    /// stay in lockstep (single authority for restriction enforcement).
+    pub fn allows(&self, ctx: &PaymentContext<'_>) -> bool {
+        match ctx {
+            PaymentContext::Spell(meta) => self.allows_spell(meta),
+            PaymentContext::Activation {
+                source_types,
+                source_subtypes,
+            } => self.allows_activation(source_types, source_subtypes),
         }
     }
 }
@@ -703,12 +745,13 @@ impl ManaPool {
         }
     }
 
-    /// Spend one mana of the given color that is eligible for the spell described by `meta`.
+    /// Spend one mana of the given color that is eligible for the given payment context.
     ///
-    /// Prefers unrestricted mana first, then falls back to restricted mana whose
-    /// restrictions all allow the target spell. Mana with restrictions that don't
-    /// match the spell is never spent.
-    pub fn spend_for(&mut self, color: ManaType, meta: &SpellMeta) -> Option<ManaUnit> {
+    /// CR 106.6: Prefers unrestricted mana first, then falls back to restricted mana
+    /// whose restrictions all allow the payment (spell cast or ability activation,
+    /// per the `PaymentContext` variant). Mana with restrictions that don't match is
+    /// never spent.
+    pub fn spend_for(&mut self, color: ManaType, ctx: &PaymentContext<'_>) -> Option<ManaUnit> {
         // First pass: prefer unrestricted mana of this color
         if let Some(pos) = self
             .mana
@@ -717,11 +760,11 @@ impl ManaPool {
         {
             return Some(self.mana.swap_remove(pos));
         }
-        // Second pass: restricted mana that allows this spell
+        // Second pass: restricted mana that allows this payment context
         if let Some(pos) = self.mana.iter().position(|m| {
             m.color == color
                 && !m.restrictions.is_empty()
-                && m.restrictions.iter().all(|r| r.allows_spell(meta))
+                && m.restrictions.iter().all(|r| r.allows(ctx))
         }) {
             return Some(self.mana.swap_remove(pos));
         }
@@ -934,7 +977,9 @@ mod tests {
             keyword_kinds: vec![],
             cast_from_zone: None,
         };
-        let spent = pool.spend_for(ManaType::Green, &spell).unwrap();
+        let spent = pool
+            .spend_for(ManaType::Green, &PaymentContext::Spell(&spell))
+            .unwrap();
         // Should prefer unrestricted mana first
         assert!(spent.restrictions.is_empty());
         assert_eq!(pool.total(), 1);
@@ -955,7 +1000,9 @@ mod tests {
             keyword_kinds: vec![],
             cast_from_zone: None,
         };
-        assert!(pool.spend_for(ManaType::Green, &elf_spell).is_some());
+        assert!(pool
+            .spend_for(ManaType::Green, &PaymentContext::Spell(&elf_spell))
+            .is_some());
     }
 
     #[test]
@@ -1010,8 +1057,66 @@ mod tests {
             keyword_kinds: vec![],
             cast_from_zone: None,
         };
-        assert!(pool.spend_for(ManaType::Green, &goblin_spell).is_none());
+        assert!(pool
+            .spend_for(ManaType::Green, &PaymentContext::Spell(&goblin_spell))
+            .is_none());
         assert_eq!(pool.total(), 1, "Restricted mana should remain in pool");
+    }
+
+    // CR 106.6: "Spend this mana only to cast Elemental spells or activate abilities
+    // of Elemental sources" — "Elemental" names a creature subtype. The restriction
+    // must match against both core types and subtypes on `SpellMeta`.
+    #[test]
+    fn restriction_type_or_ability_allows_subtype_creature_spell() {
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities("Elemental".to_string());
+        let elemental_creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elemental".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let tribal_elemental_instant = SpellMeta {
+            types: vec!["Tribal".to_string(), "Instant".to_string()],
+            subtypes: vec!["Elemental".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let goblin_creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Goblin".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let plain_instant = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        assert!(restriction.allows_spell(&elemental_creature));
+        assert!(restriction.allows_spell(&tribal_elemental_instant));
+        assert!(!restriction.allows_spell(&goblin_creature));
+        assert!(!restriction.allows_spell(&plain_instant));
+    }
+
+    // CR 106.6: The ability-activation half of the OR. An Elemental permanent is a
+    // source whose subtypes include "Elemental"; activation must be permitted.
+    #[test]
+    fn restriction_type_or_ability_allows_subtype_activation() {
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities("Elemental".to_string());
+        let elemental_creature_types = vec!["Creature".to_string()];
+        let elemental_subtypes = vec!["Elemental".to_string(), "Shaman".to_string()];
+        assert!(restriction.allows_activation(&elemental_creature_types, &elemental_subtypes));
+
+        let goblin_subtypes = vec!["Goblin".to_string()];
+        assert!(!restriction.allows_activation(&elemental_creature_types, &goblin_subtypes));
+
+        // Core-type match also satisfies the check (e.g., "Artifact sources").
+        let artifact_restriction =
+            ManaRestriction::OnlyForTypeSpellsOrAbilities("Artifact".to_string());
+        let artifact_types = vec!["Artifact".to_string()];
+        let no_subtypes: Vec<String> = vec![];
+        assert!(artifact_restriction.allows_activation(&artifact_types, &no_subtypes));
     }
 
     #[test]

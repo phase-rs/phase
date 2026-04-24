@@ -134,7 +134,7 @@ fn score_effect_harm(_state: &GameState, _source_id: ObjectId, effect: &Effect) 
             amount: QuantityExpr::Fixed { value },
             ..
         } => (*value).max(0) as f64,
-        Effect::Draw { count } => {
+        Effect::Draw { count, .. } => {
             if let QuantityExpr::Fixed { value } = count {
                 2.0 * (*value as f64)
             } else {
@@ -179,7 +179,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.insert(id, obj);
-        state.battlefield.push(id);
+        state.battlefield.push_back(id);
         state.objects.get_mut(&id).unwrap()
     }
 

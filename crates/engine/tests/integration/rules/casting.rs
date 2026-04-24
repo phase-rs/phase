@@ -1069,6 +1069,7 @@ fn miracle_first_draw_surfaces_reveal_prompt() {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         );
         obj.abilities.push(ability.clone());
@@ -1090,6 +1091,7 @@ fn miracle_first_draw_surfaces_reveal_prompt() {
     let draw_ability = engine::types::ability::ResolvedAbility::new(
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
         },
         Vec::new(),
         miracle_obj,
@@ -1238,6 +1240,7 @@ fn miracle_accept_casts_for_miracle_cost() {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         );
         obj.abilities.push(ability.clone());
@@ -1377,6 +1380,7 @@ fn miracle_sorcery_casts_during_draw_step() {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         );
         obj.abilities.push(ability.clone());

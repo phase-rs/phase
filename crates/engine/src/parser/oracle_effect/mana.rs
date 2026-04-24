@@ -17,7 +17,9 @@ use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaSpellGrant};
 
 use super::super::oracle_quantity::{parse_cda_quantity, parse_event_context_quantity};
+use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
+use crate::types::ability::TargetFilter;
 
 /// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
 /// back to the original-case text to compute the correct remainder.
@@ -28,6 +30,46 @@ where
     let (rest, result) = parser(lower).ok()?;
     let consumed = lower.len() - rest.len();
     Some((result, &text[consumed..]))
+}
+
+/// Public wrapper for the upstream clause dispatcher: accepts original-cased
+/// text and lowercases internally. See `try_parse_for_each_color_mana`.
+pub(super) fn try_parse_for_each_color_mana_public(text: &str) -> Option<Effect> {
+    let lower = text.to_lowercase();
+    try_parse_for_each_color_mana(text, &lower)
+}
+
+/// CR 106.1 + CR 109.1: Recognize "For each color among [type-phrase], add one
+/// mana of that color" — the Faeburrow Elder class. Emits
+/// `ManaProduction::DistinctColorsAmongPermanents { filter }`, which resolves
+/// at activation time to one mana of each distinct color (W/U/B/R/G) present
+/// among matching permanents.
+fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
+    use nom::bytes::complete::take_until;
+    let lower_trimmed = lower.trim_end_matches('.').trim();
+    // Prefix: "for each color among "
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("for each color among ")
+        .parse(lower_trimmed)
+        .ok()?;
+    // Boundary: the type phrase runs until ", add one mana of that color".
+    let (_, type_text_lower) =
+        take_until::<_, _, VerboseError<&str>>(", add one mana of that color")
+            .parse(rest)
+            .ok()?;
+    // Recover original-cased slice for parse_type_phrase.
+    let offset = lower_trimmed.len() - rest.len();
+    let original_trimmed = text.trim_end_matches('.').trim();
+    let type_text = &original_trimmed[offset..offset + type_text_lower.len()];
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some(Effect::Mana {
+        produced: ManaProduction::DistinctColorsAmongPermanents { filter },
+        restrictions: vec![],
+        grants: vec![],
+        expiry: None,
+    })
 }
 
 pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {

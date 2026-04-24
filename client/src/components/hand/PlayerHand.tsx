@@ -13,9 +13,7 @@ import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/us
 import { dispatchAction } from "../../game/dispatch.ts";
 import type { GameAction, ManaCost, ObjectId } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
-
-/** Cards are played when dragged above their starting position (any upward drag counts). */
-const DRAG_PLAY_THRESHOLD = -20;
+import { DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
 
 function getHandOverlap(handSize: number): string {
   if (handSize <= 5) return "calc(var(--card-w) * -0.25)";
@@ -54,13 +52,18 @@ export function PlayerHand() {
     canActForWaitingState && s.waitingFor?.type === "Priority",
   );
 
-  // Build a set of object_ids that have PlayLand or CastSpell legal actions.
+  // Build a set of object_ids that have PlayLand, CastSpell, or
+  // CastSpellAsSneak legal actions. Sneak casts (CR 702.190a) originate from
+  // the hand via `hand_object` rather than `object_id`, so they need an
+  // explicit branch to light up the card's castable indicator.
   // Coerce to Number since serde_wasm_bindgen may serialize u64 as BigInt.
   const playableObjectIds = useMemo(() => {
     const ids = new Set<number>();
     for (const action of legalActions) {
       if (action.type === "PlayLand" || action.type === "CastSpell") {
         ids.add(Number((action as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.object_id));
+      } else if (action.type === "CastSpellAsSneak") {
+        ids.add(Number(action.data.hand_object));
       }
     }
     return ids;
@@ -97,21 +100,26 @@ export function PlayerHand() {
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
   );
 
+  // Drag-to-play applies the same gesture rule as `useDragToCast` (the
+  // Commander-zone single-cast path): release above DRAG_PLAY_THRESHOLD
+  // while holding priority and outside the source zone. A React hook cannot
+  // be called once per hand card, so we inline the rule here but share the
+  // threshold constant with `useDragToCast` — there is exactly one
+  // definition of "how far up counts as a play."
   const handleDragEnd = useCallback(
     (objectId: number, _event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
-      const handBounds = handContainerRef.current?.getBoundingClientRect();
-      const droppedInsideHand = handBounds != null
-        && info.point.x >= handBounds.left
-        && info.point.x <= handBounds.right
-        && info.point.y >= handBounds.top
-        && info.point.y <= handBounds.bottom;
-
-      const willPlay = !droppedInsideHand && info.offset.y < DRAG_PLAY_THRESHOLD && hasPriority;
-      if (willPlay) {
-        playCard(objectId);
-      }
-
-      return willPlay;
+      if (!hasPriority) return false;
+      const bounds = handContainerRef.current?.getBoundingClientRect();
+      const releasedInsideHand =
+        bounds != null
+        && info.point.x >= bounds.left
+        && info.point.x <= bounds.right
+        && info.point.y >= bounds.top
+        && info.point.y <= bounds.bottom;
+      if (releasedInsideHand) return false;
+      if (info.offset.y >= DRAG_PLAY_THRESHOLD) return false;
+      playCard(objectId);
+      return true;
     },
     [hasPriority, playCard],
   );

@@ -19,7 +19,11 @@ function formatEvent(event: GameEvent): string {
     case "AbilityActivated":
       return `Ability activated (source ${event.data.source_id})`;
     case "ZoneChanged":
-      return `Object ${event.data.object_id} moved ${event.data.from} -> ${event.data.to}`;
+      // `from` is null for token creation (CR 111.1 + CR 603.6a — tokens are
+      // created in the battlefield zone with no prior zone).
+      return event.data.from
+        ? `Object ${event.data.object_id} moved ${event.data.from} -> ${event.data.to}`
+        : `Object ${event.data.object_id} enters ${event.data.to}`;
     case "LifeChanged": {
       const prefix = event.data.amount >= 0 ? "+" : "";
       return `${getPlayerDisplayName(event.data.player_id)} life: ${prefix}${event.data.amount}`;

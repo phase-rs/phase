@@ -11,7 +11,7 @@ use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blocke
 use crate::config::{AiConfig, ThreatAwareness};
 use crate::context::AiContext;
 use crate::planner::{
-    apply_candidate, build_continuation_planner, rank_candidates, PlannerServices, SearchBudget,
+    apply_candidate, build_continuation_planner, PlannerServices, RankedCandidate, SearchBudget,
 };
 use crate::policies::context::PolicyContext;
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
@@ -134,7 +134,7 @@ pub fn emit_trace_for_candidate(
     if !tracing::event_enabled!(target: "phase_ai::decision_trace", tracing::Level::DEBUG) {
         return;
     }
-    let policies = PolicyRegistry::default();
+    let policies = PolicyRegistry::shared();
     let cast_facts = cast_facts_for_action(state, &candidate.action, ai_player);
     let policy_ctx = PolicyContext {
         state,
@@ -240,7 +240,7 @@ pub fn score_candidates(
     config: &AiConfig,
 ) -> Vec<(GameAction, f64)> {
     let ctx = build_decision_context(state);
-    let policies = PolicyRegistry::default();
+    let policies = PolicyRegistry::shared();
     let context = build_ai_context(state, ai_player, config);
 
     // Combat decisions bypass the candidate pipeline entirely — the combat AI
@@ -258,7 +258,7 @@ pub fn score_candidates(
         }
     }
 
-    let mut services = PlannerServices::new(ai_player, config, &policies, context);
+    let mut services = PlannerServices::new(ai_player, config, policies, context);
     let candidates = services.validate_candidates(state, ctx.candidates.clone());
     let gated = gate_candidates(
         state,
@@ -327,12 +327,15 @@ pub fn score_candidates(
 
     // Score actions via search or heuristics
     if config.search.enabled {
-        let mut budget = match config.search.time_budget_ms {
-            Some(ms) => SearchBudget::with_time_limit(
+        // Deterministic mode ignores the wall-clock time budget so search is
+        // bounded solely by max_nodes — integration tests and ai-duel regression
+        // runs rely on this to eliminate wall-clock flake.
+        let mut budget = match (config.search.deterministic, config.search.time_budget_ms) {
+            (false, Some(ms)) => SearchBudget::with_time_limit(
                 config.search.max_nodes,
                 web_time::Duration::from_millis(ms as u64),
             ),
-            None => SearchBudget::new(config.search.max_nodes),
+            _ => SearchBudget::new(config.search.max_nodes),
         };
         let branching = config.search.max_branching as usize;
         let mut planner = build_continuation_planner(config);
@@ -366,38 +369,56 @@ pub fn score_candidates(
             0.1
         };
 
-        let penalty_for = |candidate: &engine::ai_support::CandidateAction| {
-            gated
-                .iter()
-                .find(|gated_candidate| gated_candidate.candidate.action == candidate.action)
-                .map(|gated_candidate| gated_candidate.penalty)
-                .unwrap_or(0.0)
-        };
+        // Score and rank directly from `gated`, which already carries penalty
+        // alongside each candidate. Previously a `penalty_for` closure did an
+        // O(n) linear scan of `gated` per scored candidate — O(n²) overall.
+        // GameAction is not Hash, so we can't key a HashMap; carrying the
+        // penalty with its candidate is both cheaper and more idiomatic.
+        let mut ranked: Vec<RankedCandidate> = gated
+            .iter()
+            .map(|g| {
+                let tactical = services.tactical_score(state, &ctx, &g.candidate, ai_player);
+                RankedCandidate {
+                    candidate: g.candidate.clone(),
+                    score: tactical + g.penalty,
+                }
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        ranked.truncate(branching);
 
-        rank_candidates(
-            gated.iter().map(|candidate| candidate.candidate.clone()),
-            |candidate| {
-                services.tactical_score(state, &ctx, candidate, ai_player) + penalty_for(candidate)
-            },
-            branching,
-        )
-        .into_iter()
-        .map(|ranked| {
-            let score = if let Some(sim) = apply_candidate(state, &ranked.candidate) {
+        // Walk top-level candidates, but bail out of the full rollout phase
+        // once the deadline fires — remaining candidates keep their tactical
+        // score as the ranking signal instead of a full-search continuation.
+        // This caps wall-clock on the outer map the same way the deadline caps
+        // the inner rollout recursion.
+        let mut out: Vec<(GameAction, f64)> = Vec::with_capacity(ranked.len());
+        let mut deadline_hit = false;
+        for r in ranked {
+            let score = if deadline_hit || services.deadline.expired() {
+                deadline_hit = true;
+                // Skip the continuation search; keep the tactical signal.
+                r.score * tactical_weight
+            } else if let Some(sim) = apply_candidate(state, &r.candidate) {
                 let continuation_score =
                     planner.evaluate_after_action(&sim, &mut services, &mut budget);
-                continuation_score + (ranked.score * tactical_weight)
+                continuation_score + (r.score * tactical_weight)
             } else {
                 // Action failed simulation — heavily penalize so the AI prefers
                 // any valid alternative (e.g., CancelCast over a failing PassPriority
                 // during ManaPayment when the cost is unaffordable).
                 // Preserve tactical score as tiebreaker among equally-failing actions
                 // (e.g., target selection where simulation lacks full engine context).
-                ranked.score - 1000.0
+                r.score - 1000.0
             };
-            (ranked.candidate.action, score)
-        })
-        .collect()
+            out.push((r.candidate.action, score));
+        }
+        let _ = deadline_hit;
+        out
     } else {
         // Heuristic-only scoring
         gated
@@ -424,19 +445,17 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
         ctx.player = player;
         return ctx;
     }
-    let mut ctx = AiContext::analyze_with(deck, &config.weights, &config.archetype_multipliers);
-    ctx.player = player;
-    // Re-key the session map under the actual AI player (analyze_with keys by PlayerId(0)).
-    if player != engine::types::player::PlayerId(0) {
-        let session = std::sync::Arc::make_mut(&mut ctx.session);
-        if let Some(graph) = session.synergy.remove(&engine::types::player::PlayerId(0)) {
-            session.synergy.insert(player, graph);
-        }
-        if let Some(features) = session.features.remove(&engine::types::player::PlayerId(0)) {
-            session.features.insert(player, features);
-        }
-        if let Some(plan) = session.plan.remove(&engine::types::player::PlayerId(0)) {
-            session.plan.insert(player, plan);
+    // `analyze_for_player` keys the session's synergy/features/plan maps under
+    // the actual AI player up-front, so no `Arc::make_mut` + HashMap rekey is
+    // needed when the AI isn't in seat 0.
+    let mut ctx =
+        AiContext::analyze_for_player(deck, &config.weights, &config.archetype_multipliers, player);
+    // Populate opponent features so archetype lookups hit the cache instead
+    // of re-running `DeckProfile::analyze` per search call.
+    let session = std::sync::Arc::make_mut(&mut ctx.session);
+    for pool in &state.deck_pools {
+        if pool.player != player {
+            session.ensure_player_features(pool.player, &pool.current_main);
         }
     }
 
@@ -445,24 +464,13 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
         ThreatAwareness::None => None,
         ThreatAwareness::ArchetypeOnly => {
             // Use fixed archetype-based probabilities (no per-card analysis).
-            // Derive opponent archetype from the opponent's deck pool if available,
-            // otherwise fall back to Midrange.
+            // Archetype is cached on `AiSession` (populated above via
+            // `ensure_player_features`), so this is a HashMap lookup — not a
+            // `DeckProfile::analyze` pass per search call.
             let opponents = engine::game::players::opponents(state, player);
             let opp_archetype = opponents
                 .first()
-                .and_then(|&opp| {
-                    let opp_deck = state
-                        .deck_pools
-                        .iter()
-                        .find(|p| p.player == opp)
-                        .map(|p| p.current_main.as_slice())
-                        .unwrap_or(&[]);
-                    if opp_deck.is_empty() {
-                        None
-                    } else {
-                        Some(crate::deck_profile::DeckProfile::analyze(opp_deck).archetype)
-                    }
-                })
+                .and_then(|&opp| ctx.session.archetype(opp))
                 .unwrap_or(crate::deck_profile::DeckArchetype::Midrange);
             Some(ThreatProfile {
                 probabilities: ArchetypeBaseProbabilities::for_archetype(opp_archetype),
@@ -529,7 +537,11 @@ pub(crate) fn deterministic_choice(
             .get(player)
             .unwrap_or(&default_features);
         let plan = ctx.session.plan.get(player).unwrap_or(&default_plan);
-        let hand = state.players[player.0 as usize].hand.clone();
+        let hand: Vec<_> = state.players[player.0 as usize]
+            .hand
+            .iter()
+            .copied()
+            .collect();
         let turn_order = crate::policies::mulligan::turn_order_for(state, *player);
         let decision = crate::policies::mulligan::MulliganRegistry::default().evaluate_hand(
             &hand,
@@ -1353,6 +1365,7 @@ mod tests {
             cards: vec![titan, land],
             count: 1,
             reveal: false,
+            up_to: false,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);

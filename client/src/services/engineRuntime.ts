@@ -1,3 +1,5 @@
+import type { GameFormat } from "../adapter/types";
+
 type EngineModule = typeof import("@wasm/engine");
 
 let engineModulePromise: Promise<EngineModule> | null = null;
@@ -105,24 +107,13 @@ export type SideboardPolicy =
   | { type: "Limited"; data: number }
   | { type: "Unlimited" };
 
-export type SideboardFormat =
-  | "Standard"
-  | "Commander"
-  | "Pioneer"
-  | "Historic"
-  | "Pauper"
-  | "Brawl"
-  | "HistoricBrawl"
-  | "FreeForAll"
-  | "TwoHeadedGiant";
-
 /**
  * Query the engine for the sideboard policy of a given format. The engine is
  * the single authority for these rules — the frontend never hardcodes 15
  * or any other cap.
  */
 export async function sideboardPolicyForFormat(
-  format: SideboardFormat,
+  format: GameFormat,
 ): Promise<SideboardPolicy> {
   await ensureWasmInit();
   const engine = await loadEngineModule();

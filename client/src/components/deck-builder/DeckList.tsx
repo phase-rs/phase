@@ -5,34 +5,30 @@ import type { ExportFormat } from "../../services/deckParser";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
 import {
   sideboardPolicyForFormat,
-  type SideboardFormat,
   type SideboardPolicy,
 } from "../../services/engineRuntime";
+import type { GameFormat } from "../../adapter/types";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 
 import { MoveList } from "./MoveList";
 
 /**
- * Map the client-side `DeckFormat` union to the engine's `GameFormat` when
- * a direct mapping exists. Modern/Legacy/Vintage are constructed formats not
- * yet represented in `GameFormat`; callers should treat them as standard
- * constructed (Limited(15)) until the engine gains explicit variants.
+ * Map the lowercase deck-builder format string (e.g. "standard", "commander")
+ * to the engine's `GameFormat` PascalCase identifier. Derived from the
+ * engine-authored FORMAT_REGISTRY so adding a format is automatic here.
  */
-function mapToEngineFormat(format: string | undefined): SideboardFormat | null {
-  switch (format) {
-    case "standard":
-      return "Standard";
-    case "commander":
-      return "Commander";
-    case "pioneer":
-      return "Pioneer";
-    case "pauper":
-      return "Pauper";
-    default:
-      return null;
-  }
+function mapToEngineFormat(format: string | undefined): GameFormat | null {
+  if (!format) return null;
+  const lower = format.toLowerCase();
+  const match = FORMAT_REGISTRY.find((m) => m.format.toLowerCase() === lower);
+  return match?.format ?? null;
 }
 
-/** Fallback policy for client-only formats the engine doesn't yet recognize. */
+/**
+ * Used only when the deck's format string doesn't resolve to a known
+ * GameFormat (e.g. user-imported "casual" labels). Constructed formats are
+ * the common case for unfamiliar labels, so Limited(15) is the right default.
+ */
 const FALLBACK_CONSTRUCTED_POLICY: SideboardPolicy = { type: "Limited", data: 15 };
 
 interface DeckListProps {

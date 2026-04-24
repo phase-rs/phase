@@ -71,6 +71,7 @@ import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
+import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { usePreviewDismiss } from "../hooks/usePreviewDismiss.ts";
 import { clearGame, useGameStore } from "../stores/gameStore.ts";
@@ -1341,19 +1342,26 @@ function MulliganDecisionPrompt({
 }: MulliganDecisionPromptProps) {
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const hoverProps = useInspectHoverProps();
   const [buttonsVisible, setButtonsVisible] = useState(false);
 
   if (!player || !objects) {
     return (
       <ChoiceModal
-        title={`Mulligan (${mulliganCount} cards)`}
+        title={`London Mulligan (${mulliganCount} taken)`}
         options={[
-          { id: "keep", label: "Keep Hand" },
+          {
+            id: "keep",
+            label: "Keep Hand",
+            description:
+              mulliganCount > 0
+                ? `Put ${mulliganCount} on the bottom`
+                : "No cards to the bottom",
+          },
           {
             id: "mulligan",
             label: "Mulligan",
-            description: `Draw ${7 - mulliganCount - 1} cards`,
+            description: "Shuffle and draw 7 again",
           },
         ]}
         onChoose={onChoose}
@@ -1365,12 +1373,12 @@ function MulliganDecisionPrompt({
   const nextHandSize = 7 - mulliganCount - 1;
   return (
     <MulliganPanel
-      eyebrow={mulliganCount > 0 ? `Mulligan ${mulliganCount}` : "Opening Hand"}
+      eyebrow={mulliganCount > 0 ? `Mulligan ${mulliganCount} · London` : "Opening Hand · London Mulligan"}
       title="Review your opening hand"
       subtitle={
         mulliganCount > 0
-          ? `Choose whether to keep this ${handObjects.length}-card hand or mulligan down to ${nextHandSize}.`
-          : "Take a final look before the game starts."
+          ? `Keep this hand (you'll put ${mulliganCount} on the bottom) or mulligan again for a fresh 7.`
+          : "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
       }
       footer={
         <AnimatePresence>
@@ -1427,8 +1435,7 @@ function MulliganDecisionPrompt({
                 onAnimationComplete={() => {
                   if (index === handObjects.length - 1) setButtonsVisible(true);
                 }}
-                onMouseEnter={() => inspectObject(obj.id)}
-                onMouseLeave={() => inspectObject(null)}
+                {...hoverProps(obj.id)}
               >
                 <CardImage
                   cardName={obj.name}
@@ -1545,7 +1552,7 @@ function MulliganBottomCardsPrompt({
   const objects = useGameStore((s) => s.gameState?.objects);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const addSelectedCard = useUiStore((s) => s.addSelectedCard);
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const hoverProps = useInspectHoverProps();
 
   if (!player || !objects) return null;
 
@@ -1622,8 +1629,7 @@ function MulliganBottomCardsPrompt({
                     ease: "easeOut",
                   }}
                   whileHover={{ scale: 1.06, y: -12 }}
-                  onMouseEnter={() => inspectObject(obj.id)}
-                  onMouseLeave={() => inspectObject(null)}
+                  {...hoverProps(obj.id)}
                 >
                   <CardImage
                     cardName={obj.name}
@@ -1856,17 +1862,27 @@ function AbilityChoiceModal() {
   const obj = useGameStore((s) =>
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
+  const objects = useGameStore((s) => s.gameState?.objects);
 
   if (!pending || !obj) return null;
+
+  // CR 702.190a: When every pending action is a Sneak cast, reframe the
+  // modal's subtitle — the user is choosing which attacker to return as the
+  // cost-payment creature, not activating an ability.
+  const allSneak = pending.actions.every((a) => a.type === "CastSpellAsSneak");
+  const subtitle = allSneak
+    ? "Choose which attacker to return (Sneak cost)"
+    : "Choose an ability to activate";
 
   return (
     <ChoiceModal
       title={obj.name}
-      subtitle="Choose an ability to activate"
+      subtitle={subtitle}
       options={pending.actions.map((action, i) => {
         const { label, description } = abilityChoiceLabel(
           action,
           obj,
+          objects,
         );
         return { id: String(i), label, description };
       })}

@@ -567,13 +567,28 @@ pub(super) fn match_changes_zone(
         // precedence over single-zone `origin` when non-empty — this supports
         // "put into exile from your library and/or your graveyard" where the
         // source zone can be one of several zones.
-        if !trigger.origin_zones.is_empty() {
-            if !trigger.origin_zones.contains(from) {
-                return false;
+        //
+        // CR 111.1 + CR 603.6a: `from = None` means the object was created
+        // directly in `to` (token creation / emblem). Any trigger that names
+        // a specific origin zone cannot match such an event; a trigger with
+        // no origin filter (e.g. Elvish Vanguard's "whenever another Elf
+        // enters") falls through these guards and matches.
+        match from {
+            Some(from_zone) => {
+                if !trigger.origin_zones.is_empty() {
+                    if !trigger.origin_zones.contains(from_zone) {
+                        return false;
+                    }
+                } else if let Some(origin) = &trigger.origin {
+                    if origin != from_zone {
+                        return false;
+                    }
+                }
             }
-        } else if let Some(origin) = &trigger.origin {
-            if origin != from {
-                return false;
+            None => {
+                if !trigger.origin_zones.is_empty() || trigger.origin.is_some() {
+                    return false;
+                }
             }
         }
         // Check destination zone using typed field
@@ -1429,7 +1444,7 @@ pub(super) fn match_milled(
         ..
     } = event
     {
-        if *from != Zone::Library || *to != Zone::Graveyard {
+        if *from != Some(Zone::Library) || *to != Zone::Graveyard {
             return false;
         }
         if !valid_card_matches(trigger, state, *object_id, source_id) {
@@ -1491,7 +1506,7 @@ pub(super) fn match_unattach(
     match event {
         GameEvent::ZoneChanged {
             object_id, from, ..
-        } if *from == Zone::Battlefield => {
+        } if *from == Some(Zone::Battlefield) => {
             // Check if source was attached to the object that left
             state
                 .objects
@@ -1800,7 +1815,7 @@ pub(super) fn match_leaves_battlefield(
         object_id, from, ..
     } = event
     {
-        if *from != Zone::Battlefield {
+        if *from != Some(Zone::Battlefield) {
             return false;
         }
         valid_card_matches(trigger, state, *object_id, source_id)
@@ -2502,13 +2517,13 @@ mod tests {
     ) -> GameEvent {
         GameEvent::ZoneChanged {
             object_id,
-            from,
+            from: Some(from),
             to,
             record: Box::new(ZoneChangeRecord {
                 name: "Test Object".to_string(),
                 core_types,
                 subtypes: subtypes.into_iter().map(str::to_string).collect(),
-                ..ZoneChangeRecord::test_minimal(object_id, from, to)
+                ..ZoneChangeRecord::test_minimal(object_id, Some(from), to)
             }),
         }
     }
@@ -2815,13 +2830,17 @@ mod tests {
         // A 2/2 dying should not fire.
         let event_2 = GameEvent::ZoneChanged {
             object_id: ObjectId(501),
-            from: Zone::Battlefield,
+            from: Some(Zone::Battlefield),
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 core_types: vec![CoreType::Creature],
                 power: Some(2),
                 toughness: Some(2),
-                ..ZoneChangeRecord::test_minimal(ObjectId(501), Zone::Battlefield, Zone::Graveyard)
+                ..ZoneChangeRecord::test_minimal(
+                    ObjectId(501),
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
             }),
         };
         assert!(!match_changes_zone(&event_2, &trigger, source_id, &state));
@@ -3635,7 +3654,7 @@ mod tests {
     fn setup_with_spell_on_stack() -> (GameState, ObjectId) {
         let mut state = setup();
         let spell_id = ObjectId(50);
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(0),
@@ -3644,6 +3663,7 @@ mod tests {
                 ability: Some(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: crate::types::ability::TargetFilter::Controller,
                     },
                     vec![],
                     spell_id,
@@ -3659,7 +3679,7 @@ mod tests {
     fn setup_with_ability_on_stack() -> (GameState, ObjectId) {
         let mut state = setup();
         let ability_id = ObjectId(60);
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ability_id,
             source_id: ObjectId(10),
             controller: PlayerId(1),
@@ -3668,6 +3688,7 @@ mod tests {
                 ability: ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: crate::types::ability::TargetFilter::Controller,
                     },
                     vec![],
                     ObjectId(10),

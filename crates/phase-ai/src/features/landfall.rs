@@ -244,6 +244,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: engine::types::ability::TargetFilter::Controller,
                 },
             ))
     }
@@ -258,6 +259,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: engine::types::ability::TargetFilter::Controller,
                 },
             ))
     }
@@ -268,6 +270,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
+            up_to: false,
         };
         let put_in_play = AbilityDefinition::new(
             AbilityKind::Activated,

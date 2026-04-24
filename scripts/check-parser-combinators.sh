@@ -38,11 +38,32 @@ report=""
 
 while IFS= read -r file; do
     [ -f "$file" ] || continue
-    added=$(git diff --unified=0 "$BASE" -- "$file" \
-        | grep -E '^\+[^+]' \
+    # Find offending added lines, then drop any whose own line OR the
+    # immediately preceding line in the working file contains the marker.
+    # The preceding-line check lets rustfmt move the marker comment to its
+    # own line above the offending expression without breaking the gate.
+    candidates=$(git diff --unified=0 "$BASE" -- "$file" \
+        | grep -nE '^\+[^+]' \
         | grep -Ev 'allow-noncombinator' \
         | grep -E "$FORBIDDEN" \
         || true)
+    added=""
+    while IFS= read -r diff_line; do
+        [ -z "$diff_line" ] && continue
+        # Extract the actual added text (strip the leading '+')
+        text="${diff_line#*+}"
+        # Find this exact line in the working file and check the line above
+        ln=$(grep -nFx "$text" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+        if [ -n "$ln" ] && [ "$ln" -gt 1 ]; then
+            prev=$(sed -n "$((ln-1))p" "$file")
+            if echo "$prev" | grep -q 'allow-noncombinator'; then
+                continue
+            fi
+        fi
+        added="${added}${text}
+"
+    done <<< "$candidates"
+    added="${added%$'\n'}"
     if [ -n "$added" ]; then
         report="${report}
   ${file}:"

@@ -3,7 +3,10 @@ use thiserror::Error;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, ShardChoice};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaCost, ManaCostShard, ManaPool, ManaType, ManaUnit, SpellMeta};
+use crate::types::mana::{
+    ManaCost, ManaCostShard, ManaExpiry, ManaPool, ManaRestriction, ManaSpellGrant, ManaType,
+    ManaUnit, PaymentContext,
+};
 use crate::types::player::PlayerId;
 
 /// Color demand array indexed by WUBRG (White=0, Blue=1, Black=2, Red=3, Green=4).
@@ -106,6 +109,39 @@ pub fn produce_mana(
     tapped_for_mana: bool,
     events: &mut Vec<GameEvent>,
 ) {
+    produce_mana_with_attributes(
+        state,
+        source_id,
+        mana_type,
+        player_id,
+        tapped_for_mana,
+        &[],
+        &[],
+        None,
+        events,
+    );
+}
+
+/// Produce mana and add it to a player's mana pool, carrying spend restrictions,
+/// spell grants, and expiry semantics (CR 106.6 + CR 106.4).
+///
+/// CR 106.6: Some spells or abilities that produce mana restrict how that mana
+/// can be spent (e.g., Flamebraider: "Spend this mana only to cast Elemental
+/// spells or activate abilities of Elemental sources."). Restrictions attach to
+/// each produced `ManaUnit` so the spend-mana payment gate can reject illegal
+/// uses via `ManaRestriction::allows_spell` / `allows_activation`.
+#[allow(clippy::too_many_arguments)]
+pub fn produce_mana_with_attributes(
+    state: &mut GameState,
+    source_id: ObjectId,
+    mana_type: ManaType,
+    player_id: PlayerId,
+    tapped_for_mana: bool,
+    restrictions: &[ManaRestriction],
+    grants: &[ManaSpellGrant],
+    expiry: Option<ManaExpiry>,
+    events: &mut Vec<GameEvent>,
+) {
     use crate::game::replacement::{self, ReplacementResult};
     use crate::types::proposed_event::ProposedEvent;
 
@@ -127,9 +163,9 @@ pub fn produce_mana(
         color: final_mana_type,
         source_id,
         snow: false,
-        restrictions: Vec::new(),
-        grants: Vec::new(),
-        expiry: None,
+        restrictions: restrictions.to_vec(),
+        grants: grants.to_vec(),
+        expiry,
     };
 
     let player = state
@@ -227,7 +263,7 @@ pub fn classify_payment(cost: &ManaCost) -> PaymentClassification {
 pub fn can_pay_for_spell(
     pool: &ManaPool,
     cost: &ManaCost,
-    spell: Option<&SpellMeta>,
+    spell: Option<&PaymentContext<'_>>,
     any_color: bool,
     max_life_payments: u32,
 ) -> bool {
@@ -372,7 +408,7 @@ pub fn pay_cost(
 pub(crate) fn reduce_cost_by_pool(
     pool: &ManaPool,
     cost: &ManaCost,
-    spell: Option<&SpellMeta>,
+    spell: Option<&PaymentContext<'_>>,
     any_color: bool,
 ) -> ManaCost {
     let (shards, generic) = match cost {
@@ -480,7 +516,7 @@ pub fn pay_cost_with_demand(
     pool: &mut ManaPool,
     cost: &ManaCost,
     hand_demand: Option<&ColorDemand>,
-    spell: Option<&SpellMeta>,
+    spell: Option<&PaymentContext<'_>>,
     any_color: bool,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     pay_cost_with_demand_and_choices(pool, cost, hand_demand, spell, any_color, None)
@@ -498,7 +534,7 @@ pub fn pay_cost_with_demand_and_choices(
     pool: &mut ManaPool,
     cost: &ManaCost,
     hand_demand: Option<&ColorDemand>,
-    spell: Option<&SpellMeta>,
+    spell: Option<&PaymentContext<'_>>,
     any_color: bool,
     phyrexian_choices: Option<&[ShardChoice]>,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
@@ -698,7 +734,7 @@ pub fn pay_cost_with_demand_and_choices(
 pub fn compute_phyrexian_shards(
     pool: &ManaPool,
     cost: &ManaCost,
-    spell: Option<&SpellMeta>,
+    spell: Option<&PaymentContext<'_>>,
     any_color: bool,
     max_life_payments: u32,
 ) -> Vec<crate::types::game_state::PhyrexianShard> {
@@ -823,7 +859,7 @@ pub fn compute_phyrexian_shards(
 
 fn sim_phyrexian_mana_available(
     pool: &ManaPool,
-    spell: Option<&SpellMeta>,
+    spell: Option<&PaymentContext<'_>>,
     any_color: bool,
     color: ManaType,
 ) -> bool {
@@ -834,12 +870,16 @@ fn sim_phyrexian_mana_available(
     }
 }
 
-fn sim_any_color_available(pool: &ManaPool, spell: Option<&SpellMeta>) -> bool {
+fn sim_any_color_available(pool: &ManaPool, spell: Option<&PaymentContext<'_>>) -> bool {
     let mut clone = pool.clone();
     spend_any_eligible(&mut clone, spell).is_some()
 }
 
-fn sim_color_available(pool: &ManaPool, spell: Option<&SpellMeta>, color: ManaType) -> bool {
+fn sim_color_available(
+    pool: &ManaPool,
+    spell: Option<&PaymentContext<'_>>,
+    color: ManaType,
+) -> bool {
     let mut clone = pool.clone();
     spend_eligible(&mut clone, color, spell).is_some()
 }
@@ -921,7 +961,7 @@ pub fn land_subtype_to_mana_type(subtype: &str) -> Option<ManaType> {
 fn spend_eligible(
     pool: &mut ManaPool,
     color: ManaType,
-    spell: Option<&SpellMeta>,
+    spell: Option<&PaymentContext<'_>>,
 ) -> Option<ManaUnit> {
     match spell {
         Some(meta) => pool.spend_for(color, meta),
@@ -1016,10 +1056,10 @@ pub(crate) fn shard_to_mana_type(shard: ManaCostShard) -> ShardRequirement {
     }
 }
 
-fn spend_any_eligible(pool: &mut ManaPool, spell: Option<&SpellMeta>) -> Option<ManaUnit> {
+fn spend_any_eligible(pool: &mut ManaPool, spell: Option<&PaymentContext<'_>>) -> Option<ManaUnit> {
     match spell {
-        Some(meta) => {
-            if let Some(unit) = pool.spend_for(ManaType::Colorless, meta) {
+        Some(ctx) => {
+            if let Some(unit) = pool.spend_for(ManaType::Colorless, ctx) {
                 return Some(unit);
             }
 
@@ -1035,9 +1075,7 @@ fn spend_any_eligible(pool: &mut ManaPool, spell: Option<&SpellMeta>) -> Option<
                 let count = pool
                     .mana
                     .iter()
-                    .filter(|m| {
-                        m.color == color && m.restrictions.iter().all(|r| r.allows_spell(meta))
-                    })
+                    .filter(|m| m.color == color && m.restrictions.iter().all(|r| r.allows(ctx)))
                     .count();
                 if count > 0 {
                     match best {
@@ -1047,7 +1085,7 @@ fn spend_any_eligible(pool: &mut ManaPool, spell: Option<&SpellMeta>) -> Option<
                     }
                 }
             }
-            best.and_then(|(color, _)| pool.spend_for(color, meta))
+            best.and_then(|(color, _)| pool.spend_for(color, ctx))
         }
         None => spend_any_unit(pool),
     }
@@ -1104,7 +1142,7 @@ fn spend_snow_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
 mod tests {
     use super::*;
     use crate::types::identifiers::ObjectId;
-    use crate::types::mana::ManaRestriction;
+    use crate::types::mana::{ManaRestriction, SpellMeta};
 
     /// The building-block predicate must classify each shape the parser can produce.
     /// Generic + colored + snow + free `X` (pre-concretization sentinel) are all
@@ -1258,7 +1296,7 @@ mod tests {
         );
         contamination.replacement_definitions = vec![repl].into();
         state.objects.insert(contamination_id, contamination);
-        state.battlefield.push(contamination_id);
+        state.battlefield.push_back(contamination_id);
 
         // Build a Forest (land) that will "produce" Green.
         let land_id = ObjectId(10);
@@ -1274,7 +1312,7 @@ mod tests {
             .core_types
             .push(crate::types::card_type::CoreType::Land);
         state.objects.insert(land_id, forest);
-        state.battlefield.push(land_id);
+        state.battlefield.push_back(land_id);
 
         let mut events = Vec::new();
         produce_mana(
@@ -1593,7 +1631,8 @@ mod tests {
             keyword_kinds: vec![],
             cast_from_zone: None,
         };
-        assert!(can_pay_for_spell(&pool, &cost, Some(&elf), false, 0));
+        let elf_ctx = PaymentContext::Spell(&elf);
+        assert!(can_pay_for_spell(&pool, &cost, Some(&elf_ctx), false, 0));
 
         // Goblin creature: only unrestricted green usable → insufficient
         let goblin = SpellMeta {
@@ -1602,7 +1641,14 @@ mod tests {
             keyword_kinds: vec![],
             cast_from_zone: None,
         };
-        assert!(!can_pay_for_spell(&pool, &cost, Some(&goblin), false, 0));
+        let goblin_ctx = PaymentContext::Spell(&goblin);
+        assert!(!can_pay_for_spell(
+            &pool,
+            &cost,
+            Some(&goblin_ctx),
+            false,
+            0
+        ));
     }
 
     #[test]
@@ -1630,10 +1676,11 @@ mod tests {
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
             cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
         };
+        let flashback_ctx = PaymentContext::Spell(&flashback_spell);
         assert!(can_pay_for_spell(
             &pool,
             &cost,
-            Some(&flashback_spell),
+            Some(&flashback_ctx),
             false,
             0,
         ));
@@ -1644,10 +1691,11 @@ mod tests {
             keyword_kinds: vec![],
             cast_from_zone: Some(crate::types::zones::Zone::Hand),
         };
+        let normal_ctx = PaymentContext::Spell(&normal_spell);
         assert!(!can_pay_for_spell(
             &pool,
             &cost,
-            Some(&normal_spell),
+            Some(&normal_ctx),
             false,
             0
         ));
@@ -1679,13 +1727,8 @@ mod tests {
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
             cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
         };
-        assert!(can_pay_for_spell(
-            &pool,
-            &cost,
-            Some(&graveyard_flashback_spell),
-            false,
-            0,
-        ));
+        let gy_ctx = PaymentContext::Spell(&graveyard_flashback_spell);
+        assert!(can_pay_for_spell(&pool, &cost, Some(&gy_ctx), false, 0,));
 
         let hand_flashback_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -1693,13 +1736,8 @@ mod tests {
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
             cast_from_zone: Some(crate::types::zones::Zone::Hand),
         };
-        assert!(!can_pay_for_spell(
-            &pool,
-            &cost,
-            Some(&hand_flashback_spell),
-            false,
-            0,
-        ));
+        let hand_ctx = PaymentContext::Spell(&hand_flashback_spell);
+        assert!(!can_pay_for_spell(&pool, &cost, Some(&hand_ctx), false, 0,));
     }
 
     #[test]

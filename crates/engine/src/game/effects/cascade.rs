@@ -64,7 +64,7 @@ pub fn resolve(
         .players
         .iter()
         .find(|p| p.id == controller)
-        .and_then(|p| p.library.first().copied())
+        .and_then(|p| p.library.front().copied())
     {
         zones::move_to_zone(state, card_id, Zone::Exile, events);
 
@@ -79,7 +79,7 @@ pub fn resolve(
                 .players
                 .iter()
                 .find(|p| p.id == controller)
-                .is_some_and(|p| p.library.first().copied() == Some(card_id))
+                .is_some_and(|p| p.library.front().copied() == Some(card_id))
             {
                 // Defensive: if the card is somehow still on top, break to
                 // avoid an infinite loop.
@@ -215,7 +215,7 @@ mod tests {
         let hit = add_library_card(&mut state, PlayerId(0), "Bear", 2, false);
         // library[0] is top (CR 402.2 / engine convention); set so cascade
         // exiles land1, land2, then finds hit.
-        state.players[0].library = vec![land1, land2, hit];
+        state.players[0].library = im::vector![land1, land2, hit];
 
         let ability = ResolvedAbility::new(Effect::Cascade, vec![], source_id, PlayerId(0));
         let mut events = Vec::new();
@@ -243,7 +243,7 @@ mod tests {
         let (mut state, source_id) = setup_with_source(4);
         let equal = add_library_card(&mut state, PlayerId(0), "Equal MV", 4, false);
         let hit = add_library_card(&mut state, PlayerId(0), "Below MV", 3, false);
-        state.players[0].library = vec![equal, hit];
+        state.players[0].library = im::vector![equal, hit];
 
         let ability = ResolvedAbility::new(Effect::Cascade, vec![], source_id, PlayerId(0));
         let mut events = Vec::new();
@@ -270,7 +270,7 @@ mod tests {
         // Only MV-2 and MV-3 nonlands present — none are strictly less than 2.
         let a = add_library_card(&mut state, PlayerId(0), "Too Big A", 3, false);
         let b = add_library_card(&mut state, PlayerId(0), "Too Big B", 2, false);
-        state.players[0].library = vec![a, b];
+        state.players[0].library = im::vector![a, b];
 
         let ability = ResolvedAbility::new(Effect::Cascade, vec![], source_id, PlayerId(0));
         let mut events = Vec::new();
@@ -307,7 +307,7 @@ mod tests {
     fn source_mv_reads_current_mana_value() {
         let (mut state, source_id) = setup_with_source(5);
         let hit = add_library_card(&mut state, PlayerId(0), "Small", 1, false);
-        state.players[0].library = vec![hit];
+        state.players[0].library = im::vector![hit];
 
         let ability = ResolvedAbility::new(Effect::Cascade, vec![], source_id, PlayerId(0));
         let mut events = Vec::new();
@@ -358,7 +358,7 @@ mod tests {
         let l1 = add_library_card(&mut state, PlayerId(0), "Forest", 0, true);
         let l2 = add_library_card(&mut state, PlayerId(0), "Mountain", 0, true);
         let l3 = add_library_card(&mut state, PlayerId(0), "Island", 0, true);
-        state.players[0].library = vec![l1, l2, l3];
+        state.players[0].library = im::vector![l1, l2, l3];
 
         let ability = ResolvedAbility::new(Effect::Cascade, vec![], source_id, PlayerId(0));
         let mut events = Vec::new();

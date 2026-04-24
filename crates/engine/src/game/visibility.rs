@@ -154,6 +154,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref cards,
         count,
         reveal,
+        up_to,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -162,6 +163,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 count,
                 reveal,
+                up_to,
             };
         }
     }
@@ -223,6 +225,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     }
 
     filtered.auto_pass.retain(|pid, _| *pid == viewer);
+    filtered.phase_stops.retain(|pid, _| *pid == viewer);
     filtered
         .lands_tapped_for_mana
         .retain(|pid, _| *pid == viewer);
@@ -322,6 +325,7 @@ mod tests {
             cards: vec![card_id],
             count: 1,
             reveal: false,
+            up_to: false,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
@@ -353,6 +357,7 @@ mod tests {
             cards: vec![card_id],
             count: 1,
             reveal: false,
+            up_to: false,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(2));
@@ -377,7 +382,7 @@ mod tests {
 
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
 
-        assert_eq!(filtered.command_zone, vec![commander_id]);
+        assert_eq!(filtered.command_zone, im::vector![commander_id]);
         let commander = filtered.objects.get(&commander_id).unwrap();
         assert_eq!(commander.name, "Opponent Commander");
         assert!(!commander.face_down);

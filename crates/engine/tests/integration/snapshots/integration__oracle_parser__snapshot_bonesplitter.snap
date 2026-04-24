@@ -30,6 +30,11 @@ expression: result
       "description": "Equip {1}",
       "target_prompt": null,
       "sorcery_speed": true,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        }
+      ],
       "condition": null,
       "optional_targeting": false,
       "optional": false,

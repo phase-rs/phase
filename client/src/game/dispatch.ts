@@ -1,6 +1,6 @@
 import type { GameAction, GameEvent, GameState, LegalActionsResult } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
-import { attemptStateRehydrate, notifyEngineLost } from "./engineRecovery";
+import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { getPlayerId } from "../hooks/usePlayerId";
 import type { AnimationStep } from "../animation/types";
@@ -117,6 +117,17 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   try {
     result = await adapter.submitAction(action, actor);
   } catch (err) {
+    // Engine panic: re-running the same action against the same state is
+    // guaranteed to re-panic (the previous "ai-getAction-retry" / similar
+    // failure modes were caused by exactly this loop). Surface the captured
+    // panic message immediately instead of attempting recovery.
+    if (isEnginePanic(err)) {
+      // Try rehydrate — if the panic was in a side path and engine state
+      // survived, downgrade to a non-fatal toast and let the user keep
+      // playing. Only the true state-loss path triggers the blocking modal.
+      await routePanic("submitAction-panic", err.panic);
+      throw err;
+    }
     if (!isStateLost(err)) throw err;
     debugLog(`processAction: STATE_LOST on ${action.type}; attempting rehydrate`, "warn");
     const recovered = await attemptStateRehydrate();
@@ -133,7 +144,14 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     try {
       result = await adapter.submitAction(action, actor);
     } catch (retryErr) {
-      notifyEngineLost("submitAction-retry");
+      // Prefer the captured panic message over the bare retry tag — that's
+      // the "diagnostic: submitAction-retry" the user reported, which told
+      // them nothing actionable.
+      if (isEnginePanic(retryErr)) {
+        await routePanic("submitAction-retry-panic", retryErr.panic);
+      } else {
+        notifyEngineLost("submitAction-retry");
+      }
       throw retryErr;
     }
   }
@@ -149,6 +167,10 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   try {
     newState = await adapter.getState();
   } catch (err) {
+    if (isEnginePanic(err)) {
+      await routePanic("getState-panic", err.panic);
+      throw err;
+    }
     if (!isStateLost(err)) throw err;
     debugLog("processAction: STATE_LOST on getState; attempting rehydrate", "warn");
     const recovered = await attemptStateRehydrate();
@@ -159,7 +181,11 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     try {
       newState = await adapter.getState();
     } catch (retryErr) {
-      notifyEngineLost("getState-retry");
+      if (isEnginePanic(retryErr)) {
+        notifyEngineLost("getState-retry-panic", retryErr.panic);
+      } else {
+        notifyEngineLost("getState-retry");
+      }
       throw retryErr;
     }
   }
@@ -223,6 +249,10 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   try {
     legalResult = await adapter.getLegalActions();
   } catch (err) {
+    if (isEnginePanic(err)) {
+      notifyEngineLost("getLegalActions-panic", err.panic);
+      throw err;
+    }
     if (!isStateLost(err)) throw err;
     const recovered = await attemptStateRehydrate();
     if (!recovered) {
@@ -232,7 +262,11 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     try {
       legalResult = await adapter.getLegalActions();
     } catch (retryErr) {
-      notifyEngineLost("getLegalActions-retry");
+      if (isEnginePanic(retryErr)) {
+        notifyEngineLost("getLegalActions-retry-panic", retryErr.panic);
+      } else {
+        notifyEngineLost("getLegalActions-retry");
+      }
       throw retryErr;
     }
   }
@@ -300,7 +334,11 @@ async function processQueue(): Promise<void> {
       // de-duped but the log becomes noisy and we waste cycles on doomed
       // rehydrates. User is about to reload; nothing in this queue is
       // going to succeed.
-      if (isStateLost(err)) {
+      if (isStateLost(err) || isEnginePanic(err)) {
+        // Drain on ENGINE_PANIC too: each queued action would otherwise hit
+        // its own catch + (no-op) recovery + re-throw, doubling the noise
+        // for an unrecoverable failure. The first item already fired
+        // notifyEngineLost with the captured panic.
         while (pendingQueue.length > 0) {
           const stale = pendingQueue.shift()!;
           stale.reject(err);

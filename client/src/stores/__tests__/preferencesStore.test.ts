@@ -22,7 +22,7 @@ describe("preferencesStore", () => {
         sfxMuted: false,
         musicMuted: false,
         masterMuted: false,
-        aiDifficulty: "Medium",
+        aiSeats: [{ difficulty: "Medium", deckName: "Random" }],
       });
     });
     localStorage.clear();
@@ -36,15 +36,41 @@ describe("preferencesStore", () => {
     expect(state.followActiveOpponent).toBe(false);
     expect(state.logDefaultState).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
-    expect(state.aiDifficulty).toBe("Medium");
+    expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckName: "Random" }]);
   });
 
-  it("setAiDifficulty updates AI difficulty", () => {
+  it("setAiSeatDifficulty updates the target seat", () => {
     act(() => {
-      usePreferencesStore.getState().setAiDifficulty("Hard");
+      usePreferencesStore.getState().ensureAiSeatCount(3);
+      usePreferencesStore.getState().setAiSeatDifficulty(1, "Hard");
     });
 
-    expect(usePreferencesStore.getState().aiDifficulty).toBe("Hard");
+    const seats = usePreferencesStore.getState().aiSeats;
+    expect(seats).toHaveLength(3);
+    expect(seats[0].difficulty).toBe("Medium");
+    expect(seats[1].difficulty).toBe("Hard");
+  });
+
+  it("ensureAiSeatCount seeds new seats from the first seat", () => {
+    act(() => {
+      usePreferencesStore.getState().setAiSeatDifficulty(0, "Hard");
+      usePreferencesStore.getState().ensureAiSeatCount(3);
+    });
+
+    const seats = usePreferencesStore.getState().aiSeats;
+    expect(seats.map((s) => s.difficulty)).toEqual(["Hard", "Hard", "Hard"]);
+  });
+
+  it("ensureAiSeatCount shrinks without losing leading seats", () => {
+    act(() => {
+      usePreferencesStore.getState().ensureAiSeatCount(4);
+      usePreferencesStore.getState().setAiSeatDeckName(0, "Dimir Control");
+      usePreferencesStore.getState().ensureAiSeatCount(1);
+    });
+
+    const seats = usePreferencesStore.getState().aiSeats;
+    expect(seats).toHaveLength(1);
+    expect(seats[0].deckName).toBe("Dimir Control");
   });
 
   it("setCardSize updates card size", () => {
@@ -140,7 +166,7 @@ describe("preferencesStore", () => {
     act(() => {
       usePreferencesStore.getState().setCardSize("small");
       usePreferencesStore.getState().setFollowActiveOpponent(true);
-      usePreferencesStore.getState().setAiDifficulty("VeryHard");
+      usePreferencesStore.getState().setAiSeatDifficulty(0, "VeryHard");
     });
 
     // Zustand persist writes to localStorage
@@ -150,7 +176,33 @@ describe("preferencesStore", () => {
     const parsed = JSON.parse(stored!);
     expect(parsed.state.cardSize).toBe("small");
     expect(parsed.state.followActiveOpponent).toBe(true);
-    expect(parsed.state.aiDifficulty).toBe("VeryHard");
+    expect(parsed.state.aiSeats[0].difficulty).toBe("VeryHard");
+  });
+
+  it("migrates legacy flat aiDifficulty/aiDeckName into aiSeats[0]", () => {
+    // Simulate a v0 persisted blob (pre-multi-AI schema).
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: {
+          aiDifficulty: "Hard",
+          aiDeckName: "Dimir Control",
+          cardSize: "large",
+        },
+        version: 0,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    const state = usePreferencesStore.getState();
+    expect(state.aiSeats).toEqual([{ difficulty: "Hard", deckName: "Dimir Control" }]);
+    expect(state.cardSize).toBe("large");
+    // Legacy flat keys must not leak onto the state object.
+    expect((state as unknown as { aiDifficulty?: unknown }).aiDifficulty).toBeUndefined();
+    expect((state as unknown as { aiDeckName?: unknown }).aiDeckName).toBeUndefined();
   });
 
   // --- Audio preferences ---

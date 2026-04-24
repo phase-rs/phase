@@ -221,6 +221,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
         );
         ability.cost = Some(AbilityCost::Composite {

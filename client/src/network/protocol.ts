@@ -1,26 +1,60 @@
-import type { GameAction, GameEvent, GameState } from "../adapter/types";
+import type { GameAction, GameEvent, GameState, LegalActionsResult, ManaCost } from "../adapter/types";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
+
+/**
+ * Wire-format projection of `LegalActionsResult`. Single source of truth for
+ * the legal-action fields carried by `game_setup`, `state_update`, and
+ * `reconnect_ack`. When `LegalActionsResult` grows a new field, this type
+ * plus the two helpers below are the only places that need to change — the
+ * message variants pick it up via intersection.
+ *
+ * `legalActions` (plural) is the wire name for what the adapter exposes as
+ * `actions`; the rename is historical and preserved for backward
+ * compatibility across builds already deployed in the wild.
+ */
+export interface LegalActionsWire {
+  legalActions: GameAction[];
+  autoPassRecommended?: boolean;
+  legalActionsByObject?: Record<string, GameAction[]>;
+  spellCosts?: Record<string, ManaCost>;
+}
+
+/** Host-side: project an engine `LegalActionsResult` onto the wire shape. */
+export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire {
+  return {
+    legalActions: result.actions,
+    autoPassRecommended: result.autoPassRecommended,
+    legalActionsByObject: result.legalActionsByObject,
+    spellCosts: result.spellCosts,
+  };
+}
+
+/** Guest-side: hydrate a wire payload into the adapter's `LegalActionsResult`. */
+export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult {
+  return {
+    actions: wire.legalActions,
+    autoPassRecommended: wire.autoPassRecommended ?? false,
+    legalActionsByObject: wire.legalActionsByObject,
+    spellCosts: wire.spellCosts,
+  };
+}
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string }
-  | {
+  | ({
       type: "game_setup";
       assignedPlayerId: number;
       playerToken: string;
       state: GameState;
       events: GameEvent[];
-      legalActions: GameAction[];
-      autoPassRecommended?: boolean;
       playerNames?: Record<number, string>;
-    }
+    } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
-  | {
+  | ({
       type: "state_update";
       state: GameState;
       events: GameEvent[];
-      legalActions: GameAction[];
-      autoPassRecommended?: boolean;
-    }
+    } & LegalActionsWire)
   | { type: "action_rejected"; reason: string }
   | { type: "ping"; timestamp: number }
   | { type: "pong"; timestamp: number }
@@ -29,13 +63,11 @@ export type P2PMessage =
   | { type: "concede" }
   // Reconnect: guest presents prior token; host accepts (with fresh state) or rejects.
   | { type: "reconnect"; playerToken: string }
-  | {
+  | ({
       type: "reconnect_ack";
       assignedPlayerId: number;
       state: GameState;
-      legalActions: GameAction[];
-      autoPassRecommended: boolean;
-    }
+    } & LegalActionsWire)
   | { type: "reconnect_rejected"; reason: string }
   // Kick / forced removal (host → target).
   | { type: "kick"; reason: string; format?: string }

@@ -38,7 +38,7 @@ pub fn resolve(
         .players
         .iter()
         .find(|p| p.id == target_player)
-        .map(|p| p.hand.clone())
+        .map(|p| p.hand.iter().copied().collect())
         .unwrap_or_default();
 
     // CR 701.20a: If a count is specified, reveal only that many cards.
@@ -96,6 +96,7 @@ pub fn resolve(
         player: ability.controller,
         cards: eligible,
         filter: card_filter,
+        optional: false,
     };
 
     events.push(GameEvent::EffectResolved {

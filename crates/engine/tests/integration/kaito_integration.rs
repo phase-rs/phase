@@ -158,12 +158,14 @@ fn setup_kaito_on_battlefield(phase: Phase) -> (GameRunner, ObjectId) {
                         filter: PlayerFilter::OpponentLostLife,
                     },
                 },
+                target: TargetFilter::Controller,
             },
         );
         let surveil_ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Surveil {
                 count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
             },
         )
         .cost(AbilityCost::Loyalty { amount: 0 })
@@ -511,7 +513,7 @@ fn kaito_surveil_and_draw() {
             .find(|p| p.id == P0)
             .unwrap()
             .library
-            .push(id);
+            .push_back(id);
     }
 
     // Mark opponent (P1) as having lost life this turn

@@ -74,7 +74,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::MustBlock, handle_rule_mod);
     // Note: CantDraw is a data-carrying variant — runtime enforcement is in
     // game/effects/draw.rs. Coverage support is via is_data_carrying_static().
-    registry.insert(StaticMode::Panharmonicon, handle_rule_mod);
+    // Note: DoubleTriggers (CR 603.2d) is a data-carrying variant — runtime
+    // enforcement is in triggers.rs::apply_trigger_doubling. Coverage support
+    // is via is_data_carrying_static().
     registry.insert(StaticMode::IgnoreHexproof, handle_rule_mod);
     registry.insert(
         StaticMode::ExtraBlockers { count: Some(1) },
@@ -103,6 +105,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::FlashBack, handle_flashback);
     // CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
     registry.insert(StaticMode::Shroud, handle_shroud);
+    // CR 702.11: Hexproof — affected player/permanent cannot be the target of
+    // spells or abilities an opponent controls. Player-scope grant (e.g.,
+    // Crystal Barricade's "You have hexproof.") surfaces as a `RuleModification`
+    // marker analogous to Shroud.
+    registry.insert(StaticMode::Hexproof, handle_hexproof);
     // CR 702.20: Vigilance — attacking doesn't cause this creature to tap.
     registry.insert(StaticMode::Vigilance, handle_static_vigilance);
     // CR 702.111: Menace — can't be blocked except by two or more creatures.
@@ -143,6 +150,14 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 510.1a: AssignNoCombatDamage — creature assigns no combat damage.
     // Runtime enforcement is in combat_damage.rs::combat_damage_amount().
     registry.insert(StaticMode::AssignNoCombatDamage, handle_rule_mod);
+    // CR 502.3 + CR 113.6: UntapsDuringEachOtherPlayersUntapStep — second untap
+    // pass during each other player's untap step (Seedborn Muse). Runtime
+    // enforcement is in turns.rs::execute_untap, which scans for this variant
+    // after the active player's normal untap pass.
+    registry.insert(
+        StaticMode::UntapsDuringEachOtherPlayersUntapStep,
+        handle_rule_mod,
+    );
 
     // CR 614.1d: Zone-based restriction handlers.
     // Enforcement happens in zones.rs (CantEnterBattlefieldFrom) and casting.rs (CantCastFrom),
@@ -352,6 +367,21 @@ fn handle_shroud(
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
         mode: "Shroud".to_string(),
+    }]
+}
+
+/// CR 702.11: Hexproof — surfaces a RuleModification marker so downstream
+/// coverage/registry consumers see the grant. Runtime targeting for
+/// permanent-scope hexproof flows through `Keyword::Hexproof` on the object
+/// (granted via `ContinuousModification::AddKeyword` paths); the player-scope
+/// marker mirrors `handle_shroud`.
+fn handle_hexproof(
+    _state: &GameState,
+    _mode: &StaticMode,
+    _source_id: ObjectId,
+) -> Vec<StaticEffect> {
+    vec![StaticEffect::RuleModification {
+        mode: "Hexproof".to_string(),
     }]
 }
 

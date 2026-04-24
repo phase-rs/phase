@@ -296,7 +296,7 @@ pub fn cast_prepared_copy(
     // normal casting (see `ability_utils`).
     let resolved = build_resolved_from_def(&ability_def, copy_id, controller);
 
-    state.stack.push(StackEntry {
+    state.stack.push_back(StackEntry {
         id: copy_id,
         source_id: copy_id,
         controller,
@@ -455,12 +455,13 @@ mod tests {
         let resolved = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             Vec::new(),
             copy_id,
             PlayerId(0),
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: copy_id,
             source_id: copy_id,
             controller: PlayerId(0),
@@ -519,7 +520,7 @@ mod tests {
             copy_id,
             PlayerId(0),
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: copy_id,
             source_id: copy_id,
             controller: PlayerId(0),

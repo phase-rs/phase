@@ -151,7 +151,7 @@ describe("WebSocketAdapter", () => {
 
   describe("Bug D: getAiAction no-op", () => {
     it("getAiAction returns null without throwing", () => {
-      const result = adapter.getAiAction("easy");
+      const result = adapter.getAiAction("easy", 1);
       expect(result).toBeNull();
     });
   });

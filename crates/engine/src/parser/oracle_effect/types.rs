@@ -56,6 +56,12 @@ pub(crate) struct TokenDescription {
     pub(crate) count: QuantityExpr,
     pub(crate) attach_to: Option<TargetFilter>,
     pub(crate) static_abilities: Vec<StaticDefinition>,
+    /// CR 508.4: Inline "that's tapped and attacking" clause inside the token
+    /// description phrase (e.g., "a 1/1 Goblin creature token that's tapped
+    /// and attacking"). Distinct from a trailing "It enters tapped and
+    /// attacking" continuation sentence, which is patched onto the preceding
+    /// `Effect::Token` by the sequence-level continuation handler.
+    pub(crate) enters_attacking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -75,6 +81,8 @@ pub(super) struct SearchLibraryDetails {
     pub(super) reveal: bool,
     /// CR 701.23a: When set, search this player's library instead of controller's.
     pub(super) target_player: Option<TargetFilter>,
+    /// CR 107.1c + CR 701.23d: "any number of" / "up to N" allow 0..=count picks.
+    pub(super) up_to: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +464,10 @@ pub(super) enum TargetedImperativeAst {
         /// CR 608.2c: "discard N unless you discard a [type]" — type filter for
         /// the alternative 1-card discard.
         unless_filter: Option<TargetFilter>,
+        /// CR 701.9a + CR 608.2c: Restricts which cards are legal to discard
+        /// (e.g., "discard a creature card" — Dokuchi Silencer). `None` means
+        /// any card in the discarding player's hand is legal.
+        filter: Option<TargetFilter>,
     },
     /// CR 701.3: Return to hand (bounce).
     Return {
@@ -512,6 +524,8 @@ pub(super) enum SearchCreationImperativeAst {
         reveal: bool,
         /// CR 701.23a: When set, search this player's library instead of controller's.
         target_player: Option<TargetFilter>,
+        /// CR 107.1c + CR 701.23d: "any number of" / "up to N" allow 0..=count picks.
+        up_to: bool,
     },
     Dig {
         count: QuantityExpr,

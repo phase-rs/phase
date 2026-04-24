@@ -7,12 +7,11 @@ use crate::types::game_state::{
     ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaCost, ManaPool, ManaType};
+use crate::types::mana::{ManaCost, ManaPool, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::ability_utils;
-use super::effects::mana::resolve_mana_types;
+use super::effects::mana::{resolve_mana_types, resolve_restrictions};
 use super::engine::EngineError;
 use super::filter::{matches_target_filter, FilterContext};
 use super::life_costs::{self, PayLifeCostResult};
@@ -177,14 +176,14 @@ pub fn resolve_mana_ability(
     // Pay the full ability cost (tap, sacrifice, etc.)
     pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
 
-    resolve_mana_ability_effects(
+    produce_mana_from_ability(
         state,
         source_id,
         player,
         ability_def,
         events,
         color_override,
-    )?;
+    );
     Ok(())
 }
 
@@ -199,89 +198,52 @@ fn produce_mana_from_ability(
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
 ) {
-    let produced_mana = match &*ability_def.effect {
-        Effect::Mana { produced, .. } => match color_override {
-            // `Combination` is pre-chosen — skip `resolve_mana_types` entirely
-            // so the exact sequence lands in the pool (CR 605.3b).
-            Some(ProductionOverride::Combination(types)) => types,
-            Some(ProductionOverride::SingleColor(color)) => {
-                let resolved = resolve_mana_types(produced, state, player, source_id);
-                vec![color; resolved.len()]
-            }
-            None => resolve_mana_types(produced, state, player, source_id),
-        },
-        _ => Vec::new(),
+    // CR 106.6: Resolve spend-restriction templates, grants, and expiry so they
+    // attach to each produced `ManaUnit`. Dropping these here is the bug that
+    // made Flamebraider's Elemental-only mana behave as unrestricted mana.
+    let (produced_mana, restrictions, grants, expiry) = match &*ability_def.effect {
+        Effect::Mana {
+            produced,
+            restrictions,
+            grants,
+            expiry,
+        } => {
+            let mana = match color_override {
+                // `Combination` is pre-chosen — skip `resolve_mana_types` entirely
+                // so the exact sequence lands in the pool (CR 605.3b).
+                Some(ProductionOverride::Combination(types)) => types,
+                Some(ProductionOverride::SingleColor(color)) => {
+                    let resolved = resolve_mana_types(produced, state, player, source_id);
+                    vec![color; resolved.len()]
+                }
+                None => resolve_mana_types(produced, state, player, source_id),
+            };
+            let concrete = resolve_restrictions(restrictions, state, source_id);
+            (mana, concrete, grants.clone(), *expiry)
+        }
+        _ => (Vec::new(), Vec::new(), Vec::new(), None),
     };
 
     let tapped = mana_sources::has_tap_component(&ability_def.cost);
     for mana_type in produced_mana {
-        mana_payment::produce_mana(state, source_id, mana_type, player, tapped, events);
-    }
-}
-
-/// Produce the mana and then resolve any attached sub-ability chain.
-///
-/// CR 605.1a: An activated mana ability "doesn't require a target, could add
-/// mana ... when it resolves, and isn't a loyalty ability." The parser
-/// attaches continuation effects (painland damage, "lose 1 life", etc.) as
-/// `sub_ability`; those continuations are part of the same mana-ability
-/// resolution under CR 605.1a, not independently activatable abilities.
-///
-/// CR 605.3b: Mana abilities "don't go on the stack, ... [they] resolve
-/// immediately after [they are] activated." This function therefore resolves
-/// the sub-ability inline (off-stack). Returns `true` iff the continuation
-/// pushed a `WaitingFor` prompt — e.g., a damage sub-effect requiring
-/// target selection — so callers can decide whether to keep the prompt
-/// or fall back to a resume state.
-fn resolve_mana_ability_effects(
-    state: &mut GameState,
-    source_id: ObjectId,
-    player: PlayerId,
-    ability_def: &AbilityDefinition,
-    events: &mut Vec<GameEvent>,
-    color_override: Option<ProductionOverride>,
-) -> Result<bool, EngineError> {
-    let waiting_before = state.waiting_for.clone();
-
-    produce_mana_from_ability(
-        state,
-        source_id,
-        player,
-        ability_def,
-        events,
-        color_override,
-    );
-
-    if let Some(sub_ability) = ability_def.sub_ability.as_deref() {
-        let resolved = ability_utils::build_resolved_from_def(sub_ability, source_id, player);
-        // CR 605.3b: Resolve the continuation inline — do not push it onto the
-        // stack. `InvalidAction` is the nearest fitting error variant today;
-        // TODO: introduce a dedicated `ResolutionFailed` variant if/when the
-        // engine grows a richer error hierarchy.
-        super::effects::resolve_ability_chain(state, &resolved, events, 1).map_err(|err| {
-            EngineError::InvalidAction(format!("Mana ability continuation failed: {err}"))
-        })?;
+        mana_payment::produce_mana_with_attributes(
+            state,
+            source_id,
+            mana_type,
+            player,
+            tapped,
+            &restrictions,
+            &grants,
+            expiry,
+            events,
+        );
     }
 
-    Ok(state.waiting_for != waiting_before)
-}
-
-/// If resolving a mana-ability continuation pushed its own `WaitingFor`
-/// (e.g., a pain-land damage sub-effect that needs target selection), keep
-/// that live prompt. Otherwise fall back to the caller-supplied default
-/// (typically `WaitingFor::Priority` or a `resume_waiting_for(...)` stack
-/// frame). Shared by `handle_tap_land_for_mana`, `handle_choose_mana_color`,
-/// and `advance_mana_ability_activation`.
-pub(crate) fn preserve_or_resume(
-    state: &GameState,
-    waiting_changed: bool,
-    default: WaitingFor,
-) -> WaitingFor {
-    if waiting_changed {
-        state.waiting_for.clone()
-    } else {
-        default
-    }
+    // CR 605.3b + CR 605.1a: A mana ability with a non-mana clause in its
+    // effect chain (e.g. painlands' "This land deals 1 damage to you.")
+    // resolves that chain inline — mana abilities don't use the stack, so
+    // the sub-ability runs as part of the same atomic resolution.
+    resolve_mana_ability_sub_chain(state, source_id, player, ability_def, events);
 }
 
 /// CR 605.3b: Mana abilities resolve immediately unless paying the cost requires a choice.
@@ -412,20 +374,16 @@ pub fn handle_choose_mana_color(
         .cloned()
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
 
-    let waiting_changed = resolve_mana_ability_effects(
+    produce_mana_from_ability(
         state,
         pending.source_id,
         pending.player,
         &ability_def,
         events,
         Some(override_value),
-    )?;
+    );
 
-    Ok(preserve_or_resume(
-        state,
-        waiting_changed,
-        resume_waiting_for(pending.player, pending.resume.clone()),
-    ))
+    Ok(resume_waiting_for(pending.player, pending.resume.clone()))
 }
 
 /// CR 118.3 / CR 605.3b: Complete the tapped-creature choice, then resolve the mana ability.
@@ -624,7 +582,7 @@ fn advance_mana_ability_activation(
         }
     }
 
-    let waiting_changed = resolve_mana_ability_with_selected_choices(
+    resolve_mana_ability_with_selected_choices(
         state,
         pending.source_id,
         pending.player,
@@ -635,11 +593,7 @@ fn advance_mana_ability_activation(
         &pending.chosen_discards,
         pending.chosen_mana_payment.as_deref(),
     )?;
-    Ok(preserve_or_resume(
-        state,
-        waiting_changed,
-        resume_waiting_for(pending.player, pending.resume),
-    ))
+    Ok(resume_waiting_for(pending.player, pending.resume))
 }
 
 /// Pay the full cost of a mana ability. This is the single authority for mana ability
@@ -675,7 +629,7 @@ fn resolve_mana_ability_with_selected_choices(
     tapped_creatures: &[ObjectId],
     discarded_cards: &[ObjectId],
     chosen_hybrid_payment: Option<&[ManaType]>,
-) -> Result<bool, EngineError> {
+) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
     let mut discarded = discarded_cards.iter().copied();
     pay_mana_ability_cost_with_choices(
@@ -699,14 +653,72 @@ fn resolve_mana_ability_with_selected_choices(
         ));
     }
 
-    resolve_mana_ability_effects(
-        state,
-        source_id,
-        player,
-        ability_def,
-        events,
-        color_override,
-    )
+    // CR 106.6: Thread restrictions, grants, and expiry through the
+    // selected-choices path too — otherwise color-picked or hybrid-paid mana
+    // abilities would still emit unrestricted mana.
+    let (produced_mana, restrictions, grants, expiry) = match &*ability_def.effect {
+        Effect::Mana {
+            produced,
+            restrictions,
+            grants,
+            expiry,
+        } => {
+            let mana = match color_override {
+                Some(ProductionOverride::Combination(types)) => types,
+                Some(ProductionOverride::SingleColor(color)) => {
+                    let resolved = resolve_mana_types(produced, &*state, player, source_id);
+                    vec![color; resolved.len()]
+                }
+                None => resolve_mana_types(produced, &*state, player, source_id),
+            };
+            let concrete = resolve_restrictions(restrictions, &*state, source_id);
+            (mana, concrete, grants.clone(), *expiry)
+        }
+        _ => (Vec::new(), Vec::new(), Vec::new(), None),
+    };
+
+    let tapped = mana_sources::has_tap_component(&ability_def.cost);
+    for mana_type in produced_mana {
+        mana_payment::produce_mana_with_attributes(
+            state,
+            source_id,
+            mana_type,
+            player,
+            tapped,
+            &restrictions,
+            &grants,
+            expiry,
+            events,
+        );
+    }
+
+    // CR 605.3b + CR 605.1a: Resolve the sub-ability chain inline (painlands'
+    // "deals 1 damage to you", Llanowar Wastes-style self-damage, etc.).
+    resolve_mana_ability_sub_chain(state, source_id, player, ability_def, events);
+
+    Ok(())
+}
+
+/// CR 605.3b + CR 605.1a: Run a mana ability's `sub_ability` chain inline.
+/// Mana abilities don't use the stack, so non-mana clauses ("This land deals
+/// 1 damage to you.") resolve atomically with the mana production. Walks the
+/// full chain via `resolve_ability_chain` so nested effects (DealDamage on
+/// controller, GainLife, etc.) route through the standard effect handlers.
+fn resolve_mana_ability_sub_chain(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(sub_def) = ability_def.sub_ability.as_deref() else {
+        return;
+    };
+    let resolved = super::ability_utils::build_resolved_from_def(sub_def, source_id, player);
+    // Errors during the sub-chain are non-fatal — mana has already been
+    // added to the pool and the cost has been paid. The damage/life clause
+    // of a painland cannot legitimately fail in a well-formed game state.
+    let _ = super::effects::resolve_ability_chain(state, &resolved, events, 0);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -729,7 +741,14 @@ where
         // CR 605.3a + CR 601.2h: Top-level mana sub-cost (e.g. hypothetical
         // `{R}: Add {G}{G}`). Composite costs route through the Composite arm.
         Some(AbilityCost::Mana { cost }) => {
-            pay_mana_sub_cost(state, player, cost, chosen_hybrid_payment, events)?;
+            pay_mana_sub_cost(
+                state,
+                source_id,
+                player,
+                cost,
+                chosen_hybrid_payment,
+                events,
+            )?;
         }
         Some(AbilityCost::PayLife { amount }) => {
             // CR 119.4 + CR 903.4: QuantityExpr resolves against the activator's
@@ -879,7 +898,14 @@ where
                     // any hybrid color choices (CR 107.4e); auto-pay the remaining
                     // cost from the activator's pool.
                     AbilityCost::Mana { cost } => {
-                        pay_mana_sub_cost(state, player, cost, chosen_hybrid_payment, events)?;
+                        pay_mana_sub_cost(
+                            state,
+                            source_id,
+                            player,
+                            cost,
+                            chosen_hybrid_payment,
+                            events,
+                        )?;
                     }
                     other => {
                         return Err(EngineError::InvalidAction(format!(
@@ -996,7 +1022,10 @@ fn enumerate_plans_rec(
 /// auto-pay rules as `pay_cost` except hybrid shards defer to `plan`.
 fn try_pay_with_hybrid_plan(pool: &ManaPool, cost: &ManaCost, plan: &[ManaType]) -> Option<()> {
     let mut sim = pool.clone();
-    debit_cost_with_plan(&mut sim, cost, plan).ok()
+    // Simulation path — `None` context preserves the prior "can pool cover
+    // this at all" semantics. Restriction-aware affordability is checked at
+    // the real payment site via `pay_mana_sub_cost`.
+    debit_cost_with_plan(&mut sim, cost, plan, None).ok()
 }
 
 /// CR 107.4e + CR 601.2h: Debit `cost` from `pool` using `plan` for hybrid
@@ -1012,6 +1041,7 @@ fn debit_cost_with_plan(
     pool: &mut ManaPool,
     cost: &ManaCost,
     plan: &[ManaType],
+    ctx: Option<&PaymentContext<'_>>,
 ) -> Result<(), mana_payment::PaymentError> {
     use crate::types::mana::ManaCostShard;
     let ManaCost::Cost { shards, generic } = cost else {
@@ -1033,7 +1063,10 @@ fn debit_cost_with_plan(
         shards: rewritten_shards,
         generic: *generic,
     };
-    mana_payment::pay_cost(pool, &scratch_cost).map(|_| ())
+    // CR 106.6: Route through the restriction-aware payment path so the
+    // player's context (activation or spell) gates eligible mana units.
+    mana_payment::pay_cost_with_demand_and_choices(pool, &scratch_cost, None, ctx, false, None)
+        .map(|_| ())
 }
 
 /// Map a `ManaType` to the printed-shard variant that requires exactly that
@@ -1057,21 +1090,41 @@ fn mana_type_to_single_shard(color: ManaType) -> crate::types::mana::ManaCostSha
 /// recover cleanly (the pre-activation gate should have prevented this).
 fn pay_mana_sub_cost(
     state: &mut GameState,
+    source_id: ObjectId,
     player: PlayerId,
     cost: &ManaCost,
     hybrid_plan: Option<&[ManaType]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    // CR 106.6: The mana sub-cost of a mana ability is paid as part of an
+    // ability activation — spend-restrictions must be evaluated through
+    // `allows_activation` (via `PaymentContext::Activation`), not through the
+    // pool's restriction-blind `pay_cost`. Without this, activation-only
+    // mana (e.g. Heart of Ramos) would silently pay through for the {R} half
+    // of a hypothetical "{R}: Add {G}{G}" mana ability.
+    let (source_types, source_subtypes) = super::casting::activation_source_types(state, source_id);
+    let ctx = PaymentContext::Activation {
+        source_types: &source_types,
+        source_subtypes: &source_subtypes,
+    };
     let pool = &mut state.players[player.0 as usize].mana_pool;
     let (spent, _life) = match hybrid_plan {
-        Some(plan) => debit_cost_with_plan(pool, cost, plan)
+        Some(plan) => debit_cost_with_plan(pool, cost, plan, Some(&ctx))
             .map(|_| (Vec::new(), Vec::new()))
             .map_err(|_| {
                 EngineError::ActionNotAllowed(
                     "Mana pool cannot cover mana ability cost".to_string(),
                 )
             })?,
-        None => mana_payment::pay_cost(pool, cost).map_err(|_| {
+        None => mana_payment::pay_cost_with_demand_and_choices(
+            pool,
+            cost,
+            None,
+            Some(&ctx),
+            false,
+            None,
+        )
+        .map_err(|_| {
             EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
         })?,
     };
@@ -1386,6 +1439,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         )
         .cost(AbilityCost::Tap);
@@ -1418,6 +1472,122 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::ManaAdded { .. })));
+    }
+
+    // CR 106.6: A mana ability that attaches a spend restriction (Flamebraider:
+    // "Spend this mana only to cast Elemental spells or activate abilities of
+    // Elemental sources") must thread that restriction onto every produced
+    // `ManaUnit`. Previously `produce_mana_from_ability` destructured
+    // `Effect::Mana { produced, .. }` and discarded `restrictions`, so the
+    // mana landed in the pool unrestricted.
+    #[test]
+    fn resolve_mana_ability_attaches_spend_restrictions() {
+        use crate::types::ability::ManaSpendRestriction;
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Flamebraider".to_string(),
+            Zone::Battlefield,
+        );
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                },
+                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                    "Elemental".to_string(),
+                )],
+                grants: vec![],
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events, None).unwrap();
+
+        let pool = &state.players[0].mana_pool;
+        assert_eq!(pool.total(), 2);
+        // Every produced unit must carry the Elemental restriction.
+        for unit in &pool.mana {
+            assert_eq!(
+                unit.restrictions,
+                vec![
+                    crate::types::mana::ManaRestriction::OnlyForTypeSpellsOrAbilities(
+                        "Elemental".to_string()
+                    )
+                ],
+                "Flamebraider mana must carry Elemental restriction"
+            );
+        }
+
+        // Spending for a non-Elemental creature must fail.
+        use crate::types::mana::{PaymentContext, SpellMeta};
+        let goblin_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Goblin".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let goblin_ctx = PaymentContext::Spell(&goblin_spell);
+        let mut pool_clone = pool.clone();
+        let first_color = pool_clone.mana[0].color;
+        assert!(
+            pool_clone.spend_for(first_color, &goblin_ctx).is_none(),
+            "Flamebraider mana must not be spendable on non-Elemental spells"
+        );
+
+        // Spending for an Elemental creature succeeds.
+        let elemental_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elemental".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let elemental_ctx = PaymentContext::Spell(&elemental_spell);
+        assert!(
+            pool_clone.spend_for(first_color, &elemental_ctx).is_some(),
+            "Flamebraider mana must be spendable on Elemental spells"
+        );
+
+        // CR 106.6: The ability-activation half of the OR. A non-Elemental
+        // source's activation context must reject Elemental-restricted mana;
+        // an Elemental source's activation context must accept it.
+        let non_elemental_types = vec!["Creature".to_string()];
+        let non_elemental_subtypes = vec!["Goblin".to_string()];
+        let non_elemental_activation = PaymentContext::Activation {
+            source_types: &non_elemental_types,
+            source_subtypes: &non_elemental_subtypes,
+        };
+        let mut pool_clone2 = pool.clone();
+        assert!(
+            pool_clone2
+                .spend_for(first_color, &non_elemental_activation)
+                .is_none(),
+            "Flamebraider mana must not pay non-Elemental source's ability cost"
+        );
+
+        let elemental_subtypes = vec!["Elemental".to_string()];
+        let elemental_activation = PaymentContext::Activation {
+            source_types: &non_elemental_types,
+            source_subtypes: &elemental_subtypes,
+        };
+        assert!(
+            pool_clone2
+                .spend_for(first_color, &elemental_activation)
+                .is_some(),
+            "Flamebraider mana must pay an Elemental source's ability cost"
+        );
     }
 
     #[test]
@@ -2228,6 +2398,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -3223,6 +3394,122 @@ mod tests {
         assert_eq!(
             state.players[0].life, 18,
             "Ancient Tomb should deal 2 damage to its controller"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // CR 605.3b + CR 605.1a: Painland-style self-damage sub-abilities
+    // resolve inline with the mana ability.
+    // ---------------------------------------------------------------
+
+    fn make_painland(state: &mut GameState, player: PlayerId, color: ManaColor) -> ObjectId {
+        let land = create_object(
+            state,
+            CardId(7000),
+            player,
+            "Painland".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+
+        let sub = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+            },
+        );
+
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![color],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        ability.sub_ability = Some(Box::new(sub));
+        obj.abilities.push(ability);
+        land
+    }
+
+    #[test]
+    fn painland_deals_one_damage_when_tapped_for_color() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_painland(&mut state, player, ManaColor::White);
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+
+        let starting_life = state.players[player.0 as usize].life;
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, land, player, &def, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[player.0 as usize].life,
+            starting_life - 1,
+            "Painland must deal 1 damage to its controller"
+        );
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::White),
+            1,
+            "Painland must still produce the colored mana"
+        );
+        assert!(
+            state.objects.get(&land).unwrap().tapped,
+            "Painland must tap"
+        );
+    }
+
+    #[test]
+    fn painland_kills_controller_at_one_life_via_sba_trigger() {
+        // Activating the colored mana at 1 life drops the controller to 0.
+        // The life-drop event must be emitted — SBAs triggered on the next
+        // engine pass will eliminate the player.
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_painland(&mut state, player, ManaColor::White);
+        state.players[player.0 as usize].life = 1;
+
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, land, player, &def, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[player.0 as usize].life, 0,
+            "Controller must hit 0 life after the painland damage"
+        );
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::White),
+            1,
+            "Mana production must still occur"
         );
     }
 }

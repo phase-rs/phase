@@ -50,6 +50,8 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantSearchLibrary { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
             | StaticMode::SuppressTriggers { .. }
+            // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
+            | StaticMode::DoubleTriggers { .. }
     )
 }
 
@@ -287,6 +289,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CmcEQ { value } => parts.push(format!("mv {}", fmt_quantity(value))),
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
+            FilterProp::NameMatchesAnyPermanent { controller } => match controller {
+                Some(c) => parts.push(format!("name matches {} permanent", fmt_controller(c))),
+                None => parts.push("name matches any permanent".into()),
+            },
             FilterProp::InZone { zone } => parts.push(format!("in {}", fmt_zone(zone))),
             FilterProp::Owned { controller } => parts.push(fmt_controller(controller)),
             FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
@@ -521,6 +527,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::StartingLifeTotal => "starting life total".into(),
         QuantityRef::Speed => "speed".into(),
         QuantityRef::ObjectCount { filter } => format!("# of {}", fmt_target(filter)),
+        QuantityRef::ObjectCountDistinctNames { filter } => {
+            format!("# of distinctly-named {}", fmt_target(filter))
+        }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
         QuantityRef::CountersOnSelf { counter_type } => {
             format!("{counter_type} counters on self")
@@ -595,6 +604,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::BasicLandTypeCount => "basic land types".into(),
+        QuantityRef::DistinctColorsAmongPermanents { filter } => {
+            format!("# of colors among {}", fmt_target(filter))
+        }
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
@@ -647,6 +659,14 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 None => format!("# of {kind_s} attached at ltb"),
                 Some(c) => format!("# of {kind_s} ({}) attached at ltb", fmt_controller(c)),
             }
+        }
+        QuantityRef::PlayerCounter { kind, scope } => {
+            let scope_s = match scope {
+                CountScope::Controller => "you have",
+                CountScope::Opponents => "each opponent has",
+                CountScope::All => "each player has",
+            };
+            format!("# of {kind} counters {scope_s}")
         }
     }
 }
@@ -752,6 +772,9 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
         }
         ManaProduction::AnyInCommandersColorIdentity { count, .. } => {
             format!("1 of commander's color identity x{}", fmt_quantity(count))
+        }
+        ManaProduction::DistinctColorsAmongPermanents { filter } => {
+            format!("1 of each color among {}", fmt_target(filter))
         }
     }
 }
@@ -872,9 +895,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::Draw { count } => {
+        Effect::Draw { count, target } => {
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), fmt_quantity(count)));
+            }
+            if !matches!(target, TargetFilter::Controller) {
+                d.push(("target".into(), fmt_target(target)));
             }
         }
         Effect::ExileTop { player, count } => {
@@ -1078,7 +1104,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("destination".into(), format!("{destination:?}")));
             }
         }
-        Effect::Scry { count } | Effect::Surveil { count } => {
+        Effect::Scry { count, .. } | Effect::Surveil { count, .. } => {
             d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::GainLife { amount, player } => {
@@ -1211,6 +1237,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(c) = count {
                 d.push(("count".into(), fmt_quantity(c)));
+            }
+        }
+        Effect::RevealFromHand { filter, on_decline } => {
+            if !matches!(filter, TargetFilter::Any) {
+                d.push(("filter".into(), fmt_target(filter)));
+            }
+            if on_decline.is_some() {
+                d.push(("on_decline".into(), "present".into()));
             }
         }
         Effect::RevealTop { player, count } => {
@@ -1529,7 +1563,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TimeTravel
         | Effect::Conjure { .. }
         | Effect::AddPendingETBCounters { .. }
-        | Effect::ChooseAndSacrificeRest { .. } => {}
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::ChooseOneOf { .. } => {}
     }
     d
 }
@@ -3911,6 +3946,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
         QuantityRef::Speed => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
+        QuantityRef::ObjectCountDistinctNames { .. } => ("ObjectCountDistinctNames", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
         QuantityRef::CountersOnSelf { .. } => ("CountersOnSelf", Handled),
         QuantityRef::CountersOnTarget { .. } => ("CountersOnTarget", Handled),
@@ -3930,6 +3966,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount => ("BasicLandTypeCount", Handled),
+        QuantityRef::DistinctColorsAmongPermanents { .. } => {
+            ("DistinctColorsAmongPermanents", Handled)
+        }
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
@@ -3969,6 +4008,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("ColorsInCommandersColorIdentity", Handled)
         }
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
+        QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
     }
 }
 
@@ -5059,7 +5099,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::MayChooseNotToUntap => effective_lower.contains("may choose not to untap"),
             StaticMode::CantDraw { .. } => effective_lower.contains("can't draw"),
             StaticMode::PerTurnDrawLimit { .. } => effective_lower.contains("can't draw more than"),
-            StaticMode::Panharmonicon => {
+            StaticMode::DoubleTriggers { .. } => {
                 effective_lower.contains("triggers an additional time")
                     || effective_lower.contains("trigger an additional time")
             }
@@ -7349,6 +7389,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             )
             .condition(AbilityCondition::QuantityCheck {

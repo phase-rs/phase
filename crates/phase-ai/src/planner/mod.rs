@@ -29,7 +29,7 @@ pub struct RankedCandidate {
 pub struct SearchBudget {
     pub max_nodes: u32,
     pub nodes_evaluated: u32,
-    deadline: Option<web_time::Instant>,
+    deadline: engine::util::Deadline,
 }
 
 impl SearchBudget {
@@ -37,21 +37,31 @@ impl SearchBudget {
         Self {
             max_nodes,
             nodes_evaluated: 0,
-            deadline: None,
+            deadline: engine::util::Deadline::none(),
         }
     }
 
     pub fn with_time_limit(max_nodes: u32, duration: web_time::Duration) -> Self {
+        Self::with_deadline(
+            max_nodes,
+            engine::util::Deadline::after(duration.as_millis() as u32),
+        )
+    }
+
+    /// Construct a budget with a shared [`engine::util::Deadline`] — the
+    /// canonical primitive for time-bounded operations in the engine. Use
+    /// this when the caller already holds a `Deadline` (e.g., propagating
+    /// one top-level deadline across multiple search passes).
+    pub fn with_deadline(max_nodes: u32, deadline: engine::util::Deadline) -> Self {
         Self {
             max_nodes,
             nodes_evaluated: 0,
-            deadline: Some(web_time::Instant::now() + duration),
+            deadline,
         }
     }
 
     pub fn exhausted(&self) -> bool {
-        self.nodes_evaluated >= self.max_nodes
-            || self.deadline.is_some_and(|d| web_time::Instant::now() >= d)
+        self.nodes_evaluated >= self.max_nodes || self.deadline.expired()
     }
 
     pub fn tick(&mut self) {
@@ -179,6 +189,27 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
     hasher.finish()
 }
 
+/// Cache key for `AiDecisionContext` — combines `quick_state_hash` (board
+/// state) with the full `WaitingFor` payload that drives `candidate_actions`.
+///
+/// `quick_state_hash` alone is NOT sufficient: `candidate_actions` dispatches
+/// on `state.waiting_for` (e.g., `Priority` vs `TargetSelection` vs
+/// `ModeChoice`), so two states with identical boards but different
+/// `waiting_for` would collide in a hash keyed only on board state and return
+/// a cached context populated with wrong candidates. Including the full
+/// `WaitingFor` payload in the key (via its `Debug` serialization) is
+/// conservative — the Debug output is a complete structural fingerprint and
+/// is stable within a run.
+pub fn candidate_cache_key(state: &GameState) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    quick_state_hash(state).hash(&mut hasher);
+    // Hash the full Debug form of waiting_for. Debug on WaitingFor is a
+    // structural serialization (derived), so distinct variants and payloads
+    // produce distinct strings.
+    format!("{:?}", state.waiting_for).hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UtilityVector {
     pub self_value: f64,
@@ -227,6 +258,19 @@ pub struct PlannerServices<'a> {
     pub context: crate::context::AiContext,
     pub utility_reducer: Box<dyn UtilityReducer + 'a>,
     eval_cache: HashMap<u64, f64>,
+    /// Search-scoped candidate cache keyed by `candidate_cache_key(state)`
+    /// (board state + full `waiting_for` payload — see the function's doc
+    /// for why `quick_state_hash` alone is not sufficient).
+    /// Sibling search nodes at the same game position reuse a previously
+    /// built `AiDecisionContext` instead of re-running `candidate_actions`.
+    /// Scope is the `PlannerServices` lifetime — one per `choose_action` call
+    /// — so stale entries from prior turns never match.
+    candidate_cache: HashMap<u64, std::sync::Arc<AiDecisionContext>>,
+    /// Top-level wall-clock deadline mirrored onto services so every hot-path
+    /// function (rollouts, tactical_score, evaluate_state_quiesced) can bail
+    /// without threading `SearchBudget` everywhere. Populated from the caller's
+    /// time budget at construction time; `Deadline::none()` when no budget.
+    pub deadline: engine::util::Deadline,
 }
 
 impl<'a> PlannerServices<'a> {
@@ -246,6 +290,16 @@ impl<'a> PlannerServices<'a> {
             OpponentModel::SampledReply => Box::new(SampledReplyUtilityReducer),
         };
 
+        let deadline = match (config.search.deterministic, config.search.time_budget_ms) {
+            (false, Some(ms)) => engine::util::Deadline::after(ms),
+            _ => engine::util::Deadline::none(),
+        };
+        // Mirror the same deadline onto AiContext so policies (which only see
+        // PolicyContext → AiContext) can gate expensive work — specifically
+        // the `velocity_score` opponent-turn projection that costs ~1.5s on
+        // large multi-player states.
+        let mut context = context;
+        context.deadline = deadline;
         Self {
             ai_player,
             config,
@@ -253,6 +307,8 @@ impl<'a> PlannerServices<'a> {
             context,
             utility_reducer,
             eval_cache: HashMap::new(),
+            candidate_cache: HashMap::new(),
+            deadline,
         }
     }
 
@@ -270,8 +326,28 @@ impl<'a> PlannerServices<'a> {
         )
     }
 
-    pub fn build_decision_context(&self, state: &GameState) -> AiDecisionContext {
-        build_decision_context(state)
+    /// Build an `AiDecisionContext` for `state`, reusing a cached one when a
+    /// prior search node hit the same `quick_state_hash`. Siblings at the same
+    /// game position in a search tree share the result — `candidate_actions`
+    /// is not cheap, and search revisits positions often (especially in
+    /// beam + rollout configurations).
+    pub fn build_decision_context(
+        &mut self,
+        state: &GameState,
+    ) -> std::sync::Arc<AiDecisionContext> {
+        // MUST use candidate_cache_key, NOT quick_state_hash: the latter omits
+        // state.waiting_for, which is the dispatch key for candidate_actions.
+        // Using the wrong hash collides states with identical boards but
+        // different WaitingFor (e.g. Priority vs TargetSelection), returning
+        // cached candidates from the wrong state.
+        let key = candidate_cache_key(state);
+        if let Some(hit) = self.candidate_cache.get(&key) {
+            return std::sync::Arc::clone(hit);
+        }
+        let ctx = std::sync::Arc::new(build_decision_context(state));
+        self.candidate_cache
+            .insert(key, std::sync::Arc::clone(&ctx));
+        ctx
     }
 
     pub fn validate_candidates(
@@ -476,8 +552,11 @@ impl<'a> PlannerServices<'a> {
 
     /// Evaluate a leaf state with quiescence: if the stack is non-empty and only
     /// forced passes remain, resolve through them before evaluating.
+    /// Once the wall-clock deadline is blown, skip quiescence — the cached
+    /// static eval is a good-enough approximation and quiescence can itself
+    /// clone + simulate state through the stack.
     pub fn evaluate_state_quiesced(&mut self, state: &GameState) -> f64 {
-        if state.stack.is_empty() {
+        if state.stack.is_empty() || self.deadline.expired() {
             return self.evaluate_state_cached(state);
         }
         let quiesced = self.quiesce(state);
@@ -486,7 +565,7 @@ impl<'a> PlannerServices<'a> {
 
     /// Evaluate a leaf state for utility with quiescence.
     pub fn quiesced_leaf_eval(&mut self, state: &GameState) -> f64 {
-        if state.stack.is_empty() {
+        if state.stack.is_empty() || self.deadline.expired() {
             let value = self.evaluate_for_planner(state);
             return self.reduce_utility(state, &value);
         }
@@ -558,7 +637,7 @@ impl<'a> PlannerServices<'a> {
         )
     }
 
-    pub fn planner_evaluation(&self, state: &GameState) -> PlannerEvaluation {
+    pub fn planner_evaluation(&mut self, state: &GameState) -> PlannerEvaluation {
         let ctx = self.build_decision_context(state);
         let candidates = self.validate_candidates(state, ctx.candidates.clone());
         let scoring_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
@@ -596,6 +675,12 @@ impl<'a> PlannerServices<'a> {
     }
 
     pub fn rollout_estimate(&mut self, state: &GameState, depth: u32) -> f64 {
+        // CR-agnostic: if the wall-clock budget is blown, short-circuit to the
+        // cheap leaf evaluator rather than descending further. Without this
+        // bail, rollout recursion ignores `time_budget_ms` entirely.
+        if self.deadline.expired() {
+            return self.quiesced_leaf_eval(state);
+        }
         if depth == 0 || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return self.quiesced_leaf_eval(state);
         }
@@ -693,6 +778,12 @@ impl BeamContinuationPlanner {
         };
 
         for ranked in ranked {
+            // Bail mid-loop on wall-clock budget: the outer beam can be wide
+            // (branching × depth), so checking only at entry lets a single node
+            // burn the full deadline before bubbling back up.
+            if services.deadline.expired() {
+                break;
+            }
             let Some(sim) = services.apply_candidate(state, &ranked.candidate) else {
                 continue;
             };
@@ -975,7 +1066,7 @@ mod tests {
         }
 
         // Put the creature on the stack
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: creature_id,
             source_id: creature_id,
             controller: PlayerId(0),
@@ -1065,7 +1156,7 @@ mod tests {
         state_b.players[0].hand.retain(|&id| id != creature_in_hand);
         let obj = state_b.objects.get_mut(&creature_in_hand).unwrap();
         obj.zone = Zone::Stack;
-        state_b.stack.push(StackEntry {
+        state_b.stack.push_back(StackEntry {
             id: creature_in_hand,
             source_id: creature_in_hand,
             controller: PlayerId(0),

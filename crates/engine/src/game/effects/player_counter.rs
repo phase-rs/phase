@@ -63,7 +63,7 @@ pub fn resolve(
         // CR 122.1: Emit event for counter change.
         events.push(GameEvent::PlayerCounterChanged {
             player: *player_id,
-            counter_kind: counter_kind.clone(),
+            counter_kind: *counter_kind,
             delta: amount as i32,
         });
     }

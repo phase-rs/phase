@@ -487,27 +487,26 @@ fn apply_pending_spell_resolution(
 
     // CR 702.190b: Sneak-cast permanent also enters attacking alongside the
     // returned creature's defender and gets the `cast_variant_paid` tag
-    // so intrinsic-sneak trigger conditions fire.
-    if let CastingVariant::Sneak {
-        defender,
-        attack_target,
-        ..
-    } = ctx.casting_variant
-    {
+    // so intrinsic-sneak trigger conditions fire. Placement is `Some` only
+    // for permanent spells; non-permanent Sneak casts (instants/sorceries)
+    // get only the `cast_variant_paid` tag and resolve normally.
+    if let CastingVariant::Sneak { placement, .. } = ctx.casting_variant {
         if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
             obj.cast_variant_paid = Some((
                 crate::types::ability::CastVariantPaid::Sneak,
                 state.turn_number,
             ));
         }
-        let mut events = Vec::new();
-        super::combat::place_attacking_alongside(
-            state,
-            ctx.object_id,
-            defender,
-            attack_target,
-            &mut events,
-        );
+        if let Some(p) = placement {
+            let mut events = Vec::new();
+            super::combat::place_attacking_alongside(
+                state,
+                ctx.object_id,
+                p.defender,
+                p.attack_target,
+                &mut events,
+            );
+        }
     }
 
     // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag so the
@@ -636,7 +635,7 @@ mod tests {
                 .description("Shield".to_string()),
         );
         state.objects.insert(id, obj);
-        state.battlefield.push(id);
+        state.battlefield.push_back(id);
         id
     }
 
@@ -802,7 +801,7 @@ mod tests {
                 .description("Rest in Peace".to_string()),
         );
         state.objects.insert(rip_id, rip);
-        state.battlefield.push(rip_id);
+        state.battlefield.push_back(rip_id);
 
         // Surface the outer Destroy replacement choice to the player.
         let mut events = Vec::new();

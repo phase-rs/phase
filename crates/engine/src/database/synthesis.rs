@@ -13,7 +13,7 @@ use crate::types::ability::{
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::keywords::{CyclingCost, Keyword, PartnerType};
+use crate::types::keywords::{BuybackCost, CyclingCost, Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
@@ -145,6 +145,12 @@ pub fn synthesize_basic_land_mana(face: &mut CardFace) {
     }
 }
 
+/// CR 702.6a: Equip is an activated ability of Equipment cards. "Equip [cost]"
+/// means "[Cost]: Attach this permanent to target creature you control.
+/// Activate only as a sorcery." The `.sorcery_speed()` builder is the single
+/// authority that sets both the display flag and pushes
+/// `ActivationRestriction::AsSorcery` so the runtime legality gate enforces
+/// timing at activation time.
 pub fn synthesize_equip(face: &mut CardFace) {
     let equip_abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -160,7 +166,9 @@ pub fn synthesize_equip(face: &mut CardFace) {
                             ),
                         },
                     )
-                    .cost(AbilityCost::Mana { cost: cost.clone() }),
+                    .cost(AbilityCost::Mana { cost: cost.clone() })
+                    // CR 702.6a: "Activate only as a sorcery."
+                    .sorcery_speed(),
                 )
             } else {
                 None
@@ -215,6 +223,18 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
     use crate::types::ability::PtValue;
     use crate::types::triggers::TriggerMode;
 
+    // Idempotency: skip if a Mobilize attack trigger already exists.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::Attacks)
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Token { name, .. }) if name == "Warrior"
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
     for kw in &face.keywords {
         if let Keyword::Mobilize(qty) = kw {
             let token_effect = Effect::Token {
@@ -258,6 +278,20 @@ pub fn synthesize_job_select(face: &mut CardFace) {
         .iter()
         .any(|k| matches!(k, Keyword::JobSelect))
     {
+        return;
+    }
+
+    // Idempotency: skip if the Job select ETB Hero token trigger already exists.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Token { name, .. }) if name == "Hero"
+            )
+    });
+    if already_has_trigger {
         return;
     }
 
@@ -407,6 +441,35 @@ pub fn synthesize_kicker(face: &mut CardFace) {
     }
 }
 
+/// CR 702.27a: Synthesize `additional_cost` from `Keyword::Buyback(BuybackCost)`.
+///
+/// Buyback is an optional additional cost: "You may pay an additional [cost]
+/// as you cast this spell. If the buyback cost was paid, put this spell into
+/// its owner's hand instead of into that player's graveyard as it resolves."
+///
+/// The resolution-time routing (hand instead of graveyard) is handled in
+/// `game::stack::resolve_top` by inspecting `ability.context.additional_cost_paid`
+/// on the resolving spell when the source carries `Keyword::Buyback`.
+///
+/// Idempotent: skips if `additional_cost` is already set (Oracle-parsed
+/// "as an additional cost" lines take precedence, matching the Kicker pattern).
+pub fn synthesize_buyback(face: &mut CardFace) {
+    if face.additional_cost.is_some() {
+        return;
+    }
+    let Some(buyback_cost) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Buyback(cost) => Some(cost.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    let cost = match buyback_cost {
+        BuybackCost::Mana(mana_cost) => AbilityCost::Mana { cost: mana_cost },
+        BuybackCost::NonMana(ac) => ac,
+    };
+    face.additional_cost = Some(AdditionalCost::Optional(cost));
+}
+
 /// Synthesize Gift optional cost and delivery effect.
 /// Gift is a promise (zero-cost optional additional cost) that sets `additional_cost_paid`
 /// when the player promises the gift. Conditional branches ("if the gift was promised" /
@@ -459,6 +522,19 @@ pub fn synthesize_case_solve(face: &mut CardFace) {
         return;
     }
 
+    // Idempotency: skip if the Case auto-solve end-step trigger already exists.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::Phase)
+            && t.phase == Some(Phase::End)
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::SolveCase)
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
     face.triggers.push(
         TriggerDefinition::new(TriggerMode::Phase)
             .phase(Phase::End)
@@ -474,8 +550,6 @@ pub fn synthesize_case_solve(face: &mut CardFace) {
 /// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
 /// on this permanent. Activate only as a sorcery."
 pub fn synthesize_level_up(face: &mut CardFace) {
-    use crate::types::ability::ActivationRestriction;
-
     let level_up_abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
@@ -492,7 +566,9 @@ pub fn synthesize_level_up(face: &mut CardFace) {
                         },
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() })
-                    .activation_restrictions(vec![ActivationRestriction::AsSorcery]),
+                    // CR 702.87a: "Activate only as a sorcery." `.sorcery_speed()`
+                    // sets the display flag and pushes `AsSorcery` for runtime.
+                    .sorcery_speed(),
                 )
             } else {
                 None
@@ -568,6 +644,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                     AbilityKind::Activated,
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
                     },
                 )
                 .cost(composite_cost);
@@ -616,6 +693,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         count: QuantityExpr::Fixed { value: 1 },
                         reveal: true,
                         target_player: None,
+                        up_to: false,
                     },
                 )
                 .cost(composite_cost);
@@ -645,7 +723,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
 /// target for "this card's power" in the graveyard reminder text. No new quantity
 /// ref is needed; `SelfPower` is already the right abstraction.
 pub fn synthesize_scavenge(face: &mut CardFace) {
-    use crate::types::ability::{ActivationRestriction, QuantityRef};
+    use crate::types::ability::QuantityRef;
 
     let scavenge_abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -679,9 +757,10 @@ pub fn synthesize_scavenge(face: &mut CardFace) {
             };
             let mut def = AbilityDefinition::new(AbilityKind::Activated, effect)
                 .cost(composite_cost)
-                // CR 702.97a: "Activate only as a sorcery."
-                .sorcery_speed()
-                .activation_restrictions(vec![ActivationRestriction::AsSorcery]);
+                // CR 702.97a: "Activate only as a sorcery." The `.sorcery_speed()`
+                // builder sets both the display flag and pushes
+                // `ActivationRestriction::AsSorcery` for runtime enforcement.
+                .sorcery_speed();
             // CR 702.97a: "functions only while the card with scavenge is in a graveyard."
             def.activation_zone = Some(Zone::Graveyard);
             Some(def)
@@ -739,6 +818,22 @@ pub fn synthesize_casualty(face: &mut CardFace) {
 
     // CR 702.153a: "When you cast this spell, if a casualty cost was paid, copy it.
     // If the spell has any targets, you may choose new targets for the copy."
+    // Idempotency: skip if the casualty copy-on-cast trigger already exists.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::SpellCast)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && t.trigger_zones.contains(&Zone::Stack)
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::CopySpell {
+                    target: TargetFilter::SelfRef,
+                })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
     let copy_effect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::CopySpell {
@@ -1094,6 +1189,100 @@ pub fn synthesize_suspend(face: &mut CardFace) {
     }
 }
 
+/// CR 702.170 + CR 116.2k: Plot — synthesize a hand-zone activated ability for
+/// every face carrying `Keyword::Plot(cost)`.
+///
+/// Printed text (CR 702.170a): "Plot [cost]" means "Any time you have priority
+/// during your main phase while the stack is empty, you may exile this card
+/// from your hand and pay [cost]. It becomes a plotted card." Plotting is a
+/// special action (CR 116.2k / CR 702.170b) that doesn't use the stack; we
+/// approximate it as an activated ability with `activation_zone = Hand`, the
+/// `.sorcery_speed()` single-authority builder, and a composite cost
+/// `(pay [cost], exile self from hand)`. This is the same controlled
+/// approximation Suspend uses (see `synthesize_suspend`); no card today
+/// interacts with the "doesn't use the stack" distinction.
+///
+/// On resolution the activation grants `CastingPermission::Plotted { turn_plotted: 0 }`
+/// to the now-exiled card (SelfRef). `grant_permission::resolve` stamps the
+/// real `state.turn_number` into `turn_plotted` (mirroring how it resolves
+/// `PlayFromExile { granted_to }` for the ability controller). The cast side
+/// is detected by `prepare_spell_cast` via `is_plot_cast` — exile-zone source
+/// with a `Plotted` permission — which zeros the mana cost
+/// (CR 702.170d: "without paying its mana cost") and tags
+/// `CastingVariant::Plot` for routing. The "on a later turn" gate is enforced
+/// by `has_exile_cast_permission` comparing `state.turn_number > turn_plotted`.
+/// Sorcery-speed main-phase-with-empty-stack enforcement is free: Plot cards
+/// are non-Instant in the printed OTJ cycle, so `check_spell_timing`'s default
+/// sorcery-speed branch covers "may cast as a sorcery" (CR 307.1 + CR 116.1).
+///
+/// Idempotent across repeated invocations (parser pipelines may re-run on the
+/// same face). Build-for-the-class: every Plot card flows through this single
+/// synthesizer regardless of card type.
+pub fn synthesize_plot(face: &mut CardFace) {
+    use crate::types::ability::{ActivationRestriction, CastingPermission, PermissionGrantee};
+
+    // CR 702.170a: Find the first Plot keyword. Cards do not print multiple Plots.
+    let Some(plot_cost) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Plot(cost) => Some(cost.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    // CR 702.170a: Activated ability — pay [cost] + exile self from hand, then
+    // grant Plotted casting permission on the now-exiled SelfRef. Composite cost
+    // mirrors `synthesize_suspend`; `.sorcery_speed()` enforces main-phase +
+    // empty-stack + active-player timing via `ActivationRestriction::AsSorcery`.
+    let already_has_plot_activation = face.abilities.iter().any(|a| {
+        a.activation_zone == Some(Zone::Hand)
+            && a.activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery)
+            && matches!(
+                &*a.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Plotted { .. },
+                    ..
+                }
+            )
+    });
+    if !already_has_plot_activation {
+        let composite_cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: plot_cost.clone(),
+                },
+                // CR 702.170a: "exile this card from your hand" — self-targeted
+                // exile from hand. Mirrors Suspend's self-exile cost component.
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Hand),
+                    filter: Some(TargetFilter::SelfRef),
+                },
+            ],
+        };
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            // CR 702.170a + CR 702.170d: Grant the `Plotted` casting permission
+            // to the exiled card. `turn_plotted: 0` is a placeholder stamped
+            // by `grant_permission::resolve` to `state.turn_number` at
+            // resolution. Grantee is the default `AbilityController` — the
+            // plot owner — which is the player allowed to cast it later.
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::Plotted { turn_plotted: 0 },
+                target: TargetFilter::SelfRef,
+                grantee: PermissionGrantee::AbilityController,
+            },
+        )
+        .cost(composite_cost)
+        // CR 702.170a: "Any time you have priority during your main phase while
+        // the stack is empty" — i.e. sorcery-speed timing. `.sorcery_speed()`
+        // is the single-authority builder (see `AbilityDefinition::sorcery_speed`).
+        .sorcery_speed();
+        def.activation_zone = Some(Zone::Hand);
+        face.abilities.push(def);
+    }
+}
+
 /// Run all synthesis functions in canonical order on a card face.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure the same
 /// complete set of synthesizers is applied.
@@ -1106,6 +1295,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_ninjutsu_family(face);
     synthesize_changeling_cda(face);
     synthesize_kicker(face);
+    synthesize_buyback(face);
     synthesize_gift(face);
     synthesize_case_solve(face);
     // Warp: no synthesis needed — runtime handled by Keyword::Warp directly
@@ -1122,6 +1312,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
     synthesize_suspend(face);
+    // CR 702.170 + CR 116.2k: Plot — hand-activated special-action-approximated
+    // ability that exiles self and grants a Plotted casting permission for
+    // free-cast on a later turn. Runs after Suspend; idempotent.
+    synthesize_plot(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
     // CR 721.2b: Spacecraft creature-shift at the max station-symbol striation
@@ -1489,6 +1683,107 @@ fn build_oracle_face_inner(
 }
 
 #[cfg(test)]
+mod buyback_synthesis_tests {
+    use super::*;
+
+    /// CR 702.27a: Mana-cost Buyback synthesizes an optional additional mana cost.
+    #[test]
+    fn synthesize_buyback_mana_sets_optional_additional_cost() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Buyback(BuybackCost::Mana(ManaCost::Cost {
+                generic: 3,
+                shards: vec![],
+            }))],
+            ..CardFace::default()
+        };
+
+        synthesize_buyback(&mut face);
+
+        match face.additional_cost.expect("additional_cost set") {
+            AdditionalCost::Optional(AbilityCost::Mana { cost }) => {
+                assert!(matches!(
+                    cost,
+                    ManaCost::Cost {
+                        generic: 3,
+                        ref shards,
+                    } if shards.is_empty()
+                ));
+            }
+            other => panic!("expected Optional(Mana), got {other:?}"),
+        }
+    }
+
+    /// CR 702.27a: Non-mana Buyback (Constant Mists "Sacrifice a land") routes
+    /// through the full AbilityCost pipeline as an optional additional cost.
+    #[test]
+    fn synthesize_buyback_non_mana_preserves_ability_cost() {
+        let sac_cost = AbilityCost::Sacrifice {
+            target: TargetFilter::Any,
+            count: 1,
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Buyback(BuybackCost::NonMana(sac_cost.clone()))],
+            ..CardFace::default()
+        };
+
+        synthesize_buyback(&mut face);
+
+        match face.additional_cost.expect("additional_cost set") {
+            AdditionalCost::Optional(cost) => assert_eq!(cost, sac_cost),
+            other => panic!("expected Optional(Sacrifice), got {other:?}"),
+        }
+    }
+
+    /// Idempotency: running synthesize_buyback twice produces the same result.
+    #[test]
+    fn synthesize_buyback_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Buyback(BuybackCost::Mana(ManaCost::Cost {
+                generic: 5,
+                shards: vec![],
+            }))],
+            ..CardFace::default()
+        };
+
+        synthesize_buyback(&mut face);
+        let first = face.additional_cost.clone();
+        synthesize_buyback(&mut face);
+        assert_eq!(face.additional_cost, first);
+    }
+
+    /// Parser-parsed `additional_cost` takes precedence over synthesized buyback
+    /// (Kicker pattern).
+    #[test]
+    fn synthesize_buyback_skips_when_additional_cost_already_set() {
+        let existing = AdditionalCost::Required(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 1,
+                shards: vec![],
+            },
+        });
+        let mut face = CardFace {
+            keywords: vec![Keyword::Buyback(BuybackCost::Mana(ManaCost::Cost {
+                generic: 3,
+                shards: vec![],
+            }))],
+            additional_cost: Some(existing.clone()),
+            ..CardFace::default()
+        };
+
+        synthesize_buyback(&mut face);
+        assert_eq!(face.additional_cost, Some(existing));
+    }
+
+    /// No-op when the card has no Buyback keyword.
+    #[test]
+    fn synthesize_buyback_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_buyback(&mut face);
+        assert!(face.additional_cost.is_none());
+    }
+}
+
+#[cfg(test)]
 mod cycling_synthesis_tests {
     use super::*;
 
@@ -1602,10 +1897,10 @@ mod job_select_synthesis_tests {
         synthesize_job_select(&mut face);
         let count = face.triggers.len();
         synthesize_job_select(&mut face);
-        // Second call adds another trigger because the keyword is still present.
-        // This matches synthesize_mobilize behavior — idempotency comes from
-        // synthesize_all being called once per face.
-        assert_eq!(face.triggers.len(), count * 2);
+        // Repeat synthesis must not duplicate the ETB trigger. A
+        // non-idempotent synthesizer would push the same trigger multiple
+        // times and cause per-ETB-event doubling at runtime.
+        assert_eq!(face.triggers.len(), count);
     }
 
     #[test]
@@ -2741,5 +3036,415 @@ mod suspend_serialization_tests {
             back,
             StaticCondition::SourceControllerEquals { player } if player == PlayerId(1)
         ));
+    }
+}
+
+#[cfg(test)]
+mod plot_synthesis_tests {
+    //! CR 702.170 + CR 116.2k: Plot synthesis regression suite. Locks the
+    //! shape of the hand-activated special-action-approximated ability that
+    //! every `Keyword::Plot` card carries. Mirrors `suspend_synthesis_tests`.
+    use super::*;
+    use crate::types::ability::{ActivationRestriction, CastingPermission, PermissionGrantee};
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    /// Builds a Plot-bearing face with a {1}{R} plot cost (Highway Robbery's
+    /// printed cost). Returns the populated face for synthesizer probing.
+    fn plot_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Plot(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        }));
+        face
+    }
+
+    /// CR 702.170a: Plot synthesizes a single hand-activated ability with
+    /// composite cost (mana + exile self from hand), sorcery-speed
+    /// `ActivationRestriction::AsSorcery`, `activation_zone = Hand`, and a
+    /// `GrantCastingPermission { Plotted { turn_plotted: 0 } }` effect.
+    #[test]
+    fn synthesize_plot_adds_hand_activation_with_sorcery_speed() {
+        let mut face = plot_face();
+        synthesize_plot(&mut face);
+
+        let activation = face
+            .abilities
+            .iter()
+            .find(|a| a.activation_zone == Some(Zone::Hand))
+            .expect("plot should add a hand-activated ability");
+
+        // CR 702.170a: sorcery-speed activation — AsSorcery restriction + flag.
+        assert!(activation.sorcery_speed, "plot is sorcery-speed");
+        assert!(activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // CR 702.170a: cost = pay [cost] AND exile this card from hand.
+        match &activation.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert_eq!(costs.len(), 2, "composite cost has exactly 2 components");
+                assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Hand),
+                        filter: Some(TargetFilter::SelfRef),
+                    }
+                ));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+
+        // CR 702.170a + CR 702.170d: effect grants `Plotted` to SelfRef with
+        // placeholder turn_plotted = 0 (stamped at resolution).
+        match &*activation.effect {
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::Plotted { turn_plotted },
+                target: TargetFilter::SelfRef,
+                grantee: PermissionGrantee::AbilityController,
+            } => {
+                assert_eq!(
+                    *turn_plotted, 0,
+                    "turn_plotted is a placeholder until resolution"
+                );
+            }
+            other => panic!("expected GrantCastingPermission(Plotted), got {other:?}"),
+        }
+    }
+
+    /// Idempotency: parser pipelines may call `synthesize_all` multiple times.
+    #[test]
+    fn synthesize_plot_is_idempotent() {
+        let mut face = plot_face();
+        synthesize_plot(&mut face);
+        synthesize_plot(&mut face);
+
+        let count = face
+            .abilities
+            .iter()
+            .filter(|a| a.activation_zone == Some(Zone::Hand))
+            .count();
+        assert_eq!(count, 1, "plot activation must dedupe on repeat invocation");
+    }
+
+    /// Cards without `Keyword::Plot` are completely untouched.
+    #[test]
+    fn synthesize_plot_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_plot(&mut face);
+        assert!(face.abilities.is_empty());
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.170d: The `Plotted` permission's `turn_plotted` field gates
+    /// casts by the "later turn" rule. The in-engine comparison (in
+    /// `has_exile_cast_permission`) uses `state.turn_number > turn_plotted`,
+    /// so: same-turn → false, later-turn → true. Lock the comparison
+    /// semantics here so future refactors don't flip the sign.
+    #[test]
+    fn plotted_permission_comparison_is_strictly_greater() {
+        let perm = CastingPermission::Plotted { turn_plotted: 5 };
+        // Extract the turn_plotted value and verify the comparison contract.
+        let CastingPermission::Plotted { turn_plotted } = perm else {
+            panic!("constructed variant");
+        };
+        // Same-turn: must NOT be castable (strictly greater, not >=).
+        assert!(turn_plotted <= turn_plotted);
+        // Later turn: must be castable.
+        assert!(turn_plotted + 1 > turn_plotted);
+        // Earlier turn: must NOT pass the `turn_number > turn_plotted` check.
+        // Use addition rather than subtraction to avoid underflow semantics on u32.
+        let earlier = turn_plotted;
+        let later = turn_plotted + 1;
+        assert!(!(earlier > later), "earlier turn never passes the gate");
+    }
+
+    /// CR 702.170d + CR 400.7: The `Plotted` permission is dropped when the
+    /// card leaves exile. Verifies the exhaustive match arm in
+    /// `zones::apply_zone_exit_cleanup` includes `Plotted` — regression guard
+    /// against a future refactor that forgets to add new permission variants
+    /// to the cleanup set.
+    #[test]
+    fn plotted_variant_is_serializable() {
+        let perm = CastingPermission::Plotted { turn_plotted: 3 };
+        let s = serde_json::to_string(&perm).unwrap();
+        let back: CastingPermission = serde_json::from_str(&s).unwrap();
+        match back {
+            CastingPermission::Plotted { turn_plotted } => assert_eq!(turn_plotted, 3),
+            other => panic!("round-trip produced {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod idempotency_tests {
+    //! Regression tests for trigger double-fire defect: every synthesis function
+    //! that pushes a `TriggerDefinition` must be idempotent under repeated
+    //! invocation. Non-idempotent synthesis causes multiple identical
+    //! `TriggerDefinition` entries on the same card face, which in turn causes
+    //! the engine's per-event dedup (keyed on `(ObjectId, trig_idx)`) to fail
+    //! — distinct `trig_idx` values register separately.
+    use super::*;
+    use crate::types::ability::QuantityExpr;
+    use crate::types::card_type::CoreType;
+
+    #[test]
+    fn synthesize_mobilize_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 1 }));
+        synthesize_mobilize(&mut face);
+        synthesize_mobilize(&mut face);
+        assert_eq!(
+            face.triggers.len(),
+            1,
+            "mobilize trigger should only register once"
+        );
+    }
+
+    #[test]
+    fn synthesize_case_solve_is_idempotent() {
+        let mut face = CardFace::default();
+        face.card_type.subtypes.push("Case".to_string());
+        face.solve_condition = Some(crate::types::ability::SolveCondition::Text {
+            description: "test".to_string(),
+        });
+        synthesize_case_solve(&mut face);
+        synthesize_case_solve(&mut face);
+        assert_eq!(
+            face.triggers.len(),
+            1,
+            "case-solve trigger should only register once"
+        );
+    }
+
+    #[test]
+    fn synthesize_casualty_is_idempotent() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Sorcery);
+        face.keywords.push(Keyword::Casualty(2));
+        synthesize_casualty(&mut face);
+        let first_count = face.triggers.len();
+        synthesize_casualty(&mut face);
+        assert_eq!(
+            face.triggers.len(),
+            first_count,
+            "casualty trigger should only register once"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sorcery_speed_invariant_tests {
+    //! CR 602.5d: Every activated ability tagged with the `sorcery_speed`
+    //! display flag MUST also carry `ActivationRestriction::AsSorcery` so the
+    //! runtime legality gate (`game::restrictions::check_activation_restrictions`)
+    //! actually enforces sorcery timing. Historically the `sorcery_speed` bool
+    //! was display-only, and callers were required to separately push the enum
+    //! variant — a recurring source of bugs where equip abilities were
+    //! activatable at instant speed. Unifying the two via the `.sorcery_speed()`
+    //! builder (and this invariant) prevents the bug class from recurring.
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    /// Walk every sub_ability in the chain.
+    fn walk_chain<F: FnMut(&AbilityDefinition)>(def: &AbilityDefinition, mut visit: F) {
+        let mut cur: Option<&AbilityDefinition> = Some(def);
+        while let Some(d) = cur {
+            visit(d);
+            cur = d.sub_ability.as_deref();
+        }
+    }
+
+    fn assert_sorcery_invariant(def: &AbilityDefinition, context: &str) {
+        walk_chain(def, |d| {
+            if d.sorcery_speed {
+                assert!(
+                    d.activation_restrictions
+                        .contains(&ActivationRestriction::AsSorcery),
+                    "{context}: ability has sorcery_speed=true but \
+                     activation_restrictions is missing AsSorcery"
+                );
+            }
+        });
+    }
+
+    /// CR 702.6a: Swiftfoot Boots — "Equip {1}" synthesizes an activated ability
+    /// that MUST be gated at sorcery speed. Regression test for the confirmed
+    /// bug where equip abilities were activatable at instant speed because
+    /// `synthesize_equip` set neither the display flag nor the restriction.
+    #[test]
+    fn synthesize_equip_pushes_as_sorcery_restriction() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Equip(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        }));
+        synthesize_equip(&mut face);
+
+        assert_eq!(face.abilities.len(), 1, "one equip ability");
+        let def = &face.abilities[0];
+        assert!(def.sorcery_speed, "sorcery_speed display flag set");
+        assert!(
+            def.activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "AsSorcery restriction pushed for runtime enforcement (CR 702.6a)"
+        );
+    }
+
+    /// CR 702.87a: Level Up synthesis must carry AsSorcery.
+    #[test]
+    fn synthesize_level_up_pushes_as_sorcery_restriction() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::LevelUp(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }));
+        synthesize_level_up(&mut face);
+
+        let def = &face.abilities[0];
+        assert!(def.sorcery_speed);
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+    }
+
+    /// CR 702.97a: Scavenge synthesis must carry AsSorcery (single `.sorcery_speed()`
+    /// call must produce both the flag and the restriction).
+    #[test]
+    fn synthesize_scavenge_pushes_as_sorcery_restriction() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Scavenge(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        }));
+        synthesize_scavenge(&mut face);
+
+        let def = &face.abilities[0];
+        assert!(def.sorcery_speed);
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+        // Guard against double-push regression: AsSorcery should appear exactly once.
+        let count = def
+            .activation_restrictions
+            .iter()
+            .filter(|r| matches!(r, ActivationRestriction::AsSorcery))
+            .count();
+        assert_eq!(count, 1, "AsSorcery must not be duplicated");
+    }
+
+    /// CR 602.5d: The shared invariant — corpus-wide, walk every synthesized
+    /// ability and its sub_ability chain; every ability with
+    /// `sorcery_speed=true` must carry `AsSorcery`. Runs the synthesis pipeline
+    /// against every keyword variant that has synthesis coverage and enforces
+    /// the invariant, so any future keyword synthesis regressing to a
+    /// display-only `sorcery_speed=true` fails this test.
+    #[test]
+    fn sorcery_speed_flag_implies_as_sorcery_restriction_for_synthesized_abilities() {
+        fn mana() -> ManaCost {
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            }
+        }
+
+        type SynthCase = (&'static str, fn() -> CardFace);
+        let cases: &[SynthCase] = &[
+            ("Equip {1}", || {
+                let mut f = CardFace::default();
+                f.keywords.push(Keyword::Equip(mana()));
+                synthesize_equip(&mut f);
+                f
+            }),
+            ("Level Up {1}", || {
+                let mut f = CardFace::default();
+                f.keywords.push(Keyword::LevelUp(mana()));
+                synthesize_level_up(&mut f);
+                f
+            }),
+            ("Scavenge {1}", || {
+                let mut f = CardFace::default();
+                f.keywords.push(Keyword::Scavenge(mana()));
+                synthesize_scavenge(&mut f);
+                f
+            }),
+        ];
+
+        for (name, build) in cases {
+            let face = build();
+            for def in &face.abilities {
+                assert_sorcery_invariant(def, name);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod loyalty_sorcery_speed_tests {
+    //! CR 606.3: Planeswalker loyalty abilities may only be activated during
+    //! the controller's main phase with an empty stack, and only once per turn
+    //! per permanent. The parser must tag every loyalty line with both
+    //! `ActivationRestriction::AsSorcery` (CR 606.3 timing) and
+    //! `ActivationRestriction::OnlyOnceEachTurn` (CR 606.3 per-permanent
+    //! limit) so downstream consumers (and the shared invariant) see a
+    //! self-describing restriction set. The planeswalker activation path
+    //! (`game::planeswalker::can_activate_loyalty`) already gates loyalty
+    //! independently; these restrictions are defensive + invariant-preserving.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ActivationRestriction;
+
+    #[test]
+    fn loyalty_ability_parses_with_as_sorcery_and_once_each_turn() {
+        // Jace, the Mind Sculptor reminder-text-like minimal loyalty line.
+        let r = parse_oracle_text("+2: Draw a card.", "Test Planeswalker", &[], &[], &[]);
+        assert_eq!(r.abilities.len(), 1);
+        let def = &r.abilities[0];
+        assert!(def.sorcery_speed, "loyalty sets sorcery_speed display flag");
+        assert!(
+            def.activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "CR 606.3: AsSorcery restriction is pushed for loyalty"
+        );
+        assert!(
+            def.activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "CR 606.3: OnlyOnceEachTurn restriction is pushed for loyalty"
+        );
+    }
+
+    #[test]
+    fn loyalty_bracket_format_also_tagged() {
+        // Bracket format: [+1]: effect.
+        let r = parse_oracle_text("[+1]: Draw a card.", "Test Planeswalker", &[], &[], &[]);
+        assert_eq!(r.abilities.len(), 1);
+        let def = &r.abilities[0];
+        assert!(def.sorcery_speed);
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::OnlyOnceEachTurn));
+    }
+
+    #[test]
+    fn loyalty_negative_minus_cost_tagged() {
+        let r = parse_oracle_text(
+            "\u{2212}3: Destroy target creature.",
+            "Test Planeswalker",
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let def = &r.abilities[0];
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
     }
 }

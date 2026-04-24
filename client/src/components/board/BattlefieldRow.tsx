@@ -30,7 +30,7 @@ const FULL_CARD_AR = 5 / 7;
 function getCreatureScale(groupCount: number, display: "art_crop" | "full_card"): number {
   const isArtCrop = display === "art_crop";
   const max = isArtCrop ? 1.25 : 1.12;
-  const min = isArtCrop ? 0.6 : 0.55;
+  const min = isArtCrop ? 0.78 : 0.72;
   const threshold = 4;
 
   if (groupCount <= 1) return max;
@@ -82,7 +82,7 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
   /** Minimum readable card height — below this, switch to multi-row wrapping.
    *  Lowered on compact-height (landscape phones) so creatures stay single-row
    *  in the limited vertical space rather than wrapping into a tiny grid. */
-  const MIN_CARD_H = isCompactHeight ? 40 : 70;
+  const MIN_CARD_H = isCompactHeight ? 56 : 80;
   /** Maximum creature card height — prevents oversized cards with few creatures */
   const MAX_CARD_H = 150;
   let creatureWrap = false;
@@ -99,12 +99,17 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
       const staggerPx = 20;
       const totalStagger = groups.reduce((sum, g) => sum + Math.max(0, g.count - 1) * staggerPx, 0);
 
-      // Try single-row first
+      // Try single-row first. Use the *natural* height (dictated by width
+      // per group) as the wrap-or-not decision signal — if it's below
+      // MIN_CARD_H, cards would shrink illegibly, so wrap to multi-row.
+      // Only the rendered height is clamped up to MIN_CARD_H, keeping the
+      // decision independent of the clamp.
       const availableForCards = cw - (n - 1) * gap - totalStagger;
       const widthPerGroup = n > 0 ? availableForCards / n : cw;
-      const singleRowCardH = Math.max(40, Math.min(ch, widthPerGroup / activeAr, MAX_CARD_H));
+      const naturalCardH = Math.min(ch, widthPerGroup / activeAr, MAX_CARD_H);
+      const singleRowCardH = Math.max(MIN_CARD_H, naturalCardH);
 
-      if (singleRowCardH >= MIN_CARD_H) {
+      if (naturalCardH >= MIN_CARD_H) {
         // Single row — cards fit at readable size
         rowStyle = {
           "--art-crop-w": `${singleRowCardH * ART_CROP_AR}px`,
@@ -113,17 +118,21 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
           "--card-h": `${singleRowCardH}px`,
         } as React.CSSProperties;
       } else {
-        // Multi-row wrapping — pick the row count that gives the largest card height
+        // Multi-row wrapping — pick the row count that gives the largest
+        // card height. Floors are the same MIN_CARD_H readability threshold
+        // used for the single-row decision above; `bestH` is then clamped
+        // up to MIN_CARD_H so the render never drops below the legibility
+        // floor even under pathological creature counts.
         creatureWrap = true;
         const rowGap = 12; // gap-y-3
-        let bestH = 40;
+        let bestH = MIN_CARD_H;
         for (let rows = 2; rows <= 4; rows++) {
           const cardHFromHeight = (ch - (rows - 1) * rowGap) / rows;
           const groupsPerRow = Math.ceil(n / rows);
           const staggerPerRow = totalStagger / rows; // approximate
           const cardW = (cw - (groupsPerRow - 1) * gap - staggerPerRow) / groupsPerRow;
           const cardHFromWidth = cardW / activeAr;
-          const cardH = Math.max(40, Math.min(cardHFromHeight, cardHFromWidth));
+          const cardH = Math.max(MIN_CARD_H, Math.min(cardHFromHeight, cardHFromWidth));
           if (cardH > bestH) {
             bestH = cardH;
           }

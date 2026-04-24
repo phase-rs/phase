@@ -112,19 +112,23 @@ pub fn resolve(
 
     // CR 107.3a + CR 601.2b: Resolve the count expression against the ability so
     // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
-    let (filter, count, reveal, target_player) = match &ability.effect {
+    // CR 107.1c + CR 701.23d: `up_to` propagates to SearchChoice so "any number
+    // of" / "up to N" searches accept 0..=count picks (vs. exactly-count).
+    let (filter, count, reveal, target_player, up_to) = match &ability.effect {
         Effect::SearchLibrary {
             filter,
             count,
             reveal,
             target_player,
+            up_to,
         } => (
             filter.clone(),
             resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             *reveal,
             target_player.clone(),
+            *up_to,
         ),
-        _ => (TargetFilter::Any, 1, false, None),
+        _ => (TargetFilter::Any, 1, false, None, false),
     };
 
     // CR 701.23a: Determine the library owner and the searcher.
@@ -184,6 +188,7 @@ pub fn resolve(
         cards: matching,
         count: pick_count,
         reveal,
+        up_to,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -211,6 +216,23 @@ mod tests {
                 count: QuantityExpr::Fixed { value: count },
                 reveal: false,
                 target_player: None,
+                up_to: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn make_search_ability_up_to(filter: TargetFilter, count: i32) -> ResolvedAbility {
+        // CR 107.1c: "any number of" / "up to N" — searcher picks 0..=count.
+        ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter,
+                count: QuantityExpr::Fixed { value: count },
+                reveal: false,
+                target_player: None,
+                up_to: true,
             },
             vec![],
             ObjectId(100),
@@ -289,12 +311,42 @@ mod tests {
                 cards,
                 count,
                 reveal,
+                ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(*count, 1);
                 assert!(!reveal);
                 assert!(cards.contains(&bear), "Should contain the creature");
                 assert_eq!(cards.len(), 1, "Should NOT contain the land");
+            }
+            other => panic!("Expected SearchChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn search_up_to_propagates_flag_and_floors_sentinel_to_matching_len() {
+        // CR 107.1c: Sarkhan -7 pattern — "any number of Dragon creature cards".
+        // Parser emits count=i32::MAX + up_to=true; resolver must floor pick_count
+        // to matching.len() AND propagate up_to=true into SearchChoice.
+        let mut state = GameState::new_two_player(42);
+        let _c1 = add_library_creature(&mut state, 1, PlayerId(0), "Dragon A");
+        let _c2 = add_library_creature(&mut state, 2, PlayerId(0), "Dragon B");
+
+        let ability =
+            make_search_ability_up_to(TargetFilter::Typed(TypedFilter::creature()), i32::MAX);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                count,
+                up_to,
+                cards,
+                ..
+            } => {
+                assert!(*up_to, "up_to should propagate into SearchChoice");
+                assert_eq!(*count, 2, "pick_count should floor to matching.len()");
+                assert_eq!(cards.len(), 2);
             }
             other => panic!("Expected SearchChoice, got {:?}", other),
         }
@@ -434,6 +486,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -520,6 +573,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: true,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -571,6 +625,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: true,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -634,6 +689,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -676,6 +732,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -715,6 +772,7 @@ mod tests {
                 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -779,6 +837,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             ObjectId(9999),
@@ -836,6 +895,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             ObjectId(9998),
@@ -888,6 +948,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: Some(TargetFilter::ParentTargetController),
+                up_to: false,
             },
             vec![TargetRef::Object(destroyed)],
             ObjectId(9997),
@@ -939,6 +1000,7 @@ mod tests {
                 target_player: Some(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 )),
+                up_to: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(9996),

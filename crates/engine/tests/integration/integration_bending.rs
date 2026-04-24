@@ -305,7 +305,7 @@ fn test_mana_payment_finalization() {
     runner
         .state_mut()
         .stack
-        .push(engine::types::game_state::StackEntry {
+        .push_back(engine::types::game_state::StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: P0,
@@ -354,6 +354,7 @@ fn test_mana_payment_cancel_clears_pending_cast() {
     let ability = ResolvedAbility::new(
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
         },
         vec![],
         spell_id,
@@ -950,6 +951,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
+            up_to: false,
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -964,6 +966,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             source_id,
@@ -1272,6 +1275,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
+            up_to: false,
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -1286,6 +1290,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
+                up_to: false,
             },
             vec![],
             enchantment_id,

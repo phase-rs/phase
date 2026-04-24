@@ -1,17 +1,22 @@
 import { getPlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
-import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
 import { shouldAutoPass } from "../autoPass";
 import { dispatchAction } from "../dispatch";
-import { createAIController } from "./aiController";
+import { createAIController, type AISeatBinding } from "./aiController";
 import type { OpponentController } from "./types";
 
 const AUTO_PASS_BEAT_MS = 200;
 
 export interface GameLoopConfig {
   mode: "ai" | "online" | "local";
+  /** Default difficulty used as a fallback when no per-seat binding is
+   *  supplied (e.g. legacy resume with only a flat `difficulty` in the
+   *  `ActiveGameMeta`). Every AI seat gets this difficulty. */
   difficulty?: string;
+  /** Explicit per-seat AI policy. When present this takes precedence over
+   *  `difficulty` + `playerCount`; each entry drives exactly one AI player. */
+  aiSeats?: AISeatBinding[];
   playerCount?: number;
 }
 
@@ -38,12 +43,11 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     if (!("data" in waitingFor) || waitingFor.data.player !== getPlayerId()) return;
 
     const { fullControl } = useUiStore.getState();
-    const { phaseStops } = usePreferencesStore.getState();
 
     if (!gameState) return;
 
     const { autoPassRecommended } = useGameStore.getState();
-    if (shouldAutoPass(gameState, waitingFor, phaseStops, fullControl, autoPassRecommended)) {
+    if (shouldAutoPass(gameState, waitingFor, fullControl, autoPassRecommended)) {
       scheduleAutoPass();
     }
   }
@@ -66,11 +70,18 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
     if (config.mode === "ai") {
       const count = config.playerCount ?? 2;
-      const playerIds = Array.from({ length: count - 1 }, (_, i) => i + 1);
-      opponentController = createAIController({
-        difficulty: config.difficulty ?? "Medium",
-        playerIds,
+      const fallbackDifficulty = config.difficulty ?? "Medium";
+      // PlayerIds 1..N-1 are the AI seats (0 is the local human). Map each
+      // engine-side AI playerId to its configured difficulty, falling back
+      // to the flat `difficulty` when no per-seat binding is supplied.
+      const seats: AISeatBinding[] = Array.from({ length: count - 1 }, (_, i) => {
+        const playerId = i + 1;
+        return {
+          playerId,
+          difficulty: config.aiSeats?.[i]?.difficulty ?? fallbackDifficulty,
+        };
       });
+      opponentController = createAIController({ seats });
       opponentController.start();
     }
 

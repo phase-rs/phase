@@ -435,6 +435,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         );
         ability.cost = Some(AbilityCost::Composite {
@@ -460,6 +461,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::Scry {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         );
         ability.cost = Some(AbilityCost::Composite {
@@ -483,6 +485,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
+            up_to: false,
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Composite {
@@ -518,6 +521,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
+            up_to: false,
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Sacrifice {
@@ -978,6 +982,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
             },
         ));
         let deck = vec![entry(face, 1)];

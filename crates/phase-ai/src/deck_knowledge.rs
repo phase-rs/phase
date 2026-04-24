@@ -215,7 +215,7 @@ mod tests {
         );
         state.objects.get_mut(&token).unwrap().is_token = true;
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(50),
             source_id: token,
             controller: PlayerId(0),
@@ -224,6 +224,7 @@ mod tests {
                 ability: engine::types::ability::ResolvedAbility::new(
                     engine::types::ability::Effect::Draw {
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                        target: engine::types::ability::TargetFilter::Controller,
                     },
                     Vec::new(),
                     token,
@@ -252,7 +253,7 @@ mod tests {
             "Alpha".to_string(),
             Zone::Stack,
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(60),
             source_id: spell,
             controller: PlayerId(0),
@@ -261,6 +262,7 @@ mod tests {
                 ability: Some(engine::types::ability::ResolvedAbility::new(
                     engine::types::ability::Effect::Draw {
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                        target: engine::types::ability::TargetFilter::Controller,
                     },
                     Vec::new(),
                     spell,

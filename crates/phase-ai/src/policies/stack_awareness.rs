@@ -207,6 +207,7 @@ pub(crate) fn assess_spell_impact(state: &GameState, entry: &StackEntry) -> f64 
                     Effect::Counter { .. } => 1.5,
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value },
+                        ..
                     } => *value as f64 * 1.5,
                     Effect::DealDamage { .. } => 1.0,
                     Effect::SearchLibrary { .. } => 1.0,
@@ -354,7 +355,7 @@ mod tests {
 
     fn push_stack_entry(state: &mut GameState, effect: Effect, targets: Vec<TargetRef>) {
         let ability = ResolvedAbility::new(effect, targets, ObjectId(999), PlayerId(1));
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(state.next_object_id),
             source_id: ObjectId(999),
             controller: PlayerId(1),

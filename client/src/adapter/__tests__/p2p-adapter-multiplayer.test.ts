@@ -544,4 +544,105 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       /paused-disconnect/,
     );
   });
+
+  // Regression guard: the wire must carry legalActionsByObject + spellCosts
+  // across game_setup, state_update, and reconnect_ack. Dropping these fields
+  // — even though the flat `legalActions` array still arrives — leaves guests
+  // unable to click cards in their hand, because the frontend card-click
+  // dispatch (PlayerHand.tsx et al.) routes through
+  // collectObjectActions(legalActionsByObject, objectId), which returns []
+  // when the map is undefined. Mulligan / pass-priority still worked pre-fix
+  // because those dispatch as plain GameActions, which is why the original
+  // bug evaded detection for so long. This test locks in the fix at every
+  // wire site so a future refactor cannot silently regress.
+  it("wire protocol round-trips legalActionsByObject + spellCosts on every send site", async () => {
+    // Seed the mocked engine's legal-actions response with non-empty
+    // per-object grouping and spell costs. The host adapter is expected to
+    // forward these verbatim to every guest via game_setup, state_update,
+    // and reconnect_ack.
+    const legalActionsByObject = {
+      "42": [{ type: "CastSpell", data: { object_id: 42, targets: [] } }],
+      "43": [{ type: "PlayLand", data: { object_id: 43 } }],
+    };
+    const spellCosts = {
+      "42": { generic: 1, colored: { R: 1 } },
+    };
+    // Cast via `unknown` because the hoisted mock's default return is inferred
+    // as `{ actions: never[]; autoPassRecommended: boolean }`, which would
+    // reject our richer payload. The adapter consumes the full
+    // `LegalActionsResult` shape regardless of the mock's narrow signature.
+    mocks.getLegalActions.mockResolvedValue({
+      actions: [
+        { type: "CastSpell", data: { object_id: 42, targets: [] } },
+        { type: "PlayLand", data: { object_id: 43 } },
+        { type: "PassPriority" },
+      ],
+      autoPassRecommended: false,
+      legalActionsByObject,
+      spellCosts,
+    } as unknown as { actions: never[]; autoPassRecommended: boolean });
+
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+
+    // ── game_setup ─────────────────────────────────────────────────────────
+    const g1 = joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const setup = g1.sent.find(
+      (m): m is {
+        type: "game_setup";
+        playerToken: string;
+        legalActionsByObject?: Record<string, unknown>;
+        spellCosts?: Record<string, unknown>;
+      } =>
+        typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
+    );
+    expect(setup).toBeDefined();
+    expect(setup!.legalActionsByObject).toEqual(legalActionsByObject);
+    expect(setup!.spellCosts).toEqual(spellCosts);
+    const playerToken = setup!.playerToken;
+
+    // ── state_update ───────────────────────────────────────────────────────
+    g1.sent.length = 0;
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+
+    const stateUpdate = g1.sent.find(
+      (m): m is {
+        type: "state_update";
+        legalActionsByObject?: Record<string, unknown>;
+        spellCosts?: Record<string, unknown>;
+      } =>
+        typeof m === "object" && m !== null && (m as { type: string }).type === "state_update",
+    );
+    expect(stateUpdate).toBeDefined();
+    expect(stateUpdate!.legalActionsByObject).toEqual(legalActionsByObject);
+    expect(stateUpdate!.spellCosts).toEqual(spellCosts);
+
+    // ── reconnect_ack ──────────────────────────────────────────────────────
+    g1.simulateClose();
+    const g1Reconnect = joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken,
+    });
+    // Two microtask flushes: one for the async handler, one for the nested
+    // `void (async () => {...})()` that issues the reconnect_ack send.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const ack = g1Reconnect.sent.find(
+      (m): m is {
+        type: "reconnect_ack";
+        legalActionsByObject?: Record<string, unknown>;
+        spellCosts?: Record<string, unknown>;
+      } =>
+        typeof m === "object" && m !== null && (m as { type: string }).type === "reconnect_ack",
+    );
+    expect(ack).toBeDefined();
+    expect(ack!.legalActionsByObject).toEqual(legalActionsByObject);
+    expect(ack!.spellCosts).toEqual(spellCosts);
+  });
 });

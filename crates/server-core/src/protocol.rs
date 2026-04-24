@@ -230,6 +230,17 @@ pub enum ServerMessage {
         auto_pass_recommended: bool,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         spell_costs: HashMap<ObjectId, ManaCost>,
+        /// Per-card grouping of `legal_actions` keyed by `GameAction::source_object()`.
+        /// Frontends use this map for "what can I do with this card?" lookups without
+        /// introspecting `GameAction` variants client-side. Empty for non-actors.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+        /// Engine-authored presentation projections computed alongside
+        /// `state`. See `engine::game::derived_views::DerivedViews`.
+        /// Required for Commander-format games so the CommanderDamage HUD
+        /// renders; empty in non-Commander formats (JIT short-circuit).
+        #[serde(default)]
+        derived: engine::game::derived_views::DerivedViews,
         /// Included for joiners so they can persist the token for reconnection.
         /// Omitted (None) for hosts (who get it via GameCreated) and reconnects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,6 +259,17 @@ pub enum ServerMessage {
         log_entries: Vec<GameLogEntry>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         spell_costs: HashMap<ObjectId, ManaCost>,
+        /// Per-card grouping of `legal_actions` keyed by `GameAction::source_object()`.
+        /// Empty for non-actors.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+        /// Engine-authored presentation projections for this state snapshot.
+        /// See `engine::game::derived_views::DerivedViews`. Always populated
+        /// by server construction sites — the `#[serde(default)]` exists
+        /// only for wire-format forward compatibility, never as an intended
+        /// silent fallback (CLAUDE.md: engine owns all logic).
+        #[serde(default)]
+        derived: engine::game::derived_views::DerivedViews,
     },
     ActionRejected {
         reason: String,
@@ -605,6 +627,8 @@ mod tests {
             legal_actions: vec![GameAction::PassPriority],
             auto_pass_recommended: false,
             spell_costs: HashMap::new(),
+            legal_actions_by_object: HashMap::new(),
+            derived: Default::default(),
             player_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -637,6 +661,8 @@ mod tests {
             legal_actions: vec![],
             auto_pass_recommended: false,
             spell_costs: HashMap::new(),
+            legal_actions_by_object: HashMap::new(),
+            derived: Default::default(),
             player_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();

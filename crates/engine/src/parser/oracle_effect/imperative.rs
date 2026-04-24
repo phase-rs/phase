@@ -1,6 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
+use nom::sequence::preceded;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -96,10 +97,80 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
     let (pt, target_text) = parsed_number
         .map(|(rem, n)| (n as i32, rem.trim_start()))
         .unwrap_or((0, lower_rest));
-    // Default to "target land you control" when no explicit target remains.
-    // Handles: no text, punctuation-only, sequence connectors (", then ..."),
-    // variable amounts ("X, where X is..." — parse_number fails), or non-target text.
-    let has_explicit_target = if parsed_number.is_none() {
+    let target = resolve_earthbend_target(text, target_text, parsed_number.is_some());
+    (target, pt, pt)
+}
+
+/// Parse "earthbend [N | X[, where X is …]] [target <type>]" returning the
+/// counter count as a `QuantityExpr` so dynamic amounts (Toph's "earthbend X,
+/// where X is the number of experience counters you have") flow through to
+/// `Effect::PutCounter` instead of collapsing to `Fixed { value: 0 }`.
+///
+/// Dispatch order:
+/// 1. Literal N (`parse_number` succeeds) → `QuantityExpr::Fixed`.
+/// 2. `"x, where X is the number of <kind> counters <possessor>"` →
+///    `QuantityExpr::Ref { qty: QuantityRef::PlayerCounter { … } }`.
+/// 3. Bare `"x"` (no tail) → `QuantityExpr::Ref { qty: Variable { "X" } }`,
+///    matching the spell-cost X resolution path.
+/// 4. None of the above → `Fixed { value: 0 }` with the default target,
+///    preserving the prior behaviour for unsupported text shapes.
+///
+/// Used only by `try_parse_earthbend_clause` (the full-expansion path that
+/// emits Animate + PutCounter + delayed return). The literal-N AST path
+/// retains `parse_earthbend_params` to avoid perturbing its two callers.
+///
+/// `text` is the full original-case clause (including the leading
+/// "Earthbend "); `lower_rest` is the lowercased remainder after that prefix.
+/// The shared `resolve_earthbend_target` helper recovers the original-case
+/// target slice as `text[text.len() - target_text.len()..]`, which only lands
+/// at the correct byte boundary because ASCII lowercasing preserves byte
+/// length and the entire Oracle-text dispatcher operates on ASCII.
+pub(super) fn parse_earthbend_count_expr(
+    text: &str,
+    lower_rest: &str,
+) -> (TargetFilter, QuantityExpr) {
+    if let Ok((rem, n)) = nom_primitives::parse_number.parse(lower_rest) {
+        let target_text = rem.trim_start();
+        let target = resolve_earthbend_target(text, target_text, true);
+        return (target, QuantityExpr::Fixed { value: n as i32 });
+    }
+    if let Ok((rem, _)) = tag::<_, _, VerboseError<&str>>("x").parse(lower_rest) {
+        // CR 122.1: "X, where X is the number of <kind> counters <possessor>".
+        if let Ok((rem2, qty)) = preceded(
+            tag::<_, _, VerboseError<&str>>(", where x is "),
+            crate::parser::oracle_nom::quantity::parse_the_number_of_player_counters,
+        )
+        .parse(rem)
+        {
+            let target_text = rem2.trim_start();
+            let target = resolve_earthbend_target(text, target_text, true);
+            return (target, QuantityExpr::Ref { qty });
+        }
+        // CR 107.3a + CR 601.2b: bare X resolves through the spell-cost path.
+        let target_text = rem.trim_start();
+        let target = resolve_earthbend_target(text, target_text, true);
+        return (
+            target,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        );
+    }
+    (default_earthbend_target(), QuantityExpr::Fixed { value: 0 })
+}
+
+/// Shared target-text reduction for earthbend parsing. Distinguishes between
+/// "explicit target follows the numeric slot" and "use the default target".
+/// Factored out so `parse_earthbend_params` and `parse_earthbend_count_expr`
+/// can't drift in target detection.
+fn resolve_earthbend_target(
+    text: &str,
+    target_text: &str,
+    parsed_numeric_slot: bool,
+) -> TargetFilter {
+    let has_explicit_target = if !parsed_numeric_slot {
         false
     } else {
         let trimmed =
@@ -112,13 +183,12 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
                 .parse(trimmed)
                 .is_err()
     };
-    let target = if has_explicit_target {
+    if has_explicit_target {
         let (t, _) = parse_target(&text[text.len() - target_text.len()..]);
         t
     } else {
         default_earthbend_target()
-    };
-    (target, pt, pt)
+    }
 }
 
 pub(super) fn parse_numeric_imperative_ast(
@@ -204,12 +274,16 @@ pub(super) fn parse_numeric_imperative_ast(
         }
     }
 
-    // Keyword action verbs with numeric count: scry N, surveil N, mill N
+    // Keyword action verbs with numeric count: scry N, surveil N, mill N.
+    // CR 701.22a + CR 701.25a: Oracle uses third-person conjugations
+    // ("Target player scries 2", "Target opponent surveils 1") — match both
+    // the bare-form imperative and the conjugated form. `mills` is included
+    // for symmetry with the "Target player mills N" pattern.
     if let Some((verb, rest)) = nom_on_lower(text, lower, |input| {
         alt((
-            value("scry", tag("scry ")),
-            value("surveil", tag("surveil ")),
-            value("mill", tag("mill ")),
+            value("scry", alt((tag("scry "), tag("scries ")))),
+            value("surveil", alt((tag("surveil "), tag("surveils ")))),
+            value("mill", alt((tag("mill "), tag("mills ")))),
         ))
         .parse(input)
     }) {
@@ -252,7 +326,14 @@ fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
 
 pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
     match ast {
-        NumericImperativeAst::Draw { count } => Effect::Draw { count },
+        // CR 121.1: Default `target: TargetFilter::Controller` — the imperative
+        // path doesn't see the subject, which is later threaded via
+        // `inject_subject_target` for "target player draws ..." patterns
+        // (CR 601.2c per-mode targeting).
+        NumericImperativeAst::Draw { count } => Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
             amount,
             player: GainLifePlayer::Controller,
@@ -269,8 +350,18 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
             toughness,
             target: TargetFilter::Any,
         },
-        NumericImperativeAst::Scry { count } => Effect::Scry { count },
-        NumericImperativeAst::Surveil { count } => Effect::Surveil { count },
+        // CR 701.22a + CR 601.2c: Default Controller target — `inject_subject_target`
+        // upgrades to `TargetFilter::Player` for "target player scrys ..." subjects.
+        NumericImperativeAst::Scry { count } => Effect::Scry {
+            count,
+            target: TargetFilter::Controller,
+        },
+        // CR 701.25a + CR 601.2c: Same Controller default; subject promotion
+        // wires "target opponent surveils ..." through inject_subject_target.
+        NumericImperativeAst::Surveil { count } => Effect::Surveil {
+            count,
+            target: TargetFilter::Controller,
+        },
         NumericImperativeAst::Mill { count } => Effect::Mill {
             count,
             // CR 701.17a: "Mill" with no subject defaults to the controller.
@@ -336,6 +427,38 @@ fn parse_discard_unless_filter<'a>(
         return (lower, None);
     }
     (before, Some(filter))
+}
+
+/// CR 701.9a + CR 608.2c: Parse the card-type filter portion of a discard phrase.
+///
+/// Recognizes "a <type> card" / "an <type> card" / "<N> <type> cards" where the
+/// type portion is anything `parse_target` understands (subtypes, core types,
+/// "instant or sorcery", etc.). Returns `None` when no type qualifier appears
+/// (plain "a card" / "N cards" means any card is legal).
+///
+/// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
+/// Dokuchi Silencer ("you may discard a creature card") preserves the same
+/// filter data as cost-form discards like "Discard a creature card:".
+fn parse_discard_card_filter(lower: &str) -> Option<TargetFilter> {
+    // Consume the article / quantifier prefix ("a ", "an ", "N ", "X "). The
+    // count itself was already parsed upstream; we only need to reach the
+    // type-word portion.
+    let after_article = strip_article(lower);
+    // Find the " card" / " cards" suffix — the type phrase lies between the
+    // article and that suffix. Without a suffix, there is no type qualifier
+    // (e.g. plain "a card" → `None`).
+    let type_phrase = after_article
+        .strip_suffix(" cards") // allow-noncombinator: structural suffix cleanup on pre-chunked sub-phrase (PATTERNS.md §9)
+        .or_else(|| after_article.strip_suffix(" card"))? // allow-noncombinator: see line above
+        .trim();
+    if type_phrase.is_empty() {
+        return None;
+    }
+    let (filter, remainder) = parse_target(type_phrase);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some(filter)
 }
 
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
@@ -467,6 +590,7 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
                 random,
                 up_to,
                 unless_filter: None,
+                filter: None,
             });
         }
         // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
@@ -479,11 +603,18 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         let count = parse_count_expr(original_after)
             .map(|(q, _)| q)
             .unwrap_or(QuantityExpr::Fixed { value: 1 });
+        // CR 701.9a + CR 608.2c: Extract card-type filter from phrases like
+        // "a creature card" / "an artifact card". Mirrors the filter slot on
+        // `AbilityCost::Discard` so trigger-effect discards carry the same
+        // restriction data as cost discards (Dokuchi Silencer's "you may
+        // discard a creature card").
+        let filter = parse_discard_card_filter(after_discard);
         return Some(TargetedImperativeAst::Discard {
             count,
             random,
             up_to,
             unless_filter,
+            filter,
         });
     }
     if let Some((_, rest)) =
@@ -603,6 +734,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             random,
             up_to,
             unless_filter,
+            filter,
         } => Effect::Discard {
             count,
             // CR 701.9a: "Discard" with no subject defaults to the controller.
@@ -611,6 +743,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             random,
             up_to,
             unless_filter,
+            filter,
         },
         TargetedImperativeAst::Return { target } => Effect::Bounce {
             target,
@@ -786,6 +919,7 @@ pub(super) fn parse_search_and_creation_ast(
             count: details.count,
             reveal: details.reveal,
             target_player: details.target_player,
+            up_to: details.up_to,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -859,6 +993,7 @@ pub(super) fn parse_search_and_creation_ast(
                 count,
                 attach_to,
                 static_abilities,
+                enters_attacking,
                 ..
             }) => Some(SearchCreationImperativeAst::Token {
                 token: Box::new(TokenDescription {
@@ -872,6 +1007,7 @@ pub(super) fn parse_search_and_creation_ast(
                     count,
                     attach_to,
                     static_abilities,
+                    enters_attacking,
                 }),
             }),
             _ => None,
@@ -887,11 +1023,13 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             count,
             reveal,
             target_player,
+            up_to,
         } => Effect::SearchLibrary {
             filter,
             count,
             reveal,
             target_player,
+            up_to,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
             count,
@@ -923,7 +1061,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             count: token.count,
             owner: TargetFilter::Controller,
             attach_to: token.attach_to,
-            enters_attacking: false,
+            enters_attacking: token.enters_attacking,
             supertypes: vec![],
             static_abilities: token.static_abilities,
             enter_with_counters: vec![],
@@ -2537,6 +2675,7 @@ pub(super) fn parse_imperative_family_ast(
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount,
                 },
+                target: TargetFilter::Controller,
             }))
         }
         "draw" => parse_numeric_imperative_ast(text, lower)
@@ -4187,6 +4326,46 @@ mod tests {
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
         }
+    }
+
+    /// CR 122.1: literal-N earthbend keeps the `Fixed` count path intact.
+    #[test]
+    fn earthbend_count_expr_literal_n() {
+        let (target, count) = parse_earthbend_count_expr("2", "2");
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(target, default_earthbend_target());
+    }
+
+    /// CR 122.1: Toph's "earthbend X, where X is the number of experience
+    /// counters you have" produces a typed PlayerCounter ref, not Fixed 0.
+    #[test]
+    fn earthbend_count_expr_x_with_player_counter_tail() {
+        let tail = "x, where x is the number of experience counters you have";
+        let (_, count) = parse_earthbend_count_expr(tail, tail);
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Experience,
+                    scope: crate::types::ability::CountScope::Controller,
+                },
+            }
+        );
+    }
+
+    /// CR 107.3a + CR 601.2b: bare "earthbend X" without a where-clause defers
+    /// to the spell-cost X resolution path (Variable("X")), not Fixed 0.
+    #[test]
+    fn earthbend_count_expr_bare_x_falls_through_to_variable() {
+        let (_, count) = parse_earthbend_count_expr("x", "x");
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }
+        );
     }
 
     #[test]
