@@ -668,10 +668,11 @@ fn apply_action(
                 )?;
                 // CR 605.3b: Track land mana taps for undo (UntapLandForMana),
                 // matching the TapLandForMana path so dual lands are undoable
-                // too. Gating on `mana_ability_is_undoable` ensures painlands
-                // and pay-life sources — whose inline continuation commits
-                // irreversible state — are excluded from the UI-level undo.
-                if is_land && mana_sources::mana_ability_is_undoable(&ability_def) {
+                // too. `ManaSourcePenalty::None` is the only variant that
+                // allows undo — painlands (damage on resolution), pay-life
+                // sources, and sacrifice sources all commit irreversible
+                // state atomically with CR 605.3b resolution.
+                if is_land && mana_sources::mana_ability_penalty(&ability_def).is_undoable() {
                     state
                         .lands_tapped_for_mana
                         .entry(state.priority_player)
@@ -2847,7 +2848,7 @@ pub(super) fn handle_tap_land_for_mana(
         // CR 605.3b: Only record for `UntapLandForMana` when the activation is
         // fully reversible — painlands / pay-life sources commit irreversible
         // state during inline resolution and must not be eligible for undo.
-        if mana_option.undoable {
+        if mana_option.penalty.is_undoable() {
             state
                 .lands_tapped_for_mana
                 .entry(player)

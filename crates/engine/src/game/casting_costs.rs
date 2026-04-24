@@ -1841,27 +1841,38 @@ pub(super) fn auto_tap_mana_sources(
         .flatten()
         .collect();
 
-    // Tier sort: 0 = pure land, 1 = non-land mana dork, 2 = land-creature (preserve for combat),
-    //            3 = deprioritized source, 4 = sacrifice-for-mana (Treasure — irreversible)
+    // CR 605.3b: Auto-tap sort key. Tier layout (preserved from the
+    // pre-refactor sort; the enum factors the two scattered bool flags):
+    //   outer (tier_byte): 0 = non-sacrifice mana source; 1 = sacrifice-for-mana
+    //     (source will not come back — always last).
+    //   middle (card_tier): 0 = pure land, 1 = non-land mana dork,
+    //     2 = land-creature (preserve for combat), 3 = deprioritized source
+    //     (spell's own source).
+    //   inner (priority_amount): penalty sub-tier + fixed-amount tiebreak
+    //     (e.g. painland-1 < painland-2 < painland-None). Replaces the
+    //     collapsed `harms_controller` bool — amounts now rank.
+    // The entire penalty axis is consulted only via `ManaSourcePenalty`
+    // methods, so a future variant (e.g. `DiscardsOnActivation`) updates
+    // the ordering at one place, not seven.
     available.sort_by_key(|option| {
-        if option.requires_sacrifice {
-            return (4, false); // sacrifice is irreversible — always last
-        }
-        if deprioritize_source == Some(option.object_id) {
-            return (3, option.harms_controller);
-        }
         let obj = state.objects.get(&option.object_id);
         let is_land = obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land));
         let is_creature =
             obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Creature));
-        let base_tier = if is_land && is_creature {
-            2 // animated lands (e.g. Earthbender) — preserve for combat
+        let card_tier: u32 = if deprioritize_source == Some(option.object_id) {
+            3
+        } else if is_land && is_creature {
+            2
         } else if is_land {
             0
         } else {
-            1 // non-land mana dork (creature, artifact, etc.)
+            1
         };
-        (base_tier, option.harms_controller)
+        (
+            option.penalty.tier_byte() as u32,
+            card_tier,
+            option.penalty.priority_amount(),
+        )
     });
 
     let mut to_tap: Vec<ManaSourceOption> = Vec::new();
@@ -2122,12 +2133,13 @@ fn score_combination(
 /// free-to-tap sources under the caster's control) − (fixed portion of cost).
 ///
 /// Free-to-tap = mana abilities whose activation imposes no irreversible cost
-/// on the player: i.e., `ManaSourceOption` entries with `requires_sacrifice ==
-/// false` and `harms_controller == false`. Costed mana abilities (e.g. "1, T:
-/// Add {C}") are excluded for v1 — they cascade and would require a search to
-/// bound precisely. Treasure tokens are likewise excluded because they require
-/// sacrifice; pain lands and pay-life sources are excluded because activating
-/// them for extra X damages or drains the caster.
+/// on the player: i.e., `ManaSourceOption` entries classified as
+/// `ManaSourcePenalty::None` (`penalty.is_free()`). Costed mana abilities
+/// (e.g. "1, T: Add {C}") are excluded for v1 — they cascade and would
+/// require a search to bound precisely. Treasure tokens are likewise
+/// excluded because they sacrifice the source; pain lands and pay-life
+/// sources are excluded because activating them for extra X damages or
+/// drains the caster.
 ///
 /// Each untapped producer counts once, regardless of how many color options it
 /// offers (a shock land is still one tap → one mana).
@@ -2169,7 +2181,7 @@ pub fn max_x_value(state: &GameState, player: PlayerId, cost: &ManaCost) -> u32 
         .filter(|&&id| {
             mana_sources::activatable_mana_options(state, id, player)
                 .iter()
-                .any(|opt| !opt.requires_sacrifice && !opt.harms_controller)
+                .any(|opt| opt.penalty.is_free())
         })
         .count() as u32;
 

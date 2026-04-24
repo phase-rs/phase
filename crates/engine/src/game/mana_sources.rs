@@ -1,23 +1,20 @@
 //! Mana source analysis for auto-pay and AI candidate generation.
 //!
 //! `ManaSourceOption` describes a single activatable mana path, annotated
-//! with two penalty axes used for prioritization:
+//! with a single typed `ManaSourcePenalty` that captures the full penalty
+//! axis (damage on resolution, pay-life on activation, sacrifice) plus its
+//! amount where known. Every consumer (auto-tap sort, `max_x_value`
+//! free-producer gating, `UntapLandForMana` undoability) reads the penalty
+//! via the enum's methods — no consumer re-inspects the underlying
+//! `AbilityDefinition`, eliminating the drift class where independent bool
+//! flags could diverge between construction and consumption.
 //!
-//! - `harms_controller` — activating this ability can damage or drain its
-//!   controller (pain lands, pay-life mana abilities). This is a CR-derived
-//!   property: a `PayLife` cost is always controller-harming, and a
-//!   continuation-chain effect (`DealDamage`/`LoseLife` targeting
-//!   `Controller`) harms the activator by CR 605.1a + CR 605.3b (the
-//!   continuation resolves inline as part of the activator's mana ability).
-//! - `undoable` — a UX convenience outside the CR: does `UntapLandForMana`
-//!   fully reverse activation? True only when the cost is tap-only and the
-//!   resolution chain contains nothing but `Effect::Mana`. The atomicity of
-//!   CR 605.3b resolution is what justifies this: once any irreversible
-//!   side-effect (damage, sacrifice, life loss) fires, the activation has
-//!   committed permanent game state and cannot be "rewound" from the UI.
+//! CR 605.3a defines mana abilities; CR 605.3b establishes their atomic
+//! inline resolution — which is why any irreversible sub-effect (damage,
+//! life loss, sacrifice) disqualifies a source from UI-level undo.
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr, TargetFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
@@ -31,6 +28,151 @@ use super::mana_abilities;
 use super::mana_payment;
 use super::restrictions;
 
+/// CR 605.3b — Complete classification of a mana ability's penalty axis.
+///
+/// Constructed **once** per `ManaSourceOption` in `scan_mana_abilities` via
+/// `mana_ability_penalty`. Every consumer reads this via the provided methods;
+/// no consumer re-inspects the underlying `AbilityDefinition`. This is the
+/// single-authority design that eliminates drift between auto-tap ordering,
+/// `max_x_value` gating, and `UntapLandForMana` undoability.
+///
+/// Ordering of variants is NOT significant — callers must go through
+/// `tier_byte()` + `priority_amount()` for sort, `expected_life_cost()` for
+/// AI scoring, `is_undoable()` for UI undo gating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ManaSourcePenalty {
+    /// Tap-only cost, no controller-harming continuation, and the resolution
+    /// chain is pure `Effect::Mana`. Basic lands, mana dorks, mana rocks,
+    /// filter lands, Verge lands, commander-color lands, Chromatic Lantern, etc.
+    None,
+
+    /// CR 605.3b: The resolution chain contains a non-mana sub-effect that is
+    /// not classified into a more specific variant (i.e., not damage to
+    /// controller, not life loss to controller). Examples include depletion-
+    /// counter lands (Gemstone Mine), self-haste mana lands (Urza's Tower
+    /// variants), `RemoveCounter`-on-self lands, and `Effect::Unimplemented`
+    /// continuations whose semantics the parser hasn't decoded yet.
+    ///
+    /// Conservative default: any side-effect we don't otherwise understand is
+    /// assumed to commit irreversible game state, so `is_undoable()` returns
+    /// `false`. Sorts within the same outer bucket as `None` (`tier_byte() = 0`)
+    /// but with a worse `priority_amount()` than basics, so auto-tap still
+    /// prefers truly free sources first.
+    HasIrreversibleContinuation,
+
+    /// CR 605.3b: Resolution chain contains a `DealDamage { target: Controller }`
+    /// and/or `LoseLife { target: Controller|None }` whose amounts sum to a
+    /// fixed total. `fixed_amount = None` means the chain contains a non-fixed
+    /// (`QuantityExpr::Ref` / `HalfRounded` / etc.) amount — treated as
+    /// maximally bad in `priority_amount()` for conservative auto-tap.
+    ///
+    /// Examples: painlands (1), Ancient Tomb (2), future N-damage lands,
+    /// hypothetical X-damage pain land (`None`).
+    DealsDamageOnResolution { fixed_amount: Option<u16> },
+
+    /// Cost contains `AbilityCost::PayLife { amount }`. `fixed_amount` is
+    /// `Some(n)` iff the `QuantityExpr` collapses to `Fixed { value: n }`;
+    /// otherwise `None` (War-Room-style commanders'-colors cost).
+    ///
+    /// Examples: Mana Confluence (1), Starting Town (1).
+    PaysLifeOnActivation { fixed_amount: Option<u16> },
+
+    /// CR 605.3b: Cost contains `AbilityCost::Sacrifice { target: SelfRef }`.
+    /// The source leaves the battlefield on activation, so the activation is
+    /// never rewindable.
+    ///
+    /// Examples: Treasure, Gold, Lotus Petal.
+    Sacrifices,
+}
+
+impl ManaSourcePenalty {
+    /// High-order auto-tap bucket. **Lower = preferred.** The sort caller
+    /// composes this with `card_tier` (land vs creature-animated vs dork vs
+    /// deprioritized) and `priority_amount()` to form the final key.
+    ///
+    /// Bucket layout:
+    ///   0 → None, HasIrreversibleContinuation, DealsDamageOnResolution,
+    ///       PaysLifeOnActivation (all live in the card-type-dominated
+    ///        ordering — a painland producing colored mana should still
+    ///        outrank a combat-relevant mana dork of the same color)
+    ///   1 → Sacrifices (always last — source will not come back)
+    ///
+    /// This preserves the historical behavior where painlands (tier 0 +
+    /// `harms_controller=true`) sorted before mana dorks (tier 1 +
+    /// `harms_controller=false`): `card_tier` dominates, penalty is a
+    /// *within-card-tier* tiebreak via `priority_amount()`.
+    pub fn tier_byte(self) -> u8 {
+        match self {
+            Self::None
+            | Self::HasIrreversibleContinuation
+            | Self::DealsDamageOnResolution { .. }
+            | Self::PaysLifeOnActivation { .. } => 0,
+            Self::Sacrifices => 1,
+        }
+    }
+
+    /// Within-bucket tiebreak. **Lower = preferred.** Packs a sub-tier into
+    /// the high 16 bits and the fixed amount into the low 16 bits:
+    ///
+    ///   sub_tier 0 → None (no penalty at all)
+    ///   sub_tier 1 → HasIrreversibleContinuation (unknown side effect)
+    ///   sub_tier 2 → DealsDamageOnResolution (sort by amount)
+    ///   sub_tier 3 → PaysLifeOnActivation    (sort by amount)
+    ///
+    /// `Some(n)` → `n`, `None` → `u16::MAX` (conservative "unknown = worst"
+    /// tiebreak). Sacrifices returns 0 because `tier_byte()` already sorts
+    /// it last — no within-bucket distinction is needed.
+    pub fn priority_amount(self) -> u32 {
+        const SUB_NONE: u32 = 0 << 16;
+        const SUB_IRREVERSIBLE: u32 = 1 << 16;
+        const SUB_DAMAGE: u32 = 2 << 16;
+        const SUB_PAY_LIFE: u32 = 3 << 16;
+
+        fn amt(a: Option<u16>) -> u32 {
+            a.unwrap_or(u16::MAX) as u32
+        }
+
+        match self {
+            Self::None => SUB_NONE,
+            Self::HasIrreversibleContinuation => SUB_IRREVERSIBLE,
+            Self::DealsDamageOnResolution { fixed_amount } => SUB_DAMAGE | amt(fixed_amount),
+            Self::PaysLifeOnActivation { fixed_amount } => SUB_PAY_LIFE | amt(fixed_amount),
+            Self::Sacrifices => 0,
+        }
+    }
+
+    /// CR 120.3: Damage dealt to a player by a source without infect causes
+    /// that player to lose that much life — so damage-to-controller and
+    /// pay-life are equivalent 1:1 life debits for AI scoring purposes.
+    /// Sacrifice is not a life cost (scored elsewhere in AI); `None`
+    /// amounts return 0 rather than guessing — AI policies that care about
+    /// variable cost must score it themselves with game context.
+    pub fn expected_life_cost(self) -> u32 {
+        match self {
+            Self::None | Self::HasIrreversibleContinuation | Self::Sacrifices => 0,
+            Self::DealsDamageOnResolution { fixed_amount }
+            | Self::PaysLifeOnActivation { fixed_amount } => fixed_amount.unwrap_or(0) as u32,
+        }
+    }
+
+    /// CR 605.3b: An activation is undoable only when nothing irreversible
+    /// happens — no damage, no life pay, no sacrifice, no unclassified
+    /// non-mana sub-effect. The classification precedence in
+    /// `mana_ability_penalty` guarantees that `None` is reached *only* when
+    /// the resolution chain is pure `Effect::Mana`; every other chain shape
+    /// routes to `HasIrreversibleContinuation` or a more specific harm
+    /// variant. So this collapses cleanly into a single arm.
+    pub fn is_undoable(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// Convenience for `max_x_value` / free-producer counting: the source
+    /// imposes no irreversible cost on activation.
+    pub fn is_free(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManaSourceOption {
     pub object_id: ObjectId,
@@ -42,18 +184,12 @@ pub struct ManaSourceOption {
     /// shard-matching lookup; the full mana production is driven by
     /// `atomic_combination`.
     pub mana_type: ManaType,
-    /// True for Treasure-style costs (`Composite { Tap, Sacrifice }`).
-    /// Used by auto-tap to deprioritize sacrifice sources as last resort.
-    pub requires_sacrifice: bool,
-    /// True when activating this mana ability can damage its controller or
-    /// make them lose life — from a `PayLife` cost component, or from a
-    /// resolution-time sub-effect (e.g., pain lands dealing 1 damage to the
-    /// controller). Used by auto-pay to prefer equivalent sources that don't
-    /// harm the user.
-    pub harms_controller: bool,
-    /// True iff manual `UntapLandForMana` can fully reverse this activation:
-    /// tap-only cost and no non-mana side effects in the resolution graph.
-    pub undoable: bool,
+    /// CR 605.3b — classification of this activation's penalty axis.
+    /// Single source of truth for auto-tap prioritization, `max_x_value`
+    /// free-producer gating, AI life-cost scoring, and `UntapLandForMana`
+    /// undoability. Constructed by `scan_mana_abilities` via
+    /// `mana_ability_penalty`.
+    pub penalty: ManaSourcePenalty,
     /// CR 605.3b + CR 106.1a: Complete pre-chosen multi-mana sequence for
     /// `ManaProduction::ChoiceAmongCombinations` sources (Shadowmoor/Eventide
     /// filter lands). `None` for all other sources. When `Some`, a single
@@ -91,85 +227,167 @@ fn cost_requires_sacrifice(cost: &Option<AbilityCost>) -> bool {
     }
 }
 
-fn cost_has_life_payment(cost: &Option<AbilityCost>) -> bool {
-    match cost {
-        Some(AbilityCost::PayLife { .. }) => true,
-        Some(AbilityCost::Composite { costs }) => costs
-            .iter()
-            .any(|c| matches!(c, AbilityCost::PayLife { .. })),
-        _ => false,
+/// Fold an `Option<u16>` sum with saturation and non-fixed poisoning.
+/// Threading this as a small private helper keeps the recursive walker and
+/// the composite-cost loop in sync: any `None` contribution collapses the
+/// accumulator to `None` forever, matching "unknown amount poisons the sum."
+fn fold_amount(acc: Option<u16>, rhs: Option<u16>) -> Option<u16> {
+    match (acc, rhs) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        _ => None,
     }
 }
 
-/// CR 605.3b: Resolution is atomic. A chain with any cost beyond `{T}`
-/// commits irreversible state (life loss, sacrifice, discard), so "reversible"
-/// here means strictly tap-only.
-fn cost_is_reversible_tap_only(cost: &Option<AbilityCost>) -> bool {
+/// Collapse a `QuantityExpr` to a fixed `u16` amount if possible. Any
+/// non-`Fixed` shape (Ref / HalfRounded / Offset / Multiply / …) returns
+/// `None` — the caller treats that as "unknown amount, poison the sum."
+fn quantity_expr_to_fixed_amount(expr: &QuantityExpr) -> Option<u16> {
+    match expr {
+        QuantityExpr::Fixed { value } => Some((*value).clamp(0, u16::MAX as i32) as u16),
+        _ => None,
+    }
+}
+
+/// Returns `Some(amount)` iff the cost contains a `PayLife` component.
+/// The inner `Option<u16>` is `Some(n)` when the cost's `QuantityExpr`
+/// collapses to a fixed value and `None` when it is dynamic. Returns
+/// `None` (outer) when no `PayLife` component exists anywhere in the cost.
+///
+/// If a (hypothetical) `Composite` cost contains multiple `PayLife`
+/// components, fixed amounts are summed; any dynamic component poisons
+/// the total to `None` — mirroring the chain walker's semantics.
+fn cost_life_payment_amount(cost: &Option<AbilityCost>) -> Option<Option<u16>> {
     match cost {
-        Some(AbilityCost::Tap) => true,
-        // A `Composite` cost with zero components is malformed from our
-        // parser's perspective — treat it as non-reversible so we don't
-        // claim a cost we don't understand is safely undoable.
+        Some(AbilityCost::PayLife { amount }) => Some(quantity_expr_to_fixed_amount(amount)),
         Some(AbilityCost::Composite { costs }) => {
-            !costs.is_empty() && costs.iter().all(|c| matches!(c, AbilityCost::Tap))
+            let mut found = false;
+            let mut total: Option<u16> = Some(0);
+            for c in costs {
+                if let AbilityCost::PayLife { amount } = c {
+                    found = true;
+                    total = fold_amount(total, quantity_expr_to_fixed_amount(amount));
+                }
+            }
+            found.then_some(total)
         }
-        _ => false,
+        _ => None,
     }
 }
 
+/// Contribution of a single `Effect` to the controller-harm amount.
+/// `None` = not a controller-harming effect; `Some(None)` = harming but
+/// amount is dynamic (poisons the caller's sum); `Some(Some(n))` = fixed
+/// amount `n`.
+///
 /// CR 605.3b: A mana ability's continuation effects resolve inline as part
-/// of the same resolution. A `DealDamage` / `LoseLife` effect scoped to
+/// of the same resolution. A `DealDamage`/`LoseLife` effect scoped to
 /// `Controller` therefore hits the activator atomically.
-fn effect_harms_controller(effect: &Effect) -> bool {
+fn effect_controller_harm_amount(effect: &Effect) -> Option<Option<u16>> {
     match effect {
-        Effect::DealDamage { target, .. } => matches!(target, TargetFilter::Controller),
-        Effect::LoseLife { target, .. } => {
-            target.is_none() || matches!(target.as_ref(), Some(TargetFilter::Controller))
-        }
-        _ => false,
+        Effect::DealDamage {
+            target: TargetFilter::Controller,
+            amount,
+            ..
+        } => Some(quantity_expr_to_fixed_amount(amount)),
+        Effect::LoseLife {
+            target: None | Some(TargetFilter::Controller),
+            amount,
+        } => Some(quantity_expr_to_fixed_amount(amount)),
+        _ => None,
     }
 }
 
-/// Recursive walk over a mana ability's continuation graph.
+/// Walk a mana ability's continuation graph summing controller-harm amounts.
+///
+/// Returns `Some(Some(n))` when one or more controller-harming effects are
+/// found and all their amounts are fixed (summed into `n`); `Some(None)`
+/// when one is found but any amount is dynamic; `None` when no harming
+/// effect exists anywhere in the chain.
 ///
 /// Note: currently only visits `sub_ability` and `else_ability` branches.
 /// Modal / `repeat_for` branches are out of scope for this helper — if the
 /// parser ever emits them as children of a mana ability, this function must
-/// be extended (and a `debug_assert!` at the call site would help catch it).
-fn chain_harms_controller(ability: &AbilityDefinition) -> bool {
-    effect_harms_controller(&ability.effect)
-        || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(chain_harms_controller)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(chain_harms_controller)
+/// be extended.
+fn chain_harms_controller_amount(ability: &AbilityDefinition) -> Option<Option<u16>> {
+    fn walk(ability: &AbilityDefinition, acc: &mut (bool, Option<u16>)) {
+        if let Some(contribution) = effect_controller_harm_amount(&ability.effect) {
+            acc.0 = true;
+            acc.1 = fold_amount(acc.1, contribution);
+        }
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            walk(sub, acc);
+        }
+        if let Some(other) = ability.else_ability.as_deref() {
+            walk(other, acc);
+        }
+    }
+    let mut acc = (false, Some(0_u16));
+    walk(ability, &mut acc);
+    acc.0.then_some(acc.1)
 }
 
-fn chain_is_all_mana(ability: &AbilityDefinition) -> bool {
-    matches!(*ability.effect, Effect::Mana { .. })
-        && ability.sub_ability.as_deref().is_none_or(chain_is_all_mana)
-        && ability
-            .else_ability
-            .as_deref()
-            .is_none_or(chain_is_all_mana)
+/// CR 605.3b: Returns `true` iff the continuation chain (sub_ability /
+/// else_ability) contains any effect other than `Effect::Mana`.
+///
+/// Top-level `ability.effect` is the mana production itself and is never
+/// inspected here — only the chain links. A non-mana effect anywhere in the
+/// transitive sub-graph means the activation commits irreversible state and
+/// should not be marked undoable.
+fn chain_has_non_mana_effect(ability: &AbilityDefinition) -> bool {
+    fn walk(ability: &AbilityDefinition) -> bool {
+        if !matches!(*ability.effect, Effect::Mana { .. }) {
+            return true;
+        }
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            if walk(sub) {
+                return true;
+            }
+        }
+        if let Some(other) = ability.else_ability.as_deref() {
+            if walk(other) {
+                return true;
+            }
+        }
+        false
+    }
+    if let Some(sub) = ability.sub_ability.as_deref() {
+        if walk(sub) {
+            return true;
+        }
+    }
+    if let Some(other) = ability.else_ability.as_deref() {
+        if walk(other) {
+            return true;
+        }
+    }
+    false
 }
 
-/// CR 605.3b: Returns `true` when activating this mana ability commits
-/// irreversible controller-damaging state during resolution — whether from
-/// a `PayLife` cost component or from a damage/life-loss continuation.
-pub(crate) fn mana_ability_harms_controller(ability: &AbilityDefinition) -> bool {
-    cost_has_life_payment(&ability.cost) || chain_harms_controller(ability)
-}
-
-/// CR 605.3b: Returns `true` only when the activation can be fully rewound
-/// by `UntapLandForMana` — i.e., cost is pure tap and the resolution chain
-/// is pure mana production. Any side-effect (damage, life loss, sacrifice)
-/// violates atomicity and disqualifies the source from UI-level undo.
-pub(crate) fn mana_ability_is_undoable(ability: &AbilityDefinition) -> bool {
-    cost_is_reversible_tap_only(&ability.cost) && chain_is_all_mana(ability)
+/// CR 605.3b: Single classification authority for a mana ability's penalty axis.
+///
+/// Precedence, when multiple categories apply:
+///   Sacrifice > PayLife > Damage/LoseLife > HasIrreversibleContinuation > None
+/// This matches the auto-tap tier order: an ability that both sacrifices
+/// itself and pays life (no known printed card, but hypothetically allowed)
+/// is classified by the worst category that applies. The
+/// `HasIrreversibleContinuation` arm is the conservative catch-all for chain
+/// shapes whose semantics we don't otherwise classify (depletion-counter
+/// lands, self-haste lands, `Effect::Unimplemented` tails, etc.) — assumed
+/// to commit irreversible state so they aren't offered as undoable.
+pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePenalty {
+    if cost_requires_sacrifice(&ability.cost) {
+        return ManaSourcePenalty::Sacrifices;
+    }
+    if let Some(fixed_amount) = cost_life_payment_amount(&ability.cost) {
+        return ManaSourcePenalty::PaysLifeOnActivation { fixed_amount };
+    }
+    if let Some(fixed_amount) = chain_harms_controller_amount(ability) {
+        return ManaSourcePenalty::DealsDamageOnResolution { fixed_amount };
+    }
+    if chain_has_non_mana_effect(ability) {
+        return ManaSourcePenalty::HasIrreversibleContinuation;
+    }
+    ManaSourcePenalty::None
 }
 
 /// Return all currently activatable tap-mana options for a land.
@@ -267,9 +485,7 @@ fn land_mana_options(
                 object_id,
                 ability_index: None,
                 mana_type,
-                requires_sacrifice: false,
-                harms_controller: false,
-                undoable: true,
+                penalty: ManaSourcePenalty::None,
                 atomic_combination: None,
             });
         }
@@ -310,17 +526,13 @@ fn scan_mana_abilities(
             continue;
         }
 
-        let sacrifice = cost_requires_sacrifice(&ability.cost);
-        let harms_controller = mana_ability_harms_controller(ability);
-        let undoable = mana_ability_is_undoable(ability);
+        let penalty = mana_ability_penalty(ability);
         for row in emit_source_rows(state, controller, object_id, ability_index, ability) {
             let option = ManaSourceOption {
                 object_id,
                 ability_index: Some(ability_index),
                 mana_type: row.mana_type,
-                requires_sacrifice: sacrifice,
-                harms_controller,
-                undoable,
+                penalty,
                 atomic_combination: row.atomic_combination,
             };
             if !options.contains(&option) {
@@ -806,9 +1018,7 @@ mod tests {
         let options = activatable_mana_options(&state, elf, PlayerId(0));
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].mana_type, ManaType::Green);
-        assert!(!options[0].requires_sacrifice);
-        assert!(!options[0].harms_controller);
-        assert!(options[0].undoable);
+        assert_eq!(options[0].penalty, ManaSourcePenalty::None);
     }
 
     #[test]
@@ -885,15 +1095,11 @@ mod tests {
         let options = activatable_mana_options(&state, treasure, PlayerId(0));
         assert!(!options.is_empty(), "Treasure should have mana options");
         assert!(
-            options.iter().all(|o| o.requires_sacrifice),
-            "all Treasure options should require sacrifice"
+            options.iter().all(|o| o.penalty == ManaSourcePenalty::Sacrifices),
+            "all Treasure options should classify as Sacrifices (sacrifice dominates any other penalty axis)"
         );
         assert!(
-            options.iter().all(|o| !o.harms_controller),
-            "Treasure should not be treated as a controller-harming source"
-        );
-        assert!(
-            options.iter().all(|o| !o.undoable),
+            options.iter().all(|o| !o.penalty.is_undoable()),
             "Treasure activations are irreversible because they sacrifice the source"
         );
         // Should have 5 color options
@@ -942,15 +1148,14 @@ mod tests {
             "Starting Town should expose mana options"
         );
         assert!(
-            options.iter().all(|o| !o.requires_sacrifice),
-            "Starting Town should not be treated as a sacrifice source"
+            options.iter().all(|o| o.penalty
+                == ManaSourcePenalty::PaysLifeOnActivation {
+                    fixed_amount: Some(1)
+                }),
+            "pay-life mana sources should classify as PaysLifeOnActivation(1)"
         );
         assert!(
-            options.iter().all(|o| o.harms_controller),
-            "pay-life mana sources should be flagged as controller-harming"
-        );
-        assert!(
-            options.iter().all(|o| !o.undoable),
+            options.iter().all(|o| !o.penalty.is_undoable()),
             "pay-life mana sources should not be undoable"
         );
     }
@@ -976,18 +1181,23 @@ mod tests {
             "Brushland should expose green and white rows"
         );
         assert!(
-            options.iter().all(|o| o.harms_controller),
-            "pain-land colored rows should be marked as controller-harming"
+            options.iter().all(|o| o.penalty
+                == ManaSourcePenalty::DealsDamageOnResolution {
+                    fixed_amount: Some(1)
+                }),
+            "pain-land colored rows should classify as DealsDamageOnResolution(1)"
         );
         assert!(
-            options.iter().all(|o| !o.undoable),
+            options.iter().all(|o| !o.penalty.is_undoable()),
             "pain-land activations with damage continuations are not pure-mana undoable"
         );
     }
 
-    /// Covers the `Effect::LoseLife` arm of `effect_harms_controller`:
+    /// Covers the `LoseLife` arm of `effect_controller_harm_amount`:
     /// a mana ability whose continuation drains the controller's life
-    /// (rather than dealing damage) must still flag `harms_controller`.
+    /// (rather than dealing damage) must still classify as
+    /// DealsDamageOnResolution (the enum groups damage + life-loss as one
+    /// resolution-time harm axis per CR 120.3).
     #[test]
     fn lose_life_mana_source_marks_controller_harm() {
         use crate::types::ability::Effect as AbilityEffect;
@@ -1029,12 +1239,382 @@ mod tests {
         let options = activatable_land_mana_options(&state, land, PlayerId(0));
         assert!(!options.is_empty());
         assert!(
-            options.iter().all(|o| o.harms_controller),
-            "LoseLife(Controller) sub-effect should flag the source as controller-harming"
+            options.iter().all(|o| o.penalty
+                == ManaSourcePenalty::DealsDamageOnResolution {
+                    fixed_amount: Some(1)
+                }),
+            "LoseLife(Controller) sub-effect should classify as DealsDamageOnResolution(1)"
         );
         assert!(
-            options.iter().all(|o| !o.undoable),
+            options.iter().all(|o| !o.penalty.is_undoable()),
             "life-loss continuations are not pure-mana undoable"
+        );
+    }
+
+    // ── ManaSourcePenalty classification ──────────────────────────────
+
+    fn damage_sub_ability(amount: QuantityExpr) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount,
+                target: TargetFilter::Controller,
+                damage_source: None,
+            },
+        )
+    }
+
+    fn mana_ability_with_damage(amount: QuantityExpr) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+        .sub_ability(damage_sub_ability(amount))
+    }
+
+    #[test]
+    fn ancient_tomb_classifies_as_two_damage() {
+        let ability = mana_ability_with_damage(QuantityExpr::Fixed { value: 2 });
+        let penalty = mana_ability_penalty(&ability);
+        assert_eq!(
+            penalty,
+            ManaSourcePenalty::DealsDamageOnResolution {
+                fixed_amount: Some(2)
+            },
+        );
+        assert_eq!(penalty.expected_life_cost(), 2);
+
+        let painland_penalty = ManaSourcePenalty::DealsDamageOnResolution {
+            fixed_amount: Some(1),
+        };
+        assert!(
+            penalty.priority_amount() > painland_penalty.priority_amount(),
+            "2-damage painland should sort after 1-damage painland within the same tier_byte"
+        );
+        assert_eq!(penalty.tier_byte(), painland_penalty.tier_byte());
+    }
+
+    #[test]
+    fn variable_damage_pain_land_uses_none_amount() {
+        let ability = mana_ability_with_damage(QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::HandSize,
+        });
+        let penalty = mana_ability_penalty(&ability);
+        assert_eq!(
+            penalty,
+            ManaSourcePenalty::DealsDamageOnResolution { fixed_amount: None }
+        );
+        assert_eq!(penalty.tier_byte(), 0);
+
+        let fixed_max = ManaSourcePenalty::DealsDamageOnResolution {
+            fixed_amount: Some(u16::MAX - 1),
+        };
+        assert!(
+            penalty.priority_amount() > fixed_max.priority_amount(),
+            "unknown amount (None) must sort strictly worse than any known amount (conservative worst)"
+        );
+    }
+
+    #[test]
+    fn penalty_total_order() {
+        let none = ManaSourcePenalty::None;
+        let irreversible = ManaSourcePenalty::HasIrreversibleContinuation;
+        let damage_1 = ManaSourcePenalty::DealsDamageOnResolution {
+            fixed_amount: Some(1),
+        };
+        let damage_2 = ManaSourcePenalty::DealsDamageOnResolution {
+            fixed_amount: Some(2),
+        };
+        let damage_none = ManaSourcePenalty::DealsDamageOnResolution { fixed_amount: None };
+        let pay_1 = ManaSourcePenalty::PaysLifeOnActivation {
+            fixed_amount: Some(1),
+        };
+        let pay_none = ManaSourcePenalty::PaysLifeOnActivation { fixed_amount: None };
+        let sacrifice = ManaSourcePenalty::Sacrifices;
+
+        // Within tier_byte == 0, priority_amount orders
+        // None < HasIrreversibleContinuation < damage-1 < damage-2 < damage-None
+        // < pay-1 < pay-None.
+        let ordered = [
+            none,
+            irreversible,
+            damage_1,
+            damage_2,
+            damage_none,
+            pay_1,
+            pay_none,
+        ];
+        for pair in ordered.windows(2) {
+            assert!(
+                pair[0].priority_amount() < pair[1].priority_amount(),
+                "{:?} should sort before {:?}",
+                pair[0],
+                pair[1]
+            );
+            assert_eq!(pair[0].tier_byte(), 0);
+            assert_eq!(pair[1].tier_byte(), 0);
+        }
+        // Sacrifice is always last via tier_byte, regardless of priority_amount.
+        assert_eq!(sacrifice.tier_byte(), 1);
+        for p in ordered {
+            assert!(
+                p.tier_byte() < sacrifice.tier_byte(),
+                "{p:?} should sort in a lower tier than Sacrifices"
+            );
+        }
+
+        // Undoability / freeness: only None qualifies.
+        for p in [
+            irreversible,
+            damage_1,
+            damage_none,
+            pay_1,
+            pay_none,
+            sacrifice,
+        ] {
+            assert!(!p.is_undoable(), "{p:?} must not be undoable");
+            assert!(!p.is_free(), "{p:?} must not be free");
+        }
+        assert!(none.is_undoable());
+        assert!(none.is_free());
+
+        // Expected life cost: damage + pay-life contribute fixed amounts;
+        // None / HasIrreversibleContinuation / Sacrifices are 0; dynamic
+        // amounts saturate to 0 per the "don't guess" rule.
+        assert_eq!(none.expected_life_cost(), 0);
+        assert_eq!(irreversible.expected_life_cost(), 0);
+        assert_eq!(damage_1.expected_life_cost(), 1);
+        assert_eq!(damage_2.expected_life_cost(), 2);
+        assert_eq!(damage_none.expected_life_cost(), 0);
+        assert_eq!(pay_1.expected_life_cost(), 1);
+        assert_eq!(pay_none.expected_life_cost(), 0);
+        assert_eq!(sacrifice.expected_life_cost(), 0);
+
+        // Full fixture sort — simulates the `casting_costs.rs` auto-tap key
+        // `(tier_byte, card_tier, priority_amount)` for a representative
+        // mix of card types. Pre-refactor behavior: basic land < painland-1
+        // < painland-2 < mana dork < animated land < deprioritized < Treasure.
+        #[derive(Debug)]
+        struct Fixture {
+            label: &'static str,
+            card_tier: u32,
+            penalty: ManaSourcePenalty,
+        }
+        let mut fixtures = [
+            Fixture {
+                label: "basic land",
+                card_tier: 0,
+                penalty: none,
+            },
+            Fixture {
+                label: "depletion land",
+                card_tier: 0,
+                penalty: irreversible,
+            },
+            Fixture {
+                label: "painland-1",
+                card_tier: 0,
+                penalty: damage_1,
+            },
+            Fixture {
+                label: "painland-2",
+                card_tier: 0,
+                penalty: damage_2,
+            },
+            Fixture {
+                label: "mana dork",
+                card_tier: 1,
+                penalty: none,
+            },
+            Fixture {
+                label: "animated land",
+                card_tier: 2,
+                penalty: none,
+            },
+            Fixture {
+                label: "deprioritized rock",
+                card_tier: 3,
+                penalty: none,
+            },
+            Fixture {
+                label: "treasure",
+                card_tier: 0,
+                penalty: sacrifice,
+            },
+        ];
+        fixtures.sort_by_key(|f| {
+            (
+                f.penalty.tier_byte() as u32,
+                f.card_tier,
+                f.penalty.priority_amount(),
+            )
+        });
+        let sorted_labels: Vec<_> = fixtures.iter().map(|f| f.label).collect();
+        assert_eq!(
+            sorted_labels,
+            vec![
+                "basic land",
+                "depletion land",
+                "painland-1",
+                "painland-2",
+                "mana dork",
+                "animated land",
+                "deprioritized rock",
+                "treasure",
+            ],
+            "full fixture sort must match the pre-refactor auto-tap behavior, \
+             with HasIrreversibleContinuation wedged between basics and painlands"
+        );
+    }
+
+    /// Regression anchor: synthesize a mana ability whose continuation chain
+    /// contains an effect we don't otherwise classify (here `Untap` of self
+    /// stands in for the "self-haste / depletion-counter / unimplemented tail"
+    /// class). The classifier must route it to `HasIrreversibleContinuation`
+    /// — never to `None` — so `is_undoable()` returns `false`.
+    #[test]
+    fn unrecognized_chain_effect_classifies_as_irreversible() {
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            // Stand-in for an unclassified non-mana side effect; the classifier
+            // is structural — any non-`Mana` effect in the chain triggers the
+            // irreversible variant.
+            Effect::Unimplemented {
+                name: "regression fixture".to_string(),
+                description: None,
+            },
+        ));
+
+        let penalty = mana_ability_penalty(&ability);
+        assert_eq!(penalty, ManaSourcePenalty::HasIrreversibleContinuation);
+        assert!(!penalty.is_undoable());
+        assert!(!penalty.is_free());
+        assert_eq!(penalty.tier_byte(), 0);
+        assert_eq!(penalty.expected_life_cost(), 0);
+        assert!(
+            penalty.priority_amount() > ManaSourcePenalty::None.priority_amount(),
+            "irreversible-continuation must sort strictly worse than None"
+        );
+        assert!(
+            penalty.priority_amount()
+                < ManaSourcePenalty::DealsDamageOnResolution {
+                    fixed_amount: Some(1),
+                }
+                .priority_amount(),
+            "irreversible-continuation must sort strictly better than any painland"
+        );
+    }
+
+    #[test]
+    fn none_penalty_implies_pure_mana_chain() {
+        // CR 605.3b: This sweep is the empirical guarantee that the type
+        // system's promise — `ManaSourcePenalty::None` ⇒ pure-mana chain ⇒
+        // `is_undoable()` — actually holds across every printed mana ability
+        // the parser currently emits. Any chain shape that carries a non-mana
+        // continuation must classify into `HasIrreversibleContinuation` (or a
+        // more specific damage / pay-life / sacrifice variant); a `None`
+        // result with a non-mana continuation in its sub-graph is a
+        // classifier bug, not a parser bug.
+        use crate::database::CardDatabase;
+        use crate::game::mana_abilities::is_mana_ability;
+        use std::path::Path;
+
+        // Walk up from the crate root to find the repo's client/public
+        // card-data.json. Tests may run from the workspace root or the
+        // crate dir depending on the runner; try both.
+        let candidates = [
+            Path::new("client/public/card-data.json"),
+            Path::new("../../client/public/card-data.json"),
+        ];
+        let Some(path) = candidates.iter().find(|p| p.exists()).copied() else {
+            eprintln!(
+                "SKIP none_penalty_implies_pure_mana_chain: card-data.json missing \
+                 (primary CI lanes regenerate it; local runs without it skip)"
+            );
+            return;
+        };
+        let db = match CardDatabase::from_export(path) {
+            Ok(db) => db,
+            Err(err) => {
+                eprintln!("SKIP none_penalty_implies_pure_mana_chain: load error: {err}");
+                return;
+            }
+        };
+
+        fn find_non_mana_side_effect(ability: &AbilityDefinition) -> Option<&Effect> {
+            // `ability.effect` is the Mana production itself; only scan the
+            // continuation chain.
+            if let Some(sub) = ability.sub_ability.as_deref() {
+                if let Some(bad) = walk(sub) {
+                    return Some(bad);
+                }
+            }
+            if let Some(other) = ability.else_ability.as_deref() {
+                if let Some(bad) = walk(other) {
+                    return Some(bad);
+                }
+            }
+            return None;
+
+            fn walk(ability: &AbilityDefinition) -> Option<&Effect> {
+                if !matches!(*ability.effect, Effect::Mana { .. }) {
+                    return Some(&ability.effect);
+                }
+                if let Some(sub) = ability.sub_ability.as_deref() {
+                    if let Some(bad) = walk(sub) {
+                        return Some(bad);
+                    }
+                }
+                if let Some(other) = ability.else_ability.as_deref() {
+                    if let Some(bad) = walk(other) {
+                        return Some(bad);
+                    }
+                }
+                None
+            }
+        }
+
+        let mut offenders: Vec<(String, String)> = Vec::new();
+        for (name, face) in db.face_iter() {
+            for ability in &face.abilities {
+                if !is_mana_ability(ability) {
+                    continue;
+                }
+                if mana_ability_penalty(ability) != ManaSourcePenalty::None {
+                    continue;
+                }
+                if let Some(bad) = find_non_mana_side_effect(ability) {
+                    offenders.push((name.to_string(), format!("{bad:?}")));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "ManaSourcePenalty::None classification is leaking impure chains \
+             — these cards should classify as HasIrreversibleContinuation \
+             (or a more specific harm variant): {offenders:#?}"
         );
     }
 }
