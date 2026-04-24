@@ -1602,10 +1602,24 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .and_then(|obj| obj.class_level)
             .is_some_and(|current| current >= *level),
-        // "if you cast it" — true when the source was cast (regardless of zone).
-        TriggerCondition::WasCast => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.cast_from_zone.is_some()),
+        // CR 601.2: "if you cast it" — true when the entering/affected object was
+        // cast as a spell (regardless of origin zone). For ETB-based triggers like
+        // Light-Paws, Emperor's Voice ("Whenever an Aura you control enters, if you
+        // cast it..."), the trigger source is the permanent with the ability, not the
+        // entering Aura — so we must check the entering object from the trigger event,
+        // falling back to source_id for self-referential cases (Cascade's SpellCast
+        // event, Discover ETBs where source == cast spell).
+        TriggerCondition::WasCast => {
+            let checked_id = trigger_event
+                .and_then(|e| match e {
+                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .or(source_id);
+            checked_id
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|obj| obj.cast_from_zone.is_some())
+        }
         // CR 601.2: "if it wasn't cast" / "if none of them were cast" — true when
         // the entering creature was NOT cast (ninjutsu, reanimation, flicker, etc.).
         // For batch-enters triggers (e.g., Satoru, the Infiltrator), the trigger source
@@ -6212,6 +6226,126 @@ pub mod tests {
             trigger_controller,
             None,
             Some(&event),
+        ));
+    }
+
+    /// Regression tests for `TriggerCondition::WasCast` — the condition backing
+    /// "if you cast it" intervening-if clauses. For ETB-based triggers whose
+    /// source is a separate permanent (e.g. Light-Paws, Emperor's Voice:
+    /// "Whenever an Aura you control enters, if you cast it..."), the check
+    /// must inspect the entering object from the `ZoneChanged` event rather
+    /// than the trigger source. CR 601.2 / CR 603.4.
+    #[test]
+    fn was_cast_uses_entering_object_from_zone_changed_event() {
+        let mut state = setup();
+        // Light-Paws is on the battlefield; the Aura is the entering object.
+        let light_paws = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Light-Paws".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        // Aura was cast from hand — cast_from_zone is Some.
+        state.objects.get_mut(&aura).unwrap().cast_from_zone = Some(Zone::Hand);
+        // Light-Paws was NOT cast this ETB event (it's been in play).
+        state.objects.get_mut(&light_paws).unwrap().cast_from_zone = None;
+
+        let event = zone_changed_event(
+            aura,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Enchantment],
+            vec!["Aura"],
+        );
+
+        // source_id = Light-Paws, but entering object in the event is the Aura.
+        // WasCast must read the Aura's cast_from_zone, not Light-Paws's.
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::WasCast,
+            PlayerId(0),
+            Some(light_paws),
+            Some(&event),
+        ));
+    }
+
+    #[test]
+    fn was_cast_false_when_aura_put_onto_battlefield_not_cast() {
+        let mut state = setup();
+        let light_paws = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Light-Paws".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        // Aura entered via reanimation / Academy Rector-style "put onto battlefield".
+        state.objects.get_mut(&aura).unwrap().cast_from_zone = None;
+        state.objects.get_mut(&light_paws).unwrap().cast_from_zone = None;
+
+        let event = zone_changed_event(
+            aura,
+            Zone::Graveyard,
+            Zone::Battlefield,
+            vec![CoreType::Enchantment],
+            vec!["Aura"],
+        );
+
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::WasCast,
+            PlayerId(0),
+            Some(light_paws),
+            Some(&event),
+        ));
+    }
+
+    #[test]
+    fn was_cast_self_referential_falls_back_to_source_id() {
+        // Cascade / Discover-style: the trigger source IS the cast spell,
+        // and no ZoneChanged event is attached (SpellCast event instead).
+        // WasCast should fall back to source_id.
+        let mut state = setup();
+        let cast_spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cast Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&cast_spell).unwrap().cast_from_zone = Some(Zone::Hand);
+
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::WasCast,
+            PlayerId(0),
+            Some(cast_spell),
+            None,
+        ));
+
+        // And false when the self-referential source was not cast.
+        state.objects.get_mut(&cast_spell).unwrap().cast_from_zone = None;
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::WasCast,
+            PlayerId(0),
+            Some(cast_spell),
+            None,
         ));
     }
 }
