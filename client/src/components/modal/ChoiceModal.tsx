@@ -14,8 +14,8 @@ interface ChoiceModalProps {
   options: ChoiceOption[];
   onChoose: (id: string) => void;
   onClose?: () => void;
-  /** When set, render a clipped preview of the card's Oracle text band. */
-  cardName?: string;
+  /** Card name to preview above the options. Omit to skip the preview. */
+  previewCardName?: string;
 }
 
 export function ChoiceModal({
@@ -24,7 +24,7 @@ export function ChoiceModal({
   options,
   onChoose,
   onClose,
-  cardName,
+  previewCardName,
 }: ChoiceModalProps) {
   return (
     <AnimatePresence>
@@ -57,9 +57,9 @@ export function ChoiceModal({
               </p>
             )}
           </div>
-          {cardName && (
+          {previewCardName && (
             <div className="px-3 pt-3 lg:px-5 lg:pt-4">
-              <CardTextboxPreview cardName={cardName} />
+              <CardTextboxPreview cardName={previewCardName} />
             </div>
           )}
           <div className="px-3 py-3 lg:px-5 lg:py-5">
