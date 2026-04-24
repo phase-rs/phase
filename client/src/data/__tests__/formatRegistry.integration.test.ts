@@ -2,13 +2,6 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, it, expect, beforeAll } from "vitest";
 
-// `getFormatRegistry` is a new WASM export added alongside this test. Until
-// `./scripts/build-wasm.sh` runs, the regenerated TS bindings at
-// `client/src/wasm/engine.d.ts` may not include it, which would fail
-// typecheck. The @ts-expect-error is self-removing: once bindings are
-// regenerated, the error directive itself becomes the TS error and forces
-// deletion on the next touch.
-// @ts-expect-error — regenerated bindings expose getFormatRegistry after WASM build
 import init, { getFormatRegistry } from "@wasm/engine";
 import { FORMAT_REGISTRY } from "../formatRegistry";
 import type { FormatMetadata } from "../../adapter/types";
