@@ -2120,11 +2120,13 @@ fn score_combination(
 /// Upper bound = (mana currently in pool) + (mana producible from untapped,
 /// free-to-tap sources under the caster's control) − (fixed portion of cost).
 ///
-/// Free-to-tap = mana abilities whose only cost is {T}: i.e., `ManaSourceOption`
-/// entries with `requires_sacrifice == false` and `requires_life_payment == false`.
-/// Costed mana abilities (e.g. "1, T: Add {C}") are excluded for v1 — they cascade
-/// and would require a search to bound precisely. Treasure tokens are likewise
-/// excluded because they require sacrifice.
+/// Free-to-tap = mana abilities whose activation imposes no irreversible cost
+/// on the player: i.e., `ManaSourceOption` entries with `requires_sacrifice ==
+/// false` and `harms_controller == false`. Costed mana abilities (e.g. "1, T:
+/// Add {C}") are excluded for v1 — they cascade and would require a search to
+/// bound precisely. Treasure tokens are likewise excluded because they require
+/// sacrifice; pain lands and pay-life sources are excluded because activating
+/// them for extra X damages or drains the caster.
 ///
 /// Each untapped producer counts once, regardless of how many color options it
 /// offers (a shock land is still one tap → one mana).
@@ -2166,7 +2168,7 @@ pub fn max_x_value(state: &GameState, player: PlayerId, cost: &ManaCost) -> u32 
         .filter(|&&id| {
             mana_sources::activatable_mana_options(state, id, player)
                 .iter()
-                .any(|opt| !opt.requires_sacrifice && !opt.requires_life_payment)
+                .any(|opt| !opt.requires_sacrifice && !opt.harms_controller)
         })
         .count() as u32;
 

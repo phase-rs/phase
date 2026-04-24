@@ -27,12 +27,11 @@ pub struct ManaSourceOption {
     /// True for Treasure-style costs (`Composite { Tap, Sacrifice }`).
     /// Used by auto-tap to deprioritize sacrifice sources as last resort.
     pub requires_sacrifice: bool,
-    /// True for costs like `{T}, Pay 1 life`.
-    /// Used by auto-tap to prefer equivalent sources that do not spend life.
-    pub requires_life_payment: bool,
-    /// True when resolving this mana ability can damage its controller or
-    /// make them lose life (e.g., pain lands, pay-life mana abilities).
-    /// Used by auto-pay to prefer equivalent sources that don't harm the user.
+    /// True when activating this mana ability can damage its controller or
+    /// make them lose life — from a `PayLife` cost component, or from a
+    /// resolution-time sub-effect (e.g., pain lands dealing 1 damage to the
+    /// controller). Used by auto-pay to prefer equivalent sources that don't
+    /// harm the user.
     pub harms_controller: bool,
     /// True iff manual `UntapLandForMana` can fully reverse this activation:
     /// tap-only cost and no non-mana side effects in the resolution graph.
@@ -74,7 +73,7 @@ fn cost_requires_sacrifice(cost: &Option<AbilityCost>) -> bool {
     }
 }
 
-fn cost_requires_life_payment(cost: &Option<AbilityCost>) -> bool {
+fn cost_has_life_payment(cost: &Option<AbilityCost>) -> bool {
     match cost {
         Some(AbilityCost::PayLife { .. }) => true,
         Some(AbilityCost::Composite { costs }) => costs
@@ -87,6 +86,9 @@ fn cost_requires_life_payment(cost: &Option<AbilityCost>) -> bool {
 fn cost_is_reversible_tap_only(cost: &Option<AbilityCost>) -> bool {
     match cost {
         Some(AbilityCost::Tap) => true,
+        // A `Composite` cost with zero components is malformed from our parser's
+        // perspective — treat it as non-tap so we don't claim a cost we don't
+        // understand is safely reversible.
         Some(AbilityCost::Composite { costs }) => {
             !costs.is_empty() && costs.iter().all(|c| matches!(c, AbilityCost::Tap))
         }
@@ -126,7 +128,7 @@ fn chain_is_all_mana(ability: &AbilityDefinition) -> bool {
 }
 
 pub(crate) fn mana_ability_harms_controller(ability: &AbilityDefinition) -> bool {
-    cost_requires_life_payment(&ability.cost) || chain_harms_controller(ability)
+    cost_has_life_payment(&ability.cost) || chain_harms_controller(ability)
 }
 
 pub(crate) fn mana_ability_is_undoable(ability: &AbilityDefinition) -> bool {
@@ -229,7 +231,6 @@ fn land_mana_options(
                 ability_index: None,
                 mana_type,
                 requires_sacrifice: false,
-                requires_life_payment: false,
                 harms_controller: false,
                 undoable: true,
                 atomic_combination: None,
@@ -273,7 +274,6 @@ fn scan_mana_abilities(
         }
 
         let sacrifice = cost_requires_sacrifice(&ability.cost);
-        let life_payment = cost_requires_life_payment(&ability.cost);
         let harms_controller = mana_ability_harms_controller(ability);
         let undoable = mana_ability_is_undoable(ability);
         for row in emit_source_rows(state, controller, object_id, ability_index, ability) {
@@ -282,7 +282,6 @@ fn scan_mana_abilities(
                 ability_index: Some(ability_index),
                 mana_type: row.mana_type,
                 requires_sacrifice: sacrifice,
-                requires_life_payment: life_payment,
                 harms_controller,
                 undoable,
                 atomic_combination: row.atomic_combination,
@@ -785,7 +784,6 @@ mod tests {
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].mana_type, ManaType::Green);
         assert!(!options[0].requires_sacrifice);
-        assert!(!options[0].requires_life_payment);
         assert!(!options[0].harms_controller);
         assert!(options[0].undoable);
     }
@@ -868,10 +866,6 @@ mod tests {
             "all Treasure options should require sacrifice"
         );
         assert!(
-            options.iter().all(|o| !o.requires_life_payment),
-            "Treasure options should not require life payment"
-        );
-        assert!(
             options.iter().all(|o| !o.harms_controller),
             "Treasure should not be treated as a controller-harming source"
         );
@@ -884,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn life_payment_mana_source_marks_life_cost() {
+    fn life_payment_mana_source_marks_controller_harm() {
         let mut state = GameState::new_two_player(42);
         let town = create_object(
             &mut state,
@@ -923,10 +917,6 @@ mod tests {
         assert!(
             !options.is_empty(),
             "Starting Town should expose mana options"
-        );
-        assert!(
-            options.iter().all(|o| o.requires_life_payment),
-            "all colored Starting Town options should be marked as life-payment options"
         );
         assert!(
             options.iter().all(|o| !o.requires_sacrifice),

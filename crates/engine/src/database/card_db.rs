@@ -323,5 +323,4 @@ mod tests {
             Some(LegalityStatus::NotLegal)
         );
     }
-
 }
