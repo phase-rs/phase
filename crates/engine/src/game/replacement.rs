@@ -460,7 +460,7 @@ fn draw_replacement_count(
         .as_deref()?;
 
     match &*execute.effect {
-        Effect::Draw { count: qty } if execute.sub_ability.is_none() => {
+        Effect::Draw { count: qty, .. } if execute.sub_ability.is_none() => {
             let resolved = resolve_draw_replacement_quantity(qty, *count)?;
             Some(resolved.max(0) as u32)
         }
@@ -2562,6 +2562,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
+                    target: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -2602,6 +2603,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
+                    target: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -2635,6 +2637,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
+                    target: TargetFilter::Controller,
                 },
             ));
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -4224,6 +4227,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
+                    target: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);

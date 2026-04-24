@@ -856,6 +856,7 @@ fn clue_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
         },
     )
     .cost(AbilityCost::Composite {
@@ -880,6 +881,7 @@ fn blood_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
         },
     )
     .cost(AbilityCost::Composite {

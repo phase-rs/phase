@@ -455,6 +455,7 @@ mod tests {
         let resolved = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             Vec::new(),
             copy_id,

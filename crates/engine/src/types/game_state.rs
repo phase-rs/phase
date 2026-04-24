@@ -3291,6 +3291,7 @@ mod tests {
             ability: ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
                 vec![],
                 ObjectId(5),
@@ -3328,6 +3329,7 @@ mod tests {
             ability: ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
                 vec![],
                 ObjectId(5),

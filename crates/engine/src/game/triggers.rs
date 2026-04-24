@@ -719,6 +719,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 if monarch_id == state.active_player {
                     let draw_effect = Effect::Draw {
                         count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
                     };
                     let draw_ability =
                         ResolvedAbility::new(draw_effect, Vec::new(), ObjectId(0), monarch_id);
@@ -2088,6 +2089,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2112,6 +2114,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2282,6 +2285,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2341,6 +2345,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2365,6 +2370,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2410,6 +2416,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .valid_card(TargetFilter::Typed(TypedFilter::creature()))
@@ -2647,6 +2654,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
                 },
             )
             .sub_ability(AbilityDefinition::new(
@@ -3064,6 +3072,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -3181,6 +3190,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             )));
             spell.trigger_definitions.push(trigger);
@@ -3194,6 +3204,7 @@ pub mod tests {
                 ability: Some(ResolvedAbility::new(
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
                     },
                     vec![],
                     spell_id,
@@ -3261,6 +3272,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .valid_card(TargetFilter::Typed(
@@ -4307,6 +4319,7 @@ pub mod tests {
                     AbilityKind::Database,
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
                     },
                 ))
                 .destination(Zone::Battlefield),
@@ -4390,6 +4403,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -4513,6 +4527,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .origin(Zone::Battlefield)
@@ -4577,6 +4592,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .origin(Zone::Battlefield)
@@ -4640,6 +4656,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .origin(Zone::Battlefield)
@@ -5298,6 +5315,7 @@ pub mod tests {
                     AbilityKind::Database,
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
                     },
                 ))
                 .destination(Zone::Battlefield);
@@ -5352,6 +5370,7 @@ pub mod tests {
                         AbilityKind::Database,
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
                         },
                     ))
                     .origin(Zone::Battlefield)
@@ -5384,6 +5403,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             ));
         def.valid_card = type_filter;
@@ -5739,6 +5759,7 @@ mod dedup_regression_tests {
                 AbilityKind::Database,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             ))
     }

@@ -675,6 +675,142 @@ pub fn stack_is_empty(state: &GameState) -> bool {
     state.stack.is_empty()
 }
 
+// ── Display-only stack pressure + grouping ──────────────────────────────
+//
+// These are UX pacing/presentation primitives, not a rules concept. No CR
+// citation — the Comprehensive Rules say nothing about how quickly the
+// client should animate stack resolution or whether identical triggers
+// should be collapsed visually. Owned by the engine so every consumer
+// (browser, desktop, server) shares one authoritative threshold and one
+// authoritative grouping predicate. Frontend maps StackPressure → animation
+// multiplier; it never decides what "identical" means or when to skip a
+// mount animation.
+
+/// Size at which the stack transitions out of "Normal" animation pacing.
+pub const STACK_PRESSURE_ELEVATED: usize = 10;
+/// Size at which stack animation must be noticeably faster.
+pub const STACK_PRESSURE_RAPID: usize = 30;
+/// Size at which per-entry mount animation should be skipped entirely.
+pub const STACK_PRESSURE_INSTANT: usize = 100;
+
+/// Display-only pacing bucket for stack resolution animations. Not a rules
+/// concept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StackPressure {
+    Normal,
+    Elevated,
+    Rapid,
+    Instant,
+}
+
+/// Compute the current stack pressure. Just-in-time — never stored on
+/// GameState per CLAUDE.md's "only compute when needed" guideline.
+pub fn stack_pressure(state: &GameState) -> StackPressure {
+    match state.stack.len() {
+        n if n >= STACK_PRESSURE_INSTANT => StackPressure::Instant,
+        n if n >= STACK_PRESSURE_RAPID => StackPressure::Rapid,
+        n if n >= STACK_PRESSURE_ELEVATED => StackPressure::Elevated,
+        _ => StackPressure::Normal,
+    }
+}
+
+/// A coalesced group of "visually identical" stack entries. The frontend
+/// renders one badge per group with `count` as a ×N suffix on the
+/// representative card.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StackDisplayGroup {
+    /// The first entry in the group — frontend uses its card image/name.
+    pub representative: ObjectId,
+    /// Number of coalesced entries (always ≥ 1).
+    pub count: u32,
+    /// All coalesced entry ids, in stack order. Used by UI animations that
+    /// need to key per-entry (e.g., fade each out in turn on resolution).
+    pub member_ids: Vec<ObjectId>,
+}
+
+/// Produce a display-grouped view of the stack. Adjacent entries with the
+/// same (source card name, kind discriminant, trigger description) are
+/// coalesced. Non-adjacent look-alikes stay separate — coalescing only
+/// adjacent entries preserves the actual resolution order for cases like
+/// stacked triggers from different sources interleaving.
+pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
+    let mut out: Vec<StackDisplayGroup> = Vec::new();
+    // Track the previous entry's key alongside the output vector so we can
+    // decide "merge or push" in O(1) per entry instead of re-scanning the
+    // stack to look up the representative each iteration.
+    let mut last_key: Option<(
+        String,
+        &'static str,
+        Option<String>,
+        Vec<crate::types::ability::TargetRef>,
+    )> = None;
+    for entry in &state.stack {
+        // KeywordAction entries (Equip/Crew/Station/Saddle) carry their
+        // target inside the enum variant, not via ResolvedAbility, so the
+        // target-aware signature cannot see it. Rather than reach into
+        // every keyword payload just to discriminate two consecutive
+        // keyword activations (a vanishingly rare scenario), we opt them
+        // out of coalescing: always push a fresh group and clear
+        // `last_key` so a following non-keyword entry also starts fresh.
+        if matches!(entry.kind, StackEntryKind::KeywordAction { .. }) {
+            out.push(StackDisplayGroup {
+                representative: entry.id,
+                count: 1,
+                member_ids: vec![entry.id],
+            });
+            last_key = None;
+            continue;
+        }
+        let (name, tag, desc, targets) = group_key(state, entry);
+        let owned_key = (name, tag, desc.map(str::to_owned), targets.to_vec());
+        if last_key.as_ref() == Some(&owned_key) {
+            let last = out.last_mut().unwrap();
+            last.count += 1;
+            last.member_ids.push(entry.id);
+        } else {
+            out.push(StackDisplayGroup {
+                representative: entry.id,
+                count: 1,
+                member_ids: vec![entry.id],
+            });
+            last_key = Some(owned_key);
+        }
+    }
+    out
+}
+
+/// Grouping signature for `stack_display_groups`. Two entries coalesce iff
+/// their signatures are equal. Includes the resolved target vector so
+/// visually-identical triggers that fire against different targets (e.g.
+/// N copies of "target player loses 1 life" picking different players)
+/// remain separate — coalescing them would misrepresent the resolution.
+fn group_key<'a>(
+    state: &'a GameState,
+    entry: &'a StackEntry,
+) -> (
+    String,
+    &'static str,
+    Option<&'a str>,
+    &'a [crate::types::ability::TargetRef],
+) {
+    let source_name = state
+        .objects
+        .get(&entry.source_id)
+        .map(|o| o.name.clone())
+        .unwrap_or_default();
+    let (tag, description) = match &entry.kind {
+        StackEntryKind::Spell { .. } => ("spell", None),
+        StackEntryKind::ActivatedAbility { .. } => ("activated", None),
+        StackEntryKind::TriggeredAbility { description, .. } => {
+            ("triggered", description.as_deref())
+        }
+        StackEntryKind::KeywordAction { .. } => ("keyword", None),
+    };
+    let targets: &[crate::types::ability::TargetRef] =
+        entry.ability().map(|a| a.targets.as_slice()).unwrap_or(&[]);
+    (source_name, tag, description, targets)
+}
+
 /// CR 110.4: Permanent types that resolve to the battlefield.
 fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
     use crate::types::card_type::CoreType;
@@ -1384,6 +1520,7 @@ mod tests {
             &mut state,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         );
 
@@ -1464,6 +1601,269 @@ mod tests {
             "Flashback spell should be exiled on fizzle, not sent to graveyard"
         );
     }
+
+    #[test]
+    fn stack_pressure_boundaries() {
+        let mut state = GameState::new_two_player(42);
+        assert_eq!(stack_pressure(&state), StackPressure::Normal);
+
+        // Synthesize entries; kind/source doesn't matter for pressure.
+        fn push_n(state: &mut GameState, n: usize) {
+            use crate::types::card_type::CoreType;
+            use crate::types::identifiers::{CardId, ObjectId};
+            let src = crate::game::zones::create_object(
+                state,
+                CardId(1),
+                PlayerId(0),
+                "filler".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&src)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            for i in 0..n {
+                state.stack.push(StackEntry {
+                    id: ObjectId(100_000 + i as u64),
+                    source_id: src,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::Spell {
+                        card_id: CardId(1),
+                        ability: None,
+                        casting_variant: CastingVariant::default(),
+                        actual_mana_spent: 0,
+                    },
+                });
+            }
+        }
+
+        // 9 entries → still Normal
+        push_n(&mut state, 9);
+        assert_eq!(stack_pressure(&state), StackPressure::Normal);
+        // 10th crosses Elevated
+        push_n(&mut state, 1);
+        assert_eq!(stack_pressure(&state), StackPressure::Elevated);
+        // 29 total → still Elevated
+        push_n(&mut state, 19);
+        assert_eq!(stack_pressure(&state), StackPressure::Elevated);
+        // 30th crosses Rapid
+        push_n(&mut state, 1);
+        assert_eq!(stack_pressure(&state), StackPressure::Rapid);
+        // 99 total → still Rapid
+        push_n(&mut state, 69);
+        assert_eq!(stack_pressure(&state), StackPressure::Rapid);
+        // 100th crosses Instant
+        push_n(&mut state, 1);
+        assert_eq!(stack_pressure(&state), StackPressure::Instant);
+    }
+
+    #[test]
+    fn stack_display_groups_coalesce_identical_triggers() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let mk_effect = || Effect::Unimplemented {
+            name: "test".to_string(),
+            description: None,
+        };
+
+        // 100 Scute-Swarm-like sources all sharing the same name — each fires
+        // its own copy of the ETB trigger. The group key (source name + kind
+        // + description) collapses them.
+        for i in 0..100 {
+            let sid = crate::game::zones::create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Scute Swarm".to_string(),
+                Zone::Battlefield,
+            );
+            state.stack.push(StackEntry {
+                id: ObjectId(10_000 + i as u64),
+                source_id: sid,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: sid,
+                    ability: Box::new(ResolvedAbility::new(mk_effect(), vec![], sid, PlayerId(0))),
+                    condition: None,
+                    trigger_event: None,
+                    description: Some("landfall copy trigger".to_string()),
+                },
+            });
+        }
+
+        let groups = stack_display_groups(&state);
+        assert_eq!(
+            groups.len(),
+            1,
+            "100 identical Scute Swarm triggers should collapse to one group"
+        );
+        assert_eq!(groups[0].count, 100);
+        assert_eq!(groups[0].member_ids.len(), 100);
+    }
+
+    #[test]
+    fn stack_display_groups_distinguish_different_sources() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let s1 = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scute Swarm".to_string(),
+            Zone::Battlefield,
+        );
+        let s2 = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Impact Tremors".to_string(),
+            Zone::Battlefield,
+        );
+        let mk_effect = || Effect::Unimplemented {
+            name: "test".to_string(),
+            description: None,
+        };
+        let mk_entry = |sid| StackEntry {
+            id: sid,
+            source_id: sid,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: sid,
+                ability: Box::new(ResolvedAbility::new(mk_effect(), vec![], sid, PlayerId(0))),
+                condition: None,
+                trigger_event: None,
+                description: None,
+            },
+        };
+        state.stack.push(mk_entry(s1));
+        state.stack.push(mk_entry(s2));
+
+        let groups = stack_display_groups(&state);
+        assert_eq!(
+            groups.len(),
+            2,
+            "different-named sources must stay separate"
+        );
+        assert_eq!(groups[0].count, 1);
+        assert_eq!(groups[1].count, 1);
+    }
+
+    /// Two visually-identical triggers that target different players must NOT
+    /// coalesce — coalescing them would misrepresent the resolved targeting.
+    /// Regression guard for the target-signature component of `group_key`.
+    #[test]
+    fn stack_display_groups_distinguish_different_targets() {
+        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let sid = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Syphon Life".to_string(),
+            Zone::Battlefield,
+        );
+        let mk_effect = || Effect::Unimplemented {
+            name: "test".to_string(),
+            description: None,
+        };
+        let mk_entry = |id: u64, target: TargetRef| StackEntry {
+            id: ObjectId(id),
+            source_id: sid,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: sid,
+                ability: Box::new(ResolvedAbility::new(
+                    mk_effect(),
+                    vec![target],
+                    sid,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: Some("target player loses 1 life".to_string()),
+            },
+        };
+        state
+            .stack
+            .push(mk_entry(10_001, TargetRef::Player(PlayerId(0))));
+        state
+            .stack
+            .push(mk_entry(10_002, TargetRef::Player(PlayerId(1))));
+
+        let groups = stack_display_groups(&state);
+        assert_eq!(
+            groups.len(),
+            2,
+            "triggers with divergent targets must not coalesce: got {:?}",
+            groups
+        );
+    }
+
+    /// KeywordAction entries (Equip/Crew/etc.) carry their targets inside
+    /// the enum variant, invisible to the target-aware `group_key`. To
+    /// avoid an M1-style target-coalescing bug, `stack_display_groups`
+    /// opts keyword-action entries out of coalescing entirely — each gets
+    /// its own group regardless of source/target identity. Regression
+    /// guard for that behavior.
+    #[test]
+    fn stack_display_groups_never_coalesce_keyword_actions() {
+        use crate::types::ability::KeywordAction;
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let equip = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_a = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears A".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_b = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Grizzly Bears B".to_string(),
+            Zone::Battlefield,
+        );
+        let mk_entry = |id: u64, target: ObjectId| StackEntry {
+            id: ObjectId(id),
+            source_id: equip,
+            controller: PlayerId(0),
+            kind: StackEntryKind::KeywordAction {
+                action: KeywordAction::Equip {
+                    equipment_id: equip,
+                    target_creature_id: target,
+                },
+            },
+        };
+        state.stack.push(mk_entry(10_001, creature_a));
+        state.stack.push(mk_entry(10_002, creature_b));
+
+        let groups = stack_display_groups(&state);
+        assert_eq!(
+            groups.len(),
+            2,
+            "two Equip activations on different targets must not coalesce; got {:?}",
+            groups
+        );
+    }
+
     /// CR 702.27a: Build an instant spell on the stack with a draw effect and
     /// a `Keyword::Buyback` on the game object. `buyback_paid` controls
     /// `ability.context.additional_cost_paid`. Returns the spell's object id.
@@ -1490,6 +1890,7 @@ mod tests {
         let mut resolved = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             spell_id,

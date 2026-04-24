@@ -354,6 +354,7 @@ fn test_mana_payment_cancel_clears_pending_cast() {
     let ability = ResolvedAbility::new(
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
         },
         vec![],
         spell_id,

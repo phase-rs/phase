@@ -303,6 +303,7 @@ mod tests {
             crate::types::ability::AbilityKind::Activated,
             crate::types::ability::Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
             },
         )];
         obj.color = vec![ManaColor::Green];

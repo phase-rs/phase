@@ -3663,6 +3663,7 @@ mod tests {
                 ability: Some(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: crate::types::ability::TargetFilter::Controller,
                     },
                     vec![],
                     spell_id,
@@ -3687,6 +3688,7 @@ mod tests {
                 ability: ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
+                        target: crate::types::ability::TargetFilter::Controller,
                     },
                     vec![],
                     ObjectId(10),

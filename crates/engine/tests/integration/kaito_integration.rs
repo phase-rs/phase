@@ -158,12 +158,14 @@ fn setup_kaito_on_battlefield(phase: Phase) -> (GameRunner, ObjectId) {
                         filter: PlayerFilter::OpponentLostLife,
                     },
                 },
+                target: TargetFilter::Controller,
             },
         );
         let surveil_ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Surveil {
                 count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
             },
         )
         .cost(AbilityCost::Loyalty { amount: 0 })

@@ -2324,6 +2324,7 @@ fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<Replace
                         }),
                         offset,
                     },
+                    target: TargetFilter::Controller,
                 },
             ))
             .description(text.to_string()),
@@ -4807,7 +4808,8 @@ mod tests {
         assert!(matches!(
             def.execute.as_deref().map(|ability| &*ability.effect),
             Some(Effect::Draw {
-                count: QuantityExpr::Offset { inner, offset }
+                count: QuantityExpr::Offset { inner, offset },
+                ..
             }) if matches!(
                 &**inner,
                 QuantityExpr::Ref {

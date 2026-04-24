@@ -2033,6 +2033,7 @@ mod tests {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::ExiledFromHandThisResolution,
                     },
+                    target: TargetFilter::Controller,
                 },
                 vec![],
                 ObjectId(100),

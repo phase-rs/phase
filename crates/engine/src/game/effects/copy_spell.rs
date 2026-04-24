@@ -277,6 +277,7 @@ mod tests {
         let original_ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(10),

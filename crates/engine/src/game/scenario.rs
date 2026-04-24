@@ -1424,6 +1424,7 @@ mod tests {
             let mut builder = scenario.add_creature(P0, "Wizard", 1, 1);
             builder.with_ability(Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             });
             builder.with_static(StaticMode::Continuous);
             builder.id()

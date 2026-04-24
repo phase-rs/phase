@@ -201,6 +201,7 @@ pub(super) fn handle_resolution_choice(
                         let draw = ResolvedAbility::new(
                             crate::types::ability::Effect::Draw {
                                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                                target: crate::types::ability::TargetFilter::Controller,
                             },
                             vec![],
                             ObjectId(0),
@@ -224,6 +225,7 @@ pub(super) fn handle_resolution_choice(
                     let draw_ability = ResolvedAbility::new(
                         crate::types::ability::Effect::Draw {
                             count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            target: crate::types::ability::TargetFilter::Controller,
                         },
                         vec![],
                         ObjectId(0),

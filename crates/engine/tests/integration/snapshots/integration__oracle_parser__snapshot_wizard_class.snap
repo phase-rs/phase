@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
+assertion_line: 154
 expression: result
 ---
 {
@@ -89,6 +90,9 @@ expression: result
           "count": {
             "type": "Fixed",
             "value": 2
+          },
+          "target": {
+            "type": "Controller"
           }
         },
         "cost": null,
