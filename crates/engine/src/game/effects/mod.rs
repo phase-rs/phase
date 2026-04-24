@@ -697,6 +697,15 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::GiveControl { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
+        // CR 603.7c + CR 608.2c: `GenericEffect` carries an optional `target` that may
+        // be an event-context ref (e.g., `TriggeringSource` for "that land doesn't untap
+        // during its controller's next untap step" on a TapsForMana trigger). Routing it
+        // through the event-context resolver binds the transient continuous effect to
+        // the specific triggering object, mirroring targeted pump/bounce semantics.
+        Effect::GenericEffect {
+            target: Some(ref filter),
+            ..
+        } => filter,
         Effect::Token { owner, .. } => owner,
         Effect::RevealTop { player, .. } => player,
         Effect::ExileTop { player, .. } => player,

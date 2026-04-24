@@ -625,6 +625,13 @@ pub enum ManaProduction {
     /// control, add one mana of that color." Mirrors the structure of
     /// `QuantityRef::DistinctColorsAmongPermanents`.
     DistinctColorsAmongPermanents { filter: TargetFilter },
+    /// CR 603.7c + CR 106.3: Produce one mana of the same type as the mana
+    /// produced by the triggering `ManaAdded` event. Used by `TapsForMana`
+    /// triggers of the form "add one mana of any type that land produced"
+    /// (Vorinclex, Voice of Hunger; Dictate of Karametra). Resolves from
+    /// `state.current_trigger_event` at resolution time; emits no mana if the
+    /// current trigger event is absent or not a `ManaAdded` event (CR 106.5).
+    TriggerEventManaType,
 }
 
 /// CR 607.2a + CR 406.6 + CR 610.3: Which exile-link relation a mana ability reads
@@ -715,6 +722,7 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     DistinctColorsAmongPermanents {
                         filter: TargetFilter,
                     },
+                    TriggerEventManaType,
                 }
                 let helper: ManaProductionHelper =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -777,6 +785,9 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     },
                     ManaProductionHelper::DistinctColorsAmongPermanents { filter } => {
                         ManaProduction::DistinctColorsAmongPermanents { filter }
+                    }
+                    ManaProductionHelper::TriggerEventManaType => {
+                        ManaProduction::TriggerEventManaType
                     }
                 })
             }

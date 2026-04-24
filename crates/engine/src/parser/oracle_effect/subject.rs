@@ -692,6 +692,23 @@ pub(super) fn parse_subject_application(
         let original_rest = &subject[consumed..];
         let (filter, rem) = parse_type_phrase(original_rest);
         if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            // CR 603.7c + CR 608.2c: Inside a trigger effect, "that [type]" is an
+            // anaphoric back-reference to the triggering event's subject object (the
+            // land that was tapped, the creature that was blocked, etc.) — NOT a
+            // broadcast over all matching permanents. Set `target: TriggeringSource`
+            // so the resolver (extract_event_context_filter in effects/mod.rs) binds
+            // the transient effect to the specific triggering object via SpecificObject.
+            // Outside triggers, fall back to the type filter (anaphor resolves via
+            // `inherits_parent` + ParentTarget at the call site).
+            if ctx.subject.is_some() {
+                return Some(SubjectApplication {
+                    affected: filter,
+                    target: Some(TargetFilter::TriggeringSource),
+                    multi_target: None,
+                    inherits_parent: true,
+                    is_optional: false,
+                });
+            }
             return Some(SubjectApplication {
                 affected: filter,
                 target: None,

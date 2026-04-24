@@ -271,6 +271,19 @@ fn resolve_mana_types_impl(
                 .map(|c| mana_color_to_type(&c))
                 .collect()
         }
+        // CR 603.7c + CR 106.3 + CR 106.5: Vorinclex / Dictate of Karametra —
+        // "add one mana of any type that land produced." The mana type is read
+        // from the triggering `ManaAdded` event carried in
+        // `state.current_trigger_event` at resolution time. If the current
+        // event is absent (off-stack resolution) or not a `ManaAdded` event,
+        // this produces no mana (CR 106.5 — undefined mana type).
+        ManaProduction::TriggerEventManaType => {
+            use crate::types::events::GameEvent;
+            match &state.current_trigger_event {
+                Some(GameEvent::ManaAdded { mana_type, .. }) => vec![*mana_type],
+                _ => Vec::new(),
+            }
+        }
     }
 }
 

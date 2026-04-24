@@ -492,6 +492,12 @@ fn mana_options_from_production(
             .map(mana_color_to_type)
             .collect()
         }
+        // CR 603.7c + CR 106.3: "add one mana of any type that land produced"
+        // resolves only inside a triggered ability (TapsForMana). For the mana
+        // source enumeration path (cost-payment auto-tap, direct activation),
+        // there is no trigger context — this variant has no pre-resolution
+        // option set and contributes nothing to mana-source analysis.
+        ManaProduction::TriggerEventManaType => Vec::new(),
     }
 }
 

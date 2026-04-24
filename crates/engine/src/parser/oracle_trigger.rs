@@ -1,8 +1,8 @@
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::multi::many1;
-use nom::sequence::{delimited, pair, preceded};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -4029,22 +4029,53 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::TapsForMana, def));
     }
 
-    for prefix in ["whenever a player taps ", "when a player taps "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
-            continue;
-        };
-        let Some(subject_text) = rest.strip_suffix(" for mana") else {
-            continue;
-        };
-        let (filter, remainder) = parse_trigger_subject(subject_text);
-        if !remainder.trim().is_empty() {
-            continue;
+    // CR 603.2 + CR 605.1a: "Whenever <actor> taps <subject> for mana".
+    // Shared frame for both:
+    //   - "a player taps …"  → no controller constraint on the source
+    //   - "an opponent taps …" → source must be opponent-controlled (Vorinclex class)
+    // Nested nom dispatch: outer trigger verb → actor → subject-up-to-"for mana".
+    fn parse_taps_for_mana_line(i: &str) -> OracleResult<'_, (Option<ControllerRef>, &str)> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            pair(
+                alt((
+                    value(Some(ControllerRef::Opponent), tag("an opponent taps ")),
+                    value(None, tag("a player taps ")),
+                )),
+                terminated(take_until(" for mana"), tag(" for mana")),
+            ),
+        )
+        .parse(i)
+    }
+    if let Ok((rem, (actor_controller, subject_text))) = parse_taps_for_mana_line(lower) {
+        if rem.trim().is_empty() {
+            let (mut filter, sub_rem) = parse_trigger_subject(subject_text);
+            if sub_rem.trim().is_empty() {
+                if actor_controller.is_some() {
+                    // Constrain subject to opponent-controlled permanents.
+                    // Mirrors `set_opponent_controller` pattern used elsewhere
+                    // (effects/mod.rs DamageAll).
+                    fn set_opponent_controller(filter: &mut TargetFilter) {
+                        match filter {
+                            TargetFilter::Typed(tf) => {
+                                tf.controller = Some(ControllerRef::Opponent);
+                            }
+                            TargetFilter::Or { filters } => {
+                                for f in filters.iter_mut() {
+                                    set_opponent_controller(f);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    set_opponent_controller(&mut filter);
+                }
+                let mut def = make_base();
+                def.mode = TriggerMode::TapsForMana;
+                def.valid_card = Some(filter);
+                return Some((TriggerMode::TapsForMana, def));
+            }
         }
-
-        let mut def = make_base();
-        def.mode = TriggerMode::TapsForMana;
-        def.valid_card = Some(filter);
-        return Some((TriggerMode::TapsForMana, def));
     }
 
     if matches!(lower, "whenever you lose life" | "when you lose life") {
@@ -7344,6 +7375,42 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::TapsForMana);
         assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+    }
+
+    #[test]
+    fn trigger_opponent_taps_land_for_mana_vorinclex() {
+        // CR 603.2 + CR 605.1a: "Whenever an opponent taps <subject> for mana" —
+        // source must be opponent-controlled.
+        let def = parse_trigger_line(
+            "Whenever an opponent taps a land for mana, that land doesn't untap during its controller's next untap step.",
+            "Vorinclex, Voice of Hunger",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        match def.valid_card {
+            Some(TargetFilter::Typed(ref tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Land]);
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected Typed(Land) with Opponent controller, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_you_tap_land_for_mana_vorinclex_first_half() {
+        // CR 603.2 + CR 106.3: "you tap a land" arm must NOT carry ControllerRef::Opponent.
+        let def = parse_trigger_line(
+            "Whenever you tap a land for mana, add one mana of any type that land produced.",
+            "Vorinclex, Voice of Hunger",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        match def.valid_card {
+            Some(TargetFilter::Typed(ref tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Land]);
+                assert_eq!(tf.controller, None);
+            }
+            other => panic!("expected Typed(Land) with no controller, got {other:?}"),
+        }
     }
 
     #[test]

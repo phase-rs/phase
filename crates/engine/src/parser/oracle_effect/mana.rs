@@ -3,7 +3,7 @@ use nom::bytes::complete::tag;
 use nom::character::complete::char;
 use nom::combinator::value;
 use nom::multi::many1;
-use nom::sequence::{delimited, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -126,6 +126,32 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         let count = apply_where_x_count_expression(count, where_x_expression.as_deref());
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
+
+        // CR 603.7c + CR 106.3: "add one mana of any type that land produced"
+        // (Vorinclex, Voice of Hunger; Dictate of Karametra). Only meaningful
+        // inside a TapsForMana trigger context; resolves the mana color from
+        // the triggering `ManaAdded` event at resolution time.
+        if let Some((_, _)) = nom_on_lower(rest, &rest_lower, |i| {
+            preceded(
+                tag("mana of any type that "),
+                alt((
+                    value((), tag("land produced")),
+                    value((), tag("permanent produced")),
+                )),
+            )
+            .parse(i)
+        }) {
+            // Count is fixed at 1 for this pattern (Oracle says "one mana");
+            // CR 106.5: if the trigger event is absent the resolver returns
+            // empty mana, so the count here is irrelevant for N>1.
+            let _ = count;
+            return Some(Effect::Mana {
+                produced: ManaProduction::TriggerEventManaType,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
 
         if let Some((_, after_color)) = nom_on_lower(rest, &rest_lower, |i| {
             alt((

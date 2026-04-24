@@ -281,6 +281,9 @@ pub(crate) fn extract_source_from_event(
         GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
         GameEvent::PermanentTapped { object_id, .. } => Some(*object_id),
         GameEvent::PermanentUntapped { object_id } => Some(*object_id),
+        // CR 106.3 + CR 605.1a: For TapsForMana triggers, "that land" / "that permanent"
+        // resolves to the mana source — the land/permanent being tapped for mana.
+        GameEvent::ManaAdded { source_id, .. } => Some(*source_id),
         GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),

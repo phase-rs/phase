@@ -778,6 +778,7 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
         ManaProduction::DistinctColorsAmongPermanents { filter } => {
             format!("1 of each color among {}", fmt_target(filter))
         }
+        ManaProduction::TriggerEventManaType => "1 of the triggering mana's type".to_string(),
     }
 }
 
