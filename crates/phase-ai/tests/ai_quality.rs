@@ -418,7 +418,7 @@ fn does_not_cast_redundant_removal() {
         state.priority_player = P0;
         state.waiting_for = WaitingFor::Priority { player: P0 };
         // Already have a Lightning Bolt targeting the same creature on the stack
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(301),
             source_id: ObjectId(300),
             controller: P0,
@@ -552,7 +552,7 @@ fn threat_profile_influences_scoring_against_blue_deck() {
             ..Default::default()
         });
         // Give opponent some cards in hand so threat profile is non-trivial
-        state.players[1].hand = vec![
+        state.players[1].hand = engine::im::vector![
             engine::types::identifiers::ObjectId(90),
             engine::types::identifiers::ObjectId(91),
             engine::types::identifiers::ObjectId(92),
@@ -617,7 +617,7 @@ fn threat_profile_influences_scoring_against_control_deck() {
             current_sideboard: Vec::new(),
             ..Default::default()
         });
-        state.players[1].hand = vec![
+        state.players[1].hand = engine::im::vector![
             engine::types::identifiers::ObjectId(90),
             engine::types::identifiers::ObjectId(91),
         ];

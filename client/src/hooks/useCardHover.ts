@@ -39,10 +39,16 @@ export function useCardHover(objectId: number | null) {
   // On mobile, skip mouse events — synthesized mouseenter from touch fires
   // the preview every time the user touches a card, creating an
   // un-dismissable loop. Long-press is the only mobile preview trigger.
+  //
+  // `data-card-hover` is required for usePreviewDismiss's elementFromPoint
+  // poll — without this attribute the 300ms dismiss loop clears the preview
+  // while the cursor is still over the card. Injecting it here ensures every
+  // useCardHover consumer is tagged by construction, so new callsites can't
+  // silently regress the invariant by forgetting the manual annotation.
   return {
     handlers: isMobile
-      ? longPressHandlers
-      : { onMouseEnter, onMouseLeave, ...longPressHandlers },
+      ? { ...longPressHandlers, "data-card-hover": true }
+      : { onMouseEnter, onMouseLeave, ...longPressHandlers, "data-card-hover": true },
     firedRef,
   };
 }

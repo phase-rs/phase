@@ -3654,7 +3654,7 @@ mod tests {
     fn setup_with_spell_on_stack() -> (GameState, ObjectId) {
         let mut state = setup();
         let spell_id = ObjectId(50);
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(0),
@@ -3679,7 +3679,7 @@ mod tests {
     fn setup_with_ability_on_stack() -> (GameState, ObjectId) {
         let mut state = setup();
         let ability_id = ObjectId(60);
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ability_id,
             source_id: ObjectId(10),
             controller: PlayerId(1),

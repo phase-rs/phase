@@ -65,7 +65,7 @@ pub fn resolve(
         kind: top_entry.kind.clone(),
     };
 
-    state.stack.push(copy_entry);
+    state.stack.push_back(copy_entry);
     events.push(GameEvent::StackPushed { object_id: copy_id });
 
     // CR 707.10c: If the copy has targets, allow the controller to choose new ones.
@@ -123,7 +123,7 @@ mod tests {
     ) {
         let obj = GameObject::new(obj_id, card_id, owner, name.to_string(), Zone::Stack);
         state.objects.insert(obj_id, obj);
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: owner,

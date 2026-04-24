@@ -333,7 +333,7 @@ mod tests {
             spell_expensive("C"),
             spell_expensive("D"),
         ]);
-        let hand = state.players[0].hand.clone();
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
         let score = KeepablesByLandCount.evaluate(
             &hand,
             &state,
@@ -363,7 +363,7 @@ mod tests {
             spell_cheap("Bolt 3", ManaCostShard::Red),
             spell_cheap("Bolt 4", ManaCostShard::Red),
         ]);
-        let hand = state.players[0].hand.clone();
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
         let score = KeepablesByLandCount.evaluate(
             &hand,
             &state,
@@ -392,7 +392,7 @@ mod tests {
             spell_cheap("Bolt 6", ManaCostShard::Red),
             spell_cheap("Bolt 7", ManaCostShard::Red),
         ]);
-        let hand = state.players[0].hand.clone();
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
         let score = KeepablesByLandCount.evaluate(
             &hand,
             &state,
@@ -415,7 +415,7 @@ mod tests {
             land("Mountain 6", "Mountain"),
             land("Mountain 7", "Mountain"),
         ]);
-        let hand = state.players[0].hand.clone();
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
         let score = KeepablesByLandCount.evaluate(
             &hand,
             &state,
@@ -439,7 +439,7 @@ mod tests {
             spell_cheap("Bolt 3", ManaCostShard::Red),
             spell_cheap("Bolt 4", ManaCostShard::Red),
         ]);
-        let hand = state.players[0].hand.clone();
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
         let score = KeepablesByLandCount.evaluate(
             &hand,
             &state,
@@ -467,7 +467,7 @@ mod tests {
             spell_cheap("Bolt 3", ManaCostShard::Red),
             spell_cheap("Bolt 4", ManaCostShard::Red),
         ]);
-        let hand = state.players[0].hand.clone();
+        let hand: Vec<_> = state.players[0].hand.iter().copied().collect();
         let score = KeepablesByLandCount.evaluate(
             &hand,
             &state,

@@ -47,7 +47,7 @@ pub fn resolve(
         .players
         .iter()
         .find(|p| p.id == controller)
-        .map(|p| p.hand.clone())
+        .map(|p| p.hand.iter().copied().collect())
         .unwrap_or_default();
 
     let eligible: Vec<_> = if matches!(card_filter, crate::types::ability::TargetFilter::Any) {

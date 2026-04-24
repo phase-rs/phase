@@ -82,13 +82,9 @@ If the answer to any of these is wrong, **stop and refactor before moving on.** 
 
 **Test the building block, not the special case.** Tests should verify that composable primitives work correctly across their full input range — not just that one card's Oracle text parses. A parser test for "exile target creature" is more valuable than a test for a single card name. Effect handler tests should exercise the handler's parameters, not replay a single card's resolution. When a building block is extended, add tests for the new capability at the building-block level.
 
-## Setup
-
-```bash
-./scripts/setup.sh    # Full onboarding: gen card data → build WASM → pnpm install
-```
-
 ## Build & Development Commands
+
+Run `./scripts/setup.sh` for full onboarding (gen card data → build WASM → pnpm install).
 
 ### Rust Engine
 ```bash
@@ -175,13 +171,11 @@ feed-scraper    — Metagame deck scraper (MTGGoldfish)
 
 - **`types/`** — Core data types: `GameState`, `GameAction`, `GameEvent`, `GameObject`, `Phase`, `Zone`, `ManaPool`, abilities, triggers. All types use `serde` for serialization across the WASM boundary.
 - **`game/engine.rs`** — Main `apply(state, action) -> ActionResult` function. Pure reducer pattern: takes game state + action, returns events + new waiting_for state.
-- **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mana_abilities`, `mana_sources`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `trigger_matchers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`, `casting_costs`, `casting_targets`, `commander`, `companion`, `day_night`, `deck_loading`, `deck_validation`, `derived`, `devotion`, `elimination`, `filter`, `game_object`, `gap_analysis`, `log`, `match_flow`, `morph`, `planeswalker`, `players`, `printed_cards`, `quantity`, `restrictions`, `scenario`, `scenario_db`, `transform`, `coverage`, `ability_utils`, `sacrifice`.
-- **`game/effects/`** — Effect handlers (75 modules), including: `add_restriction`, `additional_combat`, `amass`, `animate`, `attach`, `become_copy`, `become_monarch`, `bounce`, `cast_from_zone`, `change_targets`, `change_zone`, `choose`, `choose_card`, `choose_from_zone`, `cleanup`, `connive`, `copy_spell`, `counter`, `counters`, `create_emblem`, `deal_damage`, `delayed_trigger`, `destroy`, `dig`, `discard`, `discover`, `double`, `draw`, `effect`, `energy`, `exchange_control`, `exile_from_top_until`, `exploit`, `explore`, `extra_turn`, `fight`, `flip_coin`, `force_block`, `gain_control`, `gift_delivery`, `goad`, `grant_permission`, `investigate`, `life`, `mana`, `manifest_dread`, `mill`, `monstrosity`, `pay`, `phase_out`, `player_counter`, `prevent_damage`, `proliferate`, `pump`, `put_on_top`, `put_on_top_or_bottom`, `regenerate`, `reveal_hand`, `reveal_top`, `ring`, `roll_die`, `sacrifice`, `scry`, `search_library`, `seek`, `set_class_level`, `shuffle`, `solve_case`, `surveil`, `suspect`, `tap_untap`, `token`, `token_copy`, `transform_effect`, `win_lose`. New effects are added as modules here following the existing handler pattern.
-- **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. Main dispatcher in `oracle.rs`, with specialized sub-parsers: `oracle_effect/` (directory with `mod.rs`, `imperative.rs`, `subject.rs`, `token.rs`, `sequence.rs`, `animation.rs`, `counter.rs`, `mana.rs`, `types.rs`), `oracle_trigger.rs`, `oracle_static.rs`, `oracle_replacement.rs`, `oracle_target.rs`, `oracle_quantity.rs`, `oracle_util.rs`, `oracle_cost.rs`, `oracle_keyword.rs`, `oracle_casting.rs`, `oracle_class.rs`, `oracle_level.rs`, `oracle_modal.rs`, `oracle_saga.rs`. **`oracle_nom/`** is the shared nom 8.0 combinator foundation (primitives, target, quantity, duration, condition, filter, error, context, bridge) — all parser branches delegate atomic and structural parsing operations to these combinators. `dispatch_line_nom` in `oracle.rs` serves as the primary dispatch path for lines not caught by earlier priority checks, calling `parse_effect_chain_with_context` for effect candidates. See `.claude/skills/oracle-parser/SKILL.md` for the authoritative parser reference (architecture, nom combinator mandate, helpers, checklists).
-- **`ai_support/`** — Engine-side AI support: `legal_actions()` generates validated candidate actions for all `WaitingFor` states, `candidates.rs` implements action generation per state, `context.rs` provides game context for AI evaluation. This module lives in the engine crate so both WASM and server consumers share the same logic.
-- **`database/`** — Card database with three loading paths:
-  - `CardDatabase::load_json(mtgjson_path)` — MTGJSON
-  - `CardDatabase::from_export(path)` — Pre-built `card-data.json` (used at runtime by WASM and server)
+- **`game/`** — Game logic modules (turns, priority, stack, combat, SBA, targeting, mana, layers, triggers, replacement, static abilities, zones, casting, etc.). `ls crates/engine/src/game/` for the full set.
+- **`game/effects/`** — One module per effect handler (deal_damage, counter, draw, destroy, bounce, change_zone, etc.). New effects are added as modules here following the existing handler pattern. `ls crates/engine/src/game/effects/` for the full set.
+- **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. Main dispatcher in `oracle.rs`, with specialized sub-parsers (`oracle_effect/`, `oracle_trigger.rs`, `oracle_static.rs`, `oracle_replacement.rs`, `oracle_cost.rs`, `oracle_keyword.rs`, `oracle_casting.rs`, `oracle_class.rs`, `oracle_saga.rs`, etc.). **`oracle_nom/`** is the shared nom 8.0 combinator foundation — all parser branches delegate atomic and structural parsing operations to these combinators. `dispatch_line_nom` in `oracle.rs` is the primary dispatch path for lines not caught by earlier priority checks. See `.claude/skills/oracle-parser/SKILL.md` for the authoritative parser reference.
+- **`ai_support/`** — Engine-side AI support: `legal_actions()` generates validated candidate actions for all `WaitingFor` states. Lives in the engine crate so both WASM and server consumers share the same logic.
+- **`database/`** — Card database. `CardDatabase::load_json(mtgjson_path)` loads MTGJSON; `CardDatabase::from_export(path)` loads the pre-built `card-data.json` used at runtime by WASM and server.
 
 ### Card Data Format (`data/`)
 
@@ -216,16 +210,16 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
   - `WebSocketAdapter` — WebSocket to phase-server (multiplayer), with reconnection (3 attempts)
   - `P2PHostAdapter` / `P2PGuestAdapter` — WebRTC peer-to-peer via PeerJS
   - `createAdapter()` auto-detects platform (Tauri vs browser)
-- **`stores/`** — Zustand stores: `gameStore` (game state + dispatch), `uiStore` (UI state), `animationStore`, `multiplayerStore` (game code, opponent, timer), `preferencesStore` (card size, layout, audio, visual preferences)
-- **`components/`** — React components organized by domain: `animation/`, `board/`, `card/`, `chrome/`, `combat/`, `controls/`, `deck-builder/`, `hand/`, `hud/`, `lobby/`, `log/`, `mana/`, `menu/`, `modal/`, `multiplayer/`, `settings/`, `splash/`, `stack/`, `targeting/`, `ui/`, `zone/`
-- **`services/`** — `scryfall.ts` (card image API), `imageCache.ts` (IndexedDB caching via idb-keyval), `deckParser.ts`, `cardData.ts`, `cardNames.ts`, `deckCompatibility.ts`, `feedService.ts` (metagame feeds), `gamePersistence.ts`, `presets.ts` (deck presets), `serverDetection.ts`, `sidecar.ts` (Tauri sidecar management)
-- **`hooks/`** — `useGameDispatch`, `useCardImage`, `useKeyboardShortcuts`, `useLongPress`, `usePhaseInfo`, `usePlayerId`, `useCardDataMeta`, `useCardHover`, `useDeckCardData`, `useFeedInitialization`, `useHostingSession`, `usePreviewDismiss`, `useRafPositions`
-- **`pages/`** — `MenuPage`, `GamePage`, `GameSetupPage`, `MultiplayerPage`, `DeckBuilderPage`, `MyDecksPage`, `CoveragePage` (React Router)
+- **`stores/`** — Zustand stores (`gameStore`, `uiStore`, `animationStore`, `multiplayerStore`, `preferencesStore`).
+- **`components/`** — React components organized by domain (board, card, combat, hand, lobby, stack, targeting, zone, etc.). `ls client/src/components/` for the full set.
+- **`services/`** — Scryfall image fetching, IndexedDB image cache, deck parsing/compatibility, metagame feeds, game persistence, Tauri sidecar.
+- **`hooks/`** — Game dispatch, card image, keyboard shortcuts, long-press, phase info, player ID, hover, etc.
+- **`pages/`** — React Router pages (Menu, Game, GameSetup, Multiplayer, DeckBuilder, MyDecks, Coverage).
 
 ### Key Patterns
 
 - **Discriminated unions everywhere**: Rust `enum` with `#[serde(tag = "type", content = "data")]` maps to TS `{ type: string; data: ... }` unions. See `GameAction`, `GameEvent`, `WaitingFor` in `adapter/types.ts`.
-- **Immutable game state**: Engine uses `rpds` (persistent data structures) for structural sharing. State is never mutated in place on the Rust side.
+- **Persistent-container hot fields**: Hot `GameState` zones use `im` (15.x, `Arc`-backed HAMT/RRB) so `GameState::clone()` is O(log n) structural share instead of deep-copy. `im` is re-exported as `engine::im`. Writes use `push_back`/`pop_back`/`iter_mut` (not std `Vec`'s `push`/`pop`/`values_mut`). Caveat: `im::Vector::truncate(n)` panics if `n > len` — guard the length or use `im_ext` helpers. Backing choice is localized to `types/game_state.rs` + `types/player.rs`.
 - **Event-driven updates**: `submit_action()` returns `ActionResult { events, waiting_for }`. The frontend processes events for animations/logging, then updates state.
 - **AI is player 1**: In WASM mode, `get_ai_action()` always computes for `PlayerId(1)`.
 
@@ -252,7 +246,7 @@ These patterns must be used on first write, not fixed after clippy complains:
 
 - **`strip_prefix`/`strip_suffix`** over `starts_with` + manual slicing: `if let Some(rest) = s.strip_prefix("foo")` not `if s.starts_with("foo") { &s[3..] }`. **Compose from `std` primitives** — chain `strip_prefix` calls for multi-part patterns: `s.strip_prefix(word)?.strip_prefix(' ')?` not `format!("{word} ")` + `strip_prefix`. The standard library's string methods are building blocks; use them compositionally rather than constructing new strings to match against. Note: `strip_prefix` is still correct for `TextPair` dual-string operations and structural uses (punctuation stripping, dynamic string prefixes), but NOT for parsing dispatch (use nom `tag()` instead).
 - **`TextPair` for dual-string parsing** — when matching on lowercase text but preserving original casing, use `TextPair::new(original, &lower)` and its `strip_prefix`/`strip_suffix` methods instead of manually computing `&text[text.len() - rest.len()..]` or `&text[prefix.len()..]`. In functions where `TextPair` cannot be constructed (e.g., `parse_target` where `lower` is a local `String` with a shorter lifetime than the returned `&str`), the `text.len() - rest.len()` offset idiom remains correct. See `oracle_util.rs`.
-- **`oracle_nom` combinators are MANDATORY for all parser code — no exceptions, no "I'll convert later."** Every new parser function, cost extractor, condition parser, or dispatch branch MUST use nom combinators (`tag()`, `alt()`, `value()`, `terminated()`, `pair()`, etc.) from the very first line. Never write `find()`, `split_once()`, `contains()`, or `starts_with()` for parsing dispatch. This is a recurring problem — writing string-matching code first and retrofitting combinators after review feedback wastes review cycles and violates the architecture. Use `nom_on_lower` bridge for mixed-case text, `tag().parse()` for already-lowercase text, and existing building blocks (`parse_single_cost`, `parse_target`, `parse_for_each_clause`, etc.) for composed operations. The nom combinators provide structured `VerboseError` traces and word-boundary safety (e.g., `parse_article_number` prevents "another" matching as "a"). Use `parse_number_or_x` when X represents a variable resolving to 0 (costs, P/T, counters); use `parse_number` when X should remain as `Variable("X")` (effect quantities). `dispatch_line_nom` in `oracle.rs` is the primary dispatch path for lines not caught by earlier priorities.
+- **`oracle_nom` combinators** (see design principle above): use `nom_on_lower` bridge for mixed-case text, `tag().parse()` for already-lowercase text, and existing building blocks (`parse_single_cost`, `parse_target`, `parse_for_each_clause`, etc.) for composed operations. Use `parse_number_or_x` when X resolves to 0 (costs, P/T, counters); use `parse_number` when X should remain as `Variable("X")` (effect quantities). `parse_article_number` guards against word-boundary bugs (e.g., "another" matching as "a").
 - **Iterator methods** over range-indexed loops: `for item in slice.iter().skip(1)` not `for i in 1..slice.len()`
 - **`rsplit(' ').next()`** to get the last word, not `rsplit().collect::<Vec>().first()`
 - **Exhaustive `match`** without wildcard fallbacks when the enum is known — let the compiler catch missing arms
@@ -280,31 +274,19 @@ grep -n "^702.122" docs/MagicCompRules.txt  # Verify: is 702.122 really Crew?
 
 If you cannot find the rule number in `docs/MagicCompRules.txt`, do NOT write the annotation. Flag it as "needs manual verification" instead.
 
-**Format — inline comments:**
+**Format:**
 ```rust
 // CR 704.5a: A player with 0 or less life loses the game.
-```
-
-**Format — doc comments (public items):**
-```rust
-/// Checks state-based actions (CR 704).
-```
-
-**Format — multiple interacting rules (use `+`):**
-```rust
-// CR 702.2c + CR 702.19b: Deathtouch with trample assigns lethal (1) to each blocker.
-```
-
-**Format — alternative/overlapping rules (use `/`):**
-```rust
-// CR 704.3 / CR 800.4: SBAs may have ended the game during phase auto-advance.
+// CR 702.2c + CR 702.19b: Deathtouch with trample assigns lethal (1) to each blocker.   // interacting rules use `+`
+// CR 704.3 / CR 800.4: SBAs may have ended the game during phase auto-advance.          // alternatives use `/`
+/// Checks state-based actions (CR 704).                                                  // doc comment on rule-implementing function
 ```
 
 **Rules:**
-- **Prefix:** Always `CR` (the official MTG abbreviation for Comprehensive Rules). Never `Rule`, `MTG Rule`, or bare numbers.
-- **Number format:** `CR XXX` (section), `CR XXX.Y` (sub-rule), or `CR XXX.Ya` (lettered sub-rule). Regex: `CR \d{3}(\.\d+[a-z]?)?`
-- **Description is mandatory.** A bare `CR 704.5a` with no explanation is not acceptable — the description makes grep output self-documenting and serves as a correctness check.
-- **Placement:** Directly above or inline with the code that implements the rule. For functions that implement an entire rule section, use a doc comment on the function.
+- **Prefix:** Always `CR`. Never `Rule`, `MTG Rule`, or bare numbers.
+- **Number format:** `CR XXX`, `CR XXX.Y`, or `CR XXX.Ya`. Regex: `CR \d{3}(\.\d+[a-z]?)?`
+- **Description is mandatory.** A bare `CR 704.5a` with no explanation is not acceptable — grep output must be self-documenting.
+- **Placement:** Directly above or inline with the code that implements the rule.
 
 **When writing or modifying engine code (`crates/engine/`):**
 1. If you are adding new game logic, identify which CR rule(s) it implements and annotate.
@@ -336,8 +318,6 @@ git push origin main --follow-tags    # Push the release commit + tag
 - Workspace `Cargo.toml` version (shared across all crates)
 - `client/package.json`, `client/src-tauri/Cargo.toml`, `client/src-tauri/tauri.conf.json` via `pre-release-replacements`
 - Creating a `release: v{version}` commit and `v{version}` tag
-
-**Important:** Always `git pull --rebase` before `cargo release-local`. Automated coverage PRs merge frequently, causing push rejections if your local main is behind. Rebasing after the tag is created requires force-pushing the tag, which is messy — rebase first to avoid this.
 
 ## CI
 

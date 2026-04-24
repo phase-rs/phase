@@ -1,6 +1,6 @@
 import type { GameAction, GameEvent, GameState, LegalActionsResult } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
-import { attemptStateRehydrate, isEnginePanic, notifyEngineLost } from "./engineRecovery";
+import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { getPlayerId } from "../hooks/usePlayerId";
 import type { AnimationStep } from "../animation/types";
@@ -122,7 +122,10 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     // failure modes were caused by exactly this loop). Surface the captured
     // panic message immediately instead of attempting recovery.
     if (isEnginePanic(err)) {
-      notifyEngineLost("submitAction-panic", err.panic);
+      // Try rehydrate — if the panic was in a side path and engine state
+      // survived, downgrade to a non-fatal toast and let the user keep
+      // playing. Only the true state-loss path triggers the blocking modal.
+      await routePanic("submitAction-panic", err.panic);
       throw err;
     }
     if (!isStateLost(err)) throw err;
@@ -145,7 +148,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       // the "diagnostic: submitAction-retry" the user reported, which told
       // them nothing actionable.
       if (isEnginePanic(retryErr)) {
-        notifyEngineLost("submitAction-retry-panic", retryErr.panic);
+        await routePanic("submitAction-retry-panic", retryErr.panic);
       } else {
         notifyEngineLost("submitAction-retry");
       }
@@ -165,7 +168,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     newState = await adapter.getState();
   } catch (err) {
     if (isEnginePanic(err)) {
-      notifyEngineLost("getState-panic", err.panic);
+      await routePanic("getState-panic", err.panic);
       throw err;
     }
     if (!isStateLost(err)) throw err;

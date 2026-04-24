@@ -441,7 +441,7 @@ mod tests {
 
         // Stack not empty
         state.active_player = PlayerId(0);
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: ObjectId(99),
             source_id: ObjectId(99),
             controller: PlayerId(1),

@@ -37,7 +37,12 @@ pub fn resolve(
     // CR 701.17b: A player can't mill more cards than are in their library;
     // if instructed to, they mill as many as possible.
     let count = num_cards.min(player.library.len());
-    let cards_to_mill: Vec<_> = player.library[..count].to_vec();
+    let cards_to_mill: Vec<_> = player
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>();
 
     // Move each card from library to destination zone
     for obj_id in cards_to_mill {
@@ -88,7 +93,12 @@ mod tests {
                 Zone::Library,
             );
         }
-        let top_3: Vec<_> = state.players[1].library[..3].to_vec();
+        let top_3: Vec<_> = state.players[1]
+            .library
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>();
 
         let ability = make_mill_ability(3, vec![TargetRef::Player(PlayerId(1))]);
         let mut events = Vec::new();

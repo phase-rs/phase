@@ -51,7 +51,12 @@ pub fn resolve(
     });
 
     // Collect the top N card IDs for the player to choose from
-    let cards: Vec<_> = player.library[..count].to_vec();
+    let cards: Vec<_> = player
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>();
 
     state.waiting_for = WaitingFor::ScryChoice {
         player: scry_player,
@@ -98,7 +103,12 @@ mod tests {
                 Zone::Library,
             );
         }
-        let top_2: Vec<_> = state.players[0].library[..2].to_vec();
+        let top_2: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(2)
+            .copied()
+            .collect::<Vec<_>>();
 
         let ability = make_scry_ability(2);
         let mut events = Vec::new();

@@ -31,7 +31,12 @@ pub fn resolve(
     }
 
     // CR 701.62a: Look at top 2 (or fewer) cards
-    let cards: Vec<_> = player_state.library[..count].to_vec();
+    let cards: Vec<_> = player_state
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>();
 
     if count == 1 {
         // Only one card — must manifest it (no choice needed)
@@ -82,7 +87,12 @@ mod tests {
                 Zone::Library,
             );
         }
-        let top_2: Vec<_> = state.players[0].library[..2].to_vec();
+        let top_2: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(2)
+            .copied()
+            .collect::<Vec<_>>();
 
         let ability = make_manifest_dread_ability();
         let mut events = Vec::new();
@@ -149,7 +159,12 @@ mod tests {
             "Card B".to_string(),
             Zone::Library,
         );
-        let top_2: Vec<_> = state.players[0].library[..2].to_vec();
+        let top_2: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(2)
+            .copied()
+            .collect::<Vec<_>>();
         let selected = top_2[0]; // manifest the first
         let graved = top_2[1]; // graveyard the second
 
@@ -206,7 +221,12 @@ mod tests {
             "Card B".to_string(),
             Zone::Library,
         );
-        let top_2: Vec<_> = state.players[0].library[..2].to_vec();
+        let top_2: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(2)
+            .copied()
+            .collect::<Vec<_>>();
         let selected = top_2[0];
 
         // Create ability with sub_ability (draw a card)

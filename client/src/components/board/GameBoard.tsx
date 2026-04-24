@@ -62,10 +62,17 @@ export function GameBoard() {
     const selectableManaCostCreatureIds = new Set<number>();
     const undoableTapObjectIds = new Set<number>();
     const committedAttackerIds = new Set<number>();
+    const incomingAttackerCounts = new Map<number, number>();
 
     if (gameState?.combat?.attackers) {
       for (const attacker of gameState.combat.attackers) {
         committedAttackerIds.add(attacker.object_id);
+        // Accumulate incoming-attack counts for permanent targets (Planeswalker,
+        // Battle). Player targets are handled via HUD `underAttack` treatment.
+        const t = attacker.attack_target;
+        if (t.type === "Planeswalker" || t.type === "Battle") {
+          incomingAttackerCounts.set(t.data, (incomingAttackerCounts.get(t.data) ?? 0) + 1);
+        }
       }
     }
 
@@ -108,6 +115,7 @@ export function GameBoard() {
       return {
         activatableObjectIds,
         committedAttackerIds,
+        incomingAttackerCounts,
         manaTappableObjectIds,
         selectableManaCostCreatureIds,
         undoableTapObjectIds,
@@ -163,6 +171,7 @@ export function GameBoard() {
     return {
       activatableObjectIds,
       committedAttackerIds,
+      incomingAttackerCounts,
       manaTappableObjectIds,
       selectableManaCostCreatureIds,
       undoableTapObjectIds,

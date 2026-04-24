@@ -513,7 +513,7 @@ fn kaito_surveil_and_draw() {
             .find(|p| p.id == P0)
             .unwrap()
             .library
-            .push(id);
+            .push_back(id);
     }
 
     // Mark opponent (P1) as having lost life this turn

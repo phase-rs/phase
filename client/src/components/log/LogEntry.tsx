@@ -1,23 +1,18 @@
-import type { GameLogEntry, LogSegment } from "../../adapter/types.ts";
+import type { GameLogEntry, LogSegment, PlayerId } from "../../adapter/types.ts";
+import { getSeatColor } from "../../hooks/useSeatColor.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { categoryColorClass } from "../../viewmodel/logFormatting.ts";
-
-const PLAYER_COLORS = [
-  "text-cyan-300",    // Player 1 (you)
-  "text-orange-300",  // Player 2 (opponent)
-  "text-emerald-300", // Player 3
-  "text-pink-300",    // Player 4
-];
 
 interface LogEntryProps {
   entry: GameLogEntry;
 }
 
-function playerColor(playerId: number): string {
-  return PLAYER_COLORS[playerId % PLAYER_COLORS.length];
-}
-
-function renderSegment(segment: LogSegment, index: number) {
+function renderSegment(
+  segment: LogSegment,
+  index: number,
+  seatOrder: PlayerId[] | undefined,
+) {
   switch (segment.type) {
     case "Text":
       return <span key={index}>{segment.value}</span>;
@@ -29,7 +24,11 @@ function renderSegment(segment: LogSegment, index: number) {
       );
     case "PlayerName":
       return (
-        <span key={index} className={`font-semibold ${playerColor(segment.value.player_id)}`}>
+        <span
+          key={index}
+          className="font-semibold"
+          style={{ color: getSeatColor(segment.value.player_id, seatOrder) }}
+        >
           {getPlayerDisplayName(segment.value.player_id)}
         </span>
       );
@@ -62,10 +61,11 @@ function renderSegment(segment: LogSegment, index: number) {
 
 export function LogEntry({ entry }: LogEntryProps) {
   const colorClass = categoryColorClass(entry);
+  const seatOrder = useGameStore((s) => s.gameState?.seat_order);
 
   return (
     <div className={`border-b border-gray-800 py-0.5 font-mono text-[10px] ${colorClass}`}>
-      {entry.segments.map(renderSegment)}
+      {entry.segments.map((segment, index) => renderSegment(segment, index, seatOrder))}
     </div>
   );
 }

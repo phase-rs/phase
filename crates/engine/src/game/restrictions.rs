@@ -580,7 +580,7 @@ fn evaluate_condition(
             .any(|searched| *searched != player),
         ParsedCondition::BeenAttackedThisStep => state.players_attacked_this_step.contains(&player),
         ParsedCondition::GraveyardCardCountAtLeast { count } => {
-            player_graveyard_ids(state, player).len() >= *count
+            player_graveyard_ids(state, player).count() >= *count
         }
         ParsedCondition::GraveyardCardTypeCountAtLeast { count } => {
             distinct_graveyard_card_type_count(state, player) >= *count
@@ -950,13 +950,13 @@ fn player_hand_size(state: &crate::types::game_state::GameState, player: PlayerI
 fn player_graveyard_ids(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
-) -> &[ObjectId] {
+) -> impl Iterator<Item = &ObjectId> + '_ {
     state
         .players
         .iter()
         .find(|candidate| candidate.id == player)
-        .map(|candidate| candidate.graveyard.as_slice())
-        .unwrap_or(&[])
+        .into_iter()
+        .flat_map(|candidate| candidate.graveyard.iter())
 }
 
 fn distinct_graveyard_card_type_count(
@@ -980,7 +980,7 @@ fn graveyard_has_subtype_card(
     player: PlayerId,
     subtype: &str,
 ) -> bool {
-    player_graveyard_ids(state, player).iter().any(|object_id| {
+    player_graveyard_ids(state, player).any(|object_id| {
         state.objects.get(object_id).is_some_and(|obj| {
             obj.card_types
                 .subtypes

@@ -183,7 +183,7 @@ mod tests {
             Zone::Stack,
         );
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: created_id,
             source_id: created_id,
             controller: PlayerId(0),
@@ -424,7 +424,7 @@ mod tests {
             PlayerId(0),
         );
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: source_id,
             source_id,
             controller: PlayerId(0),

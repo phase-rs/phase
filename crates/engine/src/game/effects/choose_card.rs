@@ -25,19 +25,19 @@ pub fn resolve(
             .players
             .iter()
             .find(|p| p.id == ability.controller)
-            .map(|p| p.graveyard.clone())
+            .map(|p| p.graveyard.iter().copied().collect())
             .unwrap_or_default(),
         "Hand" => state
             .players
             .iter()
             .find(|p| p.id == ability.controller)
-            .map(|p| p.hand.clone())
+            .map(|p| p.hand.iter().copied().collect())
             .unwrap_or_default(),
         "Library" => state
             .players
             .iter()
             .find(|p| p.id == ability.controller)
-            .map(|p| p.library.clone())
+            .map(|p| p.library.iter().copied().collect())
             .unwrap_or_default(),
         "Exile" => state
             .exile

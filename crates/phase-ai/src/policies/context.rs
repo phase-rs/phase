@@ -30,6 +30,34 @@ impl<'a> PolicyContext<'a> {
         &self.config.policy_penalties
     }
 
+    /// True when the top-level wall-clock deadline has already elapsed.
+    /// Policies doing non-essential expensive work (opponent-turn
+    /// projections, deep synergy sweeps) should short-circuit via this
+    /// rather than threading the raw `Deadline` everywhere.
+    pub fn deadline_expired(&self) -> bool {
+        self.context.deadline.expired()
+    }
+
+    /// True when an uncached multi-turn projection is affordable given the
+    /// remaining wall-clock budget. The threshold is
+    /// `SearchConfig::projection_min_budget_ms` (tunable per difficulty);
+    /// policies that project should gate their work behind this helper so
+    /// the tightest-budget path (Medium, 1500ms) doesn't pay the ~1.5s
+    /// simulation cost and blow its own budget.
+    pub fn can_afford_projection(&self) -> bool {
+        if self.context.deadline.expired() {
+            return false;
+        }
+        let floor = self.config.search.projection_min_budget_ms;
+        if floor == 0 {
+            return true;
+        }
+        self.context
+            .deadline
+            .remaining()
+            .is_none_or(|r| r.as_millis() >= floor)
+    }
+
     pub fn source_object(&self) -> Option<&'a GameObject> {
         match &self.candidate.action {
             GameAction::CastSpell { card_id, .. } => self
@@ -405,5 +433,171 @@ mod tests {
         let facts = ctx.cast_facts().expect("cast facts");
         assert_eq!(facts.immediate_etb_triggers.len(), 1);
         assert!(facts.has_direct_removal_text());
+    }
+
+    fn deadline_test_ctx<'a>(
+        state: &'a GameState,
+        decision: &'a AiDecisionContext,
+        candidate: &'a CandidateAction,
+        config: &'a AiConfig,
+        context: &'a crate::context::AiContext,
+    ) -> PolicyContext<'a> {
+        PolicyContext {
+            state,
+            decision,
+            candidate,
+            ai_player: PlayerId(0),
+            config,
+            context,
+            cast_facts: None,
+        }
+    }
+
+    #[test]
+    fn deadline_expired_gates_projection() {
+        // When the wall-clock deadline is already blown, projection-gated
+        // policies must short-circuit — `can_afford_projection` returns false
+        // so callers (velocity_score etc.) skip `get_or_project` and don't
+        // blow past the user-visible turn-time budget on an uncached sim.
+        let state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let mut ai_ctx = crate::context::AiContext::empty(&config.weights);
+        ai_ctx.deadline = engine::util::Deadline::after(0);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let pending_cast = PendingCast::new(ObjectId(1), CardId(1), ability, ManaCost::zero());
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(pending_cast),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![],
+                    optional: false,
+                }],
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget { target: None },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        assert!(ctx.deadline_expired(), "deadline should have expired");
+        assert!(
+            !ctx.can_afford_projection(),
+            "expired deadline must disallow projection"
+        );
+    }
+
+    #[test]
+    fn fresh_deadline_allows_projection() {
+        // Mirror of `deadline_expired_gates_projection`: with a healthy
+        // remaining budget, `can_afford_projection` must return true so the
+        // velocity signal still runs in the common case.
+        let state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let mut ai_ctx = crate::context::AiContext::empty(&config.weights);
+        // 5s remaining — well above the default 500ms floor.
+        ai_ctx.deadline = engine::util::Deadline::after(5_000);
+
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let pending_cast = PendingCast::new(ObjectId(1), CardId(1), ability, ManaCost::zero());
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(pending_cast),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![],
+                    optional: false,
+                }],
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget { target: None },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        assert!(!ctx.deadline_expired());
+        assert!(ctx.can_afford_projection());
+    }
+
+    #[test]
+    fn zero_projection_floor_always_allows() {
+        // Escape hatch: setting `projection_min_budget_ms = 0` forces the
+        // policy to always attempt projection (used by difficulties with
+        // ample budget, or by deterministic regression harnesses).
+        let state = GameState::new_two_player(42);
+        let mut config = AiConfig::default();
+        config.search.projection_min_budget_ms = 0;
+
+        let mut ai_ctx = crate::context::AiContext::empty(&config.weights);
+        // Tight but not expired — 1ms remaining.
+        ai_ctx.deadline = engine::util::Deadline::after(1);
+
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let pending_cast = PendingCast::new(ObjectId(1), CardId(1), ability, ManaCost::zero());
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(pending_cast),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![],
+                    optional: false,
+                }],
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget { target: None },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        // With floor=0, even 1ms remaining allows projection. Only an
+        // already-expired deadline blocks.
+        assert!(ctx.can_afford_projection());
     }
 }

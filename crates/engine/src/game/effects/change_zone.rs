@@ -1,5 +1,3 @@
-use rand::seq::SliceRandom;
-
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
@@ -16,8 +14,9 @@ use crate::types::zones::Zone;
 /// CR 401.3: Shuffle a player's library using the game's seeded RNG.
 /// Reusable helper for auto-shuffle after zone moves to Library.
 pub fn shuffle_library(state: &mut GameState, player: PlayerId) {
-    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-        p.library.shuffle(&mut state.rng);
+    let GameState { players, rng, .. } = state;
+    if let Some(p) = players.iter_mut().find(|p| p.id == player) {
+        crate::util::im_ext::shuffle_vector(&mut p.library, rng);
     }
 }
 

@@ -19,13 +19,13 @@ pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
     });
-    state.stack.push(entry);
+    state.stack.push_back(entry);
 }
 
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
-    let entry = match state.stack.pop() {
+    let entry = match state.stack.pop_back() {
         Some(e) => e,
         None => return,
     };
@@ -442,28 +442,27 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
             // CR 702.190b: Sneak-cast permanent enters tapped (already seeded on
             // the ZoneChange replacement) AND attacking the same defender as the
-            // returned creature. Also tag `cast_variant_paid` so the
-            // `CastVariantPaid { variant: Sneak }` trigger/ability condition
-            // used by intrinsic-sneak cards fires on resolved Sneak casts.
-            if let CastingVariant::Sneak {
-                defender,
-                attack_target,
-                ..
-            } = casting_variant
-            {
+            // returned creature. Placement is `Some` only for permanent spells;
+            // non-permanent Sneak casts (instants/sorceries) resolve normally.
+            // Also tag `cast_variant_paid` so the `CastVariantPaid { variant:
+            // Sneak }` trigger/ability condition fires on resolved Sneak casts
+            // regardless of card type.
+            if let CastingVariant::Sneak { placement, .. } = casting_variant {
                 if let Some(obj) = state.objects.get_mut(&entry.id) {
                     obj.cast_variant_paid = Some((
                         crate::types::ability::CastVariantPaid::Sneak,
                         state.turn_number,
                     ));
                 }
-                super::combat::place_attacking_alongside(
-                    state,
-                    entry.id,
-                    defender,
-                    attack_target,
-                    events,
-                );
+                if let Some(p) = placement {
+                    super::combat::place_attacking_alongside(
+                        state,
+                        entry.id,
+                        p.defender,
+                        p.attack_target,
+                        events,
+                    );
+                }
             }
 
             // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag
@@ -832,6 +831,30 @@ fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
     })
 }
 
+/// CR 110.4b: A permanent spell — "an artifact, battle, creature, enchantment,
+/// or planeswalker spell." Lands are excluded because they aren't spells
+/// (they're played, not cast). Used by resolution paths that distinguish
+/// "spell that will enter the battlefield" from "non-permanent spell"
+/// (e.g., Sneak's CR 702.190b alongside-attacker placement, which applies
+/// only to permanent spells).
+pub(crate) fn is_permanent_spell(state: &GameState, object_id: ObjectId) -> bool {
+    use crate::types::card_type::CoreType;
+
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    obj.card_types.core_types.iter().any(|ct| {
+        matches!(
+            ct,
+            CoreType::Artifact
+                | CoreType::Battle
+                | CoreType::Creature
+                | CoreType::Enchantment
+                | CoreType::Planeswalker
+        )
+    })
+}
+
 /// CR 702.185a: Create the Warp delayed trigger that exiles the permanent at end step
 /// and grants WarpExile casting permission. Shared between resolve_top (Execute path)
 /// and engine_replacement (NeedsChoice path).
@@ -936,7 +959,7 @@ mod tests {
             PlayerId(0),
         );
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: aura_id,
             source_id: aura_id,
             controller: PlayerId(0),
@@ -986,7 +1009,7 @@ mod tests {
         let entry_id = ObjectId(state.next_object_id);
         state.next_object_id += 1;
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: entry_id,
             source_id: ObjectId(50),
             controller: PlayerId(0),
@@ -1124,7 +1147,7 @@ mod tests {
         if let Some(obj) = state.objects.get_mut(&creature) {
             obj.zone = Zone::Graveyard;
         }
-        state.players[1].graveyard.push(creature);
+        state.players[1].graveyard.push_back(creature);
 
         let mut events = Vec::new();
         resolve_top(&mut state, &mut events);
@@ -1154,7 +1177,7 @@ mod tests {
             .core_types
             .push(CoreType::Enchantment);
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ench_id,
             source_id: ench_id,
             controller: PlayerId(0),
@@ -1242,7 +1265,7 @@ mod tests {
             PlayerId(0),
         ));
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(0),
@@ -1256,7 +1279,7 @@ mod tests {
 
         state.battlefield.retain(|&id| id != first_target);
         state.objects.get_mut(&first_target).unwrap().zone = Zone::Graveyard;
-        state.players[1].graveyard.push(first_target);
+        state.players[1].graveyard.push_back(first_target);
 
         let mut events = Vec::new();
         resolve_top(&mut state, &mut events);
@@ -1311,7 +1334,7 @@ mod tests {
         }
 
         // Push a stack entry as if cast via Warp
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(0),
@@ -1499,7 +1522,7 @@ mod tests {
             obj.card_types.core_types.push(CoreType::Instant);
         }
         let resolved = ResolvedAbility::new(effect, vec![], obj_id, PlayerId(0));
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(0),
@@ -1552,7 +1575,7 @@ mod tests {
             obj.power = Some(2);
             obj.toughness = Some(2);
         }
-        state.battlefield.push(target_id);
+        state.battlefield.push_back(target_id);
 
         // Push a flashback spell targeting that creature
         let card_id = CardId(state.next_object_id);
@@ -1577,7 +1600,7 @@ mod tests {
             spell_id,
             PlayerId(0),
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(0),
@@ -1626,7 +1649,7 @@ mod tests {
                 .core_types
                 .push(CoreType::Creature);
             for i in 0..n {
-                state.stack.push(StackEntry {
+                state.stack.push_back(StackEntry {
                     id: ObjectId(100_000 + i as u64),
                     source_id: src,
                     controller: PlayerId(0),
@@ -1682,7 +1705,7 @@ mod tests {
                 "Scute Swarm".to_string(),
                 Zone::Battlefield,
             );
-            state.stack.push(StackEntry {
+            state.stack.push_back(StackEntry {
                 id: ObjectId(10_000 + i as u64),
                 source_id: sid,
                 controller: PlayerId(0),
@@ -1742,8 +1765,8 @@ mod tests {
                 description: None,
             },
         };
-        state.stack.push(mk_entry(s1));
-        state.stack.push(mk_entry(s2));
+        state.stack.push_back(mk_entry(s1));
+        state.stack.push_back(mk_entry(s2));
 
         let groups = stack_display_groups(&state);
         assert_eq!(
@@ -1794,10 +1817,10 @@ mod tests {
         };
         state
             .stack
-            .push(mk_entry(10_001, TargetRef::Player(PlayerId(0))));
+            .push_back(mk_entry(10_001, TargetRef::Player(PlayerId(0))));
         state
             .stack
-            .push(mk_entry(10_002, TargetRef::Player(PlayerId(1))));
+            .push_back(mk_entry(10_002, TargetRef::Player(PlayerId(1))));
 
         let groups = stack_display_groups(&state);
         assert_eq!(
@@ -1852,8 +1875,8 @@ mod tests {
                 },
             },
         };
-        state.stack.push(mk_entry(10_001, creature_a));
-        state.stack.push(mk_entry(10_002, creature_b));
+        state.stack.push_back(mk_entry(10_001, creature_a));
+        state.stack.push_back(mk_entry(10_002, creature_b));
 
         let groups = stack_display_groups(&state);
         assert_eq!(
@@ -1898,7 +1921,7 @@ mod tests {
         );
         resolved.context.additional_cost_paid = buyback_paid;
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(0),

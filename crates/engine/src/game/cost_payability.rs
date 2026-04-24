@@ -303,10 +303,10 @@ fn eligible_in_zone_count(
     let Some(p) = state.players.get(player.0 as usize) else {
         return 0;
     };
-    let ids: &[ObjectId] = match zone {
-        Zone::Hand => &p.hand,
-        Zone::Graveyard => &p.graveyard,
-        Zone::Library => &p.library,
+    let ids: Box<dyn Iterator<Item = ObjectId> + '_> = match zone {
+        Zone::Hand => Box::new(p.hand.iter().copied()),
+        Zone::Graveyard => Box::new(p.graveyard.iter().copied()),
+        Zone::Library => Box::new(p.library.iter().copied()),
         // Battlefield exile/etc. — fall back to iterating the object set by zone.
         _ => {
             let ctx = FilterContext::from_source(state, source);
@@ -323,11 +323,10 @@ fn eligible_in_zone_count(
         }
     };
     let ctx = FilterContext::from_source(state, source);
-    ids.iter()
-        .filter(|&&id| {
-            id != source && filter.is_none_or(|f| matches_target_filter(state, id, f, &ctx))
-        })
-        .count()
+    ids.filter(|&id| {
+        id != source && filter.is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+    })
+    .count()
 }
 
 /// Count counters of the given kind on an object.

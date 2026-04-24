@@ -1,4 +1,5 @@
 import type { PlayerId } from "../../adapter/types.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
 interface CommanderDamageProps {
@@ -24,6 +25,7 @@ const DEFAULT_COMMANDER_DAMAGE_LETHAL = 21;
  */
 export function CommanderDamage({ playerId }: CommanderDamageProps) {
   const gameState = useGameStore((s) => s.gameState);
+  const localPlayerId = usePlayerId();
   const threshold =
     gameState?.format_config?.commander_damage_threshold ??
     DEFAULT_COMMANDER_DAMAGE_LETHAL;
@@ -50,7 +52,8 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
       data-testid={`commander-damage-${playerId}`}
     >
       {entriesForVictim.map(({ attacker, views }) => {
-        const attackerLabel = `Opp ${attacker}`;
+        const attackerLabel =
+          Number(attacker) === localPlayerId ? "You" : `Opp ${attacker}`;
         const total = views.reduce((n, e) => n + e.damage, 0);
         return (
           <div

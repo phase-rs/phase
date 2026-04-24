@@ -3,6 +3,7 @@ import type {
   GameAction,
   GameObject,
   ManaCost,
+  ObjectId,
   SerializedAbility,
   SerializedAbilityCost,
 } from "../adapter/types.ts";
@@ -100,7 +101,24 @@ const MANA_COLOR_ABBREVIATION: Record<string, string> = {
 export function abilityChoiceLabel(
   action: GameAction,
   object: GameObject,
+  objects?: Record<ObjectId, GameObject>,
 ): { label: string; description?: string } {
+  // CR 702.190a: Sneak — label identifies which unblocked attacker is
+  // returned to pay the Sneak cost. Include the Sneak mana cost from the
+  // spell's keyword metadata when available.
+  if (action.type === "CastSpellAsSneak") {
+    const returnedId = action.data.creature_to_return;
+    const returnedName = objects?.[returnedId]?.name ?? `creature #${returnedId}`;
+    const sneakKeyword = object.keywords.find(
+      (k): k is { Sneak: ManaCost } => typeof k === "object" && "Sneak" in k,
+    );
+    const costSymbols = sneakKeyword ? manaCostToShards(sneakKeyword.Sneak).map((s) => `{${s}}`).join("") : "";
+    const costSuffix = costSymbols ? ` (${costSymbols})` : "";
+    return {
+      label: `Sneak — return ${returnedName}${costSuffix}`,
+      description: `Cast ${object.name} by paying its sneak cost and returning ${returnedName} to your hand (CR 702.190a).`,
+    };
+  }
   if (action.type === "ActivateAbility") {
     const ability = object.abilities[action.data.ability_index];
     // For mana abilities, show what they produce (e.g., "Add {U}") instead of just the cost

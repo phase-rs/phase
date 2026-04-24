@@ -102,7 +102,6 @@ function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardNam
         alt={cardName}
         className="rounded-lg border border-gray-600 shadow-md object-cover"
         style={cardStyle}
-        data-card-hover
         draggable={false}
         {...hoverHandlers}
       />

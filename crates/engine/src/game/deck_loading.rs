@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
@@ -258,14 +257,9 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.all_creature_types = sorted;
 
     // Shuffle each player's library
-    // Extract libraries, shuffle with rng, then put back to avoid conflicting mutable borrows
-    let mut libraries: Vec<Vec<crate::types::identifiers::ObjectId>> =
-        state.players.iter().map(|p| p.library.clone()).collect();
-    for lib in &mut libraries {
-        lib.shuffle(&mut state.rng);
-    }
-    for (i, lib) in libraries.into_iter().enumerate() {
-        state.players[i].library = lib;
+    let GameState { players, rng, .. } = state;
+    for player in players.iter_mut() {
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
     }
 }
 

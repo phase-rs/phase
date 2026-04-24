@@ -93,9 +93,9 @@ pub struct Player {
     pub mana_pool: ManaPool,
 
     // Per-player zones
-    pub library: Vec<ObjectId>,
-    pub hand: Vec<ObjectId>,
-    pub graveyard: Vec<ObjectId>,
+    pub library: im::Vector<ObjectId>,
+    pub hand: im::Vector<ObjectId>,
+    pub graveyard: im::Vector<ObjectId>,
 
     // Tracking
     pub has_drawn_this_turn: bool,
@@ -171,9 +171,9 @@ impl Default for Player {
             id: PlayerId(0),
             life: 20,
             mana_pool: ManaPool::default(),
-            library: Vec::new(),
-            hand: Vec::new(),
-            graveyard: Vec::new(),
+            library: im::Vector::new(),
+            hand: im::Vector::new(),
+            graveyard: im::Vector::new(),
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
             poison_counters: 0,

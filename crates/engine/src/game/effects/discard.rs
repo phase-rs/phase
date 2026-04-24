@@ -124,7 +124,9 @@ pub fn resolve(
             .find(|p| p.id == discard_player)
             .ok_or(EffectError::PlayerNotFound)?
             .hand
-            .to_vec();
+            .iter()
+            .copied()
+            .collect();
 
         // CR 701.9b: For "up to N" discards, present the full N to the player.
         // The available cards list naturally constrains actual selection.
@@ -783,7 +785,7 @@ mod tests {
         state.waiting_for = WaitingFor::DiscardChoice {
             player: PlayerId(0),
             count: 2,
-            cards: state.players[0].hand.to_vec(),
+            cards: state.players[0].hand.iter().copied().collect::<Vec<_>>(),
             source_id: ObjectId(100),
             effect_kind: crate::types::ability::EffectKind::Discard,
             up_to: true,

@@ -297,7 +297,7 @@ mod tests {
             description: None,
         };
         for i in 0..2u64 {
-            state.stack.push(StackEntry {
+            state.stack.push_back(StackEntry {
                 id: ObjectId(9000 + i),
                 source_id: source,
                 controller: PlayerId(0),

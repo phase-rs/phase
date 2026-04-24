@@ -29,7 +29,7 @@ pub fn resolve(
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
-    let library: Vec<ObjectId> = player.library.clone();
+    let library: Vec<ObjectId> = player.library.iter().copied().collect();
     let mut hit_id: Option<ObjectId> = None;
 
     // CR 107.3a + CR 601.2b: ability-context evaluation so dynamic thresholds

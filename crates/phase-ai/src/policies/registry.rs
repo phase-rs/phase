@@ -239,17 +239,25 @@ impl PolicyRegistry {
         let Some(indices) = self.by_kind.get(&kind) else {
             return Vec::new();
         };
-        let session_features = ctx
-            .context
-            .session
-            .features
-            .get(&ctx.ai_player)
-            .cloned()
-            .unwrap_or_default();
+        // Borrow the cached DeckFeatures instead of cloning. Cloning a
+        // DeckFeatures (9 Feature sub-structs, most carrying Vec<CardId>)
+        // per candidate is a ~hundred-microsecond hit × hundreds of
+        // `verdicts()` calls per decision — a measurable fraction of the
+        // pre-search tactical pass on large states. `AiSession::features`
+        // stays `cached-per-decision` so the borrow is safe for the scope.
+        let default_features;
+        let session_features: &crate::features::DeckFeatures =
+            match ctx.context.session.features.get(&ctx.ai_player) {
+                Some(f) => f,
+                None => {
+                    default_features = crate::features::DeckFeatures::default();
+                    &default_features
+                }
+            };
         let mut out = Vec::with_capacity(indices.len());
         for &idx in indices {
             let policy = &self.policies[idx];
-            let Some(activation) = policy.activation(&session_features, ctx.state, ctx.ai_player)
+            let Some(activation) = policy.activation(session_features, ctx.state, ctx.ai_player)
             else {
                 continue;
             };

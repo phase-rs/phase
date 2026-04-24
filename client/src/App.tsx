@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, useLocation } from "react-router";
 import { BuildBadge } from "./components/chrome/BuildBadge";
 import { HostControlTile } from "./components/chrome/HostControlTile";
 import { EngineLostModal } from "./components/modal/EngineLostModal";
+import { NonFatalPanicToast } from "./components/modal/NonFatalPanicToast";
 import { SplashScreen } from "./components/splash/SplashScreen";
 import { useFeedInitialization } from "./hooks/useFeedInitialization";
 import { useHostingSession } from "./hooks/useHostingSession";
@@ -74,6 +75,7 @@ function AppContent() {
       {!location.pathname.startsWith("/game/") && <BuildBadge />}
       <HostControlTile />
       <EngineLostModal />
+      <NonFatalPanicToast />
     </div>
   );
 }

@@ -367,15 +367,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
     }
 }
 
-fn selection_mismatch(
+fn selection_mismatch<'a>(
     chosen: &[ObjectId],
-    options: &[ObjectId],
+    options: impl IntoIterator<Item = &'a ObjectId>,
     exact_count: Option<usize>,
 ) -> bool {
     if exact_count.is_some_and(|count| chosen.len() != count) {
         return true;
     }
-    let option_set: HashSet<ObjectId> = options.iter().copied().collect();
+    let option_set: HashSet<ObjectId> = options.into_iter().copied().collect();
     let mut seen = HashSet::new();
     chosen
         .iter()
@@ -458,7 +458,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // MTGA-style: auto-pass when own spell/ability is on top of the stack.
     // The player almost never wants to respond to their own spell — let it resolve.
     // Full control mode (checked by the frontend) overrides this.
-    if let Some(top) = state.stack.last() {
+    if let Some(top) = state.stack.back() {
         if top.controller == player {
             return true;
         }

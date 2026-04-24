@@ -1862,17 +1862,27 @@ function AbilityChoiceModal() {
   const obj = useGameStore((s) =>
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
+  const objects = useGameStore((s) => s.gameState?.objects);
 
   if (!pending || !obj) return null;
+
+  // CR 702.190a: When every pending action is a Sneak cast, reframe the
+  // modal's subtitle — the user is choosing which attacker to return as the
+  // cost-payment creature, not activating an ability.
+  const allSneak = pending.actions.every((a) => a.type === "CastSpellAsSneak");
+  const subtitle = allSneak
+    ? "Choose which attacker to return (Sneak cost)"
+    : "Choose an ability to activate";
 
   return (
     <ChoiceModal
       title={obj.name}
-      subtitle="Choose an ability to activate"
+      subtitle={subtitle}
       options={pending.actions.map((action, i) => {
         const { label, description } = abilityChoiceLabel(
           action,
           obj,
+          objects,
         );
         return { id: String(i), label, description };
       })}

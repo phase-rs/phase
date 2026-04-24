@@ -55,7 +55,7 @@ pub fn resolve(
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
-    let library: Vec<ObjectId> = player.library.clone();
+    let library: Vec<ObjectId> = player.library.iter().copied().collect();
     let mut revealed_misses: Vec<ObjectId> = Vec::new();
     let mut hit_card: Option<ObjectId> = None;
 
@@ -554,7 +554,7 @@ mod tests {
         );
         // Activator's library is undisturbed — their bear is still on top.
         assert_eq!(
-            state.players[0].library.first().copied(),
+            state.players[0].library.front().copied(),
             Some(activator_creature)
         );
         // The CardsRevealed event names the revealing player (the opponent), not the activator.

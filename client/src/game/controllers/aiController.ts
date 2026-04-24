@@ -4,7 +4,7 @@ import type { GameAction } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { debugLog } from "../debugLog";
 import { dispatchAction } from "../dispatch";
-import { attemptStateRehydrate, isEnginePanic, notifyEngineLost } from "../engineRecovery";
+import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
 import type { OpponentController } from "./types";
 
 /**
@@ -187,7 +187,7 @@ export function createAIController(config: AIControllerConfig): AIController {
           // user-reported "ai-getAction-retry" came from — short-circuit
           // with the captured panic so the modal can show the real cause.
           if (isEnginePanic(err)) {
-            notifyEngineLost("ai-getAction-panic", err.panic);
+            await routePanic("ai-getAction-panic", err.panic);
             throw err;
           }
           if (!isStateLost(err)) throw err;
@@ -206,7 +206,7 @@ export function createAIController(config: AIControllerConfig): AIController {
             action = await adapter!.getAiAction(difficulty, playerId);
           } catch (retryErr) {
             if (isEnginePanic(retryErr)) {
-              notifyEngineLost("ai-getAction-retry-panic", retryErr.panic);
+              await routePanic("ai-getAction-retry-panic", retryErr.panic);
             } else {
               notifyEngineLost("ai-getAction-retry");
             }

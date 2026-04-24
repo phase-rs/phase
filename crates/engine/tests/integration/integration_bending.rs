@@ -305,7 +305,7 @@ fn test_mana_payment_finalization() {
     runner
         .state_mut()
         .stack
-        .push(engine::types::game_state::StackEntry {
+        .push_back(engine::types::game_state::StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: P0,

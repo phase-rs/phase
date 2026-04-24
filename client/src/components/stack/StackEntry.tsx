@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -60,6 +61,9 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
       : undefined;
   const controllerLabel = entry.controller === playerId ? "You" : "Opp";
+  const seatColor = useSeatColor(entry.controller);
+  const controllerInitial =
+    entry.controller === playerId ? "Y" : `P${entry.controller}`;
 
   // Targeting: check if this stack entry is a valid target for the current selection
   const isHumanTargetSelection =
@@ -111,6 +115,11 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       }}
       {...longPressHandlers}
     >
+      {/* Seat-color left-edge bar — identifies controller at a glance in multiplayer. */}
+      <div
+        className="pointer-events-none absolute inset-y-0 left-0 z-[1] w-[3px] rounded-l-lg"
+        style={{ backgroundColor: seatColor }}
+      />
       {/* Card image with explicit inline dimensions (Tailwind can't handle dynamic values) */}
       <div
         style={{ width: cardSize.width, height: cardSize.height }}
@@ -164,13 +173,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </div>
       )}
 
-      {/* Controller badge */}
+      {/* Controller seat avatar — colored initial anchors identity to every surface
+          where this player appears (stack, HUD, log). */}
       <span
-        className={`absolute rounded bg-black/60 px-1 py-0.5 text-[9px] font-semibold text-gray-300 ${
+        title={controllerLabel}
+        className={`absolute flex h-4 min-w-4 items-center justify-center rounded-full border border-black/30 px-[3px] text-[9px] font-bold text-black shadow ${
           isSpell ? "bottom-1 left-1" : "bottom-1 right-1"
         }`}
+        style={{ backgroundColor: seatColor }}
       >
-        {controllerLabel}
+        {controllerInitial}
       </span>
     </motion.div>
   );

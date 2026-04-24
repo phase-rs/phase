@@ -76,7 +76,7 @@ pub(super) fn handle_resolution_choice(
                 player_state.library.insert(index, card_id);
             }
             for &card_id in &bottom_cards {
-                player_state.library.push(card_id);
+                player_state.library.push_back(card_id);
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }

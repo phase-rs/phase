@@ -298,7 +298,7 @@ mod tests {
         };
         obj.power = Some(1);
         obj.toughness = Some(1);
-        state.battlefield.push(oid);
+        state.battlefield.push_back(oid);
         oid
     }
 

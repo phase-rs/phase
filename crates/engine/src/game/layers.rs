@@ -50,7 +50,7 @@ pub fn prune_end_of_combat_effects(state: &mut GameState) {
 /// (`AdventureCreature`, `ExileWithAltCost`, `ExileWithEnergyCost`, `WarpExile`)
 /// persist until the object leaves exile (handled by `zones::apply_zone_exit_cleanup`).
 pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.casting_permissions.retain(|p| match p {
             CastingPermission::PlayFromExile {
                 duration: Duration::UntilEndOfTurn,
@@ -86,7 +86,7 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
 /// player's untap step. Called from the untap step alongside
 /// `prune_until_next_turn_effects`.
 pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_player: PlayerId) {
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.casting_permissions.retain(|p| match p {
             CastingPermission::PlayFromExile {
                 duration: Duration::UntilYourNextTurn,
@@ -437,7 +437,7 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Step 1: Reset computed characteristics to base values.
     // Only reset fields where base values were explicitly set; objects without
     // base values (e.g., from older test helpers) retain their current values.
-    let bf_ids: Vec<ObjectId> = state.battlefield.clone();
+    let bf_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
@@ -2488,7 +2488,7 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Creature);
-        state.players[0].graveyard.push(gy_creature);
+        state.players[0].graveyard.push_back(gy_creature);
 
         state.layers_dirty = true;
         evaluate_layers(&mut state);
@@ -2515,7 +2515,7 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Instant);
-        state.players[1].graveyard.push(gy_instant);
+        state.players[1].graveyard.push_back(gy_instant);
 
         state.layers_dirty = true;
         evaluate_layers(&mut state);
@@ -2536,7 +2536,7 @@ mod tests {
             obj.card_types.core_types.push(CoreType::Artifact);
             obj.card_types.core_types.push(CoreType::Creature);
         }
-        state.players[0].graveyard.push(gy_artcreature);
+        state.players[0].graveyard.push_back(gy_artcreature);
 
         state.layers_dirty = true;
         evaluate_layers(&mut state);
@@ -3267,7 +3267,7 @@ mod tests {
         let ts = state.next_timestamp();
         state
             .transient_continuous_effects
-            .push(TransientContinuousEffect {
+            .push_back(TransientContinuousEffect {
                 id: 1,
                 source_id: id,
                 controller: PlayerId(0),
@@ -3297,7 +3297,7 @@ mod tests {
         let ts = state.next_timestamp();
         state
             .transient_continuous_effects
-            .push(TransientContinuousEffect {
+            .push_back(TransientContinuousEffect {
                 id: 1,
                 source_id: id,
                 controller: PlayerId(0),
@@ -3633,7 +3633,7 @@ mod tests {
         // zone routing — but `zone_object_ids(Hand)` reads `state.players[n].hand`.
         // Add bolt to the player's hand vector explicitly.
         if let Some(player) = state.players.iter_mut().find(|p| p.id == PlayerId(0)) {
-            player.hand.push(bolt);
+            player.hand.push_back(bolt);
         }
 
         // Pre-condition: hand card has no keywords.
@@ -3666,7 +3666,7 @@ mod tests {
             obj.base_card_types = obj.card_types.clone();
         }
         if let Some(player) = state.players.iter_mut().find(|p| p.id == PlayerId(1)) {
-            player.hand.push(opp_bolt);
+            player.hand.push_back(opp_bolt);
         }
 
         evaluate_layers(&mut state);
@@ -3859,7 +3859,7 @@ mod tests {
                     .active_zones(vec![Zone::Graveyard]),
             );
         }
-        state.players[0].graveyard.push(anger);
+        state.players[0].graveyard.push_back(anger);
 
         // Mountain on player 0's battlefield.
         let mountain = create_object(
@@ -3930,7 +3930,7 @@ mod tests {
                     .active_zones(vec![Zone::Graveyard]),
             );
         }
-        state.players[0].graveyard.push(anger);
+        state.players[0].graveyard.push_back(anger);
 
         let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
 

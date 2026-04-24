@@ -3342,7 +3342,7 @@ mod tests {
             "Spell".to_string(),
             Zone::Library,
         );
-        state.players[0].library.push(lib_card);
+        state.players[0].library.push_back(lib_card);
 
         // Grandchild: grant PlayFromExile to the tracked set. Forces every
         // zone-changing ancestor to publish (transitive descendant check).

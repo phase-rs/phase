@@ -432,7 +432,7 @@ mod tests {
             ObjectId(999),
             AI,
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(9000),
             source_id: ObjectId(999),
             controller: AI,

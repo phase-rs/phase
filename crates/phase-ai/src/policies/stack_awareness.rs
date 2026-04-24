@@ -355,7 +355,7 @@ mod tests {
 
     fn push_stack_entry(state: &mut GameState, effect: Effect, targets: Vec<TargetRef>) {
         let ability = ResolvedAbility::new(effect, targets, ObjectId(999), PlayerId(1));
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(state.next_object_id),
             source_id: ObjectId(999),
             controller: PlayerId(1),

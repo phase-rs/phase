@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -12,7 +13,13 @@ import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
+import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
+import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
+
+import type { ObjectId } from "../../adapter/types.ts";
+
+const EMPTY_ATTACKER_IDS: readonly ObjectId[] = [];
 
 interface OpponentHudProps {
   opponentName?: string | null;
@@ -44,6 +51,46 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const eliminated = gameState?.eliminated_players ?? [];
   const liveOpponents = allOpponents.filter((id) => !eliminated.includes(id));
   const isMultiplayer = allOpponents.length > 1;
+
+  // The `OpponentTab` row renders with a default-focused opponent even when
+  // `focusedOpponent` is null (it falls back to the first live opponent).
+  // The cross-board glimpse must exclude the *visually* focused opponent,
+  // not just the explicit one — otherwise the default-focused tab lights
+  // up a redundant badge at game start.
+  const effectiveFocused = focusedOpponent ?? liveOpponents[0] ?? null;
+
+  // Cross-board attacker glimpse: for each non-focused opponent, collect the
+  // ids of their creatures currently attacking the local player or their
+  // permanents. Used by `OpponentTab` to render a badge + hover popover so
+  // the defender can assess incoming threats without switching focus.
+  const attackers = gameState?.combat?.attackers;
+  const objectsMap = gameState?.objects;
+  const incomingByOpponent = useMemo(() => {
+    const map = new Map<PlayerId, ObjectId[]>();
+    if (!attackers || !objectsMap) return map;
+    for (const attacker of attackers) {
+      const attackerObj = objectsMap[attacker.object_id];
+      if (!attackerObj) continue;
+      const controller = attackerObj.controller;
+      // Skip my own attackers; they can't be attacking me.
+      if (controller === playerId) continue;
+      // Skip the focused opponent — their board is on screen, arrows already
+      // draw. The badge would be redundant.
+      if (effectiveFocused != null && controller === effectiveFocused) continue;
+
+      const t = attacker.attack_target;
+      const targetsMe =
+        (t.type === "Player" && t.data === playerId)
+        || ((t.type === "Planeswalker" || t.type === "Battle")
+          && objectsMap[t.data]?.controller === playerId);
+      if (!targetsMe) continue;
+
+      const list = map.get(controller) ?? [];
+      list.push(attacker.object_id);
+      map.set(controller, list);
+    }
+    return map;
+  }, [attackers, objectsMap, playerId, effectiveFocused]);
 
   useEffect(() => {
     const activeOpponentId = gameState?.active_player;
@@ -99,6 +146,10 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const label = opponentName ?? getOpponentDisplayName(opponentId);
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
+    const opponentSeatColor = getSeatColor(opponentId, gameState?.seat_order);
+    const isOpponentUnderAttack = gameState?.combat?.attackers.some(
+      (a) => a.attack_target.type === "Player" && a.attack_target.data === opponentId,
+    ) ?? false;
 
     return (
       <div
@@ -112,6 +163,8 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           label={label}
           tone={hudTone}
           active={isOpponentTurn}
+          seatColor={opponentSeatColor}
+          underAttack={isOpponentUnderAttack}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
@@ -146,6 +199,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           isTeammate={teamBased && isTeammate(playerId, opId)}
           isValidTarget={validPlayerTargetIds.includes(opId)}
           showMana={focusedId === opId}
+          incomingAttackerIds={incomingByOpponent.get(opId) ?? EMPTY_ATTACKER_IDS}
           onClick={() => validPlayerTargetIds.includes(opId) ? handlePlayerTarget(opId) : setFocusedOpponent(opId)}
           onKick={
             onKickPlayer && !eliminated.includes(opId)
@@ -191,14 +245,47 @@ interface OpponentTabProps {
   isTeammate: boolean;
   isValidTarget: boolean;
   showMana: boolean;
+  /** Attacker object ids this opponent has declared against me / my stuff.
+   *  When non-empty, the tab renders a red ⚔×N badge and a hover popover
+   *  with mini card images so the defender can assess incoming threats
+   *  without first focusing this opponent's board. */
+  incomingAttackerIds: readonly ObjectId[];
   onClick: () => void;
   /** Host-only: when provided, render a small kick affordance on the tab. */
   onKick?: () => void;
 }
 
-function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, showMana, onClick, onKick }: OpponentTabProps) {
+function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, showMana, incomingAttackerIds, onClick, onKick }: OpponentTabProps) {
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
+  const seatColor = getSeatColor(playerId, gameState?.seat_order);
+  const isUnderAttack = gameState?.combat?.attackers.some(
+    (a) => a.attack_target.type === "Player" && a.attack_target.data === playerId,
+  ) ?? false;
+  const [showIncomingPopover, setShowIncomingPopover] = useState(false);
+  const hasIncoming = incomingAttackerIds.length > 0;
+  // Short close delay so cursor moving through the gap between the tab and
+  // the popover below doesn't flicker the popover shut. The popover itself
+  // is `pointer-events-none`, so it can't re-enter the button — the delay
+  // is the only UX-safe way to give the reader time to parse mini cards.
+  const closeTimerRef = useRef<number | null>(null);
+  const openPopover = useCallback(() => {
+    if (closeTimerRef.current != null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    setShowIncomingPopover(true);
+  }, []);
+  const scheduleClosePopover = useCallback(() => {
+    if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => {
+      setShowIncomingPopover(false);
+      closeTimerRef.current = null;
+    }, 180);
+  }, []);
+  useEffect(() => () => {
+    if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
+  }, []);
   const player = gameState?.players[playerId];
   const isDisconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
@@ -243,7 +330,12 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       type="button"
       onClick={onClick}
       disabled={isEliminated}
+      data-player-hud={String(playerId)}
       data-phased-out={isPhasedOut ? "true" : undefined}
+      onMouseEnter={hasIncoming ? openPopover : undefined}
+      onMouseLeave={hasIncoming ? scheduleClosePopover : undefined}
+      onFocus={hasIncoming ? openPopover : undefined}
+      onBlur={hasIncoming ? scheduleClosePopover : undefined}
       className={`relative flex items-center gap-3 rounded-[18px] border px-3 py-2 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isTheirTurn && !shouldReduceMotion && (
@@ -264,8 +356,19 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           }}
         />
       )}
+      {isUnderAttack && (
+        <>
+          <UnderAttackOverlay />
+          <span className="sr-only">{label} is under attack</span>
+        </>
+      )}
       <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
-        <span className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">
+        <span className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">
+          <span
+            aria-hidden
+            className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
+            style={{ backgroundColor: seatColor }}
+          />
           {label}
         </span>
         <div className="flex items-center gap-1">
@@ -321,6 +424,26 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
         >
           ×
         </span>
+      )}
+      {/* Cross-board attacker badge + hover popover — only when this
+          non-focused opponent has declared attackers against me/my stuff.
+          Left-positioned to avoid colliding with the right-edge kick `×`
+          affordance rendered above. */}
+      {hasIncoming && (
+        <>
+          <span
+            aria-label={`${incomingAttackerIds.length} creature${incomingAttackerIds.length === 1 ? "" : "s"} attacking you`}
+            className={`absolute -left-1.5 -top-1.5 z-10 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white shadow ring-2 ring-red-300 ${shouldReduceMotion ? "" : "animate-pulse"}`}
+          >
+            ⚔×{incomingAttackerIds.length}
+          </span>
+          {showIncomingPopover && (
+            <IncomingAttackersPopover
+              attackerIds={incomingAttackerIds}
+              opponentName={label}
+            />
+          )}
+        </>
       )}
     </button>
   );

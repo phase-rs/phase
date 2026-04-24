@@ -152,12 +152,20 @@ pub enum GameAction {
         /// The creature to return — unblocked attacker (Ninjutsu) or tapped creature (WebSlinging).
         creature_to_return: ObjectId,
     },
-    /// CR 702.190a: Cast a creature card from graveyard via Sneak alt-cost.
-    /// Legal only during the declare-blockers step. The returned creature
-    /// must be an unblocked attacker controlled by the casting player; it is
-    /// bounced to its owner's hand as part of paying the Sneak cost.
+    /// CR 702.190a: Cast a spell from HAND via the Sneak alternative cost.
+    /// Legal only during the declare-blockers step (CR 702.190a). Applies to
+    /// any card type (creature, artifact, sorcery, instant, …) — the printed
+    /// keyword's cost grants permission regardless of the card's core type.
+    ///
+    /// `creature_to_return` must be an unblocked attacker controlled by the
+    /// casting player; it is returned to its owner's hand as part of paying
+    /// the Sneak cost (CR 702.190a).
+    ///
+    /// CR 702.190b applies only to permanent spells: they enter tapped and
+    /// attacking alongside the returned creature. Non-permanent Sneak casts
+    /// resolve normally.
     CastSpellAsSneak {
-        gy_object: ObjectId,
+        hand_object: ObjectId,
         card_id: CardId,
         creature_to_return: ObjectId,
     },
@@ -408,7 +416,7 @@ impl GameAction {
         match self {
             GameAction::PlayLand { object_id, .. } => Some(*object_id),
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
-            GameAction::CastSpellAsSneak { gy_object, .. } => Some(*gy_object),
+            GameAction::CastSpellAsSneak { hand_object, .. } => Some(*hand_object),
             GameAction::CastSpellForFree { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMiracle { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),

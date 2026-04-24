@@ -235,7 +235,7 @@ pub(super) fn handle_unless_payment(
                     .players
                     .iter()
                     .find(|p| p.id == player)
-                    .map(|p| p.hand.to_vec())
+                    .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
                     .unwrap_or_default();
                 if hand_cards.is_empty() {
                     payment_failed = true;

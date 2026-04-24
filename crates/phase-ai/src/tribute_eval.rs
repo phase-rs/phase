@@ -179,7 +179,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.insert(id, obj);
-        state.battlefield.push(id);
+        state.battlefield.push_back(id);
         state.objects.get_mut(&id).unwrap()
     }
 

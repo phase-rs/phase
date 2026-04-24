@@ -5,5 +5,6 @@
 //! downstream crates (`phase-ai`, `phase-server`, `engine-wasm`).
 
 pub mod deadline;
+pub mod im_ext;
 
 pub use deadline::Deadline;

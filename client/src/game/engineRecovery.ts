@@ -120,10 +120,24 @@ export interface EngineLostEvent {
 
 type EngineLostListener = (event: EngineLostEvent) => void;
 const engineLostListeners = new Set<EngineLostListener>();
+const nonFatalPanicListeners = new Set<EngineLostListener>();
 
 export function onEngineLost(listener: EngineLostListener): () => void {
   engineLostListeners.add(listener);
   return () => engineLostListeners.delete(listener);
+}
+
+/**
+ * Subscribe to non-fatal engine panics — a Rust panic happened but the
+ * engine kept working (either the panic was in a side path like trace
+ * instrumentation, or a rehydrate from the store snapshot succeeded).
+ * The user sees a dismissible toast, not the blocking "Engine crashed"
+ * modal. Report-link + diagnostic still available so a triager can act
+ * on the panic if it was load-bearing.
+ */
+export function onNonFatalPanic(listener: EngineLostListener): () => void {
+  nonFatalPanicListeners.add(listener);
+  return () => nonFatalPanicListeners.delete(listener);
 }
 
 /**
@@ -137,6 +151,27 @@ export function onEngineLost(listener: EngineLostListener): () => void {
  */
 export function notifyEngineLost(reason: string, panic?: string): void {
   for (const fn of engineLostListeners) fn({ reason, panic });
+}
+
+/**
+ * Route a captured panic through a rehydrate-first triage: if the engine's
+ * state survived (or can be rebuilt from the store snapshot), emit a
+ * non-fatal notification so the user keeps playing. Only on rehydrate
+ * failure does the blocking "Engine crashed" modal fire.
+ *
+ * Covers the common case where the panic happened in a side path
+ * (instrumentation, a debug assertion in a helper) and the engine's
+ * thread-local game state is still intact — the user saw the scary modal
+ * even though nothing was actually broken. This keeps the modal reserved
+ * for genuinely unrecoverable crashes.
+ */
+export async function routePanic(reason: string, panic?: string): Promise<void> {
+  const rehydrated = await attemptStateRehydrate().catch(() => false);
+  if (rehydrated) {
+    for (const fn of nonFatalPanicListeners) fn({ reason, panic });
+    return;
+  }
+  notifyEngineLost(reason, panic);
 }
 
 /**

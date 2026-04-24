@@ -22,7 +22,7 @@ pub fn resolve(
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| p.hand.clone())
+        .map(|p| p.hand.iter().copied().collect())
         .unwrap_or_default();
 
     if hand_cards.is_empty() {

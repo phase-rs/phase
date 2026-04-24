@@ -332,10 +332,10 @@ mod tests {
         make_land(&mut state, 1);
 
         let counter_id = make_instant_in_hand(&mut state, 0, 2);
-        state.players[0].hand.push(counter_id);
+        state.players[0].hand.push_back(counter_id);
 
         let sorcery_id = make_sorcery_in_hand(&mut state, 1, 2);
-        state.players[0].hand.push(sorcery_id);
+        state.players[0].hand.push_back(sorcery_id);
 
         let candidate = cast_candidate(sorcery_id, CardId(5001));
         let decision = priority_decision();
@@ -369,10 +369,10 @@ mod tests {
             make_land(&mut state, i);
         }
         let counter_id = make_instant_in_hand(&mut state, 0, 2);
-        state.players[0].hand.push(counter_id);
+        state.players[0].hand.push_back(counter_id);
 
         let cheap_spell_id = make_sorcery_in_hand(&mut state, 1, 1);
-        state.players[0].hand.push(cheap_spell_id);
+        state.players[0].hand.push_back(cheap_spell_id);
 
         let candidate = cast_candidate(cheap_spell_id, CardId(5001));
         let decision = priority_decision();
@@ -405,7 +405,7 @@ mod tests {
         make_land(&mut state, 1);
 
         let spell_id = make_sorcery_in_hand(&mut state, 0, 2);
-        state.players[0].hand.push(spell_id);
+        state.players[0].hand.push_back(spell_id);
 
         let candidate = cast_candidate(spell_id, CardId(5000));
         let decision = priority_decision();

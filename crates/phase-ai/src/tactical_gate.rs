@@ -642,7 +642,7 @@ mod tests {
         let creature = scenario.add_creature(P1, "Target", 2, 2).id();
         let mut runner = scenario.build();
         let state = runner.state_mut();
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(200),
             source_id: ObjectId(201),
             controller: P0,

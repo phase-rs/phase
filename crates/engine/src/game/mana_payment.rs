@@ -1296,7 +1296,7 @@ mod tests {
         );
         contamination.replacement_definitions = vec![repl].into();
         state.objects.insert(contamination_id, contamination);
-        state.battlefield.push(contamination_id);
+        state.battlefield.push_back(contamination_id);
 
         // Build a Forest (land) that will "produce" Green.
         let land_id = ObjectId(10);
@@ -1312,7 +1312,7 @@ mod tests {
             .core_types
             .push(crate::types::card_type::CoreType::Land);
         state.objects.insert(land_id, forest);
-        state.battlefield.push(land_id);
+        state.battlefield.push_back(land_id);
 
         let mut events = Vec::new();
         produce_mana(

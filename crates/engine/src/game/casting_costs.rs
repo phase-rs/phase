@@ -3840,7 +3840,7 @@ mod tests {
         fn rejection_handler_pops_stack_and_bottom_shuffles_all() {
             let (mut state, hit, misses) = setup_x_cost_hit(4, 4);
 
-            state.stack.push(StackEntry {
+            state.stack.push_back(StackEntry {
                 id: hit,
                 source_id: hit,
                 controller: PlayerId(0),

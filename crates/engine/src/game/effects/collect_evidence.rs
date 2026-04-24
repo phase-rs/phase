@@ -12,7 +12,7 @@ fn graveyard_cards(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
     state
         .players
         .get(player.0 as usize)
-        .map(|p| p.graveyard.clone())
+        .map(|p| p.graveyard.iter().copied().collect())
         .unwrap_or_default()
 }
 
@@ -143,7 +143,7 @@ pub(crate) fn handle_choice(
     let still_legal: Vec<ObjectId> = state
         .players
         .get(player.0 as usize)
-        .map(|p| p.graveyard.clone())
+        .map(|p| p.graveyard.iter().copied().collect())
         .unwrap_or_default();
     for id in chosen {
         if !still_legal.contains(id) {
@@ -297,7 +297,7 @@ mod tests {
         // StackEntry only; the object's zone remains at its origin (Hand)
         // until `finalize_cast` commits the Hand→Stack transition.
         let mut events = Vec::new();
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: source_id,
             source_id,
             controller: PlayerId(0),
@@ -324,7 +324,7 @@ mod tests {
         assert!(state.players[0].graveyard.is_empty());
         assert_eq!(state.objects.get(&first).unwrap().zone, Zone::Exile);
         assert_eq!(state.objects.get(&second).unwrap().zone, Zone::Exile);
-        let stack_entry = state.stack.last().expect("spell should be on stack");
+        let stack_entry = state.stack.back().expect("spell should be on stack");
         assert!(
             stack_entry
                 .ability()

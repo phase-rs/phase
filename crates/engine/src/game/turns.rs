@@ -244,7 +244,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 606.3: Loyalty abilities may be activated only once per turn per permanent.
     let active = state.active_player;
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if obj.controller == active && obj.loyalty_activated_this_turn {
             obj.loyalty_activated_this_turn = false;
         }
@@ -582,7 +582,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // CR 701.19b: Regeneration shields expire at cleanup.
     // CR 615: Prevention effects also expire.
     // Also prune any consumed shields from earlier this turn.
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions
             .retain(|r| !r.shield_kind.is_shield());
     }
@@ -647,7 +647,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         let hand_size = player.hand.len();
         if hand_size > max_hand_size {
             let count = hand_size - max_hand_size;
-            let cards = player.hand.clone();
+            let cards = player.hand.iter().copied().collect();
             return Some(WaitingFor::DiscardToHandSize {
                 player: active,
                 count,
@@ -681,7 +681,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // CR 702.171b: "Once a permanent has become saddled, it stays saddled until
     // the end of the turn or it leaves the battlefield." Clear the designation
     // at cleanup (CR 514).
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if obj.is_saddled {
             obj.is_saddled = false;
         }
@@ -1380,6 +1380,68 @@ mod tests {
 
         state.turn_number = 2;
         assert!(!should_skip_draw(&state));
+    }
+
+    /// End-to-end: drive the engine through End-step priority passes and verify
+    /// that with > 7 cards in hand, the resulting WaitingFor is DiscardToHandSize.
+    /// Mirrors the user-visible flow (no direct execute_cleanup call).
+    #[test]
+    fn end_step_pass_priority_surfaces_discard_to_hand_size() {
+        use crate::game::engine::apply;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::End;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        for i in 0..9 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Hand,
+            );
+        }
+        assert_eq!(state.players[0].hand.len(), 9);
+
+        // P0 passes end-step priority.
+        let r1 = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("p0 pass priority on End");
+        // Expect priority to move to P1 (still End step).
+        assert!(
+            matches!(r1.waiting_for, WaitingFor::Priority { player } if player == PlayerId(1)),
+            "after P0 pass, expected priority to P1, got {:?}",
+            r1.waiting_for
+        );
+
+        // P1 passes — this should advance End → Cleanup and trigger discard prompt.
+        let r2 = apply(&mut state, PlayerId(1), GameAction::PassPriority)
+            .expect("p1 pass priority on End");
+
+        match &r2.waiting_for {
+            WaitingFor::DiscardToHandSize {
+                player,
+                count,
+                cards,
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 2);
+                assert_eq!(cards.len(), 9);
+            }
+            other => panic!(
+                "expected DiscardToHandSize after End-step double-pass with 9 cards, got {:?}",
+                other
+            ),
+        }
+        // Hand untouched until selection made.
+        assert_eq!(state.players[0].hand.len(), 9);
     }
 
     #[test]
@@ -2240,7 +2302,7 @@ mod tests {
         }
         obj.replacement_definitions = vec![def].into();
         state.objects.insert(obj_id, obj);
-        state.battlefield.push(obj_id);
+        state.battlefield.push_back(obj_id);
     }
 
     #[test]
@@ -2353,7 +2415,7 @@ mod tests {
         )]
         .into();
         state.objects.insert(ObjectId(200), obj);
-        state.battlefield.push(ObjectId(200));
+        state.battlefield.push_back(ObjectId(200));
 
         let mut events = Vec::new();
 

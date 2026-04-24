@@ -1609,7 +1609,7 @@ mod tests {
             .insert(CounterType::Lore, 3);
 
         // Put a chapter trigger from this saga on the stack
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(999),
             source_id: id,
             controller: PlayerId(0),

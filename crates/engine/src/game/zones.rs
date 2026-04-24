@@ -377,7 +377,7 @@ pub fn move_to_library_at_index(
             let clamped = i.min(player.library.len());
             player.library.insert(clamped, object_id);
         }
-        None => player.library.push(object_id),
+        None => player.library.push_back(object_id),
     }
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
@@ -427,17 +427,17 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
                 .find(|p| p.id == owner)
                 .expect("owner exists");
             match zone {
-                Zone::Library => player.library.push(object_id),
-                Zone::Hand => player.hand.push(object_id),
-                Zone::Graveyard => player.graveyard.push(object_id),
+                Zone::Library => player.library.push_back(object_id),
+                Zone::Hand => player.hand.push_back(object_id),
+                Zone::Graveyard => player.graveyard.push_back(object_id),
                 _ => unreachable!(),
             }
         }
         // CR 400.4a: Instants/sorceries blocked by early check in move_to_zone.
-        Zone::Battlefield => state.battlefield.push(object_id),
+        Zone::Battlefield => state.battlefield.push_back(object_id),
         Zone::Stack => {} // Stack entries are managed separately via StackEntry
-        Zone::Exile => state.exile.push(object_id),
-        Zone::Command => state.command_zone.push(object_id),
+        Zone::Exile => state.exile.push_back(object_id),
+        Zone::Command => state.command_zone.push_back(object_id),
     }
 }
 

@@ -215,7 +215,7 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .iter()
             .flat_map(|player| player.graveyard.iter().copied())
             .collect(),
-        Zone::Exile => state.exile.clone(),
+        Zone::Exile => state.exile.iter().copied().collect(),
         Zone::Stack => state
             .stack
             .iter()
@@ -986,7 +986,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     // (Hungry Graffalon / Topiary Lecturer Increment). The field is initialized
     // to 0 by `GameObject::new` and set at cast finalization in
     // `casting::pay_mana_cost`; it never needs to be reset.
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.cast_from_zone = None;
         obj.mana_spent_to_cast = false;
         obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
@@ -1141,7 +1141,7 @@ pub fn check_state_triggers(state: &mut GameState) {
     // CR 702.26b: phased-out gating is owned by `active_trigger_definitions`
     // below; we iterate the full battlefield and let the helper drop phased-
     // out permanents rather than re-filtering here.
-    let source_ids: Vec<ObjectId> = state.battlefield.to_vec();
+    let source_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
 
     let mut pending: Vec<PendingTrigger> = Vec::new();
 
@@ -3259,7 +3259,7 @@ pub mod tests {
             )));
             spell.trigger_definitions.push(trigger);
         }
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(0),
@@ -3312,7 +3312,7 @@ pub mod tests {
 
         assert_eq!(state.stack.len(), 2);
         assert!(matches!(
-            state.stack.last().map(|entry| &entry.kind),
+            state.stack.back().map(|entry| &entry.kind),
             Some(StackEntryKind::TriggeredAbility { .. })
         ));
     }
@@ -3660,7 +3660,7 @@ pub mod tests {
             "Opponent Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: spell,
             source_id: spell,
             controller: PlayerId(1),
@@ -3731,7 +3731,7 @@ pub mod tests {
             "Own Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: spell,
             source_id: spell,
             controller: PlayerId(0),
@@ -3784,7 +3784,7 @@ pub mod tests {
             "Opponent Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: spell,
             source_id: spell,
             controller: PlayerId(1),
@@ -3836,7 +3836,7 @@ pub mod tests {
             "Opponent Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: spell,
             source_id: spell,
             controller: PlayerId(1),
@@ -6122,7 +6122,7 @@ mod dedup_regression_tests {
         let (mut state, _observer) = setup_with_observer(TriggerMode::ChangesZone);
         // Scope the observer trigger to ETB.
         // Find the first battlefield object (our observer) to seed.
-        let observer_id = *state.battlefield.first().unwrap();
+        let observer_id = *state.battlefield.iter().next().unwrap();
         state
             .objects
             .get_mut(&observer_id)

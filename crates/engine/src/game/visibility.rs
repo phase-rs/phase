@@ -382,7 +382,7 @@ mod tests {
 
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
 
-        assert_eq!(filtered.command_zone, vec![commander_id]);
+        assert_eq!(filtered.command_zone, im::vector![commander_id]);
         let commander = filtered.objects.get(&commander_id).unwrap();
         assert_eq!(commander.name, "Opponent Commander");
         assert!(!commander.face_down);

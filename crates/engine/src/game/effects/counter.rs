@@ -266,7 +266,7 @@ mod tests {
             "Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(1),
@@ -319,7 +319,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(StaticMode::CantBeCountered));
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(1),
@@ -378,7 +378,7 @@ mod tests {
 
         // Triggered ability on the stack (from the source creature)
         let ability_on_stack = ObjectId(999);
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ability_on_stack,
             source_id: source_permanent,
             controller: PlayerId(1),
@@ -468,7 +468,7 @@ mod tests {
             "Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
             controller: PlayerId(1),
@@ -514,7 +514,7 @@ mod tests {
             "Flashback Spell".to_string(),
             Zone::Stack,
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(1),

@@ -215,7 +215,7 @@ mod tests {
         );
         state.objects.get_mut(&token).unwrap().is_token = true;
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(50),
             source_id: token,
             controller: PlayerId(0),
@@ -253,7 +253,7 @@ mod tests {
             "Alpha".to_string(),
             Zone::Stack,
         );
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(60),
             source_id: spell,
             controller: PlayerId(0),

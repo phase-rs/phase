@@ -49,7 +49,12 @@ pub fn resolve(
         return Ok(());
     }
 
-    let cards: Vec<_> = player.library[..count].to_vec();
+    let cards: Vec<_> = player
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>();
     let keep_count = keep_num.min(cards.len());
 
     // CR 701.20a: Pure-peek pattern (keep_count = 0): "look at the top card" with no
@@ -156,7 +161,12 @@ mod tests {
                 Zone::Library,
             );
         }
-        let top_5: Vec<_> = state.players[0].library[..5].to_vec();
+        let top_5: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>();
 
         let ability = make_dig_ability(5);
         let mut events = Vec::new();
@@ -218,7 +228,12 @@ mod tests {
             );
             card_ids.push(id);
         }
-        let cards_on_top: Vec<_> = state.players[0].library[..5].to_vec();
+        let cards_on_top: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>();
         let kept: Vec<_> = cards_on_top[..2].to_vec();
 
         // Simulate Zimone's Dig setup: keep up to 2, no inline destination,
@@ -459,7 +474,12 @@ mod tests {
                 Zone::Library,
             );
         }
-        let cards_on_top: Vec<_> = state.players[0].library[..5].to_vec();
+        let cards_on_top: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>();
         let kept = vec![cards_on_top[2]]; // pick the middle card
         let rest_ids: Vec<_> = cards_on_top
             .iter()

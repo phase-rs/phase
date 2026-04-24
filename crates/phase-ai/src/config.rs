@@ -56,6 +56,16 @@ pub struct SearchConfig {
     pub deterministic: bool,
     /// How much the AI reasons about opponent hand threats.
     pub threat_awareness: ThreatAwareness,
+    /// Minimum remaining wall-clock budget (ms) required before running an
+    /// uncached multi-turn projection (e.g., `velocity_score`'s opponent-turn
+    /// simulation). When `time_budget_ms.remaining < this`, policies fall back
+    /// to cache-only lookups and a heuristic score — preserves the tactical
+    /// signal without blowing the user-visible turn-time budget.
+    ///
+    /// Scaled per difficulty: Medium needs tighter gating than VeryHard because
+    /// Medium's shorter budget (1500ms native) leaves less headroom for a
+    /// ~1.5s opponent-turn simulation. Set to 0 to always run projections.
+    pub projection_min_budget_ms: u128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +128,7 @@ impl Default for SearchConfig {
             time_budget_ms: None,
             deterministic: false,
             threat_awareness: ThreatAwareness::None,
+            projection_min_budget_ms: 500,
         }
     }
 }
@@ -357,6 +368,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: None,
                 deterministic: false,
                 threat_awareness: ThreatAwareness::None,
+                projection_min_budget_ms: 0,
             },
         ),
         AiDifficulty::Easy => (
@@ -380,6 +392,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: None,
                 deterministic: false,
                 threat_awareness: ThreatAwareness::None,
+                projection_min_budget_ms: 0,
             },
         ),
         AiDifficulty::Medium => (
@@ -403,6 +416,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: Some(1500),
                 deterministic: false,
                 threat_awareness: ThreatAwareness::ArchetypeOnly,
+                projection_min_budget_ms: 500,
             },
         ),
         AiDifficulty::Hard => (
@@ -426,6 +440,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: Some(2500),
                 deterministic: false,
                 threat_awareness: ThreatAwareness::Full,
+                projection_min_budget_ms: 300,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -449,6 +464,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: Some(4000),
                 deterministic: false,
                 threat_awareness: ThreatAwareness::Full,
+                projection_min_budget_ms: 300,
             },
         ),
     };

@@ -382,7 +382,7 @@ mod tests {
                 .description("Shield".to_string()),
         );
         state.objects.insert(shield_id, shield);
-        state.battlefield.push(shield_id);
+        state.battlefield.push_back(shield_id);
 
         let ability = make_fight_ability(bear, wolf);
         let mut events = Vec::new();
@@ -457,7 +457,7 @@ mod tests {
                 .description("Shield".to_string()),
         );
         state.objects.insert(shield_id, shield);
-        state.battlefield.push(shield_id);
+        state.battlefield.push_back(shield_id);
 
         // Ensure the controlling player matches the waiting_for player so apply() accepts the action.
         state.priority_player = PlayerId(1);

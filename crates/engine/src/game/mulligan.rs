@@ -1,5 +1,3 @@
-use rand::seq::SliceRandom;
-
 use crate::game::effects::resolve_effect;
 use crate::types::ability::{AbilityKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
@@ -20,8 +18,9 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
     events.push(GameEvent::MulliganStarted);
 
     // Shuffle both libraries
-    for player in &mut state.players {
-        player.library.shuffle(&mut state.rng);
+    let GameState { players, rng, .. } = &mut *state;
+    for player in players.iter_mut() {
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
     }
 
     // Draw 7 for each player in seat order
@@ -213,19 +212,21 @@ fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &m
         .find(|p| p.id == player)
         .expect("player exists")
         .hand
-        .clone();
+        .iter()
+        .copied()
+        .collect();
 
     for card_id in hand_ids {
         zones::move_to_zone(state, card_id, Zone::Library, events);
     }
 
     // Shuffle library
-    let player_data = state
-        .players
+    let GameState { players, rng, .. } = state;
+    let player_data = players
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists");
-    player_data.library.shuffle(&mut state.rng);
+    crate::util::im_ext::shuffle_vector(&mut player_data.library, rng);
 }
 
 fn draw_n(state: &mut GameState, player_id: PlayerId, count: usize, events: &mut Vec<GameEvent>) {
@@ -402,7 +403,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(state.players[0].hand.len(), 6); // 7 - 1
                                                     // Card should be at bottom of library
-        assert_eq!(*state.players[0].library.last().unwrap(), card_to_bottom,);
+        assert_eq!(*state.players[0].library.back().unwrap(), card_to_bottom,);
     }
 
     #[test]

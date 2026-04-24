@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
@@ -15,6 +16,11 @@ export function PlayerHud() {
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
   const isPhasedOut = useGameStore(
     (s) => s.gameState?.players[playerId]?.status?.type === "PhasedOut",
+  );
+  const isUnderAttack = useGameStore(
+    (s) => s.gameState?.combat?.attackers.some(
+      (a) => a.attack_target.type === "Player" && a.attack_target.data === playerId,
+    ) ?? false,
   );
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -33,6 +39,7 @@ export function PlayerHud() {
   }, [isValidTarget, dispatch, playerId]);
 
   const hudTone = isValidTarget ? "cyan" : isMyTurn ? "emerald" : "neutral";
+  const seatColor = useSeatColor(playerId);
 
   return (
     <div
@@ -47,6 +54,8 @@ export function PlayerHud() {
         label={getPlayerDisplayName(playerId)}
         tone={hudTone}
         active={isMyTurn}
+        seatColor={seatColor}
+        underAttack={isUnderAttack}
         onClick={isValidTarget ? handleTargetClick : undefined}
         trailing={
           <>
