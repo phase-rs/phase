@@ -48,20 +48,39 @@ pub(crate) fn allowed_draw_count(
 }
 
 /// CR 121.1: Draw a card — put the top card of library into hand.
+///
+/// CR 601.2c + CR 115.1: When the parsed `Effect::Draw { target }` is a
+/// player-target filter (e.g. `TargetFilter::Player` from "Target player draws
+/// a card"), the drawing player is whichever `TargetRef::Player` was chosen
+/// during spell announcement. `ResolvedAbility::target_player()` extracts
+/// that choice and falls back to `ability.controller` when the target is a
+/// context-ref (Controller, SelfRef, etc.) — preserving the historical
+/// "controller draws" behavior for plain "draw a card" / "you draw" patterns.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let num_cards = match &ability.effect {
+    let (num_cards, drawing_player) = match &ability.effect {
         // CR 107.1b: Resolve with full ability context so `QuantityRef::Variable { "X" }`
         // finds the caster-chosen X on the ability.
-        Effect::Draw { count } => resolve_quantity_with_targets(state, count, ability) as u32,
-        _ => 1,
+        // CR 601.2c: For `target: TargetFilter::Player`, the drawing player was
+        // chosen during spell announcement and is in `ability.targets` —
+        // `target_player()` reads it back, falling back to controller for
+        // context-ref filters that don't surface a target slot.
+        Effect::Draw { count, target } => (
+            resolve_quantity_with_targets(state, count, ability) as u32,
+            if target.is_context_ref() {
+                ability.controller
+            } else {
+                ability.target_player()
+            },
+        ),
+        _ => (1, ability.controller),
     };
 
     let proposed = ProposedEvent::Draw {
-        player_id: ability.controller,
+        player_id: drawing_player,
         count: num_cards,
         applied: HashSet::new(),
     };
@@ -207,6 +226,7 @@ mod tests {
                 count: QuantityExpr::Fixed {
                     value: num_cards as i32,
                 },
+                target: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),

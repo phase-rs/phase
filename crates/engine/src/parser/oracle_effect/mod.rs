@@ -2132,7 +2132,12 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
         })),
-        "draw" => Some(parsed_clause(Effect::Draw { count: qty })),
+        // CR 121.1 + CR 601.2c: Default Controller target — `inject_subject_target`
+        // upgrades to `TargetFilter::Player` for "target player draws ..." subjects.
+        "draw" => Some(parsed_clause(Effect::Draw {
+            count: qty,
+            target: TargetFilter::Controller,
+        })),
         _ => None,
     }
 }
@@ -4170,6 +4175,11 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
     let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected).clone();
     match effect {
+        // CR 601.2c + CR 121.1: "Target player draws ..." — each Draw mode of a
+        // modal spell is its own targeting instance. The imperative path emits
+        // `target: TargetFilter::Controller` (the no-subject default); when a
+        // player-subject is parsed we promote that to the subject filter so
+        // `collect_target_slots` surfaces an independent slot per Draw mode.
         Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
@@ -4178,6 +4188,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Goad { target }
         | Effect::Mill { target, .. }
         | Effect::Discard { target, .. }
+        | Effect::Draw { target, .. }
         | Effect::PutAtLibraryPosition { target, .. }
             if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
         {
@@ -6673,6 +6684,17 @@ fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerCondition>) 
                 },
                 tag("at the beginning of your next end step, "),
             ),
+            // CR 500.8 + CR 603.7a: "at the beginning of that combat" refers to an
+            // additional combat phase just scheduled by the parent effect
+            // (e.g., Moraug, Fury of Akoum's landfall trigger). The additional
+            // combat is pushed as the very next phase, so we fire on the next
+            // BeginCombat.
+            value(
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::BeginCombat,
+                },
+                tag("at the beginning of that combat, "),
+            ),
         ))
         .parse(i)
     }) {
@@ -7718,7 +7740,7 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
         | Effect::IncreaseSpeed { amount, .. }
-        | Effect::Draw { count: amount }
+        | Effect::Draw { count: amount, .. }
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
@@ -9167,7 +9189,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 2 }
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
             }
         ));
     }
@@ -9192,7 +9215,8 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::Variable { .. }
-                    }
+                    },
+                    ..
                 }
             ),
             "Expected Draw with Variable, got {:?}",
@@ -9448,7 +9472,8 @@ mod tests {
         assert!(matches!(
             *def.sub_ability.unwrap().effect,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
             }
         ));
     }
@@ -9501,7 +9526,8 @@ mod tests {
             matches!(
                 &*sub.effect,
                 Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 7 }
+                    count: QuantityExpr::Fixed { value: 7 },
+                    ..
                 }
             ),
             "sub_ability should be Draw(7), got {:?}",
@@ -14961,7 +14987,8 @@ mod tests {
             matches!(
                 *def.effect,
                 Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "expected Draw 1, got: {:?}",

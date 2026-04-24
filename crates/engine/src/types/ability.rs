@@ -2787,9 +2787,18 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         damage_source: Option<DamageSource>,
     },
+    /// CR 121.1: Draw a card.
+    /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
+    /// other non-context-ref filter), the drawing player is chosen during spell
+    /// announcement. The default `TargetFilter::Controller` preserves the
+    /// historical "controller draws" semantics for `"draw a card"` /
+    /// `"you draw a card"` patterns where no `target` field appears in the
+    /// serialized AST.
     Draw {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
     },
     Pump {
         #[serde(default = "default_pt_value_zero")]
@@ -4107,6 +4116,7 @@ impl Effect {
         match self {
             // --- Effects with a `target: TargetFilter` field ---
             Effect::DealDamage { target, .. }
+            | Effect::Draw { target, .. }
             | Effect::Pump { target, .. }
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }
@@ -4176,7 +4186,6 @@ impl Effect {
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
             | Effect::IncreaseSpeed { .. }
-            | Effect::Draw { .. }
             | Effect::Token { .. }
             | Effect::GainLife { .. }
             | Effect::Scry { .. }
@@ -6555,6 +6564,7 @@ mod tests {
         let sub = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
             vec![],
             ObjectId(1),
@@ -6630,6 +6640,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             ))),
             valid_card: Some(TargetFilter::SelfRef),
@@ -6741,6 +6752,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         ))
         .duration(Duration::UntilEndOfTurn)
@@ -7057,6 +7069,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(1),
@@ -7342,6 +7355,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             );
             assert!(def.cost_categories().is_empty());
@@ -7353,6 +7367,7 @@ mod tests {
                 AbilityKind::Activated,
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
             )
             .cost(AbilityCost::Sacrifice {
@@ -7377,6 +7392,7 @@ mod modal_ability_tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         );
         let mode2 = AbilityDefinition::new(

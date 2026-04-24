@@ -2655,12 +2655,60 @@ mod tests {
             &[],
         );
         assert_eq!(r.abilities.len(), 1);
-        assert!(matches!(
-            *r.abilities[0].effect,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+        let Effect::Draw { count, target } = &*r.abilities[0].effect else {
+            panic!("expected Effect::Draw, got {:?}", r.abilities[0].effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        // CR 601.2c: "Target player draws ..." selects a player target during
+        // spell announcement — the parsed Draw must carry a Player filter, not
+        // Controller (which would always draw for the caster).
+        assert!(
+            matches!(target, TargetFilter::Player),
+            "expected TargetFilter::Player for 'Target player draws a card.', got {target:?}",
+        );
+    }
+
+    #[test]
+    fn ashlings_command_modal_target_player_draws_carries_player_filter() {
+        // CR 601.2c + CR 700.2: Each "target player" mode-clause of a modal
+        // spell is an independent target chosen during spell announcement.
+        // Mode 2 ("Target player draws two cards") MUST surface a Player
+        // target on the parsed Draw effect so `collect_target_slots` emits
+        // an independent slot per Draw mode (otherwise the caster always draws).
+        let r = parse(
+            "Choose two —\n\
+             • Create a token that's a copy of target Elemental you control.\n\
+             • Target player draws two cards.\n\
+             • Ashling's Command deals 2 damage to each creature target player controls.\n\
+             • Target player creates two Treasure tokens.",
+            "Ashling's Command",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        // Modal spell exposes one ability with chained sub_ability per mode.
+        // Find the Draw clause anywhere in the chain and assert its target.
+        fn find_draw(
+            ab: &crate::types::ability::AbilityDefinition,
+        ) -> Option<&crate::types::ability::TargetFilter> {
+            if let Effect::Draw { target, .. } = &*ab.effect {
+                return Some(target);
             }
-        ));
+            ab.sub_ability.as_deref().and_then(find_draw)
+        }
+        let mut draw_target = None;
+        for ab in &r.abilities {
+            if let Some(t) = find_draw(ab) {
+                draw_target = Some(t);
+                break;
+            }
+        }
+        let target = draw_target.expect("expected a Draw effect somewhere in the modal chain");
+        assert!(
+            matches!(target, TargetFilter::Player),
+            "Mode 2 Draw must carry TargetFilter::Player so each modal mode \
+             surfaces an independent target slot, got {target:?}",
+        );
     }
 
     #[test]
@@ -2676,7 +2724,8 @@ mod tests {
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
             }
         ));
     }
@@ -2945,7 +2994,8 @@ mod tests {
         assert!(matches!(
             *draw.effect,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
             }
         ));
         let no_activate_tail = draw
@@ -3470,7 +3520,8 @@ mod tests {
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
             }
         ));
         assert!(matches!(
@@ -3498,7 +3549,8 @@ mod tests {
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
             }
         ));
         assert!(matches!(
@@ -3523,7 +3575,8 @@ mod tests {
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
             }
         ));
         assert!(matches!(
@@ -3809,7 +3862,8 @@ mod tests {
         assert!(matches!(
             *modal_def.mode_abilities[0].effect,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
             }
         ));
         assert!(matches!(
@@ -4193,7 +4247,8 @@ mod tests {
             matches!(
                 effect,
                 Effect::Draw {
-                    count: QuantityExpr::Ref { .. }
+                    count: QuantityExpr::Ref { .. },
+                    ..
                 }
             ),
             "trailing 'for each' should produce dynamic Draw, got {:?}",
@@ -4316,7 +4371,8 @@ mod tests {
         assert!(matches!(
             &*def.effect,
             Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 }
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
             }
         ));
         assert_eq!(def.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
