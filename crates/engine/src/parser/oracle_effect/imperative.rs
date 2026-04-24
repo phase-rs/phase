@@ -2385,6 +2385,25 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     None
 }
 
+/// Detect "target {player,opponent}'s {graveyard,library,hand}" prefixes.
+///
+/// CR 400.12: A zone-targeting effect operates on every card in the named zone.
+/// "target player's" and "target opponent's" are not in the shared `POSSESSIVES`
+/// list (those reflect possessive pronouns / determiner phrases for objects);
+/// they appear only in *zone-as-operand* contexts like Nihil Spellbomb, Bojuka
+/// Bog, Tormod's Crypt, Cremate, Faerie Macabre, etc. — so we recognize them
+/// here at the dispatch site rather than widening `POSSESSIVES` globally.
+fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
+    fn inner(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+        preceded(
+            alt((tag("target player's "), tag("target opponent's "))),
+            alt((tag("graveyard"), tag("library"), tag("hand"))),
+        )
+        .parse(i)
+    }
+    inner(rest_lower).is_ok()
+}
+
 pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("exile the top ").parse(lower) {
         let (count, remainder) = if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
@@ -2440,12 +2459,15 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
     let (_, rest_text) = nom_on_lower(text, lower, |input| value((), tag("exile ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest_text.len()..];
 
-    // CR 400.12: "exile their graveyard" acts on all cards in that zone.
-    // Bare possessive zone references have same semantics as "exile all/each".
-    if starts_with_possessive(rest_lower, "", "graveyard")
+    // CR 400.12: "exile their graveyard" / "exile target player's graveyard"
+    // act on all cards in that zone. Bare possessive zone references and
+    // "target {player,opponent}'s <zone>" share semantics with "exile all/each".
+    // CR 404 (graveyard) / CR 406 (exile) — the zone itself is the operand.
+    let mass_zone = starts_with_possessive(rest_lower, "", "graveyard")
         || starts_with_possessive(rest_lower, "", "library")
         || starts_with_possessive(rest_lower, "", "hand")
-    {
+        || starts_with_target_possessive_zone(rest_lower);
+    if mass_zone {
         let (target, _rem) = parse_target(rest_text);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);

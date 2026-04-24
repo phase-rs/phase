@@ -1073,6 +1073,85 @@ mod tests {
     }
 
     #[test]
+    fn change_zone_all_exile_target_player_graveyard() {
+        // CR 400.12 + CR 404 + CR 406: "exile target player's graveyard"
+        // (Nihil Spellbomb, Bojuka Bog, Tormod's Crypt class) must move every
+        // card from the chosen player's graveyard to the exile zone.
+        let mut state = GameState::new_two_player(42);
+
+        // Five cards in opponent's (PlayerId(1)) graveyard.
+        let mut opp_grave_ids = Vec::new();
+        for i in 0..5 {
+            let id = create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(1),
+                format!("Opp Card {i}"),
+                Zone::Graveyard,
+            );
+            opp_grave_ids.push(id);
+        }
+        // One card in our own graveyard — must remain untouched.
+        let mine = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "My Card".to_string(),
+            Zone::Graveyard,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        for id in &opp_grave_ids {
+            let obj = &state.objects[id];
+            assert_eq!(
+                obj.zone,
+                Zone::Exile,
+                "opponent's graveyard card {id:?} should be exiled"
+            );
+        }
+        assert_eq!(
+            state.objects[&mine].zone,
+            Zone::Graveyard,
+            "controller's graveyard must be untouched"
+        );
+    }
+
+    #[test]
+    fn change_zone_all_exile_target_player_graveyard_empty_is_noop() {
+        // Edge case: targeting a player with an empty graveyard is legal and
+        // resolves with no zone changes. (Nihil Spellbomb's ruling allows
+        // activation against any player.)
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        // Must not error.
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+    }
+
+    #[test]
     fn resolve_all_exile_with_until_host_leaves_creates_links() {
         // Phase 2 fix: resolve_all should create ExileLinks for UntilHostLeavesPlay
         let mut state = GameState::new_two_player(42);

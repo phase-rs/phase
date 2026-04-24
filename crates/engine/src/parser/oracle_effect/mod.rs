@@ -9039,6 +9039,41 @@ mod tests {
     }
 
     #[test]
+    fn effect_exile_target_player_graveyard_is_change_zone_all() {
+        // CR 400.12 + CR 404 + CR 406: "exile target player's graveyard" must
+        // act on every card in that zone — Nihil Spellbomb / Bojuka Bog class.
+        let e = parse_effect("exile target player's graveyard");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    target: TargetFilter::Player,
+                }
+            ),
+            "exile target player's graveyard should be ChangeZoneAll with origin=Graveyard, target=Player, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_exile_target_opponent_graveyard_is_change_zone_all() {
+        // CR 400.12: "exile target opponent's graveyard" — same class.
+        let e = parse_effect("exile target opponent's graveyard");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "exile target opponent's graveyard should be ChangeZoneAll with origin=Graveyard, got {e:?}"
+        );
+    }
+
+    #[test]
     fn effect_compound_exile_creature_and_possessive_graveyard() {
         let clause = parse_effect_clause(
             "exile a creature they control and their graveyard",
