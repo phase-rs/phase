@@ -1578,52 +1578,62 @@ fn parse_creature_die_exile_replacement(
         None
     };
 
-    // Extract the replacement effect after the comma.
-    // "If [filter] would die, exile it instead." → effect is "exile it instead."
-    let after_would_die = &norm_lower[would_die_pos + "would die".len()..].trim_start();
-    let effect_text = after_would_die.strip_prefix(", ")?;
+    // Extract the replacement effect after "would die, " via a nom combinator.
+    // CR 614.1a: Replacement effects use "instead" — both word orders are equivalent:
+    //   suffix form: "exile it instead [.]"  (Void Maw, Valentin, Vren)
+    //   prefix form: "instead exile it [and <continuation>] [.]"  (Darkness Crystal,
+    //                Kalitas, Ravenloft Adventurer, Ravenous Slime, Doctor's Tomb)
+    let after_would_die = &norm_lower[would_die_pos + "would die".len()..];
+    let (effect_lower, _) = preceded(nom_primitives::ws, tag::<_, _, VerboseError<&str>>(", "))
+        .parse(after_would_die)
+        .ok()?;
 
-    // Parse the replacement effect (typically "exile it instead")
-    let effect_text_trimmed = effect_text
-        .strip_suffix('.')
-        .unwrap_or(effect_text)
-        .trim_end_matches(" instead")
-        .trim();
+    // Original-case slice covering the same bytes as effect_lower for chain parsing.
+    let effect_offset = norm_lower.len() - effect_lower.len();
+    let effect_orig = &original_text[effect_offset..];
+    let effect_pair = TextPair::new(effect_orig, effect_lower)
+        .trim_end()
+        .trim_end_matches('.')
+        .trim_end();
 
-    let execute = if effect_text_trimmed == "exile it"
-        || effect_text_trimmed == "exile that card"
-        || effect_text_trimmed == "exile that creature"
-    {
-        // The anaphoric "it"/"that card"/"that creature" refers to the object whose
-        // event is being replaced. In the replacement pipeline, the execute effect's
-        // ChangeZone is used only for zone redirection (destination extraction) —
-        // the affected object is already known from the ProposedEvent. SelfRef is
-        // semantically correct: "exile the same object this replacement is modifying,"
-        // consistent with how ETB-tapped replacements use SelfRef for their Tap execute.
-        AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                origin: None,
-                target: TargetFilter::SelfRef,
-                owner_library: false,
-                enter_transformed: false,
-                under_your_control: false,
-                enter_tapped: false,
-                enters_attacking: false,
-                up_to: false,
-            },
-        )
-    } else {
-        // Generic effect text — parse as effect chain from the original-case text
-        let orig_effect =
-            if let Ok((_, (_, after))) = nom_primitives::split_once_on(original_text, ", ") {
-                after.trim()
-            } else {
-                effect_text_trimmed
-            };
-        parse_effect_chain(orig_effect, AbilityKind::Spell)
-    };
+    // Match the exile-anaphor in either word order via nom alt().
+    // Returns the (anaphor_text_consumed, post-anaphor remainder) so we can
+    // route any "and <continuation>" tail through parse_effect_chain.
+    let (continuation_pair, anaphor_matched) = parse_exile_anaphor_clause(effect_pair)?;
+    if !anaphor_matched {
+        return None;
+    }
+
+    // CR 614.1a: The anaphoric "it" / "that card" / "that creature" refers to the
+    // object whose event is being replaced. In the replacement pipeline, the
+    // execute effect's ChangeZone is used only for zone redirection (destination
+    // extraction) — the affected object is already known from the ProposedEvent.
+    // SelfRef is semantically correct: "exile the same object this replacement
+    // is modifying," consistent with how ETB-tapped replacements use SelfRef.
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            origin: None,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+        },
+    );
+
+    // CR 614.6: Trailing clauses (e.g., "and you gain 2 life", "and put a hit
+    // counter on it") are additional effects that resolve as part of the modified
+    // event. Attach them as sub_abilities — the chain parser strips a leading
+    // "and " automatically.
+    let continuation = continuation_pair.original.trim();
+    if !continuation.is_empty() {
+        let chain = parse_effect_chain(continuation, AbilityKind::Spell);
+        execute = execute.sub_ability(chain);
+    }
 
     let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
         .execute(execute)
@@ -1633,6 +1643,52 @@ fn parse_creature_die_exile_replacement(
         def = def.condition(cond);
     }
     Some(def)
+}
+
+/// CR 614.1a: Match the exile-anaphor clause in either word order, returning the
+/// continuation text after the anaphor.
+///
+/// Recognizes both equivalent phrasings:
+///   * **suffix form** — `"exile <anaphor> instead"` (Void Maw, Valentin, Vren)
+///   * **prefix form** — `"instead exile <anaphor>"` (Darkness Crystal, Kalitas,
+///     Ravenloft Adventurer, Ravenous Slime, Doctor's Tomb)
+///
+/// The anaphor is one of `"exile it"`, `"exile that card"`, `"exile that creature"`.
+/// Any text remaining after the matched clause (e.g., `" and you gain 2 life"`)
+/// is returned as the continuation `TextPair` for downstream chain parsing.
+///
+/// Returns `None` if the input is empty or has unrecognized leading content.
+/// Returns `Some((continuation, false))` if the leading content does not match
+/// the exile-anaphor pattern (caller can fall through).
+fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> Option<(TextPair<'a>, bool)> {
+    use nom::sequence::terminated;
+
+    let lower = input.lower;
+    let exile_anaphor = || {
+        alt((
+            tag::<_, _, VerboseError<&str>>("exile it"),
+            tag("exile that card"),
+            tag("exile that creature"),
+        ))
+    };
+
+    // Try prefix form first: "instead exile <anaphor>".
+    // Then suffix form: "exile <anaphor> instead".
+    let parsed: nom::IResult<&str, &str, VerboseError<&str>> = alt((
+        preceded(tag("instead "), exile_anaphor()),
+        terminated(exile_anaphor(), tag(" instead")),
+    ))
+    .parse(lower);
+
+    match parsed {
+        Ok((rest, _matched)) => {
+            // Compute the byte offset where the continuation starts.
+            let consumed = lower.len() - rest.len();
+            let (_, continuation) = input.split_at(consumed);
+            Some((continuation, true))
+        }
+        Err(_) => Some((input, false)),
+    }
 }
 
 /// Parse graveyard-destination zone-change replacements (CR 614.6).
@@ -4019,6 +4075,117 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
+    }
+
+    /// CR 614.1a — prefix-form `instead exile it` mirrors the suffix-form
+    /// `exile it instead`. The Darkness Crystal is the canonical print and
+    /// chains `you gain 2 life` after `and` as a sub-ability.
+    #[test]
+    fn the_darkness_crystal_prefix_instead_exile_it() {
+        let def = parse_replacement_line(
+            "If a nontoken creature an opponent controls would die, instead exile it and you gain 2 life.",
+            "The Darkness Crystal",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        // The "and you gain 2 life" continuation must be attached as a sub_ability.
+        let sub = execute.sub_ability.as_ref().expect("expected sub_ability");
+        assert!(matches!(
+            *sub.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        // valid_card: nontoken creature, opponent-controlled.
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a — prefix-form with `exile that card` anaphor variant. Kalitas
+    /// chains a Token follow-up after `and`.
+    #[test]
+    fn kalitas_prefix_instead_exile_that_card() {
+        let def = parse_replacement_line(
+            "If a nontoken creature an opponent controls would die, instead exile that card and create a 2/2 black Zombie creature token.",
+            "Kalitas, Traitor of Ghet",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().expect("expected sub_ability");
+        assert!(
+            matches!(*sub.effect, Effect::Token { .. }),
+            "expected Token, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// CR 614.1a — bare prefix-form (no `and` continuation). Confirms the
+    /// continuation slot remains empty when there is no trailing clause.
+    #[test]
+    fn prefix_instead_exile_it_no_continuation() {
+        let def = parse_replacement_line(
+            "If another creature would die, instead exile it.",
+            "Hypothetical Card",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        assert!(
+            execute.sub_ability.is_none(),
+            "expected no sub_ability for bare anaphor"
+        );
+    }
+
+    /// CR 614.1a — prefix-form with `exile that creature` anaphor variant.
+    #[test]
+    fn prefix_instead_exile_that_creature() {
+        let def = parse_replacement_line(
+            "If a creature would die, instead exile that creature.",
+            "Hypothetical Card",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
     }
 
     #[test]
