@@ -8418,23 +8418,38 @@ fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
         .parse(input)
     }
 
-    // Try "tapped and attacking" first — it's the more specific match. The
-    // boundary check then absorbs the trailing player phrase ("that opponent",
+    // Combinator for the most-specific "tapped and attacking" form. The
+    // boundary check absorbs the trailing player phrase ("that opponent",
     // "defending player ...") or sentence terminator without consuming it.
-    let mut tapped_and_attacking = preceded(
-        tag::<_, _, VerboseError<&str>>(" tapped and attacking"),
-        qualifier_boundary,
-    );
-    if tapped_and_attacking.parse(tail_lower).is_ok() {
+    fn tapped_and_attacking_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        preceded(tag(" tapped and attacking"), qualifier_boundary).parse(input)
+    }
+
+    // Combinator for the bare "tapped" form (no "and attacking"). Preserves
+    // existing tutor / reanimation behavior (Coming Attraction, Dance of the
+    // Dead, Hunting Wilds, etc.).
+    fn tapped_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        preceded(tag(" tapped"), qualifier_boundary).parse(input)
+    }
+
+    // CR 508.4 + CR 614.1: Scan every word-boundary position in the tail for
+    // the qualifier clause. This handles word-ordering variants where
+    // "under your control" or other phrasing appears between the destination
+    // and the qualifier (Chorale of the Void, The Grim Captain, Zara
+    // Renegade Recruiter: "...onto the battlefield under your control tapped
+    // and attacking..."). The scanner mirrors `oracle_effect/token.rs:195`
+    // which scans byte positions for the first leading-space match. Try the
+    // more-specific "tapped and attacking" combinator at every boundary
+    // first; if no boundary matches, fall back to the bare "tapped" form.
+    let scan_at_boundaries = |clause: fn(&str) -> nom::IResult<&str, (), VerboseError<&str>>| {
+        (0..tail_lower.len()).any(|pos| {
+            tail_lower.as_bytes().get(pos) == Some(&b' ') && clause(&tail_lower[pos..]).is_ok()
+        })
+    };
+    if scan_at_boundaries(tapped_and_attacking_clause) {
         return (true, true);
     }
-    // Fallback: bare "tapped" (no "and attacking"). Preserves the existing
-    // tutor / reanimation behavior.
-    let mut just_tapped = preceded(
-        tag::<_, _, VerboseError<&str>>(" tapped"),
-        qualifier_boundary,
-    );
-    if just_tapped.parse(tail_lower).is_ok() {
+    if scan_at_boundaries(tapped_clause) {
         return (true, false);
     }
     (false, false)
@@ -17555,6 +17570,61 @@ mod tests {
                 assert_eq!(destination, Zone::Hand);
                 assert!(!enter_tapped);
                 assert!(!enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 + CR 110.2 — Chorale of the Void / The Grim Captain / Zara
+    /// Renegade Recruiter: word-ordering variant where "under your control"
+    /// appears between the destination and the "tapped and attacking"
+    /// qualifier. The scanner must locate the qualifier at any word-boundary
+    /// position in the tail, not only immediately after the needle.
+    #[test]
+    fn put_zone_change_inline_tail_under_control_then_tapped_and_attacking() {
+        let text = "put target creature card from defending player's graveyard onto the battlefield under your control tapped and attacking";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Chorale-of-the-Void shape");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                under_your_control,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(under_your_control);
+                assert!(enter_tapped, "expected enter_tapped");
+                assert!(enters_attacking, "expected enters_attacking");
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1 — Geth, Lord of the Vault / Tato Farmer / Pay-{E}-cost class:
+    /// "under your control tapped" with no "and attacking". Bare-tapped form
+    /// must still resolve through the scanner; `enters_attacking` stays false.
+    #[test]
+    fn put_zone_change_inline_tail_under_control_then_bare_tapped() {
+        let text = "put target creature card from a graveyard onto the battlefield under your control tapped";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for under-control-tapped shape");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                under_your_control,
+                ..
+            } => {
+                assert!(under_your_control);
+                assert!(enter_tapped, "expected enter_tapped");
+                assert!(
+                    !enters_attacking,
+                    "bare tapped without 'and attacking' must not set attacking"
+                );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }
