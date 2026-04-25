@@ -129,7 +129,7 @@ pub(super) fn handle_replacement_choice(
                         });
                     }
                 }
-                // CR 121.1: Counter removal accepted after replacement choice.
+                // CR 122.1: Counter removal accepted after replacement choice.
                 ProposedEvent::RemoveCounter {
                     object_id,
                     counter_type,

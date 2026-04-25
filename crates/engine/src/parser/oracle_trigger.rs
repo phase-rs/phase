@@ -4721,7 +4721,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         return None;
     }
 
-    // CR 121.6: "a [type] counter is removed from ~" — counter removal trigger.
+    // CR 122.1: "a [type] counter is removed from ~" — counter removal trigger.
     // Check removal before placement to avoid false-matching "removed" as "put".
     if let Some(result) = try_parse_counter_removed(lower) {
         return Some(result);
@@ -4760,7 +4760,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     Some((TriggerMode::CounterAdded, def))
 }
 
-/// CR 121.6: Parse "a [type] counter is removed from [subject]" patterns.
+/// CR 122.1: Parse "a [type] counter is removed from [subject]" patterns.
 /// Also handles zone constraints like "while it's exiled" (e.g. suspend cards).
 fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // Pattern: "a [type] counter is removed from [subject] [while ...]"
@@ -4803,7 +4803,7 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         def.description = Some(format!("{counter_type} counter"));
     }
 
-    // CR 121.6: Zone constraint for cards that trigger from exile (e.g. suspend)
+    // CR 122.1: Zone constraint for cards that trigger from exile (e.g. suspend)
     if let Some(zone) = zone_constraint {
         def.trigger_zones = vec![zone];
     }
@@ -9300,7 +9300,7 @@ mod tests {
 
     #[test]
     fn trigger_time_counter_removed_exile() {
-        // CR 121.6: "a time counter is removed from ~ while it's exiled"
+        // CR 122.1: "a time counter is removed from ~ while it's exiled"
         let def = parse_trigger_line(
             "Whenever a time counter is removed from ~ while it's exiled, you may cast a copy of ~ without paying its mana cost.",
             "Rift Bolt",
@@ -9312,7 +9312,7 @@ mod tests {
 
     #[test]
     fn trigger_counter_removed_no_zone_constraint() {
-        // CR 121.6: "a time counter is removed from ~" without zone constraint.
+        // CR 122.1: "a time counter is removed from ~" without zone constraint.
         let def = parse_trigger_line(
             "Whenever a time counter is removed from ~, deal 1 damage to any target.",
             "Test Suspend Card",

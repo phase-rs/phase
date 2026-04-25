@@ -300,7 +300,7 @@ fn try_strip_a_number_of(input: &str) -> Option<&str> {
 
 pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // "remove N {type} counter(s) from {target}" or "remove all counters from {target}"
-    // CR 121.1: Counter type is optional — "remove all counters" removes every type.
+    // CR 122.1: Counter type is optional — "remove all counters" removes every type.
     let ((), after_remove) = nom_on_lower(lower, lower, |i| value((), tag("remove ")).parse(i))?;
     let after_remove = after_remove.trim();
 
@@ -388,8 +388,10 @@ fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
     }
 }
 
-/// CR 121.5: Parse "put its counters on [target]" / "put those counters on
-/// [target]" → MoveCounters effect.
+/// CR 122.8: Parse "put its counters on [target]" / "put those counters on
+/// [target]" → MoveCounters effect. CR 122.8 covers the trigger-on-leaving
+/// case where the source's counters are copied (not strictly moved) to a
+/// second object.
 ///
 /// `"its"` / `"this creature's"` are possessive pronouns referring to the
 /// ability source (live state). `"those"` is an anaphoric reference to the
@@ -438,7 +440,7 @@ pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<
     ))
 }
 
-/// CR 121.5: Parse "move [all/N] [type] counter(s) from [source] onto/to [target]".
+/// CR 122.5: Parse "move [all/N] [type] counter(s) from [source] onto/to [target]".
 /// Handles Bioshift, Fate Transfer, Nesting Grounds, Simic Fluxmage, etc.
 pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     let ((), after_move) = nom_on_lower(lower, lower, |i| value((), tag("move ")).parse(i))?;
@@ -962,8 +964,8 @@ mod tests {
         assert!(matches!(target, TargetFilter::SelfRef));
     }
 
-    /// CR 121.5 + CR 400.7: "put those counters on [target]" — anaphoric
-    /// counter-move from a dies/leaves trigger. Source = SelfRef; the runtime
+    /// CR 122.8 + CR 400.7: "put those counters on [target]" — anaphoric
+    /// counter-copy from a dies/leaves trigger. Source = SelfRef; the runtime
     /// resolver in `effects::counters::resolve_move` performs LKI fallback so
     /// the counters from the dying creature's last-known state are read.
     /// Used by Scolding Administrator: "When this creature dies, if it had

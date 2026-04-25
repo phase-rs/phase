@@ -788,7 +788,7 @@ pub(super) fn apply_clause_continuation(
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            // CR 122.1a: Patch the preceding Token effect to enter with counters.
+            // CR 122.6a: Patch the preceding Token effect to enter with counters.
             if let Effect::Token {
                 enter_with_counters,
                 ..
@@ -1481,7 +1481,7 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::GrantExtraTurnAfterControlledTurn)
         }
-        // CR 122.1a: "The token enters with X +1/+1 counters on it, where X is ..."
+        // CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
         // or "It enters with X +1/+1 counters on it, where X is ..."
         // Absorbs into the preceding Token effect's `enter_with_counters` field.
         Effect::Token { .. } => try_parse_token_enters_with_counters(&lower),
@@ -1489,7 +1489,7 @@ pub(super) fn parse_followup_continuation_ast(
     }
 }
 
-/// CR 122.1a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
+/// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
 /// Returns `TokenEntersWithCounters` continuation on success.
 fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> {
     // Match subject prefix: "the token enters with " / "it enters with "

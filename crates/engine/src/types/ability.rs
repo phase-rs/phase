@@ -3333,7 +3333,10 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 121.5: Put counters from source onto target.
+    /// CR 122.5 + CR 122.8: Put counters from source onto target. CR 122.5 is
+    /// the general "move a counter" rule; CR 122.8 covers the specific case of
+    /// triggered abilities that copy counters off a creature that left the
+    /// battlefield (e.g. dies-trigger "put its counters on…").
     MoveCounters {
         /// Where counters are read from (SelfRef = ability source object).
         #[serde(default = "default_target_filter_self_ref")]

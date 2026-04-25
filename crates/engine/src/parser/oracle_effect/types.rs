@@ -228,7 +228,7 @@ pub(super) enum ContinuationAst {
     /// Absorbs into preceding CopyTokenOf, Token, or ChangeZone by setting
     /// enters_attacking and tapped/enter_tapped flags.
     EntersTappedAttacking,
-    /// CR 122.1a: "The token enters with X +1/+1 counters on it, where X is ..."
+    /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
     /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
     TokenEntersWithCounters {
         counter_type: String,
@@ -773,7 +773,7 @@ pub(super) enum ZoneCounterImperativeAst {
         count: i32,
         target: TargetFilter,
     },
-    /// CR 121.5: "Put its counters on [target]" — copy all counters from source to target.
+    /// CR 122.8: "Put its counters on [target]" — copy all counters from source to target.
     MoveCounters {
         source: TargetFilter,
         counter_type: Option<String>,

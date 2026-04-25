@@ -1629,7 +1629,8 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return clause;
     }
 
-    // CR 121.6: "{verb} cards equal to {quantity}" — dynamic count from game state.
+    // CR 121.1 + CR 701.17a: "{verb} cards equal to {quantity}" — dynamic count
+    // from game state for draw or mill.
     if let Some(clause) = try_parse_equal_to_quantity_effect(tp) {
         return clause;
     }
@@ -2215,7 +2216,7 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     Some(parsed_clause(Effect::SkipNextTurn { target, count }))
 }
 
-/// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.6).
+/// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.1 + CR 701.17a).
 ///
 /// Handles verbs whose count field is `QuantityExpr` (mill, draw).
 fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause> {

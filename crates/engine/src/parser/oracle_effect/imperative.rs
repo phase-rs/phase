@@ -4052,7 +4052,7 @@ pub(super) fn parse_zone_counter_ast(
             _ => None,
         };
     }
-    // CR 121.5: "move [N] [type] counter(s) from [source] onto/to [target]"
+    // CR 122.5: "move [N] [type] counter(s) from [source] onto/to [target]"
     if tag::<_, _, VerboseError<&str>>("move ")
         .parse(lower)
         .is_ok()

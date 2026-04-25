@@ -395,7 +395,7 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
             ReplacementResult::Execute(event) => {
                 if let ProposedEvent::Untap { object_id, .. } = event {
                     if let Some(obj) = state.objects.get_mut(&object_id) {
-                        // CR 122.1g: If a permanent with a stun counter would become untapped,
+                        // CR 122.1d: If a permanent with a stun counter would become untapped,
                         // instead remove a stun counter from it.
                         if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
                             *entry -= 1;
@@ -505,7 +505,7 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
                 ReplacementResult::Execute(event) => {
                     if let ProposedEvent::Untap { object_id, .. } = event {
                         if let Some(obj) = state.objects.get_mut(&object_id) {
-                            // CR 122.1g: Stun-counter removal takes precedence
+                            // CR 122.1d: Stun-counter removal takes precedence
                             // over the untap, matching the main untap pass.
                             if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
                                 *entry -= 1;
@@ -2164,7 +2164,7 @@ mod tests {
 
     #[test]
     fn stun_counter_prevents_untap_and_removes_counter() {
-        // CR 122.1g: A stun counter prevents a permanent from untapping;
+        // CR 122.1d: A stun counter prevents a permanent from untapping;
         // instead, one stun counter is removed.
         use crate::types::zones::Zone;
 

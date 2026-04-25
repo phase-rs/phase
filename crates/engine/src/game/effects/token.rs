@@ -395,7 +395,7 @@ pub fn resolve(
         )
     });
 
-    // CR 122.1a: Resolve ETB counter quantities before proposing — the event
+    // CR 122.6a: Resolve ETB counter quantities before proposing — the event
     // carries fully-resolved counts, not quantity expressions.
     let resolved_etb_counters: Vec<(String, u32)> = etb_counters
         .iter()
@@ -616,7 +616,7 @@ pub fn apply_create_token_after_replacement(
             crate::game::combat::enter_attacking(state, obj_id, spec.source_id, spec.controller);
         }
 
-        // CR 122.1a: Place counters on the token as it enters the battlefield.
+        // CR 122.6a: Place counters on the token as it enters the battlefield.
         for (counter_type_str, counter_count) in &spec.enter_with_counters {
             if *counter_count > 0 {
                 let ct = crate::types::counter::parse_counter_type(counter_type_str);
