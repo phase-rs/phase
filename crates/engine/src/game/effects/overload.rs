@@ -17,8 +17,9 @@
 //!   with the resolving spell as the source per CR 120.3, which matches every
 //!   overload card in the current corpus.)
 //! - `Tap { target }` → `TapAll { target }`
-//! - `Bounce { target, destination }` → `ChangeZoneAll { destination:
-//!   destination.unwrap_or(Hand), target, origin: None }`
+//! - `Bounce { target, destination }` → `BounceAll { target, destination }`
+//!   (the canonical mass-bounce variant; mirrors `Destroy` → `DestroyAll`
+//!   and `Pump` → `PumpAll` in shape — see CR 400.7 + CR 611.2c).
 //!
 //! Effects with no all-matching counterpart (e.g. `Counter` — Counterflux)
 //! are preserved unchanged; the overloaded cast simply has no useful effect
@@ -26,7 +27,6 @@
 //! only to the word "target" in the spell's text matches this behavior.
 
 use crate::types::ability::{AbilityDefinition, Effect};
-use crate::types::Zone;
 
 /// Transform an ability definition tree in place: rewrite every target-bearing
 /// effect into its all-matching counterpart and recurse into `sub_ability`,
@@ -82,13 +82,16 @@ fn transform_effect_in_place(effect: &mut Effect) {
             player_filter: None,
         },
         Effect::Tap { target } => Effect::TapAll { target },
+        // CR 702.96b + CR 400.7 + CR 611.2c: Cyclonic Rift overload — promote
+        // single-target Bounce to the canonical mass-bounce variant. Preserves
+        // `destination` so top-of-library overloads (none in current corpus
+        // but type-system-supported) thread through unchanged.
         Effect::Bounce {
             target,
             destination,
-        } => Effect::ChangeZoneAll {
-            origin: None,
-            destination: destination.unwrap_or(Zone::Hand),
+        } => Effect::BounceAll {
             target,
+            destination,
         },
         // Effects without an all-matching counterpart (e.g. `Counter` for
         // Counterflux) are preserved as-is. No overload corpus card has a
@@ -104,6 +107,7 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
         TypedFilter,
     };
+    use crate::types::Zone;
 
     fn creature_filter() -> TargetFilter {
         TargetFilter::Typed(TypedFilter {
@@ -164,17 +168,39 @@ mod tests {
     }
 
     #[test]
-    fn bounce_becomes_change_zone_all_to_hand() {
+    fn bounce_becomes_bounce_all_with_destination_preserved() {
+        // CR 702.96b + CR 400.7 + CR 611.2c: Cyclonic Rift overload promotes
+        // single-target `Bounce` to the canonical mass-bounce variant. Default
+        // destination (`None`) means owner's hand at resolve time, matching
+        // the single-target Bounce semantics.
         let mut def = leaf(Effect::Bounce {
             target: creature_filter(),
             destination: None,
         });
         transform_ability_def(&mut def);
         match *def.effect {
-            Effect::ChangeZoneAll { destination, .. } => {
-                assert_eq!(destination, Zone::Hand);
+            Effect::BounceAll {
+                destination,
+                ref target,
+            } => {
+                assert!(destination.is_none(), "default destination preserved");
+                assert!(matches!(target, TargetFilter::Typed(_)));
             }
-            other => panic!("expected ChangeZoneAll, got {other:?}"),
+            ref other => panic!("expected BounceAll, got {other:?}"),
+        }
+
+        // Confirm the destination override threads through unchanged.
+        let mut def_lib = leaf(Effect::Bounce {
+            target: creature_filter(),
+            destination: Some(Zone::Library),
+        });
+        transform_ability_def(&mut def_lib);
+        match *def_lib.effect {
+            Effect::BounceAll {
+                destination: Some(dest),
+                ..
+            } => assert_eq!(dest, Zone::Library),
+            ref other => panic!("expected BounceAll {{ destination: Library }}, got {other:?}"),
         }
     }
 

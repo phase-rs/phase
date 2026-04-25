@@ -44,6 +44,7 @@ pub(crate) fn execute_zone_move(
     enter_transformed: bool,
     effect_enter_tapped: bool,
     controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(String, u32)],
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
@@ -99,6 +100,35 @@ pub(crate) fn execute_zone_move(
                     enter_with_counters.extend(intrinsic);
                 }
             }
+        }
+        // CR 122.1 + CR 614.1c: Seed effect-driven enter-with-counters from
+        // `Effect::ChangeZone.enter_with_counters` (Darkness Crystal class:
+        // "put target creature card ... onto the battlefield with two
+        // additional +1/+1 counters on it"). Only applied for battlefield
+        // entries — other destinations (Exile, etc.) carry the counters
+        // through to drive `apply_etb_counters` downstream when the object
+        // arrives at a counter-bearing zone.
+        if !effect_enter_with_counters.is_empty() {
+            if let ProposedEvent::ZoneChange {
+                enter_with_counters,
+                ..
+            } = &mut proposed
+            {
+                enter_with_counters.extend(effect_enter_with_counters.iter().cloned());
+            }
+        }
+    } else if !effect_enter_with_counters.is_empty() {
+        // CR 122.1 + CR 614.1c: For non-battlefield destinations (e.g., Exile
+        // for "exile it with three egg counters on it"), counters are applied
+        // post-move via `apply_etb_counters` directly on the object. The
+        // ProposedEvent slot is reserved for battlefield entries that flow
+        // through the replacement pipeline.
+        if let ProposedEvent::ZoneChange {
+            enter_with_counters,
+            ..
+        } = &mut proposed
+        {
+            enter_with_counters.extend(effect_enter_with_counters.iter().cloned());
         }
     }
 
@@ -168,6 +198,19 @@ pub(crate) fn execute_zone_move(
                             .pending_etb_counters
                             .retain(|(oid, _, _)| *oid != object_id);
                     }
+                } else if !enter_with_counters.is_empty() {
+                    // CR 122.1: Effect-driven counters for non-battlefield
+                    // destinations — e.g., "exile it with three egg counters
+                    // on it" (Darigaaz Reincarnated). Apply directly via the
+                    // shared single-authority resolver so counter-doubling
+                    // replacements (Doubling Season, Hardened Scales) and
+                    // event emission stay consistent.
+                    crate::game::engine_replacement::apply_etb_counters(
+                        state,
+                        object_id,
+                        &enter_with_counters,
+                        events,
+                    );
                 }
                 // CR 401.3: If an object is put into a library (not at a specific
                 // position), that library is shuffled afterward.
@@ -215,6 +258,7 @@ pub fn resolve(
         effect_enter_tapped,
         effect_enters_attacking,
         up_to,
+        effect_enter_with_counters,
     ) = match &ability.effect {
         Effect::ChangeZone {
             origin,
@@ -225,17 +269,34 @@ pub fn resolve(
             enter_tapped,
             enters_attacking,
             up_to,
+            enter_with_counters,
             ..
-        } => (
-            *origin,
-            *destination,
-            *owner_library,
-            *enter_transformed,
-            *under_your_control,
-            *enter_tapped,
-            *enters_attacking,
-            *up_to,
-        ),
+        } => {
+            // CR 122.1 + CR 614.1c: Resolve `QuantityExpr` counts to concrete
+            // u32 values up front so the zone-move pipeline carries fully-
+            // resolved counts (matches the Token resolver pattern at
+            // `effects/token.rs:400`).
+            let resolved_counters: Vec<(String, u32)> = enter_with_counters
+                .iter()
+                .map(|(ct, qty)| {
+                    let n =
+                        crate::game::quantity::resolve_quantity_with_targets(state, qty, ability)
+                            .max(0) as u32;
+                    (ct.clone(), n)
+                })
+                .collect();
+            (
+                *origin,
+                *destination,
+                *owner_library,
+                *enter_transformed,
+                *under_your_control,
+                *enter_tapped,
+                *enters_attacking,
+                *up_to,
+                resolved_counters,
+            )
+        }
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
     };
 
@@ -379,6 +440,7 @@ pub fn resolve(
                 effect_enter_transformed,
                 effect_enter_tapped,
                 ctrl_override,
+                &effect_enter_with_counters,
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -477,6 +539,7 @@ pub fn resolve(
             effect_enter_transformed,
             effect_enter_tapped,
             ctrl_override,
+            &effect_enter_with_counters,
             events,
         ) {
             ZoneMoveResult::Done => {
@@ -649,6 +712,7 @@ pub fn resolve_all(
             false,
             false,
             None,
+            &[],
             events,
         ) {
             ZoneMoveResult::Done => {
@@ -710,6 +774,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to,
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(100),
@@ -738,6 +803,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -749,6 +815,55 @@ mod tests {
 
         assert!(state.battlefield.contains(&obj_id));
         assert!(!state.players[0].hand.contains(&obj_id));
+    }
+
+    /// CR 122.1 + CR 614.1c — `Effect::ChangeZone.enter_with_counters` drives
+    /// counter placement during the move. For a non-battlefield destination
+    /// (Exile, Darigaaz / Draugr / Rayami class), counters are stamped via
+    /// `apply_etb_counters` on the object after the zone change completes.
+    #[test]
+    fn change_zone_enter_with_counters_stamps_counters_on_exile_destination() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![("egg".to_string(), QuantityExpr::Fixed { value: 3 })],
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        // Object moved to exile and got 3 egg counters.
+        assert!(state.exile.contains(&obj_id));
+        let obj = state
+            .objects
+            .get(&obj_id)
+            .expect("object should still exist post-exile");
+        let egg = obj
+            .counters
+            .get(&CounterType::Generic("egg".to_string()))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(egg, 3, "expected 3 egg counters, got {egg}");
     }
 
     #[test]
@@ -772,6 +887,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -806,6 +922,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -849,6 +966,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),
@@ -899,6 +1017,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -942,6 +1061,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -985,6 +1105,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![], // empty targets — SelfRef means source_id
             source_id,
@@ -1359,6 +1480,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(obj_id)],
             source_id,
@@ -1412,6 +1534,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: true,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(obj_id)],
             source_id,
@@ -1459,6 +1582,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![],
             obj_id,
@@ -1514,6 +1638,7 @@ mod tests {
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: true,
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(100),
@@ -1636,6 +1761,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
                 vec![],
                 ObjectId(200),
@@ -1703,6 +1829,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![], // zero targets chosen
             ObjectId(900),
@@ -1752,6 +1879,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![],
             obj_id,
@@ -1796,6 +1924,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![],
             obj_id,
@@ -1843,6 +1972,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         )));
         state
@@ -2166,6 +2296,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
                 vec![TargetRef::Object(seed)],
                 ObjectId(100),
@@ -2275,6 +2406,7 @@ mod tests {
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![], // Empty targets: search failed to find, no card to put.
             ObjectId(100),

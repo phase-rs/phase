@@ -384,8 +384,8 @@ pub fn resolve_move(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // CR 400.7: Read source counters, falling back to LKI cache for objects that
-    // have changed zones (e.g., dies triggers — counters are removed on zone change
-    // per CR 121.2, but the LKI snapshot preserves them).
+    // have changed zones (e.g., dies triggers — counters cease to exist on zone
+    // change per CR 122.2, but the LKI snapshot preserves them).
     let source_counters = {
         let current = state
             .objects
@@ -457,7 +457,7 @@ pub fn resolve_move(
 }
 
 /// Remove counters from target objects, clamping at 0.
-/// CR 121.1: When counter_type is empty, removes counters of every type (Vampire Hexmage).
+/// CR 122.1: When counter_type is empty, removes counters of every type (Vampire Hexmage).
 pub fn resolve_remove(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -472,7 +472,7 @@ pub fn resolve_remove(
         _ => ("P1P1".to_string(), 1),
     };
 
-    // CR 121.1: Empty counter_type means "all types" — collect each type on the object.
+    // CR 122.1: Empty counter_type means "all types" — collect each type on the object.
     let all_types = counter_type_str.is_empty();
 
     let targets = resolve_defined_or_targets(ability);

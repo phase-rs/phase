@@ -74,6 +74,7 @@ pub fn resolve(
                     false,
                     enter_tapped,
                     None,
+                    &[],
                     events,
                 );
             }

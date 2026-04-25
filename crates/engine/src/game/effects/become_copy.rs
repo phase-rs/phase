@@ -42,10 +42,18 @@ pub fn resolve(
     let values = compute_current_copiable_values(state, target_id)
         .ok_or(EffectError::ObjectNotFound(target_id))?;
 
+    // CR 122.1 + CR 614.1c: `AddCounterOnEnter` is consumed at resolution
+    // (not layered) — partition the modifications so the layer pipeline only
+    // sees the layered variants and the counter-on-enter variants are
+    // applied via the counter primitive after layer evaluation.
+    let (counter_mods, layered_mods): (Vec<_>, Vec<_>) = additional_modifications
+        .into_iter()
+        .partition(|m| matches!(m, ContinuousModification::AddCounterOnEnter { .. }));
+
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
     }];
-    modifications.extend(additional_modifications);
+    modifications.extend(layered_mods);
 
     state.add_transient_continuous_effect(
         ability.source_id,
@@ -57,6 +65,54 @@ pub fn resolve(
         modifications,
         None,
     );
+
+    // CR 707.9f: "Some exceptions to the copying process apply only if the
+    // copy is or has certain characteristics" — re-evaluate layers so the
+    // copied card_types is realized before checking `if_type` on each
+    // counter-on-enter modification (Spark Double's branches). Counters are
+    // then placed via the shared replacement-aware primitive (Doubling
+    // Season etc. apply normally).
+    if !counter_mods.is_empty() {
+        crate::game::layers::evaluate_layers(state);
+        for modification in counter_mods {
+            if let ContinuousModification::AddCounterOnEnter {
+                counter_type,
+                count,
+                if_type,
+            } = modification
+            {
+                let n = crate::game::quantity::resolve_quantity(
+                    state,
+                    &count,
+                    ability.controller,
+                    ability.source_id,
+                )
+                .max(0) as u32;
+                if n == 0 {
+                    continue;
+                }
+                let gate_passes = match if_type {
+                    None => true,
+                    Some(t) => state
+                        .objects
+                        .get(&ability.source_id)
+                        .map(|obj| obj.card_types.core_types.contains(&t))
+                        .unwrap_or(false),
+                };
+                if !gate_passes {
+                    continue;
+                }
+                let ct = crate::types::counter::parse_counter_type(&counter_type);
+                super::counters::add_counter_with_replacement(
+                    state,
+                    ability.source_id,
+                    ct,
+                    n,
+                    events,
+                );
+            }
+        }
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -590,6 +646,7 @@ mod tests {
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
+                additional_modifications: vec![],
             },
             vec![TargetRef::Object(clone)],
             clone,

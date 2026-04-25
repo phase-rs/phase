@@ -565,6 +565,7 @@ pub(super) fn apply_clause_continuation(
                     enter_tapped,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
             );
             // CR 303.4f: "attached to [source]" — forward the moved card to an Attach sub_ability
@@ -787,7 +788,7 @@ pub(super) fn apply_clause_continuation(
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            // CR 122.1a: Patch the preceding Token effect to enter with counters.
+            // CR 122.6a: Patch the preceding Token effect to enter with counters.
             if let Effect::Token {
                 enter_with_counters,
                 ..
@@ -1099,10 +1100,20 @@ pub(super) fn parse_dig_from_among(lower: &str, _original: &str) -> Option<Conti
     })
 }
 
-/// Extract rest_destination from "put N of them into your hand and the rest on the bottom/graveyard".
-/// Returns None if no "and the rest" clause is present.
+/// Extract rest_destination from "put N of them into your hand and the rest/the other on the bottom/graveyard".
+/// Returns None if neither "and the rest" nor "and the other" anaphor is present.
+///
+/// CR 401.1 + CR 401.4: "the rest" / "the other" both refer to the un-chosen
+/// remainder of the looked-at pile. The grammatical difference is purely a
+/// count distinction — "the other" is used when exactly one card remains
+/// (the count=2-keep=1 form, e.g. Sleight of Hand, Sea Gate Oracle); "the
+/// rest" generalizes to any remainder count. Both anaphors point to the same
+/// rest_destination semantics, so they share the same downstream zone
+/// classification.
 fn parse_of_them_rest_destination(lower: &str) -> Option<Zone> {
-    let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest").ok()?;
+    let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest")
+        .or_else(|_| nom_primitives::split_once_on(lower, " and the other"))
+        .ok()?;
     if contains_possessive(after_rest, "into", "graveyard") {
         Some(Zone::Graveyard)
     } else if contains_possessive(after_rest, "into", "hand") {
@@ -1470,7 +1481,7 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::GrantExtraTurnAfterControlledTurn)
         }
-        // CR 122.1a: "The token enters with X +1/+1 counters on it, where X is ..."
+        // CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
         // or "It enters with X +1/+1 counters on it, where X is ..."
         // Absorbs into the preceding Token effect's `enter_with_counters` field.
         Effect::Token { .. } => try_parse_token_enters_with_counters(&lower),
@@ -1478,7 +1489,7 @@ pub(super) fn parse_followup_continuation_ast(
     }
 }
 
-/// CR 122.1a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
+/// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
 /// Returns `TokenEntersWithCounters` continuation on success.
 fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> {
     // Match subject prefix: "the token enters with " / "it enters with "
@@ -1935,6 +1946,31 @@ mod tests {
         let dig = make_dig_effect();
         let result = parse_followup_continuation_ast(
             "Put one of them into your hand and the rest on the bottom of your library in any order.",
+            &dig,
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::DigFromAmong {
+                count: 1,
+                up_to: false,
+                filter: TargetFilter::Any,
+                destination: Some(Zone::Hand),
+                rest_destination: Some(Zone::Library),
+            })
+        );
+    }
+
+    /// CR 401.1 + CR 401.4 + CR 701.20e: Sleight of Hand / Sea Gate Oracle /
+    /// Sight Beyond Sight pattern. "Put one of them into your hand and the
+    /// other on the bottom of your library." The anaphor "the other"
+    /// (singular remainder of a count=2 look) must be recognized as
+    /// equivalent to "the rest" (general remainder); both must yield
+    /// `rest_destination: Some(Library)` — NOT the graveyard default.
+    #[test]
+    fn put_one_of_them_into_hand_with_other_on_bottom() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put one of them into your hand and the other on the bottom of your library.",
             &dig,
         );
         assert_eq!(

@@ -3652,6 +3652,9 @@ pub fn handle_activate_ability(
         if let Some(c) = ability_def.condition.clone() {
             r = r.condition(c);
         }
+        // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
+        // before any branch path that pushes this ability onto the stack.
+        r.ability_index = Some(ability_index);
         r
     };
 

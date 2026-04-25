@@ -641,6 +641,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
         QuantityRef::OpponentLifeLostThisTurn => "opponent life lost this turn".into(),
+        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => {
+            "max life lost this turn across players".into()
+        }
         QuantityRef::CounterAddedThisTurn => "counter added this turn".into(),
         QuantityRef::OpponentDiscardedCardThisTurn => "opponent discarded card this turn".into(),
         QuantityRef::OpponentLifeTotal => "opponent life total".into(),
@@ -687,6 +690,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
+        PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
     }
     .into()
 }
@@ -960,6 +964,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::DestroyAll { target, .. }
         | Effect::TapAll { target }
         | Effect::UntapAll { target }
+        | Effect::BounceAll { target, .. }
         | Effect::DamageAll {
             amount: _,
             target,
@@ -978,6 +983,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 if let Some(pf) = player_filter {
                     d.push(("player_filter".into(), format!("{pf:?}")));
                 }
+            }
+            if let Effect::BounceAll {
+                destination: Some(dest),
+                ..
+            } = effect
+            {
+                d.push(("destination".into(), format!("{dest:?}")));
             }
         }
         Effect::DamageEachPlayer {
@@ -1727,6 +1739,29 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
         } => format!("retain printed trigger {source_trigger_index}"),
+        ContinuousModification::AddSupertype { supertype } => {
+            format!("add supertype {supertype}")
+        }
+        ContinuousModification::RemoveSupertype { supertype } => {
+            format!("remove supertype {supertype}")
+        }
+        ContinuousModification::AddCounterOnEnter {
+            counter_type,
+            count,
+            if_type,
+        } => {
+            let count_str = match count {
+                crate::types::ability::QuantityExpr::Fixed { value } => value.to_string(),
+                _ => format!("{count:?}"),
+            };
+            match if_type {
+                Some(t) => format!(
+                    "enter with {count_str} {counter_type} counter if {}",
+                    fmt_core_type(t)
+                ),
+                None => format!("enter with {count_str} {counter_type} counter"),
+            }
+        }
     }
 }
 
@@ -3931,6 +3966,12 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::IsYourTurn { .. } => ("IsYourTurn", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
+        // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by
+        // evaluate_condition (effects/mod.rs); used by reveal-tribal land cycle
+        // (Fortified Beachhead, Temple of the Dragon Queen) on_decline gating.
+        AbilityCondition::ControllerControlsMatching { .. } => {
+            ("ControllerControlsMatching", Handled)
+        }
         // Variants below are parsed but have no runtime resolver today.
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
@@ -3941,6 +3982,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::And { .. } => ("And", Handled),
         // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
+        // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.
+        AbilityCondition::NthResolutionThisTurn { .. } => ("NthResolutionThisTurn", Handled),
     }
 }
 
@@ -4004,6 +4047,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
         QuantityRef::OpponentLifeLostThisTurn => ("OpponentLifeLostThisTurn", Unhandled),
+        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => {
+            ("MaxLifeLostThisTurnAcrossPlayers", Handled)
+        }
         QuantityRef::CounterAddedThisTurn => ("CounterAddedThisTurn", Unhandled),
         QuantityRef::OpponentDiscardedCardThisTurn => ("OpponentDiscardedCardThisTurn", Handled),
         QuantityRef::OpponentLifeTotal => ("OpponentLifeTotal", Unhandled),
@@ -4038,6 +4084,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::ZoneChangedThisWay => ("ZoneChangedThisWay", Unhandled),
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
+        PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
     }
 }
 

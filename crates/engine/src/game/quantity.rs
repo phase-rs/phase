@@ -1039,6 +1039,17 @@ fn resolve_ref(
             .filter(|p| p.id != controller)
             .map(|p| u32_to_i32_saturating(p.life_lost_this_turn))
             .sum(),
+        // CR 119.3 + CR 603.4: Maximum life lost this turn across all players
+        // (controller and opponents). Used by "if a player lost N or more life
+        // this turn" intervening-if clauses (Y'shtola, Knight of the Ebon
+        // Legion). Per-player max, not sum — "a player lost N+" means "some
+        // single player has individually lost ≥ N".
+        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => state
+            .players
+            .iter()
+            .map(|p| u32_to_i32_saturating(p.life_lost_this_turn))
+            .max()
+            .unwrap_or(0),
         // CR 122.1: Whether the controller added any counter to any permanent this turn.
         QuantityRef::CounterAddedThisTurn => {
             if state
@@ -1210,6 +1221,19 @@ pub(crate) fn resolve_player_count(
                                 crate::game::targeting::extract_player_from_event(e, state)
                             })
                             .is_some_and(|pid| pid == p.id),
+                        // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
+                        // Falls back to plain Opponent semantics when no trigger event is in scope.
+                        PlayerFilter::OpponentOtherThanTriggering => {
+                            if p.id == controller {
+                                false
+                            } else {
+                                let triggering =
+                                    state.current_trigger_event.as_ref().and_then(|e| {
+                                        crate::game::targeting::extract_player_from_event(e, state)
+                                    });
+                                triggering.is_none_or(|pid| pid != p.id)
+                            }
+                        }
                     }
             })
             .count(),
@@ -1920,6 +1944,41 @@ mod tests {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentLostLife,
             },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 119.3 + CR 603.4: `MaxLifeLostThisTurnAcrossPlayers` returns the
+    /// maximum life-loss across all players (controller + opponents),
+    /// not the sum. Three players' losses [2, 5, 1] → max = 5.
+    /// Critical: 2 + 5 + 1 = 8 would falsely satisfy a >= 8 threshold,
+    /// while max = 5 correctly fails it.
+    #[test]
+    fn resolve_quantity_max_life_lost_this_turn_across_players() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].life_lost_this_turn = 2;
+        state.players[1].life_lost_this_turn = 5;
+        state.players[2].life_lost_this_turn = 1;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+        };
+        // Resolves identically regardless of which player is the controller —
+        // the variant scans all players, not just opponents.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 5);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(1)), 5);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(2), ObjectId(1)), 5);
+    }
+
+    /// CR 119.3: When no player has lost life this turn, the resolver
+    /// returns 0 (not panics on empty `.max()`).
+    #[test]
+    fn resolve_quantity_max_life_lost_this_turn_none_lost() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }

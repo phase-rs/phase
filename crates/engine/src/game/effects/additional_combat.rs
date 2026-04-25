@@ -2,7 +2,7 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{ExtraPhase, GameState};
 use crate::types::phase::Phase;
 
 /// CR 500.8: Add extra phases to the current turn via a LIFO stack.
@@ -47,16 +47,33 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 500.8: Push phases in LIFO order — most recently created occurs first.
-    // For "additional combat phase followed by additional main phase":
-    // push PostCombatMain first, then BeginCombat, so combat executes first.
-    // Note: If the extra combat is skipped (no attackers), the no-attackers path in
-    // turns.rs sets phase = PostCombatMain directly. The stacked PostCombatMain
-    // still fires as an additional main phase — this is arguably correct per CR 505.1a.
+    // CR 500.8 + CR 506.1: The combat phase ends after `EndCombat`. "After
+    // this phase, there is an additional combat phase" anchors the new
+    // `BeginCombat` to `EndCombat` so it consumes only when transitioning out
+    // of the *current* combat (not mid-combat between DeclareAttackers and
+    // DeclareBlockers, which would silently skip the rest of the first
+    // combat's steps). For `with_main_phase = true` (e.g., World at War /
+    // Combat Celebrant exert variant), the extra `PostCombatMain` is also
+    // anchored to `EndCombat` — but because `EndCombat` is encountered a
+    // second time after the *extra* combat finishes, the LIFO `rposition`
+    // scan in `advance_phase` consumes `BeginCombat` first (the more recent
+    // push) and `PostCombatMain` on the second pass. Result: current combat
+    // → extra combat → extra postcombat main → End.
+    //
+    // Note: If the extra combat is skipped (no attackers), the no-attackers
+    // path in turns.rs sets phase = PostCombatMain directly. The stacked
+    // PostCombatMain still fires as an additional main phase — arguably
+    // correct per CR 505.1a.
     if with_main_phase {
-        state.extra_phases.push(Phase::PostCombatMain);
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::EndCombat,
+            phase: Phase::PostCombatMain,
+        });
     }
-    state.extra_phases.push(Phase::BeginCombat);
+    state.extra_phases.push(ExtraPhase {
+        anchor: Phase::EndCombat,
+        phase: Phase::BeginCombat,
+    });
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::AdditionalCombatPhase,
@@ -99,6 +116,7 @@ mod tests {
             description: None,
             player_scope: None,
             chosen_x: None,
+            ability_index: None,
             repeat_for: None,
             forward_result: false,
             unless_pay: None,
@@ -117,7 +135,15 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_phases, vec![Phase::BeginCombat]);
+        // CR 500.8: anchor = EndCombat so consumption happens after the
+        // current combat phase ends (not mid-combat).
+        assert_eq!(
+            state.extra_phases,
+            vec![ExtraPhase {
+                anchor: Phase::EndCombat,
+                phase: Phase::BeginCombat,
+            }]
+        );
     }
 
     #[test]
@@ -131,10 +157,21 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // LIFO: PostCombatMain pushed first, BeginCombat on top → combat executes first
+        // LIFO: PostCombatMain pushed first, BeginCombat on top → on the
+        // first EndCombat encountered, BeginCombat (the more recent entry)
+        // is consumed; the second EndCombat consumes PostCombatMain.
         assert_eq!(
             state.extra_phases,
-            vec![Phase::PostCombatMain, Phase::BeginCombat]
+            vec![
+                ExtraPhase {
+                    anchor: Phase::EndCombat,
+                    phase: Phase::PostCombatMain,
+                },
+                ExtraPhase {
+                    anchor: Phase::EndCombat,
+                    phase: Phase::BeginCombat,
+                },
+            ]
         );
     }
 
@@ -154,14 +191,18 @@ mod tests {
         let ability2 = make_ability(TargetFilter::Controller, false, PlayerId(0));
         resolve(&mut state, &ability2, &mut events).unwrap();
 
+        let begin_combat_after_end = ExtraPhase {
+            anchor: Phase::EndCombat,
+            phase: Phase::BeginCombat,
+        };
         assert_eq!(
             state.extra_phases,
-            vec![Phase::BeginCombat, Phase::BeginCombat]
+            vec![begin_combat_after_end, begin_combat_after_end]
         );
 
         // CR 500.8: Pop from end → most recent first
-        assert_eq!(state.extra_phases.pop(), Some(Phase::BeginCombat));
-        assert_eq!(state.extra_phases.pop(), Some(Phase::BeginCombat));
+        assert_eq!(state.extra_phases.pop(), Some(begin_combat_after_end));
+        assert_eq!(state.extra_phases.pop(), Some(begin_combat_after_end));
     }
 
     #[test]

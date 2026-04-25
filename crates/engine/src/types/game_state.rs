@@ -2217,11 +2217,14 @@ pub struct GameState {
     #[serde(default)]
     pub scheduled_turn_controls: Vec<ScheduledTurnControl>,
 
-    /// CR 500.8: Extra phases granted by effects, stored as a LIFO stack.
-    /// Most recently created phase occurs first (pop from end).
-    /// Consumed by `advance_phase()` — popped when transitioning between phases.
+    /// CR 500.8: Extra phases granted by effects, stored as a LIFO stack of
+    /// anchored entries. Each `ExtraPhase` records the phase it occurs
+    /// directly after (`anchor`) and the phase to insert (`phase`).
+    /// Consumed by `advance_phase()` — only entries whose `anchor` matches
+    /// `state.phase` are popped, scanned from the end so the most recently
+    /// created entry occurs first.
     #[serde(default)]
-    pub extra_phases: Vec<Phase>,
+    pub extra_phases: Vec<ExtraPhase>,
 
     // N-player support
     #[serde(default)]
@@ -2295,6 +2298,20 @@ pub struct GameState {
         with = "tuple_key_map"
     )]
     pub activated_abilities_this_game: HashMap<(ObjectId, usize), u32>,
+    /// CR 603.4: Per-ability per-turn resolution counter.
+    /// Keyed by `(source_id, ability_index)` — identifies a specific printed
+    /// ability on a specific source object. Incremented at the top of
+    /// `resolve_ability_chain` (depth 0) when the resolving ability has a
+    /// `Some(ability_index)` stamp; read by
+    /// `AbilityCondition::NthResolutionThisTurn` to gate Omnath-style
+    /// "if this is the [Nth] time this ability has resolved this turn" patterns.
+    /// Cleared in `start_next_turn` alongside other per-turn counters.
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        with = "tuple_key_map"
+    )]
+    pub ability_resolutions_this_turn: HashMap<(ObjectId, usize), u32>,
     /// CR 601.2a: Tracks which graveyard-cast permission sources have been
     /// used this turn. Keyed by the granting permanent's ObjectId.
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
@@ -2592,6 +2609,27 @@ pub struct ScheduledTurnControl {
     pub grant_extra_turn_after: bool,
 }
 
+/// CR 500.8: An extra phase added to a turn by an effect, anchored to the
+/// phase it occurs *directly after*. Stored on `GameState.extra_phases` and
+/// consumed by `advance_phase` only when the current phase matches `anchor`.
+///
+/// CR 500.8 ("phases are added directly after the specified phase") requires
+/// per-entry anchor typing — a flat `Vec<Phase>` consumed at every transition
+/// silently misroutes Aurelia-style "after this phase" extra combats into the
+/// middle of the current combat, skipping declare-blockers / combat-damage /
+/// end-of-combat.
+///
+/// LIFO ordering ("the most recently created phase will occur first") is
+/// preserved by scanning `extra_phases` from the end (`rposition`) for the
+/// first matching anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraPhase {
+    /// The phase after which this extra phase is inserted (CR 500.8).
+    pub anchor: Phase,
+    /// The phase to insert.
+    pub phase: Phase,
+}
+
 // Pin `GameState: Send + Sync` at compile time. Blocks accidental imports of
 // `im-rc` (the single-threaded variant of `im`, which is !Send/!Sync) and
 // catches any future field addition that violates thread-safety.
@@ -2694,6 +2732,7 @@ impl GameState {
             triggers_fired_this_game: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
+            ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             hand_cast_free_permissions_used: HashSet::new(),
             first_card_drawn_this_turn: HashMap::new(),
@@ -2860,6 +2899,7 @@ impl PartialEq for GameState {
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
+            && self.ability_resolutions_this_turn == other.ability_resolutions_this_turn
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn

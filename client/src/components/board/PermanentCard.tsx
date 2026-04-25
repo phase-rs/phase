@@ -8,6 +8,7 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
+import { AttachmentChipRow } from "./AttachmentChipRow.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -25,7 +26,6 @@ interface PermanentCardProps {
   objectId: number;
 }
 
-const ATTACHMENT_OFFSET_PX = 15;
 const EXILE_GHOST_OFFSET_PX = 20;
 
 export const PermanentCard = memo(function PermanentCard({ objectId }: PermanentCardProps) {
@@ -289,11 +289,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
         transformOrigin: "center center",
-        // Reserve space above for tucked attachments
-        marginTop:
-          obj.attachments.length > 0
-            ? `${obj.attachments.length * ATTACHMENT_OFFSET_PX}px`
-            : undefined,
         // Reserve space below for exile ghost cards
         marginBottom:
           exileLinks.length > 0
@@ -311,19 +306,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       onMouseLeave={handleMouseLeave}
       {...longPressHandlers}
     >
-      {/* Attachments rendered behind, tucked with top edge visible */}
-      {obj.attachments.map((attachId, i) => (
-        <div
-          key={attachId}
-          className="absolute left-0 z-0"
-          style={{
-            top: `${-(i + 1) * ATTACHMENT_OFFSET_PX}px`,
-          }}
-        >
-          <PermanentCard objectId={attachId} />
-        </div>
-      ))}
-
       {/* Exile ghosts — cards held in exile by this permanent, peeking from below */}
       {exileLinks.map((link, i) => (
         <ExileGhostCard
@@ -350,6 +332,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
 
           {/* P/T box for creatures */}
           {ptDisplay && <PTBox ptDisplay={ptDisplay} />}
+
+          {/* Attached Equipment / Auras / etc. summarized as chips along the
+              bottom edge of the host. Replaces the prior 15px top-peek of
+              tucked cards. Sibling of PTBox so it inherits tap rotation. */}
+          {obj.attachments.length > 0 && <AttachmentChipRow objectIds={obj.attachments} />}
 
           {/* Damage overlay for non-creatures only (creatures use P/T box) */}
           {!ptDisplay && obj.damage_marked > 0 && (

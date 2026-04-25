@@ -176,7 +176,11 @@ fn collect_matching_triggers(
                     continue;
                 }
             }
-            let ability = build_triggered_ability(state, trig_def, obj_id, controller);
+            let mut ability = build_triggered_ability(state, trig_def, obj_id, controller);
+            // CR 603.4: Stamp the printed-trigger index so per-turn resolution
+            // tracking (`AbilityCondition::NthResolutionThisTurn`) can identify
+            // "this ability" at resolution time.
+            ability.ability_index = Some(trig_idx);
             let (modal, mode_abilities) = trig_def
                 .execute
                 .as_ref()
@@ -2958,6 +2962,7 @@ pub mod tests {
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 up_to: false,
+                                enter_with_counters: vec![],
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -3050,6 +3055,7 @@ pub mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
             );
             execute.multi_target = Some(MultiTargetSpec {
@@ -3169,6 +3175,7 @@ pub mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
             );
             execute.multi_target = Some(MultiTargetSpec {
@@ -3284,6 +3291,7 @@ pub mod tests {
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 up_to: false,
+                                enter_with_counters: vec![],
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -3357,6 +3365,7 @@ pub mod tests {
                             enter_tapped: false,
                             enters_attacking: false,
                             up_to: false,
+                            enter_with_counters: vec![],
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -3416,6 +3425,7 @@ pub mod tests {
                             enter_tapped: false,
                             enters_attacking: false,
                             up_to: false,
+                            enter_with_counters: vec![],
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -3563,6 +3573,7 @@ pub mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -3808,6 +3819,7 @@ pub mod tests {
                                     enter_tapped: false,
                                     enters_attacking: false,
                                     up_to: false,
+                                    enter_with_counters: vec![],
                                 },
                             )
                             .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -4765,6 +4777,7 @@ pub mod tests {
             enter_tapped: true,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -4786,6 +4799,7 @@ pub mod tests {
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -5335,6 +5349,7 @@ pub mod tests {
             true,  // enter_transformed
             false, // effect_enter_tapped
             None,  // controller_override
+            &[],   // effect_enter_with_counters
             &mut events,
         );
 

@@ -13,7 +13,7 @@ pub enum CounterType {
     /// battlefield indicates its defense. A battle with 0 defense is put into
     /// its owner's graveyard as a state-based action (CR 704.5v).
     Defense,
-    /// CR 122.1g: When a permanent with a stun counter would become untapped during its
+    /// CR 122.1d: When a permanent with a stun counter would become untapped during its
     /// controller's untap step, one stun counter is removed instead of untapping.
     Stun,
     /// CR 714.1: Lore counters track Saga chapter progression.

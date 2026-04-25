@@ -982,6 +982,7 @@ pub(super) fn handle_resolution_choice(
                             enter_transformed,
                             enter_tapped,
                             controller_override,
+                            &[],
                             events,
                         ) {
                             effects::change_zone::ZoneMoveResult::Done => {

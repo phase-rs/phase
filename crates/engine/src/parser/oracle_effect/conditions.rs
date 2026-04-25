@@ -1044,6 +1044,17 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         return Some(AbilityCondition::DayNightIsNeither);
     }
 
+    // CR 603.4: "if this is the [Nth] time this ability has resolved this turn"
+    // and the abbreviated continuation form "if it's the [Nth] time" used by
+    // Omnath's later sentences (the "this ability has resolved this turn" tail
+    // is anaphoric to the prior sentence and is dropped). Composes:
+    //   subject: "this is" | "it's" | "it is"
+    //   ordinal: "first" | "second" | ...
+    //   tail:    optional " this ability has resolved this turn"
+    if let Some(n) = parse_nth_resolution_condition(lower.as_str()) {
+        return Some(AbilityCondition::NthResolutionThisTurn { n });
+    }
+
     if tag::<_, _, VerboseError<&str>>("you win the clash")
         .parse(lower.as_str())
         .is_ok()
@@ -1224,4 +1235,45 @@ fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
         return None;
     }
     Some((type_filter, negated))
+}
+
+/// CR 603.4: Parse "[subject] the [Nth] time[ this ability has resolved this turn]".
+///
+/// Subject is one of `"this is"`, `"it's"`, `"it is"` — the second/third forms are
+/// anaphoric continuations whose "this ability has resolved this turn" tail was
+/// printed in a prior sentence. Ordinals span first–tenth (Omnath/Ashling print
+/// up to third; the broader ceiling is conservative).
+fn parse_nth_resolution_condition(lower: &str) -> Option<u32> {
+    type E<'a> = VerboseError<&'a str>;
+    let (rest, _) = alt((
+        tag::<_, _, E>("this is the "),
+        tag("it's the "),
+        tag("it is the "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (rest, n) = alt((
+        value(1u32, tag::<_, _, E>("first")),
+        value(2u32, tag("second")),
+        value(3u32, tag("third")),
+        value(4u32, tag("fourth")),
+        value(5u32, tag("fifth")),
+        value(6u32, tag("sixth")),
+        value(7u32, tag("seventh")),
+        value(8u32, tag("eighth")),
+        value(9u32, tag("ninth")),
+        value(10u32, tag("tenth")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, E>(" time").parse(rest).ok()?;
+    let rest = rest.trim_end_matches('.').trim();
+    // Tail is optional — anaphoric forms ("if it's the second time") drop it
+    // because the prior sentence already established "this ability has resolved
+    // this turn" as the subject.
+    if rest.is_empty() || rest == "this ability has resolved this turn" {
+        Some(n)
+    } else {
+        None
+    }
 }

@@ -526,12 +526,14 @@ fn push_ability_entry(
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
-    resolved: ResolvedAbility,
+    mut resolved: ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
 
+    // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
+    resolved.ability_index = Some(ability_index);
     stack::push_to_stack(
         state,
         StackEntry {
