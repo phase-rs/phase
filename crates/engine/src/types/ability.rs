@@ -3115,6 +3115,14 @@ pub enum Effect {
         /// ("put up to one land ...").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         up_to: bool,
+        /// CR 122.1 + CR 614.1c: Counters placed on the moved object as it
+        /// enters its destination zone. Each entry is `(counter_type, count)`.
+        /// Mirrors `Effect::Token.enter_with_counters` and is used by patterns
+        /// like "Put target creature card ... onto the battlefield ... with two
+        /// additional +1/+1 counters on it" (Darkness Crystal) and "exile it
+        /// with three egg counters on it" (Darigaaz Reincarnated).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(String, QuantityExpr)>,
     },
     ChangeZoneAll {
         #[serde(default)]
@@ -7352,6 +7360,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(1),
@@ -7384,6 +7393,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

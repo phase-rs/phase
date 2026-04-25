@@ -184,6 +184,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

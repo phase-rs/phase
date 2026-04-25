@@ -123,10 +123,23 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
     {
-        let effect_text = extract_replacement_effect(&normalized);
         let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
             .valid_card(TargetFilter::SelfRef)
             .description(text.to_string());
+        // CR 614.1a + CR 122.1: Try the shared exile-anaphor recognizer first
+        // so the self-die branch sees the same prefix/suffix word-order
+        // handling and `with N <type> counter(s) on it` lift as the non-self
+        // `parse_creature_die_exile_replacement` branch. Darigaaz Reincarnated's
+        // "instead exile it with three egg counters on it" routes through
+        // here (self-die `~ would die`), not through the non-self path.
+        if let Some(execute) = self_die_exile_anaphor_execute(&normalized, &text) {
+            def = def.execute(execute);
+            return Some(def);
+        }
+        // Fall through: anaphor didn't match — keep prior coverage for compound
+        // tails like "return it to its owner's hand instead" via the generic
+        // chain parser.
+        let effect_text = extract_replacement_effect(&normalized);
         if let Some(e) = effect_text {
             def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
         }
@@ -1601,12 +1614,16 @@ fn parse_creature_die_exile_replacement(
         .trim_end_matches('.')
         .trim_end();
 
-    // Match the exile-anaphor in either word order via nom alt().
-    // Returns the (continuation, matched) pair so we can route any
-    // "and <continuation>" tail through parse_effect_chain.
-    let (continuation_pair, anaphor_matched) = parse_exile_anaphor_clause(effect_pair);
+    // Match the exile-anaphor in either word order via nom alt(). The match
+    // also lifts an inline `with N <type> counter(s) on it` modifier into
+    // `enter_with_counters` so callers see counters on the resulting
+    // ChangeZone (Draugr Necromancer's "with an ice counter", Rayami's "with
+    // a blood counter", Darigaaz's "with three egg counters" via the self-die
+    // branch). Compound suffix tails ("and you gain 2 life") are routed
+    // through `parse_effect_chain` as sub-abilities.
+    let anaphor = parse_exile_anaphor_clause(effect_pair);
 
-    let execute = if anaphor_matched {
+    let execute = if anaphor.matched {
         // CR 614.1a: The anaphoric "it" / "that card" / "that creature" refers
         // to the object whose event is being replaced. In the replacement
         // pipeline, the execute effect's ChangeZone is used only for zone
@@ -1626,13 +1643,17 @@ fn parse_creature_die_exile_replacement(
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                // CR 122.1 + CR 614.1c: enter_with_counters is populated when
+                // the anaphor clause carried a "with N <type> counter(s) on it"
+                // modifier. Empty otherwise.
+                enter_with_counters: anaphor.enter_with_counters,
             },
         );
         // CR 614.6: Trailing clauses (e.g., "and you gain 2 life", "and put a
         // hit counter on it") are additional effects that resolve as part of
         // the modified event. Attach them as sub_abilities — the chain parser
         // strips a leading "and " automatically.
-        let continuation = continuation_pair.original.trim();
+        let continuation = anaphor.continuation.original.trim();
         if !continuation.is_empty() {
             let chain = parse_effect_chain(continuation, AbilityKind::Spell);
             exile_self = exile_self.sub_ability(chain);
@@ -1642,13 +1663,12 @@ fn parse_creature_die_exile_replacement(
         // Fall through: the effect text isn't a bare exile-anaphor clause —
         // hand the whole tail (with `instead` intact) to the chain parser.
         // This preserves prior coverage for compound effects like
-        // "exile that card with an ice counter on it instead" (Draugr, Rayami)
-        // and "return it to its owner's hand instead" (Necromancer's Magemark).
+        // "return it to its owner's hand instead" (Necromancer's Magemark).
         let orig_effect =
             if let Ok((_, (_, after))) = nom_primitives::split_once_on(original_text, ", ") {
                 after.trim()
             } else {
-                continuation_pair.original.trim()
+                anaphor.continuation.original.trim()
             };
         parse_effect_chain(orig_effect, AbilityKind::Spell)
     };
@@ -1682,7 +1702,17 @@ fn parse_creature_die_exile_replacement(
 /// the unmodified text, preserving coverage for compound effects like
 /// `"exile that card with an ice counter on it instead"` (Draugr, Rayami) or
 /// `"return it to its owner's hand instead"` (Necromancer's Magemark).
-fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> (TextPair<'a>, bool) {
+/// Outcome of `parse_exile_anaphor_clause`: continuation slice for any
+/// trailing `and <effect>` clause, plus whether the anaphor matched and
+/// (optionally) `enter_with_counters` lifted from a `with N <type> counter(s)
+/// on it` modifier sandwiched between the anaphor and `instead` / end-of-input.
+struct ExileAnaphorMatch<'a> {
+    continuation: TextPair<'a>,
+    matched: bool,
+    enter_with_counters: Vec<(String, QuantityExpr)>,
+}
+
+fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> {
     use nom::sequence::terminated;
 
     let lower = input.lower;
@@ -1694,23 +1724,114 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> (TextPair<'a>, bool) {
         ))
     };
 
-    // Try prefix form first: "instead exile <anaphor>".
-    // Then suffix form: "exile <anaphor> instead".
-    let parsed: nom::IResult<&str, &str, VerboseError<&str>> = alt((
-        preceded(tag("instead "), exile_anaphor()),
-        terminated(exile_anaphor(), tag(" instead")),
+    // Optional `with N <type> counter(s) on it` modifier between the anaphor
+    // and the `instead` / end-of-input. Mirrors `Token.enter_with_counters`
+    // — see `parse_counter_suffix_body_combinator` in `oracle_effect/mod.rs`.
+    // The leading space is consumed here so the body combinator sees a clean
+    // input starting with the count.
+    let with_counters = || {
+        preceded(
+            tag::<_, _, VerboseError<&str>>(" with "),
+            crate::parser::oracle_effect::parse_counter_suffix_body_combinator,
+        )
+    };
+
+    // Try prefix form first: "instead exile <anaphor> [with N counters on it]".
+    // Then suffix form:    "exile <anaphor> [with N counters on it] instead".
+    // The body shape is unified: the `with-counters` slot is optional in both
+    // word orders.
+    let parsed: nom::IResult<&str, Option<(String, QuantityExpr)>, VerboseError<&str>> = alt((
+        // Prefix: "instead exile <anaphor> [with N counter(s) on it]"
+        preceded(
+            tag("instead "),
+            preceded(exile_anaphor(), nom::combinator::opt(with_counters())),
+        ),
+        // Suffix: "exile <anaphor> [with N counter(s) on it] instead"
+        terminated(
+            preceded(exile_anaphor(), nom::combinator::opt(with_counters())),
+            tag(" instead"),
+        ),
     ))
     .parse(lower);
 
     match parsed {
-        Ok((rest, _matched)) => {
+        Ok((rest, counters_opt)) => {
             // Compute the byte offset where the continuation starts.
             let consumed = lower.len() - rest.len();
             let (_, continuation) = input.split_at(consumed);
-            (continuation, true)
+            ExileAnaphorMatch {
+                continuation,
+                matched: true,
+                enter_with_counters: counters_opt.into_iter().collect(),
+            }
         }
-        Err(_) => (input, false),
+        Err(_) => ExileAnaphorMatch {
+            continuation: input,
+            matched: false,
+            enter_with_counters: Vec::new(),
+        },
     }
+}
+
+/// CR 614.1a + CR 122.1: For the self-die `~ would die` branch, try to
+/// recognize the exile-anaphor clause (with optional `with N <type> counter(s)
+/// on it` modifier) on the post-`, ` slice and build a `ChangeZone`-to-Exile
+/// execute ability with the counters lifted onto `enter_with_counters`.
+///
+/// Compound trailing clauses ("and you gain 2 life") are routed through
+/// `parse_effect_chain` as sub-abilities, mirroring
+/// `parse_creature_die_exile_replacement` for the non-self path.
+fn self_die_exile_anaphor_execute(
+    normalized: &str,
+    original_text: &str,
+) -> Option<AbilityDefinition> {
+    // Find the boundary `, ` that separates "If ~ would die" from the
+    // replacement effect text.
+    let (_, (_before, after_norm)) = nom_primitives::split_once_on(normalized, ", ").ok()?;
+    let after_norm_lower = after_norm.to_lowercase();
+
+    // Compute the matching slice on the original (un-normalized) text so the
+    // continuation TextPair preserves original case for downstream chain
+    // parsing. The original may differ from `normalized` in case but lengths
+    // match for the suffix portion.
+    let after_orig =
+        if let Ok((_, (_, after_orig))) = nom_primitives::split_once_on(original_text, ", ") {
+            after_orig
+        } else {
+            return None;
+        };
+
+    let effect_pair = TextPair::new(after_orig, &after_norm_lower)
+        .trim_end()
+        .trim_end_matches('.')
+        .trim_end();
+
+    let anaphor = parse_exile_anaphor_clause(effect_pair);
+    if !anaphor.matched {
+        return None;
+    }
+
+    let mut exile_self = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            origin: None,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: anaphor.enter_with_counters,
+        },
+    );
+    let continuation = anaphor.continuation.original.trim();
+    if !continuation.is_empty() {
+        let chain = parse_effect_chain(continuation, AbilityKind::Spell);
+        exile_self = exile_self.sub_ability(chain);
+    }
+    Some(exile_self)
 }
 
 /// Parse graveyard-destination zone-change replacements (CR 614.6).
@@ -1821,6 +1942,7 @@ fn parse_graveyard_exile_replacement(
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         },
     );
 
@@ -4210,21 +4332,18 @@ mod tests {
         ));
     }
 
-    /// Regression guard: compound effects whose verb isn't a bare exile-anaphor
-    /// (e.g., `"exile that card with an ice counter on it instead"`) must still
-    /// produce a non-empty `ReplacementDefinition` via the chain-parser fall-
-    /// through path. The bare-anaphor combinator must not gate non-anaphor
-    /// effect text out entirely (Draugr Necromancer / Rayami / Necromancer's
-    /// Magemark would otherwise lose their Destroy replacement).
+    /// CR 614.1a + CR 122.1 — Draugr Necromancer / Rayami class: the
+    /// suffix-form exile-anaphor with an inline `with N <type> counter(s) on
+    /// it` modifier lifts to `Effect::ChangeZone.enter_with_counters` so the
+    /// resolver stamps an "ice"/"blood" counter on the exiled card.
     #[test]
-    fn creature_die_compound_non_anaphor_falls_through_to_chain_parser() {
+    fn parse_enter_with_counters_on_change_zone_destroy_to_exile() {
         let def = parse_replacement_line(
             "If a nontoken creature an opponent controls would die, exile that card with an ice counter on it instead.",
             "Draugr Necromancer",
         )
-        .expect("expected non-empty ReplacementDefinition for compound die-replacement");
+        .expect("expected non-empty ReplacementDefinition for Draugr-shape die-replacement");
         assert_eq!(def.event, ReplacementEvent::Destroy);
-        // valid_card filter still recognized
         match &def.valid_card {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -4232,10 +4351,60 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
-        // execute is delegated to parse_effect_chain; the exact shape is the
-        // chain parser's responsibility — this regression test only asserts
-        // a definition is produced, not what shape its execute takes.
-        assert!(def.execute.is_some(), "expected execute populated");
+        let execute = def.execute.as_ref().expect("expected execute populated");
+        match &*execute.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert_eq!(
+                    enter_with_counters,
+                    &vec![("ice".to_string(), QuantityExpr::Fixed { value: 1 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a + CR 122.1 — Darigaaz Reincarnated: the self-die `~ would
+    /// die` branch with prefix-form `instead exile it with three egg counters
+    /// on it` lifts to `Effect::ChangeZone.enter_with_counters` (egg, 3) so
+    /// the recurring upkeep loop can find Darigaaz with its egg counters.
+    #[test]
+    fn parse_enter_with_counters_on_self_die_replacement() {
+        let def = parse_replacement_line(
+            "If Darigaaz Reincarnated would die, instead exile it with three egg counters on it.",
+            "Darigaaz Reincarnated",
+        )
+        .expect("expected non-empty ReplacementDefinition for Darigaaz self-die");
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert!(
+            matches!(def.valid_card, Some(TargetFilter::SelfRef)),
+            "self-die replacement must target the source via SelfRef"
+        );
+        let execute = def.execute.as_ref().expect("expected execute populated");
+        match &*execute.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert_eq!(
+                    enter_with_counters,
+                    &vec![("egg".to_string(), QuantityExpr::Fixed { value: 3 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+        // The bare prefix-form has no `and <continuation>` — sub_ability empty.
+        assert!(execute.sub_ability.is_none());
     }
 
     #[test]

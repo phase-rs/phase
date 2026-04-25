@@ -7005,6 +7005,7 @@ mod trigger_target_tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             Vec::new(),
             trigger_creature,
@@ -7100,6 +7101,7 @@ mod trigger_target_tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
                 vec![],
                 ObjectId(1),
@@ -8411,6 +8413,7 @@ mod phase_trigger_regression_tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![],
             source_id,
@@ -9840,6 +9843,7 @@ mod phase_trigger_regression_tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
             );
             let reflexive = crate::types::ability::AbilityDefinition {
@@ -10029,6 +10033,7 @@ mod phase_trigger_regression_tests {
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
+                        enter_with_counters: vec![],
                     },
                 )
             };

@@ -565,6 +565,7 @@ pub(super) fn apply_clause_continuation(
                     enter_tapped,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 },
             );
             // CR 303.4f: "attached to [source]" — forward the moved card to an Attach sub_ability

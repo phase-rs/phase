@@ -669,6 +669,10 @@ pub(super) enum PutImperativeAst {
         under_your_control: bool,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
+        /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
+        /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
+        /// `(counter_type, count)`.
+        enter_with_counters: Vec<(String, QuantityExpr)>,
     },
     TopOfLibrary,
     BottomOfLibrary,

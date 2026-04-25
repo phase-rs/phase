@@ -900,6 +900,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -916,6 +917,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         },
         TargetedImperativeAst::Fight { target } => Effect::Fight {
             target,
@@ -1928,6 +1930,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         target,
         under_your_control,
         enter_tapped,
+        enter_with_counters,
         ..
     }) = super::try_parse_put_zone_change(lower, text)
     {
@@ -1937,6 +1940,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             target,
             under_your_control,
             enter_tapped,
+            enter_with_counters,
         });
     }
 
@@ -1959,14 +1963,19 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target,
             under_your_control,
             enter_tapped,
+            enter_with_counters,
         } => {
             // CR 610.3: Mass filters (ExiledBySource, TrackedSet) act on all matching
             // objects without individual targeting — use ChangeZoneAll.
             // ExiledBySource always originates from Exile regardless of inferred zone.
+            // CR 122.1: ChangeZoneAll has no counter-stamping channel — those
+            // patterns are single-target only in current Oracle text, so the
+            // mass-filter branch deliberately drops `enter_with_counters`.
             if matches!(
                 target,
                 TargetFilter::ExiledBySource | TargetFilter::TrackedSet { .. }
-            ) {
+            ) && enter_with_counters.is_empty()
+            {
                 Effect::ChangeZoneAll {
                     origin: Some(Zone::Exile),
                     destination,
@@ -1983,6 +1992,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enter_tapped,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters,
                 }
             }
         }
@@ -2270,6 +2280,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             };
             with_shuffle_sub_ability(effect)
         }
@@ -2300,6 +2311,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             };
             with_shuffle_sub_ability(effect)
         }
@@ -2390,6 +2402,7 @@ pub(super) fn lower_multi_filter_search_library(
         enter_tapped,
         enters_attacking: false,
         up_to: false,
+        enter_with_counters: vec![],
     };
 
     let mut tail: Option<Box<AbilityDefinition>> = None;
@@ -4098,6 +4111,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
+                    enter_with_counters: vec![],
                 }
             }
         }

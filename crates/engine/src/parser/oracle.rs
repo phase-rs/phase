@@ -1300,6 +1300,7 @@ pub fn parse_oracle_text(
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
+                        enter_with_counters: vec![],
                     },
                 )
                 .description(line.to_string()),

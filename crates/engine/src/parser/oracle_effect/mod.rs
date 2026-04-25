@@ -910,6 +910,7 @@ fn try_parse_self_name_exile(tp: TextPair<'_>, ctx: &ParseContext) -> Option<Par
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         }));
     }
     None
@@ -973,6 +974,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         }
     };
 
@@ -1040,6 +1042,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enter_tapped: true,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         },
     );
 
@@ -1305,6 +1308,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         ))),
         distribute: None,
@@ -2330,6 +2334,7 @@ fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause>
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
+        enter_with_counters: vec![],
     }))
 }
 
@@ -3840,6 +3845,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
+        enter_with_counters: vec![],
     };
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
     sub_def.sub_ability = Some(Box::new(shuffle_def));
@@ -3855,6 +3861,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
+        enter_with_counters: vec![],
     };
 
     Some(ParsedEffectClause {
@@ -8209,6 +8216,74 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
     Some(PtValue::Fixed(sign * value))
 }
 
+/// CR 122.1 + CR 614.1c: Scan a remainder for a "with [N] [type] counter(s) on
+/// it" suffix and lift the matched counter type + count into a
+/// `Vec<(String, QuantityExpr)>` slot for `Effect::ChangeZone.enter_with_counters`.
+///
+/// Matches the patterns:
+///   * "with N <type> counter(s) on it" — fixed numeric (digits or English).
+///   * "with a/an <type> counter on it" — singular article.
+///   * Optional "additional " between count and type — purely a synonym in
+///     this position; the counter is still added once during the move.
+///
+/// Returns an empty `Vec` when no clause is present, so the caller can stamp
+/// it unconditionally.
+///
+/// Implemented as a `scan_preceded` over the body combinator — the scanner
+/// advances at word boundaries, so the suffix can appear anywhere after the
+/// destination phrase ("onto the battlefield tapped under your control with
+/// two additional +1/+1 counters on it") without the caller having to
+/// pre-trim. The body combinator gates on `tag("with ")` then dispatches to
+/// `parse_counter_suffix_body`.
+fn parse_with_counters_suffix(lower: &str) -> Vec<(String, QuantityExpr)> {
+    nom_primitives::scan_preceded(lower, |i| {
+        let (i, _) = tag::<_, _, VerboseError<&str>>("with ").parse(i)?;
+        parse_counter_suffix_body_combinator(i)
+    })
+    .map(|(_, val, _)| vec![val])
+    .unwrap_or_default()
+}
+
+/// CR 122.1 + CR 614.1c: Combinator body for "[N|a|an] [additional ]<type>
+/// counter(s) on it". Used by `parse_with_counters_suffix` AND by the exile-
+/// anaphor counter clause in `oracle_replacement.rs` so both paths share the
+/// same grammar.
+///
+/// Returns the parsed `(counter_type, count)` pair on success.
+pub(crate) fn parse_counter_suffix_body_combinator(
+    input: &str,
+) -> nom::IResult<&str, (String, QuantityExpr), VerboseError<&str>> {
+    // Count: digits, English word, or article ("a"/"an").
+    let (rest, count) = nom_primitives::parse_number.parse(input)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+
+    // Optional "additional " — a synonym in this grammatical position.
+    let (rest, _) =
+        nom::combinator::opt(tag::<_, _, VerboseError<&str>>("additional ")).parse(rest)?;
+
+    // Counter type: parse the token up to " counter" / " counters". The body
+    // accepts any non-whitespace name (including "+1/+1") followed by inline
+    // tokens that don't terminate at " counter".
+    let (rest, type_token) = take_until(" counter").parse(rest)?;
+    let counter_type = crate::types::counter::parse_counter_type(type_token)
+        .as_str()
+        .to_string();
+    let (rest, _) = tag(" counter").parse(rest)?;
+    // Optional plural "s".
+    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("s")).parse(rest)?;
+    let (rest, _) = tag(" on it").parse(rest)?;
+
+    Ok((
+        rest,
+        (
+            counter_type,
+            QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        ),
+    ))
+}
+
 fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
     let tp = TextPair::new(text, lower);
     let (_, after_put_tp) = tp.split_at(4);
@@ -8257,6 +8332,13 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             };
             // CR 110.2: "under your control" overrides the entering object's controller.
             let under_your_control = scan_contains_phrase(after_put_tp.lower, "under your control");
+            // CR 122.1 + CR 614.1c: Detect a trailing "with [N] [type] counter(s)
+            // on it" clause and stamp it onto `enter_with_counters`. This covers
+            // The Darkness Crystal's "with two additional +1/+1 counters on it"
+            // and the broader class of put-onto-battlefield-with-counters
+            // activated abilities. The combinator scans the post-destination
+            // remainder so the suffix is consumed only when present.
+            let enter_with_counters = parse_with_counters_suffix(after_put_tp.lower);
             return Some(Effect::ChangeZone {
                 origin: infer_origin_zone(after_put_tp.lower),
                 destination,
@@ -8269,6 +8351,7 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
                     && scan_contains_phrase(after_put_tp.lower, "battlefield tapped"),
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters,
             });
         }
     }
@@ -17118,5 +17201,58 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// CR 122.1 + CR 614.1c — The Darkness Crystal class:
+    ///   "Put target creature card exiled with ~ onto the battlefield tapped
+    ///    under your control with two additional +1/+1 counters on it."
+    /// `try_parse_put_zone_change` must lift the trailing
+    /// "with N <type> counter(s) on it" clause into
+    /// `Effect::ChangeZone.enter_with_counters` so the resolver stamps
+    /// counters during the same battlefield-entry replacement event.
+    #[test]
+    fn put_zone_change_lifts_with_counters_suffix() {
+        let text = "put target creature card onto the battlefield tapped under your control with two additional +1/+1 counters on it";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for put-onto-battlefield");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                under_your_control,
+                enter_tapped,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(under_your_control);
+                assert!(enter_tapped);
+                assert_eq!(
+                    enter_with_counters,
+                    vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 122.1 — Bare put-onto-battlefield without the counters suffix must
+    /// emit an empty `enter_with_counters` slot. Regression-protects existing
+    /// tutors / reanimation effects that place cards without counters.
+    #[test]
+    fn put_zone_change_without_suffix_has_empty_counters() {
+        let text = "put target creature card onto the battlefield";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for put-onto-battlefield");
+        match effect {
+            Effect::ChangeZone {
+                enter_with_counters,
+                ..
+            } => {
+                assert!(enter_with_counters.is_empty());
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
     }
 }
