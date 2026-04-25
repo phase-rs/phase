@@ -6282,16 +6282,22 @@ fn match_create_of_those_tokens(effect: &Effect) -> Option<u32> {
     }
 }
 
-/// CR 701.36a + CR 603.7c: Rewrite "the token created this way …" /
-/// "sacrifice it" anaphors following a token-creating effect.
+/// CR 608.2k + CR 603.7c + CR 701.36a: Rewrite token anaphors following a
+/// token-creating effect.
 ///
 /// Two rewrites, both scoped to defs whose chain contains a prior token
 /// creator (`Populate`, `CopyTokenOf`, `Token`):
 ///
-/// 1. `Effect::Unimplemented { description: "the token created this way <mod>" }`
+/// 1. `Effect::Unimplemented { description: "<anaphor> <mod>" }`
 ///    → `GenericEffect { target: Some(LastCreated), static_abilities: [...],
 ///    duration: Some(UntilEndOfTurn) }` where the modifications are parsed
 ///    from the verb phrase ("gains haste" / "gets +1/+1" / …).
+///    Recognized anaphor prefixes (longest-first to disambiguate):
+///    "the token created this way " / "the tokens created this way "
+///    (populate-specific qualifier) and the plain forms "this token " /
+///    "that token " / "the token " (covers Pietra, Inalla, and similar
+///    token-creators that follow with a generic pronoun rather than the
+///    populate-specific phrasing).
 ///
 /// 2. Inside a `CreateDelayedTrigger` whose inner effect references the
 ///    created token via `TargetFilter::ParentTarget` (currently the
@@ -6338,21 +6344,35 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
     }
 }
 
-/// If `effect` is `Unimplemented { description: "the token created this way
-/// <verb-phrase>" }`, try to parse the verb phrase as a continuous
-/// modification set and return a replacement `GenericEffect`. Returns `None`
-/// when the shape doesn't match so the caller leaves the effect untouched.
+/// If `effect` is `Unimplemented { description: "<anaphor> <verb-phrase>" }`,
+/// try to parse the verb phrase as a continuous modification set and return
+/// a replacement `GenericEffect`. Returns `None` when the shape doesn't
+/// match so the caller leaves the effect untouched.
+///
+/// CR 608.2k + CR 603.7c: Recognized anaphor prefixes resolve to the
+/// just-created token via `TargetFilter::LastCreated`. The longer
+/// populate-specific phrases ("the token(s) created this way ") MUST be
+/// tried before the plain "the token " prefix to avoid the latter
+/// shadowing the qualified forms when both could match.
 fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> Option<Effect> {
     let Effect::Unimplemented { description, .. } = effect else {
         return None;
     };
     let text = description.as_deref()?;
     let lower = text.to_lowercase();
-    // Accept both "the token" (populate / single) and "the tokens" (plural)
-    // anaphors — both resolve against LastCreated.
-    let rest = lower
-        .strip_prefix("the token created this way ")
-        .or_else(|| lower.strip_prefix("the tokens created this way "))?;
+    // Anaphor prefixes — longest-first so "the token created this way "
+    // wins over the bare "the token " when both could match. Plain forms
+    // ("this/that/the token ") cover token-creators (Pietra, Inalla,
+    // Ghired) that refer to the just-created token without the
+    // populate-specific qualifier.
+    let mut anaphor = alt((
+        tag::<&str, &str, ()>("the token created this way "),
+        tag("the tokens created this way "),
+        tag("this token "),
+        tag("that token "),
+        tag("the token "),
+    ));
+    let (rest, _matched) = anaphor.parse(lower.as_str()).ok()?;
     let mods = crate::parser::oracle_static::parse_continuous_modifications(rest);
     if mods.is_empty() {
         return None;
@@ -6374,6 +6394,15 @@ fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> Option<Effec
 /// Iteration) and related delayed-trigger anaphors: the imperative parser
 /// emits ParentTarget for bare "it", but in the populate context the
 /// antecedent is the newly created token, not a parent ability's target.
+///
+/// CR 608.2k: Scope is narrow — this runs only inside the inner effect of a
+/// `CreateDelayedTrigger` whose enclosing chain contains a token-creating
+/// effect. Within that scope, `ParentTarget` reflects the imperative
+/// parser's bare-pronoun fallback ("sacrifice it" / "exile it" / …) rather
+/// than a real parent target slot, so rewriting to `LastCreated` is safe.
+/// `ChangeZone` is included because Inalla-style "Exile it at the beginning
+/// of the next end step" lowers to `ChangeZone { destination: Exile,
+/// target: ParentTarget }`.
 fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
     match effect {
         Effect::Sacrifice { target, .. }
@@ -6381,7 +6410,8 @@ fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         | Effect::Bounce { target, .. }
         | Effect::Tap { target, .. }
         | Effect::Untap { target, .. }
-        | Effect::Pump { target, .. } => {
+        | Effect::Pump { target, .. }
+        | Effect::ChangeZone { target, .. } => {
             if matches!(target, TargetFilter::ParentTarget) {
                 *target = TargetFilter::LastCreated;
             }
@@ -16273,6 +16303,240 @@ mod tests {
         assert!(
             !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
             "must not emit ChooseOneOf when one branch fails to parse"
+        );
+    }
+
+    /// CR 608.2k: After a token-creating effect, a plain "the token <verb>"
+    /// anaphor (without the "created this way" populate qualifier) must
+    /// rewrite to a `GenericEffect` targeting `LastCreated`. Pietra,
+    /// Crafter of Clowns is the canonical case: "Create a 1/1 white Clown
+    /// Robot artifact creature token. … the token gains haste until end of
+    /// turn."
+    #[test]
+    fn the_token_plain_anaphor_after_token_creator_rewrites_to_last_created() {
+        let ability = parse_effect_chain(
+            "create a 1/1 white Clown Robot artifact creature token. the token gains haste",
+            AbilityKind::Spell,
+        );
+        // Outer effect is the Token creation.
+        assert!(
+            matches!(&*ability.effect, Effect::Token { .. }),
+            "expected Effect::Token, got {:?}",
+            ability.effect
+        );
+        // Sub-ability is the rewritten anaphor: GenericEffect bound to
+        // LastCreated with a Haste keyword grant.
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("anaphor sub-ability missing");
+        match &*sub.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(static_abilities.len(), 1);
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::LastCreated)
+                );
+                assert!(
+                    static_abilities[0].modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }
+                    )),
+                    "expected AddKeyword(Haste), got {:?}",
+                    static_abilities[0].modifications
+                );
+            }
+            other => panic!("expected GenericEffect anaphor rewrite, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2k: Recognizer-level coverage for the "this token "
+    /// anaphor — exercised directly via `Unimplemented` description so
+    /// the test pins the recognizer's behavior independent of upstream
+    /// dispatch (where "this token" gets normalized to `~`/SelfRef by
+    /// `SELF_REF_TYPE_PHRASES` and routed through the typed parser
+    /// before the post-pass runs). Test is the safety net for any
+    /// future surface form that survives normalization and lands here
+    /// as `Unimplemented`.
+    #[test]
+    fn rewrite_recognizer_accepts_this_token_prefix() {
+        let effect = Effect::Unimplemented {
+            name: "this".to_string(),
+            description: Some("this token gains haste".to_string()),
+        };
+        let rewritten = rewrite_token_created_this_way_unimplemented(&effect)
+            .expect("recognizer must accept 'this token' prefix");
+        match rewritten {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(target, Some(TargetFilter::LastCreated));
+                assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }
+                )));
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2k: Recognizer-level coverage for the "that token "
+    /// anaphor — exercised via `Unimplemented` description because
+    /// "that token" at the chain level is currently routed through the
+    /// trigger pipeline (producing `GenericEffect { affected:
+    /// ParentTarget }`), not the post-pass. The recognizer must still
+    /// accept it as a defensive catch for future flows.
+    #[test]
+    fn rewrite_recognizer_accepts_that_token_prefix() {
+        let effect = Effect::Unimplemented {
+            name: "that".to_string(),
+            description: Some("that token gains flying".to_string()),
+        };
+        let rewritten = rewrite_token_created_this_way_unimplemented(&effect)
+            .expect("recognizer must accept 'that token' prefix");
+        match rewritten {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                assert_eq!(target, Some(TargetFilter::LastCreated));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }
+                )));
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// Disambiguation regression: when the populate-specific qualifier
+    /// "the token created this way " is present, it MUST win over the
+    /// shorter "the token " prefix. The longest-first strip_prefix order
+    /// is the guard. If "the token " were tried first, the qualifier text
+    /// would leak into the parsed verb-phrase (`parse_continuous_modifications`
+    /// would receive "created this way gains haste"), producing an empty
+    /// modification set and silently dropping the rewrite.
+    #[test]
+    fn populate_qualifier_takes_precedence_over_plain_the_token() {
+        let ability = parse_effect_chain(
+            "populate. the token created this way gains haste",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*ability.effect, Effect::Populate),
+            "outer effect should be Populate, got {:?}",
+            ability.effect
+        );
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("anaphor sub-ability missing");
+        match &*sub.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert!(
+                    static_abilities[0].modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }
+                    )),
+                    "qualifier-form should still parse to AddKeyword(Haste); got {:?}",
+                    static_abilities[0].modifications
+                );
+            }
+            other => panic!("expected GenericEffect anaphor rewrite, got {other:?}"),
+        }
+    }
+
+    /// Negative gate: without a preceding token-creating effect, plain
+    /// "the token gains haste" must NOT be rewritten — there is no
+    /// antecedent for `LastCreated` to bind to. The outer
+    /// `resolve_populated_token_anaphors` walk gates on
+    /// `is_token_creating_effect` in the chain prefix.
+    #[test]
+    fn plain_anaphor_without_token_creator_is_not_rewritten() {
+        // Chain has no Token / Populate / CopyTokenOf — just a Pump and
+        // a dangling anaphor. The dangling clause must remain Unimplemented.
+        let ability = parse_effect_chain(
+            "target creature gets +1/+1. the token gains haste",
+            AbilityKind::Spell,
+        );
+        // Walk the chain's sub-ability tail; assert no GenericEffect with
+        // LastCreated target was produced.
+        fn contains_last_created_rewrite(def: &AbilityDefinition) -> bool {
+            if let Effect::GenericEffect {
+                target: Some(TargetFilter::LastCreated),
+                ..
+            } = &*def.effect
+            {
+                return true;
+            }
+            def.sub_ability
+                .as_deref()
+                .is_some_and(contains_last_created_rewrite)
+        }
+        assert!(
+            !contains_last_created_rewrite(&ability),
+            "no token creator preceded — must not produce LastCreated rewrite"
+        );
+    }
+
+    /// CR 608.2k + CR 603.7c: Inalla-style "Exile it at the beginning of
+    /// the next end step" inside a delayed trigger after a token-creating
+    /// effect must rewrite the inner `ChangeZone { target: ParentTarget }`
+    /// to `LastCreated`. Coverage gap before B11: `ChangeZone` was missing
+    /// from `rewrite_parent_target_to_last_created`'s effect-list, so
+    /// Inalla's exile-the-token delayed trigger leaked `ParentTarget`.
+    #[test]
+    fn delayed_trigger_change_zone_after_token_creator_rewrites_to_last_created() {
+        let ability = parse_effect_chain(
+            "create a token that's a copy of that creature. the token gains haste. exile it at the beginning of the next end step",
+            AbilityKind::Spell,
+        );
+        // Outermost is CopyTokenOf.
+        assert!(
+            matches!(&*ability.effect, Effect::CopyTokenOf { .. }),
+            "expected CopyTokenOf, got {:?}",
+            ability.effect
+        );
+        // Walk to the CreateDelayedTrigger and inspect its inner ChangeZone.
+        fn find_delayed_change_zone_target(def: &AbilityDefinition) -> Option<TargetFilter> {
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                if let Effect::ChangeZone { target, .. } = &*inner.effect {
+                    return Some(target.clone());
+                }
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_delayed_change_zone_target)
+        }
+        let target = find_delayed_change_zone_target(&ability)
+            .expect("expected CreateDelayedTrigger { ChangeZone } in chain");
+        assert_eq!(
+            target,
+            TargetFilter::LastCreated,
+            "ChangeZone target must be rewritten from ParentTarget to LastCreated"
         );
     }
 }
