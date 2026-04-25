@@ -133,6 +133,15 @@ jobs:
           mkdir -p client/dist
           echo '<!doctype html><html></html>' > client/dist/index.html
 
+      - name: Stub phase-server sidecar for tauri-build
+        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`,
+        # so tauri-build requires `binaries/phase-server-<triple>` to exist
+        # at check time. The real sidecar is built in the release matrix;
+        # for PR-time compile checks we only need the path to exist.
+        run: |
+          mkdir -p client/src-tauri/binaries
+          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
+
       - name: Tauri compile check
         # phase-tauri is excluded from the workspace clippy and nextest runs
         # above (no proptest support, no tests). Without this step, compile

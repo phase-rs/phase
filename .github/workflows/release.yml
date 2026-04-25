@@ -71,6 +71,17 @@ jobs:
           mkdir -p client/dist
           echo '<!doctype html><html></html>' > client/dist/index.html
 
+      - name: Stub phase-server sidecar for tauri-build
+        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`,
+        # so tauri-build's resource resolver requires
+        # `binaries/phase-server-<triple>` to exist at check time. The real
+        # sidecar is compiled later in the build-tauri matrix; for the
+        # preflight we only need the path to exist (existence check, not
+        # content). Empty placeholder is sufficient.
+        run: |
+          mkdir -p client/src-tauri/binaries
+          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
+
       - name: cargo check phase-tauri
         # phase-tauri is excluded from the root workspace (client/src-tauri),
         # so `-p phase-tauri` from the repo root cannot resolve it. Drive the
