@@ -1703,12 +1703,12 @@ mod tests {
             predefined_role_token_statics("Royal").expect("Royal is an implemented Role");
         assert_eq!(statics.len(), 1);
         let s = &statics[0];
+        let affected_ok = matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::EnchantedBy)
+        );
         assert!(
-            matches!(
-                &s.affected,
-                Some(TargetFilter::Typed(tf))
-                    if tf.properties.contains(&FilterProp::EnchantedBy)
-            ),
+            affected_ok,
             "Royal Role static must affect the enchanted creature, got {:?}",
             s.affected
         );
