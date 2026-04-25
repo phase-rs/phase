@@ -1200,6 +1200,38 @@ mod tests {
         assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
     }
 
+    /// Regression: Katsumasa, the Animator upkeep trigger uses `Effect::PutCounter`
+    /// with a `+1/+1` counter. Prior to the classifier fix, `effect_polarity`
+    /// fell through to the default `Contextual` arm, flipping the AI's
+    /// anti-self-harm preference and making it target opponents' artifacts.
+    #[test]
+    fn put_counter_plus_is_beneficial() {
+        let effect = Effect::PutCounter {
+            counter_type: "+1/+1".to_string(),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+        };
+        assert_eq!(effect_polarity(&effect), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn put_counter_all_minus_is_harmful() {
+        let effect = Effect::PutCounterAll {
+            counter_type: "-1/-1".to_string(),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+        };
+        assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn proliferate_is_contextual_before_target_selection() {
+        assert_eq!(
+            effect_polarity(&Effect::Proliferate),
+            EffectPolarity::Contextual
+        );
+    }
+
     #[test]
     fn unknown_effect_defaults_to_contextual() {
         let effect = Effect::GenericEffect {
