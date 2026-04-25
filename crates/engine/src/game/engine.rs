@@ -4980,7 +4980,7 @@ mod tests {
             let obj = state.objects.get_mut(&aura).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.card_types.subtypes.push("Aura".to_string());
-            obj.attached_to = Some(forest);
+            obj.attached_to = Some(forest.into());
             obj.entered_battlefield_turn = Some(1);
             obj.chosen_attributes
                 .push(ChosenAttribute::Color(crate::types::mana::ManaColor::Red));
@@ -6214,7 +6214,14 @@ mod tests {
             apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
             apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
             assert_eq!(
-                state.objects.get(&equipment_id).unwrap().attached_to,
+                state
+                    .objects
+                    .get(&equipment_id)
+                    .unwrap()
+                    .attached_to
+                    // CR 301.5: Equipment must attach to an object — `as_object`
+                    // makes the rules invariant explicit.
+                    .and_then(|t| t.as_object()),
                 Some(creature_a)
             );
             assert!(state
@@ -6252,7 +6259,12 @@ mod tests {
             apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
             apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
             assert_eq!(
-                state.objects.get(&equipment_id).unwrap().attached_to,
+                state
+                    .objects
+                    .get(&equipment_id)
+                    .unwrap()
+                    .attached_to
+                    .and_then(|t| t.as_object()),
                 Some(creature_a)
             );
 
@@ -6277,7 +6289,12 @@ mod tests {
             apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
 
             assert_eq!(
-                state.objects.get(&equipment_id).unwrap().attached_to,
+                state
+                    .objects
+                    .get(&equipment_id)
+                    .unwrap()
+                    .attached_to
+                    .and_then(|t| t.as_object()),
                 Some(creature_b)
             );
             assert!(state
@@ -6376,7 +6393,12 @@ mod tests {
             apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
             apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
             assert_eq!(
-                state.objects.get(&equipment_id).unwrap().attached_to,
+                state
+                    .objects
+                    .get(&equipment_id)
+                    .unwrap()
+                    .attached_to
+                    .and_then(|t| t.as_object()),
                 Some(creature)
             );
         }

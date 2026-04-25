@@ -1124,7 +1124,12 @@ mod tests {
         assert!(state.battlefield.contains(&aura_id));
         // Aura should be attached to the creature
         assert_eq!(
-            state.objects.get(&aura_id).unwrap().attached_to,
+            state
+                .objects
+                .get(&aura_id)
+                .unwrap()
+                .attached_to
+                .and_then(|t| t.as_object()),
             Some(creature)
         );
         // Creature should list the Aura in its attachments

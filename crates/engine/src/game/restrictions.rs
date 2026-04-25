@@ -552,10 +552,15 @@ fn evaluate_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
+        // CR 301.5 + CR 303.4: This condition is meaningful only when the host is
+        // an object (Equipment/Aura attached to a permanent). A player host
+        // (CR 303.4 + CR 702.5d, Curse cycle) has no `tapped` or core_type, so
+        // the predicate is false by construction — `as_object()` filters it out.
         ParsedCondition::SourceUntappedAttachedTo { required_type } => state
             .objects
             .get(&source_id)
             .and_then(|obj| obj.attached_to)
+            .and_then(|t| t.as_object())
             .and_then(|attached_to| state.objects.get(&attached_to))
             .is_some_and(|obj| !obj.tapped && obj.card_types.core_types.contains(required_type)),
         ParsedCondition::SourceLacksKeyword { keyword } => state

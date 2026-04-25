@@ -364,6 +364,7 @@ fn filter_inner_for_object(
             .objects
             .get(&source_id)
             .and_then(|src| src.attached_to)
+            .and_then(|t| t.as_object())
             .is_some_and(|attached| attached == object_id),
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
         // CR 603.7: Match objects in a tracked set from the originating effect.
@@ -988,7 +989,11 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
 struct SourceContext<'a> {
     id: ObjectId,
     controller: Option<PlayerId>,
-    attached_to: Option<ObjectId>,
+    /// CR 303.4 + CR 301.5: Resolved host of the source's attachment, if any.
+    /// Widened to `AttachTarget` so attachment-aware filter properties
+    /// (`EnchantedBy`, `EquippedBy`) can route on Object vs Player. The
+    /// `FilterContext` snapshot mirrors this shape — see `FilterContext`.
+    attached_to: Option<crate::game::game_object::AttachTarget>,
     chosen_creature_type: Option<&'a str>,
     chosen_attributes: &'a [crate::types::ability::ChosenAttribute],
     /// CR 107.3a + CR 601.2b: The resolving ability, when one is in scope.
@@ -1195,7 +1200,9 @@ fn matches_filter_prop(
         // use of "enchanted creature" on a non-Aura trigger source.
         FilterProp::EnchantedBy => {
             if source.attached_to.is_some() {
-                source.attached_to == Some(object_id)
+                // CR 303.4: An Aura attached to a player never matches an object
+                // filter ("enchanted creature"); only Object hosts qualify.
+                source.attached_to.and_then(|t| t.as_object()) == Some(object_id)
             } else {
                 obj.attachments.iter().any(|att_id| {
                     state
@@ -1210,7 +1217,10 @@ fn matches_filter_prop(
         // "has at least one Equipment attached" for non-Equipment trigger sources.
         FilterProp::EquippedBy => {
             if source.attached_to.is_some() {
-                source.attached_to == Some(object_id)
+                // CR 301.5: Equipment can attach only to creatures (objects), so
+                // a Player host is structurally impossible here — but routing
+                // through `as_object` is the typed way to express that.
+                source.attached_to.and_then(|t| t.as_object()) == Some(object_id)
             } else {
                 obj.attachments.iter().any(|att_id| {
                     state
@@ -2055,7 +2065,7 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Enchantment);
-        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature_a);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature_a.into());
 
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
@@ -2860,7 +2870,7 @@ mod tests {
             let a = state.objects.get_mut(&aura_a).unwrap();
             a.card_types.core_types.push(CoreType::Enchantment);
             a.card_types.subtypes.push("Aura".into());
-            a.attached_to = Some(cre_a);
+            a.attached_to = Some(cre_a.into());
         }
         state
             .objects
@@ -2895,7 +2905,7 @@ mod tests {
             let a = state.objects.get_mut(&aura_b).unwrap();
             a.card_types.core_types.push(CoreType::Enchantment);
             a.card_types.subtypes.push("Aura".into());
-            a.attached_to = Some(cre_b);
+            a.attached_to = Some(cre_b.into());
         }
         state
             .objects
@@ -2989,7 +2999,7 @@ mod tests {
             let a = state.objects.get_mut(&aura).unwrap();
             a.card_types.core_types.push(CoreType::Enchantment);
             a.card_types.subtypes.push("Aura".into());
-            a.attached_to = Some(cre_enchanted);
+            a.attached_to = Some(cre_enchanted.into());
         }
         state
             .objects
@@ -3101,7 +3111,7 @@ mod tests {
             let a = state.objects.get_mut(&eq).unwrap();
             a.card_types.core_types.push(CoreType::Artifact);
             a.card_types.subtypes.push("Equipment".into());
-            a.attached_to = Some(cre);
+            a.attached_to = Some(cre.into());
         }
         state.objects.get_mut(&cre).unwrap().attachments.push(eq);
 
@@ -3151,7 +3161,7 @@ mod tests {
             let a = state.objects.get_mut(&aura_a).unwrap();
             a.card_types.core_types.push(CoreType::Enchantment);
             a.card_types.subtypes.push("Aura".into());
-            a.attached_to = Some(cre_a);
+            a.attached_to = Some(cre_a.into());
         }
         state
             .objects
@@ -3186,7 +3196,7 @@ mod tests {
             let a = state.objects.get_mut(&aura_b).unwrap();
             a.card_types.core_types.push(CoreType::Enchantment);
             a.card_types.subtypes.push("Aura".into());
-            a.attached_to = Some(cre_b);
+            a.attached_to = Some(cre_b.into());
         }
         state
             .objects
