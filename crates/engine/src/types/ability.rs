@@ -5407,6 +5407,18 @@ pub enum AbilityCondition {
     /// the ability's source object matches the filter. Used by leveler-style cards
     /// (e.g. Figure of Fable) where each activated ability gates on the source's current type.
     SourceMatchesFilter { filter: TargetFilter },
+    /// CR 608.2c + CR 614.1d: "if you control a/no [filter]" — gates sub_ability on whether
+    /// the ability controller controls at least one battlefield permanent matching the
+    /// filter (excluding the source itself). When `negated` is true, the condition is
+    /// satisfied iff the controller controls NO matching permanent. Used by reveal-tribal
+    /// land cycles (Fortified Beachhead, Temple of the Dragon Queen) where the on_decline
+    /// Tap fires only when the controller doesn't already control a [filter] permanent.
+    /// `filter` MUST have its `ControllerRef::You` pre-bound by the parser.
+    ControllerControlsMatching {
+        filter: TargetFilter,
+        #[serde(default)]
+        negated: bool,
+    },
     /// CR 608.2c: "If it's your turn" / "If it's not your turn" — gates sub_ability on
     /// whether the active player is the ability's controller.
     IsYourTurn {
