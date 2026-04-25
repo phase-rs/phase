@@ -26,17 +26,15 @@ import type { DeckCompatibilityResult } from "../services/deckCompatibility";
 
 // --- Format trigger styling ---
 //
-// The format is rendered *inline* inside the page's H1 ("Start a Commander
-// match.") so the title itself is the affordance. This eliminates the
-// stacked "eyebrow / chip / hint" island that fragmented the hero, frees
-// ~80px of vertical space, and makes the title a direct action statement.
-// The inline word is tinted by the engine FormatGroup so the affordance
-// reads at a glance (amber=Commander, indigo=Constructed).
+// One large touch-friendly chip shows the current format and opens the
+// rich <FormatPicker> in a modal/sheet on tap. This replaces the flat
+// pill row, which failed mobile touch-target rules (28px) and pushed the
+// deck grid below the fold once the format count grew past ~6.
 
-const GROUP_INLINE_TONE: Record<FormatGroup, string> = {
-  Constructed: "text-indigo-200 decoration-indigo-300/50 hover:bg-indigo-500/15",
-  Commander: "text-amber-200 decoration-amber-300/50 hover:bg-amber-500/15",
-  Multiplayer: "text-emerald-200 decoration-emerald-300/50 hover:bg-emerald-500/15",
+const GROUP_TRIGGER_TONE: Record<FormatGroup, string> = {
+  Constructed: "border-indigo-300/40 bg-indigo-500/15 text-indigo-50 hover:bg-indigo-500/22",
+  Commander: "border-amber-300/40 bg-amber-500/15 text-amber-50 hover:bg-amber-500/22",
+  Multiplayer: "border-emerald-300/40 bg-emerald-500/15 text-emerald-50 hover:bg-emerald-500/22",
 };
 
 // --- Component ---
@@ -165,21 +163,26 @@ export function GameSetupPage() {
       <div className="menu-scene__sigil menu-scene__sigil--right" />
       <div className="menu-scene__haze" />
 
-      <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col px-6 pt-14 pb-10 lg:px-10 lg:pt-16">
-        {/* Header -- the format is rendered inline inside the H1 as the
-            interactive word ("Start a Commander match."). One cohesive
-            unit instead of the previous stacked eyebrow/chip/hint island,
-            and the title doubles as the action statement. */}
-        <div className="mb-6 flex flex-col items-center gap-3">
+      <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col px-6 pt-20 pb-10 lg:px-10">
+        {/* Header + format trigger -- one large touch chip showing the
+            current format, opens the rich picker modal on tap. The trigger
+            is tinted by the engine FormatGroup so the affordance reads at a
+            glance ("amber == Commander", "indigo == Constructed"). */}
+        <div className="mb-8 flex flex-col items-center gap-3">
           <div className="menu-kicker text-amber-100/58">Match Setup</div>
+          <h1 className="menu-display text-balance text-center text-[2.4rem] leading-[1.02] text-white sm:text-[3.1rem]">
+            Start a match.
+          </h1>
           {(() => {
             const meta = selectedFormat ? formatMetadata(selectedFormat) : null;
             const tone = meta
-              ? GROUP_INLINE_TONE[meta.group]
-              : "text-slate-200 decoration-white/30 hover:bg-white/8";
+              ? GROUP_TRIGGER_TONE[meta.group]
+              : "border-white/10 bg-black/18 text-slate-300 hover:border-white/18";
             return (
-              <h1 className="menu-display text-balance text-center text-[2.4rem] leading-[1.05] text-white sm:text-[3.1rem]">
-                Start a{" "}
+              <div className="mt-6 flex flex-col items-center gap-2">
+                <span className="text-[0.62rem] font-medium uppercase tracking-[0.22em] text-slate-400/70">
+                  Format
+                </span>
                 <button
                   type="button"
                   onClick={() => setFormatPickerOpen(true)}
@@ -190,25 +193,31 @@ export function GameSetupPage() {
                       ? `Format: ${meta.label} (${meta.group}). Tap to change.`
                       : "Choose match format"
                   }
-                  className={`group inline-flex items-baseline gap-2 rounded-[12px] px-2 py-0.5 underline decoration-2 underline-offset-[0.2em] transition-colors ${tone}`}
+                  className={`group flex min-h-[56px] items-center gap-4 rounded-full border-2 px-7 py-3 text-lg font-semibold shadow-[0_8px_24px_rgba(0,0,0,0.32)] transition-all hover:scale-[1.02] active:scale-[0.99] ${tone}`}
                 >
-                  <span>{meta?.label ?? "format"}</span>
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                    className="h-[0.55em] w-[0.55em] self-center opacity-70 transition-transform group-hover:translate-y-[1px]"
-                    aria-hidden="true"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.06l3.71-3.83a.75.75 0 1 1 1.08 1.04l-4.25 4.39a.75.75 0 0 1-1.08 0L5.21 8.27a.75.75 0 0 1 .02-1.06Z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
+                  <span className="text-[1.15rem] tracking-tight">
+                    {meta?.label ?? "Choose format"}
+                  </span>
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 transition-colors group-hover:bg-white/20">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                      className="h-4 w-4"
+                      aria-hidden="true"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.06l3.71-3.83a.75.75 0 1 1 1.08 1.04l-4.25 4.39a.75.75 0 0 1-1.08 0L5.21 8.27a.75.75 0 0 1 .02-1.06Z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  </span>
                 </button>
-                {" "}match.
-              </h1>
+                <span className="text-[0.7rem] text-slate-500">
+                  Tap to change
+                </span>
+              </div>
             );
           })()}
         </div>
