@@ -114,6 +114,7 @@ pub mod token_copy;
 pub mod transform_effect;
 pub mod tribute;
 pub mod venture;
+pub mod vote;
 pub mod win_lose;
 
 fn matches_player_scope(
@@ -308,6 +309,8 @@ pub fn resolve_effect(
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
+        // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
+        Effect::Vote { .. } => vote::resolve(state, ability, events),
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),

@@ -1565,6 +1565,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Clash
+        | Effect::Vote { .. }
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }

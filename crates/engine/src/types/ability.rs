@@ -3193,6 +3193,36 @@ pub enum Effect {
     Populate,
     /// CR 701.30: Clash with an opponent — reveal top cards, compare mana values.
     Clash,
+    /// CR 701.38: Vote — each player chooses one of the listed options, starting
+    /// with a specified player and proceeding in turn order. After all votes are
+    /// collected, the resolver runs `per_choice_effect[i]` once for each vote
+    /// cast for `choices[i]`. CR 701.38d: A player with multiple votes (granted
+    /// by static "you may vote an additional time") makes those choices at the
+    /// same time they would otherwise have voted.
+    ///
+    /// The starting player defaults to the ability's controller (the canonical
+    /// "Council's dilemma — starting with you" pattern). `per_choice_effect[i]`
+    /// resolves once per vote tallied for `choices[i]` (Tivit's "for each
+    /// evidence vote, investigate" / "for each bribery vote, create a Treasure
+    /// token"). Each per-vote sub-resolution inherits the source ability's
+    /// controller and source object, identical to how `ForEach`-style replicate
+    /// effects fan out.
+    Vote {
+        /// Lowercase choice identifiers ("evidence", "bribery", a creature
+        /// type, etc.). Display capitalization is restored from the original
+        /// Oracle text by the parser before serialization.
+        choices: Vec<String>,
+        /// One sub-effect per choice. `per_choice_effect[i]` resolves once for
+        /// every vote cast for `choices[i]`. Length must equal `choices.len()`
+        /// — the parser is the single authority and the resolver asserts this
+        /// invariant.
+        per_choice_effect: Vec<Box<AbilityDefinition>>,
+        /// CR 101.4 + CR 701.38a: The first voter. `ControllerRef::You` covers
+        /// "starting with you"; other refs cover "starting with the player to
+        /// your left" / "the affected player" if those phrasings ever land.
+        #[serde(default = "default_controller_ref_you")]
+        starting_with: ControllerRef,
+    },
     /// CR 613.4d: Switch a creature's power and toughness. Applied in layer 7d.
     SwitchPT {
         #[serde(default = "default_target_filter_any")]
@@ -4090,6 +4120,13 @@ fn default_target_filter_self_ref() -> TargetFilter {
     TargetFilter::SelfRef
 }
 
+/// CR 701.38a + CR 101.4: Default starting voter for `Effect::Vote` is the
+/// ability controller ("starting with you"). Defining this as a free function
+/// (not an enum default) keeps the serde shape stable across schema upgrades.
+fn default_controller_ref_you() -> ControllerRef {
+    ControllerRef::You
+}
+
 impl TargetFilter {
     /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
     /// context references (triggering event participants per CR 603.7c),
@@ -4303,6 +4340,7 @@ impl Effect {
             | Effect::Proliferate
             | Effect::Populate
             | Effect::Clash
+            | Effect::Vote { .. }
             | Effect::Cleanup { .. }
             | Effect::Mana { .. }
             | Effect::RevealTop { .. }
@@ -4415,6 +4453,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Proliferate => "Proliferate",
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
+        Effect::Vote { .. } => "Vote",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
@@ -4573,6 +4612,8 @@ pub enum EffectKind {
     Proliferate,
     Populate,
     Clash,
+    /// CR 701.38: Vote — interactive APNAP-ordered choice with per-choice tally effects.
+    Vote,
     SwitchPT,
     CopySpell,
     CopyTokenOf,
@@ -4732,6 +4773,7 @@ impl From<&Effect> for EffectKind {
             Effect::Proliferate => EffectKind::Proliferate,
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
+            Effect::Vote { .. } => EffectKind::Vote,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,

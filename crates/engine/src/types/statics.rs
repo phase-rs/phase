@@ -332,6 +332,18 @@ pub enum StaticMode {
         cause: ProhibitionScope,
     },
     CastWithFlash,
+    /// CR 701.38d: While voting, the controller of this permanent may vote an
+    /// additional time. Each active source grants +1 to the controller's
+    /// `Player::extra_votes_per_session` snapshot taken at vote-session start
+    /// (Tivit, Seller of Secrets — "While voting, you may vote an additional
+    /// time.").
+    ///
+    /// The vote-effect resolver scans the battlefield for permanents with this
+    /// static at session start (CR 701.38d: extra votes happen at the same
+    /// time the player would otherwise have voted). It does *not* feed into
+    /// layer 7 — there is no continuous P/T or keyword grant; the static is a
+    /// pure "session-start +1 votes" signal.
+    GrantsExtraVote,
     /// CR 702.51a: Grants a keyword to spells during casting.
     /// Generalized version of CastWithFlash — the `spell_filter` on the StaticDefinition
     /// determines which spells are affected (e.g., "Creature spells you cast have convoke").
@@ -648,6 +660,7 @@ impl fmt::Display for StaticMode {
                 write!(f, "SuppressTriggers({})", parts.join("+"))
             }
             StaticMode::CastWithFlash => write!(f, "CastWithFlash"),
+            StaticMode::GrantsExtraVote => write!(f, "GrantsExtraVote"),
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
             }

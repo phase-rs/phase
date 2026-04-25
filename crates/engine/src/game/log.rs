@@ -185,6 +185,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::DungeonCompleted { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. }
         | GameEvent::XValueChosen { .. } => LogCategory::Special,
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {
             LogCategory::Combat
@@ -837,6 +839,21 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::DungeonCompleted { .. } => vec![text("Dungeon completed")],
         GameEvent::InitiativeTaken { .. } => vec![text("Initiative taken")],
         GameEvent::Clash { .. } => vec![text("Clash")],
+        GameEvent::VoteCast { voter, choice, .. } => {
+            vec![player_seg(state, *voter), text(" voted "), text(choice)]
+        }
+        GameEvent::VoteResolved { tallies, .. } => {
+            let mut segs = vec![text("Vote resolved: ")];
+            for (i, (label, count)) in tallies.iter().enumerate() {
+                if i > 0 {
+                    segs.push(text(", "));
+                }
+                segs.push(text(label));
+                segs.push(text(": "));
+                segs.push(text(&count.to_string()));
+            }
+            segs
+        }
         GameEvent::XValueChosen { value, .. } => {
             vec![text("Chose X = "), text(&value.to_string())]
         }

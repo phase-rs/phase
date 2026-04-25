@@ -240,6 +240,7 @@ fn redundancy_delta(
         | Effect::Proliferate
         | Effect::Populate
         | Effect::Clash
+        | Effect::Vote { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::CopyTokenOf { .. }

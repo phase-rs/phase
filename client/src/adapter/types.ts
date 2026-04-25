@@ -648,6 +648,16 @@ export type WaitingFor =
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
+  | { type: "VoteChoice"; data: {
+      player: PlayerId;
+      remaining_votes: number;
+      options: string[];
+      option_labels: string[];
+      remaining_voters: [PlayerId, number][];
+      tallies: number[];
+      controller: PlayerId;
+      source_id: ObjectId;
+    } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
   | { type: "CategoryChoice"; data: {

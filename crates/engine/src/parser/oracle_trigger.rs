@@ -482,8 +482,20 @@ pub(crate) fn parse_trigger_line_with_index(
     // Parse the effect
     let has_up_to = scan_contains(&effect_for_parse, "up to one");
     let execute = if !effect_for_parse.is_empty() {
-        let mut ability =
-            parse_effect_chain_with_context(&effect_for_parse, AbilityKind::Spell, &effect_ctx);
+        // CR 701.38 + CR 207.2c: Council's-dilemma / Will-of-the-Council vote
+        // blocks have a fixed three-sentence shape ("starting with you, each
+        // player votes for X or Y. For each X vote, A. For each Y vote, B.")
+        // that can't be cleanly split by `parse_effect_chain` because the per-
+        // choice tally clauses are semantically welded to the vote prompt.
+        // Try the dedicated detector first; fall back to the chain parser if
+        // the input isn't a vote block.
+        let mut ability = if let Some(vote_def) =
+            crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
+        {
+            vote_def
+        } else {
+            parse_effect_chain_with_context(&effect_for_parse, AbilityKind::Spell, &effect_ctx)
+        };
         if has_up_to {
             ability.optional_targeting = true;
         }

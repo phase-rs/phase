@@ -444,6 +444,22 @@ pub enum GameEvent {
         opponent_mana_value: Option<u32>,
         result: ClashResult,
     },
+    /// CR 701.38a: A player cast a single vote in a Council's-dilemma
+    /// resolution. One event per vote (so a player with multiple votes
+    /// produces multiple events). `choice` is the lowercase canonical
+    /// option name from `Effect::Vote.choices`.
+    VoteCast {
+        voter: PlayerId,
+        choice: String,
+        source_id: ObjectId,
+    },
+    /// CR 701.38: All voters have voted. Emitted before the per-choice tally
+    /// sub-effects fire. `tallies` is `(choice, count)` pairs in `options`
+    /// declaration order.
+    VoteResolved {
+        source_id: ObjectId,
+        tallies: Vec<(String, u32)>,
+    },
     /// Emitted when layer re-evaluation changes a creature's effective power/toughness.
     /// Generic event — not tied to any specific card or effect.
     PowerToughnessChanged {

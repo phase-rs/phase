@@ -418,6 +418,33 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
+    // CR 701.38d: "While voting, you may vote an additional time." (Tivit,
+    // Seller of Secrets and the Council's-dilemma extra-vote family.) Built
+    // for the class — covers any phrasing where the controller gets one
+    // additional vote per session. Dispatched via nom so future variants
+    // ("two additional times", "while voting on a Council's dilemma you cast")
+    // can be added as new combinator arms rather than as additional
+    // string-equality checks.
+    {
+        let lower_trim = tp.lower.trim_end_matches('.').trim();
+        let res: nom::IResult<&str, (), nom_language::error::VerboseError<&str>> =
+            nom::combinator::value(
+                (),
+                nom::branch::alt((
+                    nom::bytes::complete::tag("while voting, you may vote an additional time"),
+                    nom::bytes::complete::tag("while voting you may vote an additional time"),
+                )),
+            )
+            .parse(lower_trim);
+        if res.is_ok() {
+            return Some(
+                StaticDefinition::new(StaticMode::GrantsExtraVote)
+                    .affected(TargetFilter::Player)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
     // CR 604.3 + CR 601.2a: "Once during each of your turns, you may cast [filter] from your graveyard."
     if let Some(result) = try_parse_graveyard_cast_permission(&text, &lower) {
         return Some(result);

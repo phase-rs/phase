@@ -1401,6 +1401,48 @@ pub enum WaitingFor {
         card: ObjectId,
         remaining: Vec<(PlayerId, ObjectId)>,
     },
+    /// CR 701.38: A player is voting on the listed choices. After this player
+    /// has cast all of their votes (1 + extras from "you may vote an additional
+    /// time" static abilities), the engine advances to the next player in
+    /// APNAP order until every non-eliminated player has voted, then resolves
+    /// the per-choice tally sub-effects. Lives in the engine — frontend just
+    /// renders the modal.
+    VoteChoice {
+        /// The voter currently making a choice.
+        player: PlayerId,
+        /// CR 701.38d: Remaining votes this player must cast before passing
+        /// the turn to the next voter. Always >= 1 when this state is entered.
+        remaining_votes: u32,
+        /// Lowercase choice identifiers as defined in `Effect::Vote.choices`.
+        /// Persisted on `WaitingFor` (not just on the ability) so multiplayer
+        /// state filtering and the frontend modal can render the prompt
+        /// without re-walking the stack.
+        options: Vec<String>,
+        /// Display labels (original-case from Oracle text) — frontend renders
+        /// these; the engine compares votes against `options`.
+        option_labels: Vec<String>,
+        /// Players still awaiting their first vote, in APNAP order from the
+        /// starting voter. Each entry is `(player_id, total_votes)` where
+        /// `total_votes` is computed at vote-session start (CR 701.38d: extra
+        /// votes resolve at the same time the player would otherwise vote).
+        remaining_voters: Vec<(PlayerId, u32)>,
+        /// Vote tallies indexed parallel to `options`. `tallies[i]` is the
+        /// number of votes cast for `options[i]` so far.
+        tallies: Vec<u32>,
+        /// CR 701.38: Per-choice sub-effects. `per_choice_effect[i]` resolves
+        /// once for each vote tallied against `options[i]`. Carried on the
+        /// WaitingFor so the resolver chain doesn't need to re-find the source
+        /// ability — voting can outlive permanents (LKI) and the WaitingFor is
+        /// always the canonical state.
+        per_choice_effect: Vec<Box<super::ability::AbilityDefinition>>,
+        /// Ability controller — the player who owns the Vote effect. Used by
+        /// the tally resolver to scope sub-effects to the correct controller.
+        controller: PlayerId,
+        /// Source ability's object ID — used by logging and for state-filter
+        /// echoes; mirrors the `source_id` carried on other interactive
+        /// `WaitingFor` variants (e.g., NamedChoice).
+        source_id: ObjectId,
+    },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
@@ -1674,6 +1716,7 @@ impl WaitingFor {
             | WaitingFor::ParadigmCastOffer { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
+            | WaitingFor::VoteChoice { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
