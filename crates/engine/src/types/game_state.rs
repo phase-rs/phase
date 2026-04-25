@@ -2174,11 +2174,14 @@ pub struct GameState {
     #[serde(default)]
     pub scheduled_turn_controls: Vec<ScheduledTurnControl>,
 
-    /// CR 500.8: Extra phases granted by effects, stored as a LIFO stack.
-    /// Most recently created phase occurs first (pop from end).
-    /// Consumed by `advance_phase()` — popped when transitioning between phases.
+    /// CR 500.8: Extra phases granted by effects, stored as a LIFO stack of
+    /// anchored entries. Each `ExtraPhase` records the phase it occurs
+    /// directly after (`anchor`) and the phase to insert (`phase`).
+    /// Consumed by `advance_phase()` — only entries whose `anchor` matches
+    /// `state.phase` are popped, scanned from the end so the most recently
+    /// created entry occurs first.
     #[serde(default)]
-    pub extra_phases: Vec<Phase>,
+    pub extra_phases: Vec<ExtraPhase>,
 
     // N-player support
     #[serde(default)]
@@ -2561,6 +2564,27 @@ pub struct ScheduledTurnControl {
     pub controller: PlayerId,
     #[serde(default)]
     pub grant_extra_turn_after: bool,
+}
+
+/// CR 500.8: An extra phase added to a turn by an effect, anchored to the
+/// phase it occurs *directly after*. Stored on `GameState.extra_phases` and
+/// consumed by `advance_phase` only when the current phase matches `anchor`.
+///
+/// CR 500.8 ("phases are added directly after the specified phase") requires
+/// per-entry anchor typing — a flat `Vec<Phase>` consumed at every transition
+/// silently misroutes Aurelia-style "after this phase" extra combats into the
+/// middle of the current combat, skipping declare-blockers / combat-damage /
+/// end-of-combat.
+///
+/// LIFO ordering ("the most recently created phase will occur first") is
+/// preserved by scanning `extra_phases` from the end (`rposition`) for the
+/// first matching anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraPhase {
+    /// The phase after which this extra phase is inserted (CR 500.8).
+    pub anchor: Phase,
+    /// The phase to insert.
+    pub phase: Phase,
 }
 
 // Pin `GameState: Send + Sync` at compile time. Blocks accidental imports of

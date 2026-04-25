@@ -39,13 +39,19 @@ pub fn next_phase(phase: Phase) -> Phase {
 
 /// CR 500.4: Advance to the next phase/step, clearing mana pools.
 pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // CR 500.8: Check for extra phases before using the normal phase order.
-    // Extra phases are pushed by AdditionalCombatPhase resolver and consumed here.
-    let next = if !state.extra_phases.is_empty() {
-        state.extra_phases.pop().unwrap()
-    } else {
-        next_phase(state.phase)
-    };
+    // CR 500.8: Extra phases are inserted *directly after* their anchor phase
+    // (e.g., Aurelia's "after this phase" extra combat is inserted after the
+    // current combat phase ends — anchor = `EndCombat`). Consume only when
+    // `state.phase == anchor`, scanning from the end so the most recently
+    // created entry occurs first ("the most recently created phase will occur
+    // first" per CR 500.8). An entry with a non-matching anchor is preserved
+    // until its anchor phase is reached.
+    let next = state
+        .extra_phases
+        .iter()
+        .rposition(|ep| ep.anchor == state.phase)
+        .map(|i| state.extra_phases.remove(i).phase)
+        .unwrap_or_else(|| next_phase(state.phase));
 
     // If wrapping from Cleanup to Untap, start next turn. Turn-level skip
     // replacements (CR 614.10) are handled inside `start_next_turn` — the
@@ -1316,6 +1322,220 @@ mod tests {
 
         assert_eq!(state.priority_player, PlayerId(0));
         assert_eq!(state.priority_pass_count, 0);
+    }
+
+    /// CR 500.8: An extra phase whose `anchor` does NOT match the current
+    /// phase must NOT be consumed early. This is the regression test for the
+    /// Aurelia bug — pushing `BeginCombat` (anchor = `EndCombat`) during
+    /// `DeclareAttackers` must not redirect the natural
+    /// `DeclareAttackers → DeclareBlockers` advance into the extra combat.
+    #[test]
+    fn extra_phase_does_not_consume_when_anchor_mismatches_current_phase() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::DeclareAttackers;
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::EndCombat,
+            phase: Phase::BeginCombat,
+        });
+
+        let mut events = Vec::new();
+        advance_phase(&mut state, &mut events);
+
+        // Natural successor of DeclareAttackers is DeclareBlockers — the
+        // extra-phase entry must remain queued for its real anchor.
+        assert_eq!(state.phase, Phase::DeclareBlockers);
+        assert_eq!(state.extra_phases.len(), 1);
+        assert_eq!(state.extra_phases[0].anchor, Phase::EndCombat);
+        assert_eq!(state.extra_phases[0].phase, Phase::BeginCombat);
+    }
+
+    /// CR 500.8: The extra phase IS consumed exactly when transitioning out
+    /// of its anchor phase. With anchor = `EndCombat`, advancing from
+    /// `EndCombat` jumps to the extra `BeginCombat` (not the natural
+    /// `PostCombatMain`).
+    #[test]
+    fn extra_phase_consumes_when_anchor_matches_current_phase() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::EndCombat;
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::EndCombat,
+            phase: Phase::BeginCombat,
+        });
+
+        let mut events = Vec::new();
+        advance_phase(&mut state, &mut events);
+
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert!(state.extra_phases.is_empty());
+    }
+
+    /// CR 500.8 regression — Aurelia, the Warleader. Trigger fires during
+    /// `DeclareAttackers`, resolver pushes `ExtraPhase { anchor: EndCombat,
+    /// phase: BeginCombat }`. The remaining steps of the FIRST combat
+    /// (DeclareBlockers, CombatDamage, EndCombat) MUST run before the
+    /// extra combat begins. This pins the exact phase sequence the bug
+    /// silently broke.
+    #[test]
+    fn cr_500_8_aurelia_extra_combat_does_not_skip_first_combat_steps() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::DeclareAttackers;
+        // Simulate Aurelia's trigger resolving mid-combat.
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::EndCombat,
+            phase: Phase::BeginCombat,
+        });
+
+        // Walk the phase machine forward and record each phase entered.
+        let mut events = Vec::new();
+        let mut sequence = vec![state.phase];
+        for _ in 0..12 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if matches!(state.phase, Phase::PostCombatMain) {
+                break;
+            }
+        }
+
+        // CR 506.1 + CR 500.8: First combat's steps (DeclareBlockers,
+        // CombatDamage, EndCombat) must execute, then the extra
+        // BeginCombat starts a new combat. The extra combat's full cycle
+        // runs to its EndCombat, then the natural PostCombatMain.
+        assert_eq!(
+            sequence,
+            vec![
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+                // Extra combat begins (CR 500.8: directly after the combat phase)
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+                // No more extra phases — natural successor.
+                Phase::PostCombatMain,
+            ]
+        );
+        assert!(state.extra_phases.is_empty());
+    }
+
+    /// CR 500.8: World at War / Combat Celebrant exert variant — additional
+    /// combat phase followed by additional main phase. Both push with
+    /// anchor = EndCombat; LIFO ordering (`rposition` from the end)
+    /// consumes BeginCombat (most recent push) on the FIRST EndCombat
+    /// transition, then PostCombatMain on the SECOND EndCombat transition
+    /// (after the extra combat finishes).
+    #[test]
+    fn cr_500_8_with_main_phase_lifo_anchor_ordering() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::DeclareAttackers;
+        // Mirror `additional_combat::resolve` push order with `with_main_phase = true`.
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::EndCombat,
+            phase: Phase::PostCombatMain,
+        });
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::EndCombat,
+            phase: Phase::BeginCombat,
+        });
+
+        let mut events = Vec::new();
+        let mut sequence = vec![state.phase];
+        for _ in 0..14 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if matches!(state.phase, Phase::End) {
+                break;
+            }
+        }
+
+        assert_eq!(
+            sequence,
+            vec![
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+                // First EndCombat consumes the most recent push: BeginCombat.
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+                // Second EndCombat consumes the remaining push: PostCombatMain.
+                Phase::PostCombatMain,
+                // Natural successor — no entries left.
+                Phase::End,
+            ]
+        );
+        assert!(state.extra_phases.is_empty());
+    }
+
+    /// CR 500.8: Multiple extra combats stacked with the same anchor are
+    /// consumed in LIFO order — each EndCombat transition pops one. This
+    /// covers Aggravated Assault re-activation / multiple Aurelias.
+    #[test]
+    fn cr_500_8_multiple_extra_combats_consume_one_per_anchor_pass() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::EndCombat;
+        for _ in 0..3 {
+            state.extra_phases.push(ExtraPhase {
+                anchor: Phase::EndCombat,
+                phase: Phase::BeginCombat,
+            });
+        }
+
+        let mut events = Vec::new();
+
+        // First pass: EndCombat → BeginCombat (one extra consumed).
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert_eq!(state.extra_phases.len(), 2);
+
+        // Walk the extra combat to its own EndCombat.
+        for _ in 0..4 {
+            advance_phase(&mut state, &mut events);
+        }
+        assert_eq!(state.phase, Phase::EndCombat);
+
+        // Second pass: another extra combat consumes.
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert_eq!(state.extra_phases.len(), 1);
+    }
+
+    /// Negative test — extra-turn / extra-step mechanics that did NOT use
+    /// `extra_phases` are unaffected by the typing change. `extra_turns` is
+    /// a separate `Vec<PlayerId>` consumed by `start_next_turn`.
+    #[test]
+    fn extra_turns_field_is_independent_of_extra_phases() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.extra_turns.push(PlayerId(0));
+        // No extra_phases pushed — make sure normal phase advance is unaffected.
+        state.phase = Phase::Cleanup;
+
+        let mut events = Vec::new();
+        advance_phase(&mut state, &mut events);
+
+        // Wrap from Cleanup to Untap consumes the extra turn entry — same
+        // player remains active.
+        assert_eq!(state.phase, Phase::Untap);
+        assert_eq!(state.active_player, PlayerId(0));
+        assert!(state.extra_turns.is_empty());
+        // extra_phases is unchanged (still empty).
+        assert!(state.extra_phases.is_empty());
     }
 
     #[test]

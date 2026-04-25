@@ -26,6 +26,7 @@ use engine::types::ability::{
     TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::game_state::ExtraPhase;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::statics::{StaticMode, SuppressedTriggerEvent};
@@ -143,8 +144,15 @@ fn ureni_attacks_in_second_combat_fires_again() {
     );
 
     // CR 500.8: Schedule an extra combat phase (simulates Aggravated Assault /
-    // Moraug). The phase machine pops `extra_phases` on the next `advance_phase`.
-    runner.state_mut().extra_phases.push(Phase::BeginCombat);
+    // Moraug). Anchor to the current phase so the very next `advance_phase`
+    // consumes it — this is the test-harness equivalent of the in-game flow
+    // where the trigger resolver pushes with anchor = `EndCombat` and the
+    // engine then advances out of `EndCombat` into the extra `BeginCombat`.
+    let current_phase = runner.state().phase;
+    runner.state_mut().extra_phases.push(ExtraPhase {
+        anchor: current_phase,
+        phase: Phase::BeginCombat,
+    });
 
     // Advance out of the current step (post-combat / end phase) into the
     // extra BeginCombat. Passing priority repeatedly drives the phase machine.
