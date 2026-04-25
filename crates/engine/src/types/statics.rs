@@ -914,6 +914,8 @@ impl FromStr for StaticMode {
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep
             }
+            // CR 701.38d: "While voting, you may vote an additional time."
+            "GrantsExtraVote" => StaticMode::GrantsExtraVote,
             // Parameterized
             other => {
                 if let Some(inner) = other
@@ -1048,6 +1050,40 @@ impl FromStr for StaticMode {
             }
         };
         Ok(mode)
+    }
+}
+
+/// Forward-compatible deserializer for `StaticMode` fields in persisted JSON
+/// (card-data.json). Handles the common case where a new unit-variant is added
+/// to the engine but an older WASM binary tries to load card data that contains
+/// that variant: instead of a hard error, the variant is silently mapped to
+/// `StaticMode::Other(name)` and the card continues to load.
+///
+/// Usage: `#[serde(deserialize_with = "crate::types::statics::deserialize_static_mode_fwd")]`
+///
+/// # How it avoids infinite recursion
+/// - String values go through `FromStr`, which has an `Other(s)` fallback for
+///   unknown variants and never calls `<StaticMode as Deserialize>::deserialize`.
+/// - Non-string (object) values are fed to `serde_json::from_value::<StaticMode>`,
+///   which invokes the *derived* `StaticMode::Deserialize` impl directly (not this
+///   helper). No cycle is possible.
+pub fn deserialize_static_mode_fwd<'de, D>(d: D) -> Result<StaticMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
+    match raw {
+        serde_json::Value::String(ref s) => {
+            // Unit variant path. `FromStr` maps unknown strings to `Other(s)`
+            // so old binaries can load card data produced by newer code.
+            s.parse::<StaticMode>().map_err(serde::de::Error::custom)
+        }
+        other => {
+            // Data-carrying variant path. Delegate to the derived Deserialize
+            // which handles all struct/newtype variants correctly.
+            serde_json::from_value::<StaticMode>(other).map_err(serde::de::Error::custom)
+        }
     }
 }
 
@@ -1219,11 +1255,39 @@ mod tests {
             StaticMode::CantBeBlocked,
             StaticMode::Flying,
             StaticMode::MustBeBlocked,
+            StaticMode::GrantsExtraVote,
             StaticMode::Other("Custom".to_string()),
         ];
         let json = serde_json::to_string(&modes).unwrap();
         let deserialized: Vec<StaticMode> = serde_json::from_str(&json).unwrap();
         assert_eq!(modes, deserialized);
+    }
+
+    /// Regression test for forward-compat: card-data.json produced by a newer
+    /// engine (containing a unit variant the current binary doesn't know) must
+    /// deserialize as `Other(name)` rather than failing hard.
+    ///
+    /// Simulates an old WASM reading card data that has `"GrantsExtraVote"` (or
+    /// any future unit variant not yet in the enum). `deserialize_static_mode_fwd`
+    /// routes the string through `FromStr`, which maps unknown names to `Other`.
+    #[test]
+    fn fwd_compat_unknown_unit_variant_maps_to_other() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+        // A variant name the binary wouldn't know in the pre-GrantsExtraVote world.
+        let json = r#"{"mode":"FutureUnknownVariant"}"#;
+        let w: Wrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            w.mode,
+            StaticMode::Other("FutureUnknownVariant".to_string())
+        );
+        // Known variant still deserializes correctly.
+        let json2 = r#"{"mode":"GrantsExtraVote"}"#;
+        let w2: Wrapper = serde_json::from_str(json2).unwrap();
+        assert_eq!(w2.mode, StaticMode::GrantsExtraVote);
     }
 
     #[test]
