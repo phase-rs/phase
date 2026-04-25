@@ -703,21 +703,16 @@ pub(super) fn parse_targeted_action_ast(
     // variant requires an `Effect::ChangeZoneAll` field-shape extension that
     // is out of scope here. Mirrors the `tap all`/`tap each` precheck arms
     // above plus the bare `tag("return ")` arm's destination routing.
-    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
-        value(
-            (),
-            alt((tag("return all "), tag("return each "), tag("return "))),
-        )
+    // The combinator captures the plurality directly: `true` = mass quantifier
+    // (`all`/`each`), `false` = single-target. Avoids post-hoc string
+    // equality on the consumed head (parser-combinator gate).
+    if let Some((is_mass, rest)) = nom_on_lower(text, lower, |input| {
+        alt((
+            value(true, alt((tag("return all "), tag("return each ")))),
+            value(false, tag("return ")),
+        ))
         .parse(input)
     }) {
-        // Detect whether the consumed prefix was `return all `/`return each `
-        // (mass) or just `return ` (single). The lowercase head bytes are the
-        // same length as the original-case head, so byte-arithmetic on `lower`
-        // is safe here.
-        let consumed_len = lower.len() - rest.len();
-        let head_lower = &lower[..consumed_len];
-        let is_mass = head_lower == "return all " || head_lower == "return each ";
-
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (target_text, dest) = super::strip_return_destination_ext(rest);
         let (target, _rem) = parse_target(target_text);
