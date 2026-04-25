@@ -3,11 +3,19 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { getKeywordName } from "../../viewmodel/keywordProps.ts";
 import type { ObjectId } from "../../adapter/types.ts";
 
-// Keywords that materially change how a defender evaluates a blocker's
-// viability. These MUST match `getKeywordName`'s display-form output —
-// `splitPascalCase` turns `FirstStrike` into `"First Strike"` etc., so a
-// PascalCase set would silently drop the most important matchups.
+// Keywords on the *attacker* that materially change how a defender plans a
+// block or removes the threat. These MUST match `getKeywordName`'s display-form
+// output — `splitPascalCase` turns `FirstStrike` into `"First Strike"`, and
+// parameterized keywords (Protection, Ward, Hexproof) fall through to the bare
+// key — so a PascalCase set would silently drop the most important matchups.
+//
+// Excluded by design:
+//   - "Reach": a defender's keyword (lets *blockers* hit fliers); irrelevant
+//     on an attacker.
+//   - "Defender": creatures with defender can't attack, so it never appears
+//     in this popover.
 const BLOCKING_RELEVANT_KEYWORDS = new Set([
+  // Combat-shape modifiers
   "Flying",
   "Trample",
   "Menace",
@@ -15,12 +23,19 @@ const BLOCKING_RELEVANT_KEYWORDS = new Set([
   "Lifelink",
   "First Strike",
   "Double Strike",
+  // Block-restriction keywords
   "Unblockable",
   "Intimidate",
   "Fear",
   "Shadow",
   "Skulk",
   "Horsemanship",
+  "Protection",
+  // Removal-restriction keywords (defender's removal plans)
+  "Hexproof",
+  "Shroud",
+  "Indestructible",
+  "Ward",
 ]);
 
 interface IncomingAttackersPopoverProps {
