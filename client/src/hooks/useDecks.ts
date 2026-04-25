@@ -10,6 +10,12 @@ export interface DeckEntry {
   name: string;
   type: string;
   releaseDate?: string;
+  /** Share of mainboard+commander copies (counting duplicates) the engine
+   *  can play right now, rounded to the nearest percent. 100 = fully
+   *  playable; lower values mean some cards will silently no-op. */
+  coveragePct: number;
+  /** Unique card names the engine can't play yet. Empty/omitted at 100%. */
+  unsupported?: string[];
   mainBoard: DeckCardEntry[];
   sideBoard?: DeckCardEntry[];
   commander?: DeckCardEntry[];
@@ -35,8 +41,10 @@ function fetchDecks(): Promise<DeckMap | null> {
 
 /**
  * Returns the preconstructed deck catalog keyed by deck id (MTGJSON filename
- * stem, e.g. `RedDeckB_10E`). Filtered at build time to decks whose every
- * card is playable by the engine. `null` while loading or on fetch failure.
+ * stem, e.g. `RedDeckB_10E`). Includes every deck above MIN_DECK_CARDS — each
+ * entry carries a `coveragePct`, so consumers (e.g. the precon picker) can
+ * apply their own coverage-floor filter rather than dropping decks at build
+ * time. `null` while loading or on fetch failure.
  */
 export function useDecks(): DeckMap | null {
   const [decks, setDecks] = useState<DeckMap | null>(cached);

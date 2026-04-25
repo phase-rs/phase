@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 
 use serde::{Deserialize, Serialize};
@@ -669,6 +669,13 @@ fn default_count() -> u32 {
 }
 
 /// Projected deck entry written to `client/public/decks.json`.
+///
+/// `coverage_pct` is the percentage of mainboard+commander cards (counting
+/// duplicates) the engine can currently play; `unsupported` lists the unique
+/// card names that fall short. Both are surfaced to the precon picker so the
+/// UI can show the same coverage-floor slider used by the AI deck picker —
+/// the user picks any deck they want, and the slider just controls how much
+/// of the catalog is visible by default.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeckEntry {
@@ -678,6 +685,9 @@ struct DeckEntry {
     deck_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     release_date: Option<String>,
+    coverage_pct: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unsupported: Vec<String>,
     main_board: Vec<DeckCardEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     side_board: Vec<DeckCardEntry>,
@@ -689,17 +699,6 @@ struct DeckEntry {
 struct DeckCardEntry {
     name: String,
     count: u32,
-}
-
-/// Debug sidecar entry describing a deck that was filtered out.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SkippedDeck {
-    code: String,
-    name: String,
-    #[serde(rename = "type")]
-    deck_type: String,
-    unsupported: Vec<String>,
 }
 
 fn project_deck_cards(raw: &[DeckCardRaw]) -> Vec<DeckCardEntry> {
@@ -726,35 +725,76 @@ fn deck_card_total(raw: &DeckRaw) -> u32 {
 /// alone is brittle (every new product line invents a new type string).
 const MIN_DECK_CARDS: u32 = 40;
 
-/// Collect the names of cards in a deck that aren't playable in the engine.
-/// Dedups while preserving first-seen order so the skipped sidecar is readable.
-fn unsupported_cards(raw: &DeckRaw, db: &CardDatabase) -> Vec<String> {
+/// Per-deck engine coverage. `unsupported` is the deduped list of card names
+/// the parser/runtime can't currently play (preserves first-seen order so the
+/// list reads in deck order). `coverage_pct` is the share of mainboard +
+/// commander *copies* (counting duplicates) that ARE playable, rounded to
+/// the nearest percent — by-count rather than by-unique so a 30-Forest deck
+/// with one missing card scores ~96%, matching the share of gameplay that
+/// works. Sideboard is excluded from the percentage because the sideboard is
+/// optional and skews the score for products that pile flavor text into it.
+struct DeckCoverage {
+    coverage_pct: u32,
+    unsupported: Vec<String>,
+}
+
+fn compute_coverage(raw: &DeckRaw, db: &CardDatabase) -> DeckCoverage {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out: Vec<String> = Vec::new();
+    let mut unsupported: Vec<String> = Vec::new();
+    let mut unsupported_lc: std::collections::HashSet<String> = std::collections::HashSet::new();
     let sections = [&raw.main_board, &raw.side_board, &raw.commander];
     for section in sections {
         for card in section.iter() {
-            if seen.insert(card.name.to_lowercase())
-                && !engine::database::is_card_playable(db, &card.name)
-            {
-                out.push(card.name.clone());
+            let lc = card.name.to_lowercase();
+            if seen.insert(lc.clone()) && !engine::database::is_card_playable(db, &card.name) {
+                unsupported.push(card.name.clone());
+                unsupported_lc.insert(lc);
             }
         }
     }
-    out
+
+    // Counted copies in main + commander (sideboard excluded — see doc above).
+    let mut total: u32 = 0;
+    let mut playable: u32 = 0;
+    for section in [&raw.main_board, &raw.commander] {
+        for card in section.iter() {
+            total += card.count;
+            if !unsupported_lc.contains(&card.name.to_lowercase()) {
+                playable += card.count;
+            }
+        }
+    }
+    let coverage_pct = if total == 0 {
+        0
+    } else {
+        ((playable as f64 / total as f64) * 100.0).round() as u32
+    };
+
+    DeckCoverage {
+        coverage_pct,
+        unsupported,
+    }
 }
 
 /// Ingest MTGJSON's `AllDeckFiles` (one JSON per deck extracted under
-/// `<data-dir>/mtgjson/decks/`), filter to decks whose every card is playable
-/// by the engine, and project to a flat map keyed by deck code.
+/// `<data-dir>/mtgjson/decks/`) and project every deck above `MIN_DECK_CARDS`
+/// into a flat map keyed by deck filename stem. Each entry carries a
+/// `coveragePct` and `unsupported` list so the precon picker can surface a
+/// coverage-floor slider rather than dropping decks at build time. Coverage
+/// is informational; the user is allowed to pick any deck.
+///
+/// `--emit-skipped` is accepted but is now a no-op (the previous build of
+/// this command emitted a `decks-skipped.json` sidecar — that data is now
+/// inline on every entry that has unsupported cards, so the sidecar would
+/// be redundant). The flag is retained so existing scripts continue working.
 ///
 /// Usage: `cargo run --bin oracle-gen -- decks <data-dir> [output-path] [--emit-skipped]`
 fn run_decks(remaining_args: &[String]) {
     let mut positional: Vec<&String> = Vec::new();
-    let mut emit_skipped = false;
     for arg in remaining_args {
         if arg == "--emit-skipped" {
-            emit_skipped = true;
+            // Accepted for backward compatibility; coverage data is always
+            // inline now (see doc comment above).
         } else {
             positional.push(arg);
         }
@@ -801,7 +841,8 @@ fn run_decks(remaining_args: &[String]) {
     };
 
     let mut included: BTreeMap<String, DeckEntry> = BTreeMap::new();
-    let mut skipped: Vec<SkippedDeck> = Vec::new();
+    let mut fully_playable: u32 = 0;
+    let mut partially_playable: u32 = 0;
     let mut too_small: u32 = 0;
     let mut read_errors: u32 = 0;
 
@@ -836,61 +877,42 @@ fn run_decks(remaining_args: &[String]) {
             too_small += 1;
             continue;
         }
-        let unsupported = unsupported_cards(&raw, &card_db);
-        if unsupported.is_empty() {
-            included.insert(
-                deck_id,
-                DeckEntry {
-                    code: raw.code,
-                    name: raw.name,
-                    deck_type: raw.deck_type,
-                    release_date: raw.release_date,
-                    main_board: project_deck_cards(&raw.main_board),
-                    side_board: project_deck_cards(&raw.side_board),
-                    commander: project_deck_cards(&raw.commander),
-                },
-            );
+        let coverage = compute_coverage(&raw, &card_db);
+        if coverage.unsupported.is_empty() {
+            fully_playable += 1;
         } else {
-            skipped.push(SkippedDeck {
+            partially_playable += 1;
+        }
+        included.insert(
+            deck_id,
+            DeckEntry {
                 code: raw.code,
                 name: raw.name,
                 deck_type: raw.deck_type,
-                unsupported,
-            });
-        }
+                release_date: raw.release_date,
+                coverage_pct: coverage.coverage_pct,
+                unsupported: coverage.unsupported,
+                main_board: project_deck_cards(&raw.main_board),
+                side_board: project_deck_cards(&raw.side_board),
+                commander: project_deck_cards(&raw.commander),
+            },
+        );
     }
 
     let json = serde_json::to_string(&included).expect("DeckEntry serialization cannot fail");
     std::fs::write(&output, &json)
         .unwrap_or_else(|e| panic!("Failed to write {}: {e}", output.display()));
     eprintln!(
-        "Wrote {} decks to {} ({} bytes; {} skipped for unsupported cards, {} dropped as non-decks (<{} cards), {} read errors)",
+        "Wrote {} decks to {} ({} bytes; {} fully playable, {} partially playable, {} dropped as non-decks (<{} cards), {} read errors)",
         included.len(),
         output.display(),
         json.len(),
-        skipped.len(),
+        fully_playable,
+        partially_playable,
         too_small,
         MIN_DECK_CARDS,
         read_errors
     );
-
-    if emit_skipped {
-        let skipped_path = output
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("decks-skipped.json");
-        skipped.sort_by(|a, b| {
-            a.unsupported
-                .len()
-                .cmp(&b.unsupported.len())
-                .then_with(|| a.code.cmp(&b.code))
-        });
-        let skipped_json =
-            serde_json::to_string_pretty(&skipped).expect("SkippedDeck serialization cannot fail");
-        std::fs::write(&skipped_path, &skipped_json)
-            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", skipped_path.display()));
-        eprintln!("Wrote skipped-deck sidecar to {}", skipped_path.display());
-    }
 }
 
 #[cfg(test)]

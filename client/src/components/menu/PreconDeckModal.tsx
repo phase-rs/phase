@@ -10,7 +10,7 @@ interface PreconDeckModalProps {
   onImported: (name: string) => void;
 }
 
-/** Cap on rendered rows. Prevents 250+ node lists becoming a perf cliff;
+/** Cap on rendered rows. Prevents 1000+ node lists becoming a perf cliff;
  * users narrow further with the search input. */
 const MAX_RESULTS = 500;
 const ALL_TYPES = "All" as const;
@@ -26,6 +26,15 @@ function matchesQuery(deck: DeckEntry, q: string): boolean {
 
 function mainBoardCount(deck: DeckEntry): number {
   return deck.mainBoard.reduce((n, c) => n + c.count, 0);
+}
+
+/** Color the coverage % badge so a glance tells the user what to expect.
+ *  Mirrors the AiOpponentConfig coverage threshold UX. */
+function coverageTone(pct: number): string {
+  if (pct >= 100) return "text-emerald-300";
+  if (pct >= 90) return "text-lime-300";
+  if (pct >= 75) return "text-amber-300";
+  return "text-rose-400";
 }
 
 export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalProps) {
@@ -107,10 +116,10 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
               Preconstructed Decks
             </h2>
             <p className="mt-1 text-xs text-slate-400">
-              Sourced from MTGJSON. Filtered to decks the engine can play fully
+              Sourced from MTGJSON AllDeckFiles — every WotC-printed precon.
               {decks && (
                 <span className="ml-1 text-slate-500">
-                  · {Object.keys(decks).length} available
+                  · {Object.keys(decks).length} total
                 </span>
               )}
             </p>
@@ -147,6 +156,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
           </select>
         </div>
 
+
         <div className="flex-1 overflow-y-auto rounded-lg border border-white/5 bg-black/20">
           {!decks ? (
             <div className="p-8 text-center text-sm text-slate-500">Loading deck catalog…</div>
@@ -168,9 +178,14 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
                         <span> · {deck.code}</span>
                       </div>
                     </div>
-                    <span className="shrink-0 text-[11px] text-slate-600">
-                      {mainBoardCount(deck)} cards
-                      {deck.commander && deck.commander.length > 0 && " · cmdr"}
+                    <span className="flex shrink-0 items-baseline gap-2 text-[11px]">
+                      <span className={`font-semibold ${coverageTone(deck.coveragePct)}`}>
+                        {deck.coveragePct}%
+                      </span>
+                      <span className="text-slate-600">
+                        {mainBoardCount(deck)} cards
+                        {deck.commander && deck.commander.length > 0 && " · cmdr"}
+                      </span>
                     </span>
                   </button>
                 </li>
