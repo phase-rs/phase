@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-05-08T00:00:00Z",
+  "updated": "2026-05-09T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -924,8 +924,8 @@
       "name": "Dimir Midrange",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "B"
+        "B",
+        "U"
       ],
       "tags": [
         "metagame"
@@ -937,7 +937,7 @@
         },
         {
           "count": 3,
-          "name": "Enduring Curiosity"
+          "name": "Super Shredder"
         },
         {
           "count": 2,
@@ -957,11 +957,7 @@
         },
         {
           "count": 2,
-          "name": "Soulstone Sanctuary"
-        },
-        {
-          "count": 3,
-          "name": "Island"
+          "name": "Phantom Interference"
         },
         {
           "count": 3,
@@ -969,15 +965,19 @@
         },
         {
           "count": 2,
-          "name": "Phantom Interference"
+          "name": "Soulstone Sanctuary"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
         },
         {
           "count": 4,
           "name": "Multiversal Passage"
         },
         {
-          "count": 3,
-          "name": "Super Shredder"
+          "count": 2,
+          "name": "Tishana's Tidebinder"
         },
         {
           "count": 4,
@@ -988,12 +988,12 @@
           "name": "Starting Town"
         },
         {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
           "count": 2,
           "name": "Restless Reef"
+        },
+        {
+          "count": 3,
+          "name": "Enduring Curiosity"
         },
         {
           "count": 4,
@@ -1004,22 +1004,22 @@
           "name": "Wan Shi Tong, Librarian"
         },
         {
-          "count": 2,
-          "name": "Tishana's Tidebinder"
+          "count": 4,
+          "name": "Kaito, Bane of Nightmares"
         },
         {
           "count": 4,
           "name": "Dream Beavers"
         },
         {
-          "count": 4,
-          "name": "Kaito, Bane of Nightmares"
+          "count": 3,
+          "name": "Island"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Annul"
+          "name": "Flashfreeze"
         },
         {
           "count": 1,
@@ -1031,23 +1031,15 @@
         },
         {
           "count": 1,
-          "name": "Intimidation Tactics"
+          "name": "Soul-Guide Lantern"
         },
         {
           "count": 1,
-          "name": "Annul"
+          "name": "Strategic Betrayal"
         },
         {
-          "count": 2,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 2,
-          "name": "Tishana's Tidebinder"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
+          "count": 1,
+          "name": "Duress"
         },
         {
           "count": 1,
@@ -1055,11 +1047,19 @@
         },
         {
           "count": 2,
-          "name": "Duress"
+          "name": "Tishana's Tidebinder"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Disdainful Stroke"
+        },
+        {
+          "count": 2,
+          "name": "Annul"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
         }
       ]
     },
@@ -1216,109 +1216,158 @@
       ]
     },
     {
-      "name": "Azorius Momo",
+      "name": "Jeskai Control",
       "author": "MTGGoldfish",
       "colors": [
         "W",
-        "U"
+        "U",
+        "R"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 4,
+          "name": "Consult the Star Charts"
+        },
+        {
+          "count": 2,
+          "name": "Flashback"
+        },
+        {
           "count": 3,
+          "name": "Abrade"
+        },
+        {
+          "count": 4,
+          "name": "Stock Up"
+        },
+        {
+          "count": 2,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 2,
           "name": "Get Lost"
         },
         {
-          "count": 3,
-          "name": "Nurturing Pixie"
-        },
-        {
-          "count": 4,
-          "name": "Floodfarm Verge"
-        },
-        {
-          "count": 4,
-          "name": "Haliya, Guided by Light"
-        },
-        {
-          "count": 4,
+          "count": 2,
           "name": "Seam Rip"
         },
         {
           "count": 4,
-          "name": "Starfield Shepherd"
-        },
-        {
-          "count": 3,
-          "name": "Quantum Riddler"
+          "name": "No More Lies"
         },
         {
           "count": 2,
-          "name": "Spider-Sense"
-        },
-        {
-          "count": 2,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 3,
-          "name": "Abandoned Air Temple"
+          "name": "Meticulous Archive"
         },
         {
           "count": 4,
-          "name": "Momo, Friendly Flier"
+          "name": "Great Hall of the Biblioplex"
+        },
+        {
+          "count": 3,
+          "name": "Resonating Lute"
+        },
+        {
+          "count": 3,
+          "name": "Jeskai Revelation"
         },
         {
           "count": 1,
-          "name": "Figure of Fable"
+          "name": "Sundown Pass"
         },
         {
-          "count": 4,
-          "name": "Springleaf Drum"
+          "count": 2,
+          "name": "Lightning Helix"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Hallowed Fountain"
         },
         {
-          "count": 8,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Sage of the Skies"
+          "count": 2,
+          "name": "Sunbillow Verge"
         },
         {
           "count": 3,
-          "name": "Cosmogrand Zenith"
+          "name": "Floodfarm Verge"
+        },
+        {
+          "count": 2,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Three Steps Ahead"
+        },
+        {
+          "count": 2,
+          "name": "Fire Magic"
+        },
+        {
+          "count": 1,
+          "name": "Mistrise Village"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 2,
+          "name": "Sacred Foundry"
         }
       ],
       "sideboard": [
         {
-          "count": 4,
-          "name": "Rest in Peace"
+          "count": 3,
+          "name": "Voice of Victory"
         },
         {
           "count": 2,
-          "name": "Requisition Raid"
+          "name": "Emeritus of Ideation"
         },
         {
           "count": 2,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
-          "count": 4,
-          "name": "Clarion Conqueror"
-        },
-        {
-          "count": 2,
-          "name": "Avatar's Wrath"
+          "name": "Riverchurn Monument"
         },
         {
           "count": 1,
-          "name": "Curious Farm Animals"
+          "name": "Seam Rip"
+        },
+        {
+          "count": 1,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 1,
+          "name": "Day of Judgment"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 2,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "Negate"
         }
       ]
     }

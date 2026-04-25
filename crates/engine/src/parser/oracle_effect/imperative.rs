@@ -12,7 +12,9 @@ use super::counter::{
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
 use super::types::*;
-use super::{is_bare_object_pronoun, resolve_it_pronoun, ParseContext};
+use super::{
+    attach_controller_if_absent, is_bare_object_pronoun, resolve_it_pronoun, ParseContext,
+};
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
@@ -498,6 +500,20 @@ fn parse_discard_card_filter(lower: &str) -> Option<TargetFilter> {
     Some(filter)
 }
 
+/// CR 701.21a + CR 608.2k: When a targeted-action body has been stripped of an
+/// actor prefix ("you (may) ", "an opponent (may) ", "each opponent ", "each
+/// player "), `ctx.actor` carries the resolving player's controller-ref. This
+/// helper defaults `TargetFilter::Typed.controller` to that actor whenever the
+/// parsed target phrase didn't supply one. Without the default, the resolver
+/// treats `controller: None` as Any — letting the actor sacrifice / discard /
+/// return any object on the battlefield, violating CR 701.21a (sacrifice) and
+/// the analogous owner / controller restrictions on other actor-bound verbs.
+fn apply_actor_default(filter: &mut TargetFilter, ctx: &ParseContext) {
+    if let Some(actor) = ctx.actor.as_ref() {
+        attach_controller_if_absent(filter, actor.clone());
+    }
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
@@ -586,11 +602,16 @@ pub(super) fn parse_targeted_action_ast(
         // count's filter into `target` so eligibility matches the same set the
         // count was computed against. Without this lift, Sacrifice would fall
         // back to `Any` and the parser-warned filter would be silently dropped.
-        let target = if matches!(target, TargetFilter::Any) {
+        let mut target = if matches!(target, TargetFilter::Any) {
             extract_object_count_filter(&count).unwrap_or(target)
         } else {
             target
         };
+        // CR 701.21a: Default the sacrificed permanent's controller to the
+        // resolving player when the target phrase didn't specify one. "You may
+        // sacrifice a non-Demon creature" must restrict the prompt to the
+        // actor's permanents — sacrificing requires controlling the permanent.
+        apply_actor_default(&mut target, ctx);
         return Some(TargetedImperativeAst::Sacrifice { target, count });
     }
     // Simple targeted verbs: tap, untap — parse target after verb prefix
@@ -4339,6 +4360,100 @@ mod tests {
                 assert!(keywords.contains(&crate::types::keywords::Keyword::Haste));
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
+        }
+    }
+
+    // CR 701.21a + CR 608.2k: When the trigger body is "you (may) sacrifice
+    // [filter]", the actor hint piped through ParseContext.actor must default
+    // the parsed `TargetFilter::Typed.controller` to ControllerRef::You so the
+    // resolver restricts the prompt to the actor's permanents — sacrificing
+    // requires controlling the permanent, never an opponent's.
+    #[test]
+    fn parse_sacrifice_defaults_controller_to_you_actor() {
+        let text = "sacrifice a non-Demon creature";
+        let lower = text.to_lowercase();
+        let ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "Promise of Aclazotz: controller must default to You, got {tf:?}"
+                ),
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    // CR 701.21a: Symmetric handling — "an opponent (may) sacrifices [filter]"
+    // routes ControllerRef::Opponent into the parsed Sacrifice target.
+    #[test]
+    fn parse_sacrifice_defaults_controller_to_opponent_actor() {
+        let text = "sacrifice a creature";
+        let lower = text.to_lowercase();
+        let ctx = ParseContext {
+            actor: Some(ControllerRef::Opponent),
+            ..Default::default()
+        };
+        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert_eq!(tf.controller, Some(ControllerRef::Opponent)),
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    // CR 701.21a: An explicit controller phrase in the target text must NOT be
+    // overwritten by the actor default. "Sacrifice a creature an opponent
+    // controls" stays Some(Opponent) even when ctx.actor = Some(You).
+    #[test]
+    fn parse_sacrifice_preserves_explicit_controller() {
+        let text = "sacrifice a creature an opponent controls";
+        let lower = text.to_lowercase();
+        let ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::Opponent),
+                    "explicit controller must be preserved, got {tf:?}"
+                ),
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    // Regression guard: without an actor hint (ctx.actor = None), the legacy
+    // `controller: None` behavior is preserved. Establishes that the default is
+    // strictly opt-in — non-trigger contexts (activated abilities) still rely on
+    // the existing `ability.controller` resolver path.
+    #[test]
+    fn parse_sacrifice_without_actor_leaves_controller_unset() {
+        let text = "sacrifice a creature";
+        let lower = text.to_lowercase();
+        let ctx = ParseContext::default();
+        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert!(
+                    tf.controller.is_none(),
+                    "no actor hint should leave controller unset, got {tf:?}"
+                ),
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
         }
     }
 

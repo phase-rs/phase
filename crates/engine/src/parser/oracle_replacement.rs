@@ -3,22 +3,22 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
-use nom::combinator::{opt, value};
+use nom::combinator::{opt, peek, value};
+use nom::sequence::preceded;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::oracle_effect::become_copy_except::{parse_except_clause, ExceptClauseContext};
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
-use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_static::split_keyword_list;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{
-    canonicalize_subtype_name, normalize_card_name_refs, parse_count_expr, parse_number,
-    parse_ordinal, strip_after, strip_reminder_text, TextPair,
+    normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
+    strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
@@ -27,7 +27,6 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
-use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -246,6 +245,32 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         || nom_primitives::scan_contains(&lower, "would create a token")
     {
         if let Some(def) = parse_token_replacement(&lower, &text) {
+            return Some(def);
+        }
+    }
+
+    // CR 614.1a + CR 111.1: Subtype-gated token creation replacement —
+    // "if you would create one or more <subtype> tokens, instead create
+    // those tokens plus an additional <subtype> token" (Xorn class).
+    // Distinguished from the Chatterfang/Doubling-Season class above by its
+    // subtype condition AND inverted "instead create" word order.
+    if nom_primitives::scan_contains(&lower, "would create one or more")
+        && nom_primitives::scan_contains(&lower, "instead create those tokens plus")
+    {
+        if let Some(def) = parse_xorn_subtype_token_replacement(&lower, &text) {
+            return Some(def);
+        }
+    }
+
+    // CR 614.1a + CR 111.1: Manufactor-class ensure-all token replacement —
+    // "if you would create a <subtype>, <subtype>, or <subtype> token, instead
+    // create one of each." Gated by the comma-separated subtype list AND the
+    // "instead create one of each" tail; mutually exclusive with the Xorn
+    // shape above (which uses "those tokens plus").
+    if nom_primitives::scan_contains(&lower, "would create a ")
+        && nom_primitives::scan_contains(&lower, "instead create one of each")
+    {
+        if let Some(def) = parse_manufactor_ensure_all_token_replacement(&lower, &text) {
             return Some(def);
         }
     }
@@ -761,8 +786,12 @@ fn parse_clone_suffix<'a>(
     // at cleanup. Appears between the zone clause and the except clause on
     // Cursed Mirror; absent on Phantasmal Image / Clever Impersonator (permanent).
     let (remaining, duration) = parse_leading_duration(remaining);
+    // Replacement-form clones don't have a "current trigger" — `has this
+    // ability` arms inside an except clause decline gracefully when the
+    // context's `current_trigger_index` is `None`.
     let (post_except, modifications) =
-        parse_except_clause(remaining, card_name).unwrap_or((remaining, Vec::new()));
+        parse_except_clause(remaining, card_name, ExceptClauseContext::default())
+            .unwrap_or((remaining, Vec::new()));
 
     (mana_value_limit, duration, modifications, post_except)
 }
@@ -795,278 +824,11 @@ fn parse_mana_value_limit_clause(suffix: &str) -> Option<(&str, Option<CopyManaV
     Some((rest, Some(CopyManaValueLimit::AmountSpentToCastSource)))
 }
 
-/// CR 707.9a: ", except {except_body} [and {except_body}]*[.]"
-///
-/// Each `except_body` independently contributes typed modifications. Bodies
-/// that don't match a known shape are silently skipped so we still keep the
-/// ones that do. The trailing '.' is optional and non-load-bearing.
-///
-/// The remainder returned is the span after any sentence-terminating `.` so
-/// callers can continue parsing trailing clauses (e.g. "When you do, ...").
-fn parse_except_clause<'a>(
-    input: &'a str,
-    card_name: &str,
-) -> Option<(&'a str, Vec<ContinuousModification>)> {
-    // ", except " — if missing, there are no modifications to extract.
-    let (mut rest, _) = tag::<_, _, VerboseError<&str>>(", except ")
-        .parse(input)
-        .ok()?;
-    let mut modifications = Vec::new();
-
-    loop {
-        let before = rest;
-        if let Some((after, mods)) = parse_except_body(rest, card_name) {
-            modifications.extend(mods);
-            rest = after;
-        } else {
-            // Unknown body — jump to the next " and " so recognised bodies
-            // that follow are not lost. If none exists, we're done.
-            rest = skip_to_next_conjunction(rest);
-        }
-
-        // Bodies are joined by " and " — consume it to parse another body.
-        if let Ok((after_and, _)) = tag::<_, _, VerboseError<&str>>(" and ").parse(rest) {
-            rest = after_and;
-        } else {
-            break;
-        }
-
-        // Safety: if nothing was consumed this iteration, stop.
-        if rest == before {
-            break;
-        }
-    }
-
-    let (rest, _) = opt(char::<_, VerboseError<&str>>('.')).parse(rest).ok()?;
-    Some((rest, modifications))
-}
-
-/// Parse a single "except ..." body, producing zero or more modifications.
-/// Recognised shapes:
-///   - "it's a(n) {subtype} in addition to its other types"   → AddSubtype
-///   - "it's a(n) {core_type} in addition to its other types" → AddType
-///   - "it has {keyword[, keyword, ...]}"                     → AddKeyword per kw
-///   - "<possessive> name is ~"                               → SetName(card_name)
-///   - "<subject>'s N/M {type list} in addition to its other types"
-///     → SetPower + SetToughness + AddType/AddSubtype per word
-fn parse_except_body<'a>(
-    input: &'a str,
-    card_name: &str,
-) -> Option<(&'a str, Vec<ContinuousModification>)> {
-    if let Some((rest, name_mod)) = parse_name_override(input, card_name) {
-        return Some((rest, vec![name_mod]));
-    }
-    if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
-        return Some((rest, mods));
-    }
-    if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
-        return Some((rest, vec![subtype]));
-    }
-    if let Some((rest, keywords)) = parse_it_has_keywords(input) {
-        return Some((rest, keywords));
-    }
-    None
-}
-
-/// CR 707.9b + CR 707.2: "his/her/its name is ~" — emit a `SetName` override
-/// keyed to the original card name. The `~` here is the self-ref sentinel
-/// inserted by `normalize_card_name_refs`; we don't need to peel the card's
-/// literal name because the suffix text was produced from the already-
-/// normalised Oracle line.
-fn parse_name_override<'a>(
-    input: &'a str,
-    card_name: &str,
-) -> Option<(&'a str, ContinuousModification)> {
-    let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("his name is "),
-        tag("her name is "),
-        tag("its name is "),
-    ))
-    .parse(input)
-    .ok()?;
-    // Accept "~" (normalised self-ref) as the name target. This keeps the
-    // parser strict — "except its name is Whatever" should only emit SetName
-    // when the name is the card's own (which is what normalisation produces).
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("~").parse(rest).ok()?;
-    Some((
-        rest,
-        ContinuousModification::SetName {
-            name: card_name.to_string(),
-        },
-    ))
-}
-
-/// CR 707.9b: "<subject> N/M {type list} in addition to its other types" where
-/// the subject is a pronoun-contraction ("he's" / "she's" / "it's" with either
-/// straight or curly apostrophes). Produces `SetPower` + `SetToughness`
-/// (overriding the copied P/T per CR 707.9b) and one `AddType`/`AddSubtype`
-/// per word in the type list. Layer placement is automatic from the variants'
-/// own `layer()` methods: SetPT at layer 7b, type additions at layer 4
-/// (CR 613.1d) — the layer system applies type additions after the copy's
-/// own types via timestamp order.
-fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("he's a "),
-        tag("he\u{2019}s a "),
-        tag("she's a "),
-        tag("she\u{2019}s a "),
-        tag("it's a "),
-        tag("it\u{2019}s a "),
-    ))
-    .parse(input)
-    .ok()?;
-
-    // Parse "N/M " — both components are positive integers.
-    let (rest, (power, toughness)) = parse_pt_pair(rest)?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
-
-    // Grab the type list up to " in addition to its/his/her other types".
-    let (type_text, rest) = split_on_first_of(
-        rest,
-        &[
-            " in addition to its other types",
-            " in addition to his other types",
-            " in addition to her other types",
-        ],
-    )?;
-
-    let mut mods = vec![
-        ContinuousModification::SetPower { value: power },
-        ContinuousModification::SetToughness { value: toughness },
-    ];
-
-    // Type list is space-separated in the copy class ("Spider Human Hero").
-    // Reuse the shared core-type vs subtype dispatch from parse_its_a_type_in_addition.
-    for word in type_text.split_whitespace() {
-        if word.is_empty() {
-            continue;
-        }
-        let canonical = canonicalize_subtype_name(word);
-        let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
-            ContinuousModification::AddType { core_type }
-        } else {
-            ContinuousModification::AddSubtype { subtype: canonical }
-        };
-        mods.push(modification);
-    }
-
-    Some((rest, mods))
-}
-
-/// Structural multi-candidate splitter: return the (before, after) pair for the
-/// earliest-matching phrase in `candidates`. None if no candidate matches.
-fn split_on_first_of<'a>(text: &'a str, candidates: &[&str]) -> Option<(&'a str, &'a str)> {
-    let mut best: Option<(usize, usize)> = None;
-    for phrase in candidates {
-        if let Ok((_, (before, _))) = nom_primitives::split_once_on(text, phrase) {
-            let pos = before.len();
-            if best.is_none_or(|(bp, _)| pos < bp) {
-                best = Some((pos, phrase.len()));
-            }
-        }
-    }
-    let (pos, len) = best?;
-    Some((&text[..pos], &text[pos + len..]))
-}
-
-/// Parse "N/M" where N and M are positive integers. Input is already lowercase.
-/// Returns the remainder positioned immediately after "N/M" (caller peels the
-/// following space) and the `(power, toughness)` pair.
-fn parse_pt_pair(input: &str) -> Option<(&str, (i32, i32))> {
-    use nom::character::complete::digit1;
-    let parser = |i| -> nom::IResult<&str, (&str, &str), VerboseError<&str>> {
-        let (i, p) = digit1(i)?;
-        let (i, _) = char('/')(i)?;
-        let (i, t) = digit1(i)?;
-        Ok((i, (p, t)))
-    };
-    let (rest, (p, t)) = parser(input).ok()?;
-    let power: i32 = p.parse().ok()?;
-    let toughness: i32 = t.parse().ok()?;
-    Some((rest, (power, toughness)))
-}
-
-/// "it's a(n) {type_word} in addition to its other types"
-/// The type_word is either a core type (`"artifact"`, `"creature"`, ...) → `AddType`,
-/// or anything else → treated as a subtype and canonicalized.
-fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
-    let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("it's an "),
-        tag("it's a "),
-        tag("it\u{2019}s an "),
-        tag("it\u{2019}s a "),
-    ))
-    .parse(input)
-    .ok()?;
-    let (type_word, rest) = nom_primitives::split_once_on(rest, " in addition to its other types")
-        .ok()
-        .map(|(_, pair)| pair)?;
-    let type_word = type_word.trim();
-    if type_word.is_empty() {
-        return None;
-    }
-    // Try core type first (canonicalize capitalization before FromStr).
-    let canonical = canonicalize_subtype_name(type_word);
-    let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
-        ContinuousModification::AddType { core_type }
-    } else {
-        ContinuousModification::AddSubtype { subtype: canonical }
-    };
-    Some((rest, modification))
-}
-
-/// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.
-/// Terminates at the next body separator (" and it ", end-of-string, or '.').
-fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("it has ")
-        .parse(input)
-        .ok()?;
-    // Keyword list terminates at " and it " (next body), the period, or end.
-    let (kw_text, remainder) = split_at_body_boundary(rest);
-    let mut modifications = Vec::new();
-    for part in split_keyword_list(kw_text) {
-        if let Some(keyword) = parse_keyword_from_oracle(part.trim()) {
-            modifications.push(ContinuousModification::AddKeyword { keyword });
-        }
-    }
-    if modifications.is_empty() {
-        return None;
-    }
-    Some((remainder, modifications))
-}
-
-/// Return `(body, remainder)` where `body` is the text up to the next
-/// body-level boundary (`" and it "`, `" and it's "`, or `"."`) and
-/// `remainder` still contains that boundary. Delegates to `split_once_on`
-/// (a nom-built primitive) for every boundary candidate and keeps the
-/// earliest match — purely structural position lookup, no dispatch logic.
-fn split_at_body_boundary(text: &str) -> (&str, &str) {
-    let candidates = [" and it ", " and it\u{2019}s ", " and it's ", "."];
-    let mut best: Option<usize> = None;
-    for pat in candidates {
-        if let Ok((_, (before, _))) = nom_primitives::split_once_on(text, pat) {
-            let pos = before.len();
-            best = Some(best.map_or(pos, |b| b.min(pos)));
-        }
-    }
-    match best {
-        Some(i) => (&text[..i], &text[i..]),
-        None => (text, ""),
-    }
-}
-
-/// Advance past the next " and " that starts a fresh body. Used to skip an
-/// unrecognised body so the rest of the except clause can still be parsed.
-/// `split_once_on` is a nom-built primitive — structural position lookup only.
-fn skip_to_next_conjunction(text: &str) -> &str {
-    match nom_primitives::split_once_on(text, " and ") {
-        Ok((_, (_, after))) => {
-            // Return the span starting at " and " so the caller can consume it.
-            &text[text.len() - after.len() - " and ".len()..]
-        }
-        Err(_) => "",
-    }
-}
+// CR 707.9 + CR 707.9b + CR 707.9a: The `, except <body>` clause grammar lives
+// in `oracle_effect/become_copy_except.rs` so both the replacement-form clones
+// (`parse_clone_replacement` above) and the triggered-form copies (Irma's
+// "becomes a copy of … except her name is ~ and she has this ability") share
+// one parser. See that module for the recognised body shapes.
 
 /// Parse check land pattern: "enters tapped unless you control a [LandType] or a [LandType]"
 /// Returns Mandatory ReplacementDefinition with an UnlessControlsSubtype condition.
@@ -2409,6 +2171,210 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
     })
 }
 
+/// CR 614.1a + CR 111.1: Parse Xorn-class subtype-gated additional-token
+/// replacements. Matches the shape:
+///
+/// ```text
+/// "If you would create one or more <subtype> tokens, instead create
+///  those tokens plus an additional <subtype> token."
+/// ```
+///
+/// Differs from `parse_token_replacement` (Chatterfang) in two ways:
+/// (1) the original event already creates tokens of the listed subtype, so a
+/// `ReplacementCondition::TokenSubtypeMatches` gate is emitted; (2) the
+/// "instead create those tokens plus X" word order is inverted from
+/// Chatterfang's "those tokens plus X are created instead." Manufactor
+/// ("instead create one of each") shares the same prefix and is parsed
+/// separately in Item 5b.
+fn parse_xorn_subtype_token_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Extract the subtype after "would create one or more ".
+    // Stops at " tokens," — the comma separator before "instead create".
+    let ((subtype_start, subtype_len), _) = nom_on_lower(lower, lower, |i| {
+        let (i, pre) =
+            take_until::<_, _, VerboseError<&str>>("would create one or more ").parse(i)?;
+        let start_offset = pre.len() + "would create one or more ".len();
+        let (i, _) = tag("would create one or more ").parse(i)?;
+        let (_, subtype) = take_until::<_, _, VerboseError<&str>>(" tokens,").parse(i)?;
+        Ok((i, (start_offset, subtype.len())))
+    })?;
+
+    let subtype_phrase = lower
+        .get(subtype_start..subtype_start + subtype_len)?
+        .trim();
+    if subtype_phrase.is_empty() || subtype_phrase.contains(' ') {
+        // Multi-word subtypes (e.g., "or more Treasure") indicate the prefix
+        // didn't isolate a single canonical subtype — bail and let a future
+        // multi-subtype branch (Manufactor) handle it.
+        return None;
+    }
+
+    // Extract the additional-token descriptor after
+    // "instead create those tokens plus [an additional ]?", up to a
+    // terminating comma or "." Track the post-strip position via input length.
+    let total_len = lower.len();
+    let ((desc_start, desc_len, needs_article), _) = nom_on_lower(lower, lower, |i| {
+        let (i, _) =
+            take_until::<_, _, VerboseError<&str>>("instead create those tokens plus ").parse(i)?;
+        let (i, _) = tag("instead create those tokens plus ").parse(i)?;
+        // Strip the "additional " modifier (with its optional leading article)
+        // so parse_token_description sees the canonical token tail. Factor as
+        // (opt article) + required "additional " to avoid the cartesian-product
+        // expansion of {a_, an_, ε} × additional_.
+        let (i, _) = opt(value(
+            (),
+            preceded(opt(alt((tag("a "), tag("an ")))), tag("additional ")),
+        ))
+        .parse(i)?;
+        let start_offset = total_len - i.len();
+        let (i, article) = peek(opt(alt((
+            tag::<_, _, VerboseError<&str>>("a "),
+            tag("an "),
+        ))))
+        .parse(i)?;
+        let needs_article = article.is_none();
+        let (i, descriptor) = alt((
+            take_until::<_, _, VerboseError<&str>>("."),
+            nom::combinator::rest,
+        ))
+        .parse(i)?;
+        Ok((i, (start_offset, descriptor.len(), needs_article)))
+    })?;
+
+    let descriptor_raw = lower.get(desc_start..desc_start + desc_len)?.trim();
+    // CR 111.1: parse_token_description's count-prefix requirement
+    // (parser/oracle_effect/token.rs:169-175) needs an article or numeric
+    // count. Re-add "a " when the modifier strip above consumed the article.
+    let descriptor_owned;
+    let descriptor: &str = if needs_article {
+        descriptor_owned = format!("a {descriptor_raw}");
+        &descriptor_owned
+    } else {
+        descriptor_raw
+    };
+    let token = super::oracle_effect::parse_token_description(descriptor)?;
+    let spec = token_description_to_spec(&token)?;
+
+    // Capitalize the subtype to match the parser's existing convention
+    // (TokenSpec.subtypes uses title-case: "Treasure", not "treasure").
+    let canonical_subtype = canonicalize_subtype(subtype_phrase);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .condition(ReplacementCondition::TokenSubtypeMatches {
+                subtypes: vec![canonical_subtype],
+            })
+            .additional_token_spec(spec)
+            .description(original_text.to_string()),
+    )
+}
+
+/// Title-case a single-word subtype string for canonical TokenSpec storage.
+/// "treasure" → "Treasure". Mirrors the existing parser convention; if a
+/// shared subtype-canonicalization helper lands later this function should
+/// delegate to it.
+fn canonicalize_subtype(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+        None => String::new(),
+    }
+}
+
+/// CR 614.1a + CR 111.1: Parse Manufactor-class ensure-all token replacements.
+/// Matches the shape:
+///
+/// ```text
+/// "If you would create a <S1>, <S2>, or <S3> token, instead create
+///  one of each."
+/// ```
+///
+/// (or any 2+ subtype list with `, or ` before the final entry). Returns a
+/// `ReplacementDefinition` whose:
+///
+/// - `condition` is `TokenSubtypeMatches { subtypes: [S1, S2, S3] }` so the
+///   replacement only fires for events whose proposed token spec carries one
+///   of the listed subtypes;
+/// - `ensure_token_specs` is the parallel list of full `TokenSpec`s, one per
+///   subtype, synthesized via `parse_token_description("a <subtype> token")`.
+///
+/// CR 616.1 idempotence is enforced by the applier's `applied: HashSet` write
+/// on each spawned `CreateToken` event, not here.
+fn parse_manufactor_ensure_all_token_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Extract the comma-separated subtype list between "would create a " and
+    // " token,". Single combinator: locate the prefix, capture up to the
+    // " token," terminator that precedes "instead create one of each".
+    let total_len = lower.len();
+    let ((list_start, list_len), _) = nom_on_lower(lower, lower, |i| {
+        let (i, _) = take_until::<_, _, VerboseError<&str>>("would create a ").parse(i)?;
+        let (i, _) = tag("would create a ").parse(i)?;
+        let start_offset = total_len - i.len();
+        let (i, list) = take_until::<_, _, VerboseError<&str>>(" token,").parse(i)?;
+        Ok((i, (start_offset, list.len())))
+    })?;
+
+    let list_text = lower.get(list_start..list_start + list_len)?.trim();
+    // `split_subtype_list` returns one entry for a single-subtype phrase; the
+    // Xorn (single-subtype) shape is dispatched separately upstream, so a
+    // <2-entry list at this site means the Manufactor shape didn't match.
+    let subtypes = split_subtype_list(list_text);
+    if subtypes.len() < 2 {
+        return None;
+    }
+
+    let condition_subtypes: Vec<String> =
+        subtypes.iter().map(|s| canonicalize_subtype(s)).collect();
+    let mut specs: Vec<crate::types::proposed_event::TokenSpec> =
+        Vec::with_capacity(subtypes.len());
+    for sub in &subtypes {
+        let descriptor = format!("a {sub} token");
+        let token = super::oracle_effect::parse_token_description(&descriptor)?;
+        specs.push(token_description_to_spec(&token)?);
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .condition(ReplacementCondition::TokenSubtypeMatches {
+                subtypes: condition_subtypes,
+            })
+            .ensure_token_specs(specs)
+            .description(original_text.to_string()),
+    )
+}
+
+/// Split a Manufactor-style subtype list ("clue, food, or treasure") into
+/// individual entries via nom combinators. Grammar:
+///
+/// ```text
+/// list  := entry ( ", " ( "or " )? entry )+
+/// entry := word
+/// ```
+///
+/// The entry parser optionally consumes a leading "or " so the Oxford form
+/// ("a, b, or c") and the simple form ("a, b") share one rule. Single-word
+/// entries only; multi-word subtypes are not a known printed pattern for
+/// this replacement class.
+fn split_subtype_list(s: &str) -> Vec<String> {
+    use nom::bytes::complete::take_while1;
+    use nom::multi::separated_list1;
+    use nom::IResult;
+
+    fn entry(i: &str) -> IResult<&str, &str, VerboseError<&str>> {
+        let (i, _) = opt(tag("or ")).parse(i)?;
+        take_while1(|c: char| c.is_alphanumeric() || c == '-' || c == '\'').parse(i)
+    }
+    let mut list = separated_list1(tag(", "), entry);
+    match list.parse(s) {
+        Ok((_, parts)) => parts.into_iter().map(|p| p.to_string()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// CR 111.1 + CR 111.4: Convert a parser-extracted `TokenDescription` into a
 /// static `TokenSpec`. Source/controller are placeholder zeros — the applier
 /// fills them with the replacement source's runtime identity. `sacrifice_at`
@@ -2683,16 +2649,59 @@ fn parse_damage_prevention_replacement(
     // consumes the damage. Class members: Phyrexian Hydra, Vigor, Stormwild
     // Capridor, Hostility.
     if let Some(followup) = extract_prevention_followup(original_text) {
-        def = def.execute(parse_effect_chain(&followup, AbilityKind::Spell));
+        let mut followup_def = parse_effect_chain(&followup, AbilityKind::Spell);
+        // CR 615.5 + CR 609.7: `parse_target` maps "the source's controller" /
+        // "that source's controller" to `ParentTargetController` (correct for
+        // anaphoric "its controller" in non-prevention contexts). Inside a
+        // prevention follow-up the same surface phrase refers instead to the
+        // controller of the *prevented event's* damage source (Swans of Bryn
+        // Argoll, Deflecting Palm class). Rewrite the filter at the call site
+        // — keeps `parse_target` consolidated for non-prevention callers and
+        // avoids parser-context plumbing. Single building-block walker
+        // (`each_target_filter_mut`) handles every target-bearing effect arm.
+        rewrite_parent_target_controller_to_post_replacement_source(&mut followup_def);
+        def = def.execute(followup_def);
     }
 
     Some(def)
+}
+
+/// CR 615.5 + CR 609.7: Walk an `AbilityDefinition` tree and rewrite every
+/// `TargetFilter::ParentTargetController` slot to
+/// `TargetFilter::PostReplacementSourceController`. Invoked at the prevention
+/// follow-up call site only — see the parent comment for rationale.
+fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::ParentTargetController) {
+            *f = TargetFilter::PostReplacementSourceController;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_parent_target_controller_to_post_replacement_source(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_parent_target_controller_to_post_replacement_source(else_branch);
+    }
 }
 
 /// CR 615.5: Extract the trailing additional-effect sentence from a prevention
 /// replacement's Oracle text. Returns the slice after `"prevent that damage. "`,
 /// trimmed and ready for `parse_effect_chain`. Returns `None` when there is no
 /// follow-up (the common case: pure prevention).
+///
+/// CR 615.5: Strips an optional `"(when|if) damage is prevented this way, "`
+/// prelude before returning the body. The prelude restates the firing condition
+/// the replacement's `execute` hook already encodes — `Prevented` arm at
+/// `replacement.rs:2207` only stashes `post_replacement_effect` when prevention
+/// actually occurred — so the prelude is semantically a no-op and normalizes
+/// to a bare effect chain. Documenting this here preempts a future contributor
+/// adding a redundant "when damage is prevented" trigger arm in
+/// `oracle_trigger.rs`.
+///
+/// Out of scope: one-shot prevention spells (Acolyte's Reward, Channel Harm,
+/// Comeuppance, Bandage-style "Prevent the next N damage. Draw a card.") use a
+/// different parser branch (spell-side `parse_effect_chain`) that does not
+/// route through this helper.
 fn extract_prevention_followup(original_text: &str) -> Option<String> {
     let lower = original_text.to_lowercase();
     let (_, after) = split_once_on_lower(original_text, &lower, "prevent that damage. ")?;
@@ -2700,7 +2709,27 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    Some(trimmed.to_string())
+    let after_lower = trimmed.to_lowercase();
+    let body = match nom_on_lower(trimmed, &after_lower, |i| {
+        value(
+            (),
+            preceded(
+                alt((
+                    tag::<_, _, VerboseError<&str>>("when "),
+                    tag::<_, _, VerboseError<&str>>("if "),
+                )),
+                tag::<_, _, VerboseError<&str>>("damage is prevented this way, "),
+            ),
+        )
+        .parse(i)
+    }) {
+        Some((_, rest)) => rest.trim(),
+        None => trimmed,
+    };
+    if body.is_empty() {
+        return None;
+    }
+    Some(body.to_string())
 }
 
 /// CR 614.1a: Parse event substitution replacement effects.
@@ -2947,8 +2976,142 @@ mod tests {
         Comparator, ControllerRef, QuantityExpr, QuantityModification, QuantityRef,
         ReplacementCondition, ShieldKind,
     };
-    use crate::types::card_type::Supertype;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+
+    #[test]
+    fn rewrite_parent_target_controller_flips_top_level_draw_target() {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::ParentTargetController,
+            },
+        );
+        rewrite_parent_target_controller_to_post_replacement_source(&mut def);
+        assert!(matches!(
+            *def.effect,
+            Effect::Draw {
+                target: TargetFilter::PostReplacementSourceController,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rewrite_parent_target_controller_recurses_into_sub_ability() {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::ParentTargetController,
+                damage_source: None,
+            },
+        );
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::ParentTargetController,
+            },
+        )));
+        rewrite_parent_target_controller_to_post_replacement_source(&mut def);
+        assert!(matches!(
+            *def.effect,
+            Effect::DealDamage {
+                target: TargetFilter::PostReplacementSourceController,
+                ..
+            }
+        ));
+        assert!(matches!(
+            *def.sub_ability.as_ref().unwrap().effect,
+            Effect::Draw {
+                target: TargetFilter::PostReplacementSourceController,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rewrite_parent_target_controller_leaves_other_filters_untouched() {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+        );
+        rewrite_parent_target_controller_to_post_replacement_source(&mut def);
+        assert!(matches!(
+            *def.effect,
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn extract_prevention_followup_returns_none_when_no_followup() {
+        assert_eq!(
+            extract_prevention_followup("If damage would be dealt to ~, prevent that damage."),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_prevention_followup_returns_bare_effect() {
+        assert_eq!(
+            extract_prevention_followup(
+                "If damage would be dealt to ~, prevent that damage. \
+                 Put a -1/-1 counter on ~ for each 1 damage prevented this way."
+            )
+            .as_deref(),
+            Some("Put a -1/-1 counter on ~ for each 1 damage prevented this way.")
+        );
+    }
+
+    #[test]
+    fn extract_prevention_followup_strips_when_prelude() {
+        assert_eq!(
+            extract_prevention_followup(
+                "If damage would be dealt to ~, prevent that damage. \
+                 When damage is prevented this way, sacrifice an Equipment attached to ~."
+            )
+            .as_deref(),
+            Some("sacrifice an Equipment attached to ~.")
+        );
+    }
+
+    #[test]
+    fn extract_prevention_followup_strips_if_prelude() {
+        assert_eq!(
+            extract_prevention_followup(
+                "If a source would deal damage to ~, prevent that damage. \
+                 If damage is prevented this way, you draw a card."
+            )
+            .as_deref(),
+            Some("you draw a card.")
+        );
+    }
+
+    #[test]
+    fn extract_prevention_followup_preserves_original_case_in_body() {
+        // Prelude is matched case-insensitively, but the returned body keeps
+        // the original casing so downstream parsers see e.g. card-name capitals.
+        let result = extract_prevention_followup(
+            "If damage would be dealt to ~, prevent that damage. \
+             When damage is prevented this way, ~ deals 2 damage to any target.",
+        );
+        assert_eq!(result.as_deref(), Some("~ deals 2 damage to any target."));
+    }
 
     #[test]
     fn replacement_enters_tapped() {
@@ -5156,23 +5319,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_pt_pair_handles_single_and_double_digit_values() {
-        // Sanity: the 4/4 used by Superior Spider-Man works, as does a
-        // two-digit "12/12" (hypothetical future card).
-        let (rest, (p, t)) = parse_pt_pair("4/4 spider").unwrap();
-        assert_eq!((p, t), (4, 4));
-        assert_eq!(rest, " spider");
-        let (rest, (p, t)) = parse_pt_pair("12/12 giant").unwrap();
-        assert_eq!((p, t), (12, 12));
-        assert_eq!(rest, " giant");
-    }
-
-    #[test]
-    fn parse_pt_pair_rejects_non_numeric_halves() {
-        assert!(parse_pt_pair("a/4").is_none());
-        assert!(parse_pt_pair("4/").is_none());
-    }
+    // `parse_pt_pair` building-block tests moved to
+    // `oracle_effect::become_copy_except` along with the helper itself.
 
     #[test]
     fn split_on_clone_source_zone_prefers_battlefield_when_present() {
@@ -5296,5 +5444,89 @@ mod tests {
             Some(crate::types::ability::QuantityModification::Double)
         ));
         assert!(def.additional_token_spec.is_none());
+    }
+
+    /// CR 614.1a + CR 111.1 + CR 111.10a: Xorn's full Oracle text parses to a
+    /// CreateToken replacement with a `TokenSubtypeMatches { ["Treasure"] }`
+    /// gate and an `additional_token_spec` carrying the Treasure spec.
+    /// (CR 111.10a defines the Treasure token, verified via
+    /// `grep '^111.10a' docs/MagicCompRules.txt` — earlier "111.10p" was wrong;
+    /// 111.10p is the Virtuous Role token.)
+    #[test]
+    fn parses_xorn_additional_treasure_token_replacement_cr_614_1a() {
+        let text = "If you would create one or more Treasure tokens, instead create those tokens plus an additional Treasure token.";
+        let def =
+            parse_replacement_line(text, "Xorn").expect("should parse Xorn token replacement");
+
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        match &def.condition {
+            Some(ReplacementCondition::TokenSubtypeMatches { subtypes }) => {
+                assert_eq!(
+                    subtypes,
+                    &vec!["Treasure".to_string()],
+                    "Xorn gates on Treasure subtype"
+                );
+            }
+            other => panic!("Expected TokenSubtypeMatches, got {other:?}"),
+        }
+        let spec = def
+            .additional_token_spec
+            .as_ref()
+            .expect("Xorn must populate additional_token_spec");
+        assert!(
+            spec.subtypes
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case("Treasure")),
+            "appended spec must be a Treasure token, got {:?}",
+            spec.subtypes
+        );
+    }
+
+    /// CR 614.1a + CR 111.1: Academy Manufactor's "instead create one of each"
+    /// parses to a CreateToken replacement whose `condition` lists all three
+    /// gated subtypes and whose `ensure_token_specs` carries a TokenSpec for
+    /// each. The applier (covered by replacement.rs tests) emits the missing
+    /// subtypes only.
+    #[test]
+    fn parses_manufactor_ensure_all_token_replacement_cr_614_1a() {
+        let text =
+            "If you would create a Clue, Food, or Treasure token, instead create one of each.";
+        let def = parse_replacement_line(text, "Academy Manufactor")
+            .expect("Manufactor replacement must parse");
+
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        match &def.condition {
+            Some(ReplacementCondition::TokenSubtypeMatches { subtypes }) => {
+                assert_eq!(
+                    subtypes,
+                    &vec![
+                        "Clue".to_string(),
+                        "Food".to_string(),
+                        "Treasure".to_string()
+                    ],
+                    "condition must gate on all three subtypes"
+                );
+            }
+            other => panic!("Expected TokenSubtypeMatches, got {other:?}"),
+        }
+
+        let specs = def
+            .ensure_token_specs
+            .as_ref()
+            .expect("Manufactor must populate ensure_token_specs");
+        assert_eq!(specs.len(), 3);
+        let subtypes_present: Vec<String> = specs.iter().flat_map(|s| s.subtypes.clone()).collect();
+        for expected in &["Clue", "Food", "Treasure"] {
+            assert!(
+                subtypes_present
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(expected)),
+                "ensure_token_specs missing {expected}, got {subtypes_present:?}"
+            );
+        }
+        assert!(
+            def.additional_token_spec.is_none(),
+            "Manufactor uses ensure_token_specs, not additional_token_spec"
+        );
     }
 }

@@ -161,7 +161,9 @@ describe("normalizeEvents", () => {
       { type: "SpellCast", data: { card_id: 9, controller: 0, object_id: 9 } },
     ];
 
-    const steps = normalizeEvents(events, { combatPacing: "cinematic" });
+    const steps = normalizeEvents(events, {
+      pacingMultipliers: { effects: 1.0, combat: 1.75, banners: 1.0 },
+    });
     expect(steps).toHaveLength(2);
     expect(steps[0].duration).toBeGreaterThan(EVENT_DURATIONS.DamageDealt);
     expect(steps[1].duration).toBe(EVENT_DURATIONS.SpellCast);

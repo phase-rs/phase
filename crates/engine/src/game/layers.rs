@@ -295,8 +295,10 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|obj| obj.controller == *player),
         // CR 301.5a: True when at least one Equipment is attached to the source object.
         // Mirrors the attacher-is-equipment subtype check from `effects/attach.rs:64-67`.
+        // CR 301.5: Equipment can only attach to objects, so any non-Object host
+        // is rejected by `as_object`.
         StaticCondition::SourceIsEquipped => state.objects.values().any(|obj| {
-            obj.attached_to == Some(source_id)
+            obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
                 && obj.card_types.subtypes.iter().any(|s| s == "Equipment")
         }),
         // CR 701.37: True when the source permanent is monstrous.
@@ -304,11 +306,14 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.monstrous),
-        // CR 301.5 + CR 303.4: True when source Aura/Equipment is attached to a creature.
+        // CR 301.5 + CR 303.4: True when source Aura/Equipment is attached to a
+        // creature. A Player host (CR 303.4 + CR 702.5d) is never a creature, so
+        // we filter to Object hosts via `as_object`.
         StaticCondition::SourceAttachedToCreature => state
             .objects
             .get(&source_id)
             .and_then(|obj| obj.attached_to)
+            .and_then(|t| t.as_object())
             .and_then(|target_id| state.objects.get(&target_id))
             .is_some_and(|target| {
                 target
@@ -323,11 +328,13 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|obj| obj.zone == *zone),
         // CR 708.2 + CR 707.2: True when the creature this Aura/Equipment is attached to
         // is face-down. Traverses `attached_to` to the target object and reads its
-        // `face_down` status (false if source is not attached to any object).
+        // `face_down` status (false if source is not attached, or attached to a
+        // player — players have no face-down state).
         StaticCondition::EnchantedIsFaceDown => state
             .objects
             .get(&source_id)
             .and_then(|obj| obj.attached_to)
+            .and_then(|t| t.as_object())
             .and_then(|target_id| state.objects.get(&target_id))
             .is_some_and(|target| target.face_down),
         // CR 608.2c: Check if the source object matches a type filter (leveler gates).
@@ -981,6 +988,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
+            | ContinuousModification::RetainPrintedTriggerFromSource { .. }
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
@@ -1108,6 +1116,23 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             ))
         }
         _ => None,
+    };
+
+    // CR 707.9a: Pre-read the printed trigger to retain from the source object's
+    // `base_trigger_definitions`. Reads here (immutable) before we take the
+    // per-object mutable borrow inside the loop. Cloning out the trigger keeps
+    // the dispatch arm's mutation site free of nested borrows.
+    let retained_printed_trigger = if let ContinuousModification::RetainPrintedTriggerFromSource {
+        source_trigger_index,
+    } = &effect.modification
+    {
+        state.objects.get(&effect.source_id).and_then(|src| {
+            src.base_trigger_definitions
+                .get(*source_trigger_index)
+                .cloned()
+        })
+    } else {
+        None
     };
 
     for id in affected_ids {
@@ -1336,6 +1361,18 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 obj.static_definitions.clear();
                 obj.keywords.clear();
             }
+            // CR 707.9a: Retain the source's printed trigger on the copy.
+            // After `CopyValues` overwrote `obj.trigger_definitions` with the
+            // copied values, push the source's printed trigger back so the
+            // copy retains "this ability". Idempotent — duplicate retain calls
+            // (same trigger structurally) collapse into one.
+            ContinuousModification::RetainPrintedTriggerFromSource { .. } => {
+                if let Some(trigger) = retained_printed_trigger.clone() {
+                    if !obj.trigger_definitions.iter_all().any(|t| t == &trigger) {
+                        obj.trigger_definitions.push(trigger);
+                    }
+                }
+            }
         }
     }
 }
@@ -1429,6 +1466,29 @@ pub(crate) fn compute_current_copiable_values(
             // source's name.
             ContinuousModification::SetName { name } => {
                 values.name = name.clone();
+            }
+            // CR 707.9a: A copy effect that grants/retains an ability ("…
+            // and it has this ability") makes that ability part of the
+            // copiable values of the copy. A subsequent copy of this object
+            // must see the retained trigger as one of its copiable triggers.
+            // Read the printed trigger from the *effect's source object*
+            // (the original printer of the retain modification — Irma) by
+            // index, mirroring the write-side application in
+            // `apply_continuous_effect`. Idempotent under stacking: a
+            // structurally-equal trigger already present is not duplicated.
+            ContinuousModification::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            } => {
+                if let Some(trigger) = state.objects.get(&effect.source_id).and_then(|src| {
+                    src.base_trigger_definitions
+                        .get(*source_trigger_index)
+                        .cloned()
+                }) {
+                    let triggers = Arc::make_mut(&mut values.trigger_definitions);
+                    if !triggers.iter().any(|t| t == &trigger) {
+                        triggers.push(trigger);
+                    }
+                }
             }
             _ => {}
         }
@@ -1874,7 +1934,7 @@ mod tests {
             obj.card_types
                 .core_types
                 .push(crate::types::card_type::CoreType::Enchantment);
-            obj.attached_to = Some(bear_a);
+            obj.attached_to = Some(bear_a.into());
             obj.timestamp = ts;
 
             let enchanted_creature = TargetFilter::Typed(
@@ -3101,7 +3161,7 @@ mod tests {
         }
 
         // Attach aura to land
-        state.objects.get_mut(&aura_id).unwrap().attached_to = Some(land_id);
+        state.objects.get_mut(&aura_id).unwrap().attached_to = Some(land_id.into());
 
         evaluate_layers(&mut state);
 
@@ -3148,7 +3208,7 @@ mod tests {
         let aura = make_creature(&mut state, "Aura", 0, 0, PlayerId(0));
         let creature = make_creature(&mut state, "Manifested", 2, 2, PlayerId(0));
         state.objects.get_mut(&creature).unwrap().face_down = true;
-        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature.into());
         assert!(evaluate_condition_for_test(
             &state,
             &StaticCondition::EnchantedIsFaceDown,
@@ -3162,7 +3222,7 @@ mod tests {
         let mut state = setup();
         let aura = make_creature(&mut state, "Aura", 0, 0, PlayerId(0));
         let creature = make_creature(&mut state, "Face Up", 2, 2, PlayerId(0));
-        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature.into());
         assert!(!evaluate_condition_for_test(
             &state,
             &StaticCondition::EnchantedIsFaceDown,

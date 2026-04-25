@@ -2,7 +2,17 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { GameFormat, MatchType, Phase } from "../adapter/types";
-import type { AnimationSpeed, CombatPacing, VfxQuality } from "../animation/types";
+import {
+  ANIMATION_SPEED_DEFAULT,
+  ANIMATION_SPEED_MAX,
+  ANIMATION_SPEED_MIN,
+  PACING_DEFAULT,
+  PACING_MAX,
+  PACING_MIN,
+  defaultPacingMultipliers,
+  type PacingCategory,
+  type VfxQuality,
+} from "../animation/types";
 import type { AIDifficulty } from "../constants/ai";
 import { DEFAULT_AI_DIFFICULTY } from "../constants/ai";
 import type { DeckArchetype } from "../services/engineRuntime";
@@ -39,6 +49,65 @@ function defaultAiSeat(): AiSeatPref {
   return { difficulty: DEFAULT_AI_DIFFICULTY, deckName: AI_DECK_RANDOM };
 }
 
+function clamp(value: number, min: number, max: number): number {
+  if (Number.isNaN(value)) return min;
+  return Math.min(Math.max(value, min), max);
+}
+
+/** Map the v1 AnimationSpeed enum to its numeric multiplier. Used by the
+ *  v1→v2 persist migration so existing users don't lose their setting. */
+const LEGACY_ANIMATION_SPEED_MULTIPLIERS: Record<string, number> = {
+  slow: 1.5,
+  normal: 1.0,
+  fast: 0.5,
+  instant: 0,
+};
+
+/** Map the v1 CombatPacing enum to its numeric multiplier. */
+const LEGACY_COMBAT_PACING_MULTIPLIERS: Record<string, number> = {
+  normal: 1.0,
+  slow: 1.35,
+  cinematic: 1.75,
+};
+
+/** Factory returning a freshly-allocated default preferences snapshot. Returned
+ *  as a function (not a const) because the state contains nested objects
+ *  (`pacingMultipliers`, `aiSeats`, `customThemeUrls`, `phaseStops`) — sharing
+ *  those references between the store and the "defaults" snapshot would let
+ *  setters silently mutate the defaults. Used by both store init and
+ *  `resetAllPreferences`, so they can never drift apart. */
+function buildDefaultPreferences(): PreferencesState {
+  return {
+    cardSize: "medium",
+    hudLayout: "inline",
+    followActiveOpponent: false,
+    logDefaultState: "closed",
+    boardBackground: "auto-wubrg",
+    customBackgroundUrl: "",
+    vfxQuality: "full",
+    animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
+    pacingMultipliers: defaultPacingMultipliers(),
+    phaseStops: [],
+    masterVolume: 100,
+    sfxVolume: 70,
+    musicVolume: 40,
+    sfxMuted: false,
+    musicMuted: false,
+    masterMuted: false,
+    audioThemeId: "planeswalker",
+    customThemeUrls: [],
+    battlefieldCardDisplay: "art_crop",
+    tapRotation: "mtga",
+    showKeywordStrip: true,
+    aiSeats: [defaultAiSeat()],
+    aiArchetypeFilter: "Any",
+    aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
+    lastFormat: null,
+    lastMatchType: "Bo1",
+    lastPlayerCount: 2,
+  };
+}
+
 interface PreferencesState {
   cardSize: CardSizePreference;
   hudLayout: HudLayout;
@@ -47,8 +116,14 @@ interface PreferencesState {
   boardBackground: BoardBackground;
   customBackgroundUrl: string;
   vfxQuality: VfxQuality;
-  animationSpeed: AnimationSpeed;
-  combatPacing: CombatPacing;
+  /** Continuous global animation-speed multiplier. `0` = instant (skip waits).
+   *  `1` = neutral. Higher = slower playback. Multiplies every per-category
+   *  duration after pacingMultipliers is applied. */
+  animationSpeedMultiplier: number;
+  /** Per-category pacing multipliers — see `PacingCategory` in animation/types
+   *  for the full list. Each event's category is resolved via `eventCategory()`
+   *  and the matching multiplier scales its base duration. */
+  pacingMultipliers: Record<PacingCategory, number>;
   phaseStops: Phase[];
   masterVolume: number;
   sfxVolume: number;
@@ -77,8 +152,14 @@ interface PreferencesActions {
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
   setVfxQuality: (quality: VfxQuality) => void;
-  setAnimationSpeed: (speed: AnimationSpeed) => void;
-  setCombatPacing: (pacing: CombatPacing) => void;
+  setAnimationSpeedMultiplier: (multiplier: number) => void;
+  setPacingMultiplier: (category: PacingCategory, multiplier: number) => void;
+  /** Reset every pacing slider (animation speed + per-category) back to 1.0×. */
+  resetPacing: () => void;
+  /** Reset the entire preferences store to factory defaults. Clears AI seats,
+   *  audio levels, board background — everything except persisted multiplayer
+   *  reconnect state, which is owned by `multiplayerStore`. */
+  resetAllPreferences: () => void;
   setPhaseStops: (stops: Phase[]) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
@@ -113,33 +194,7 @@ type LegacyFlatAiPrefs = Partial<{
 export const usePreferencesStore = create<PreferencesState & PreferencesActions>()(
   persist(
     (set) => ({
-      cardSize: "medium",
-      hudLayout: "inline",
-      followActiveOpponent: false,
-      logDefaultState: "closed",
-      boardBackground: "auto-wubrg",
-      customBackgroundUrl: "",
-      vfxQuality: "full",
-      animationSpeed: "normal",
-      combatPacing: "normal",
-      phaseStops: [],
-      masterVolume: 100,
-      sfxVolume: 70,
-      musicVolume: 40,
-      sfxMuted: false,
-      musicMuted: false,
-      masterMuted: false,
-      audioThemeId: "planeswalker",
-      customThemeUrls: [],
-      battlefieldCardDisplay: "art_crop",
-      tapRotation: "mtga",
-      showKeywordStrip: true,
-      aiSeats: [defaultAiSeat()],
-      aiArchetypeFilter: "Any",
-      aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
-      lastFormat: null,
-      lastMatchType: "Bo1",
-      lastPlayerCount: 2,
+      ...buildDefaultPreferences(),
 
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
@@ -148,8 +203,21 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
       setVfxQuality: (quality) => set({ vfxQuality: quality }),
-      setAnimationSpeed: (speed) => set({ animationSpeed: speed }),
-      setCombatPacing: (pacing) => set({ combatPacing: pacing }),
+      setAnimationSpeedMultiplier: (multiplier) =>
+        set({ animationSpeedMultiplier: clamp(multiplier, ANIMATION_SPEED_MIN, ANIMATION_SPEED_MAX) }),
+      setPacingMultiplier: (category, multiplier) =>
+        set((state) => ({
+          pacingMultipliers: {
+            ...state.pacingMultipliers,
+            [category]: clamp(multiplier, PACING_MIN, PACING_MAX),
+          },
+        })),
+      resetPacing: () =>
+        set({
+          animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
+          pacingMultipliers: defaultPacingMultipliers(),
+        }),
+      resetAllPreferences: () => set(buildDefaultPreferences()),
       setPhaseStops: (stops) => set({ phaseStops: stops }),
       setMasterVolume: (vol) => set({ masterVolume: vol }),
       setSfxVolume: (vol) => set({ sfxVolume: vol }),
@@ -206,24 +274,66 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 1,
-      // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0]. Any other
-      // legacy fields pass through untouched — persist merges against the
-      // current defaults on rehydrate, so unknown v0 fields are simply dropped
-      // and missing v1 fields get their default.
+      version: 3,
+      // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
+      // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
+      //          animationSpeedMultiplier/combatPacingMultiplier.
+      // v2 → v3: combatPacingMultiplier folded into a per-category
+      //          pacingMultipliers map. The old combat value seeds
+      //          pacingMultipliers.combat so existing users keep their
+      //          combat slider exactly where they left it; other
+      //          categories start at the neutral 1.0 default.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
-        if (version >= 1) return persisted;
-        const legacy = persisted as LegacyFlatAiPrefs & Record<string, unknown>;
-        const seat: AiSeatPref = {
-          difficulty: legacy.aiDifficulty ?? DEFAULT_AI_DIFFICULTY,
-          deckName: legacy.aiDeckName ?? AI_DECK_RANDOM,
-        };
-        // Strip legacy flat keys so they don't leak into the new schema.
-        const { aiDifficulty: _d, aiDeckName: _n, ...rest } = legacy;
-        void _d;
-        void _n;
-        return { ...rest, aiSeats: [seat] };
+        let migrated = persisted as Record<string, unknown>;
+
+        if (version < 1) {
+          const legacy = migrated as LegacyFlatAiPrefs & Record<string, unknown>;
+          const seat: AiSeatPref = {
+            difficulty: legacy.aiDifficulty ?? DEFAULT_AI_DIFFICULTY,
+            deckName: legacy.aiDeckName ?? AI_DECK_RANDOM,
+          };
+          const { aiDifficulty: _d, aiDeckName: _n, ...rest } = legacy;
+          void _d;
+          void _n;
+          migrated = { ...rest, aiSeats: [seat] };
+        }
+
+        if (version < 2) {
+          const { animationSpeed, combatPacing, ...rest } = migrated as {
+            animationSpeed?: string;
+            combatPacing?: string;
+          } & Record<string, unknown>;
+          const legacyAnim =
+            typeof animationSpeed === "string"
+              ? LEGACY_ANIMATION_SPEED_MULTIPLIERS[animationSpeed]
+              : undefined;
+          const legacyCombat =
+            typeof combatPacing === "string"
+              ? LEGACY_COMBAT_PACING_MULTIPLIERS[combatPacing]
+              : undefined;
+          migrated = {
+            ...rest,
+            animationSpeedMultiplier: legacyAnim ?? ANIMATION_SPEED_DEFAULT,
+            combatPacingMultiplier: legacyCombat ?? PACING_DEFAULT,
+          };
+        }
+
+        if (version < 3) {
+          const { combatPacingMultiplier, ...rest } = migrated as {
+            combatPacingMultiplier?: number;
+          } & Record<string, unknown>;
+          const carried =
+            typeof combatPacingMultiplier === "number" && !Number.isNaN(combatPacingMultiplier)
+              ? combatPacingMultiplier
+              : PACING_DEFAULT;
+          migrated = {
+            ...rest,
+            pacingMultipliers: { ...defaultPacingMultipliers(), combat: carried },
+          };
+        }
+
+        return migrated;
       },
     },
   ),

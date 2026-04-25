@@ -25,6 +25,7 @@ mod mana_efficiency;
 pub mod mulligan;
 mod plus_one_counters;
 mod ramp_timing;
+mod reactive_self_protection;
 mod recursion_awareness;
 mod redundancy_avoidance;
 pub mod registry;

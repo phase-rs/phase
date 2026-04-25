@@ -520,6 +520,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::DefendingPlayer
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
+        | TargetFilter::PostReplacementSourceController
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,
@@ -1497,6 +1498,9 @@ pub(super) fn match_attached(
 }
 
 /// Unattach: fires when attachment is removed from a permanent.
+/// CR 303.4 + CR 301.5: Only fires when the host was an object that left the
+/// battlefield. A player host (Curse cycle) leaves via game-loss, which is a
+/// different SBA path (CR 704.5m for the Aura) — not modeled by this matcher.
 pub(super) fn match_unattach(
     event: &GameEvent,
     _trigger: &TriggerDefinition,
@@ -1512,6 +1516,7 @@ pub(super) fn match_unattach(
                 .objects
                 .get(&source_id)
                 .and_then(|obj| obj.attached_to)
+                .and_then(|t| t.as_object())
                 .map(|attached| attached == *object_id)
                 .unwrap_or(false)
         }
@@ -3259,7 +3264,7 @@ mod tests {
             "Forest".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&aura).unwrap().attached_to = Some(enchanted_land);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(enchanted_land.into());
 
         let event = GameEvent::ManaAdded {
             player_id: PlayerId(0),

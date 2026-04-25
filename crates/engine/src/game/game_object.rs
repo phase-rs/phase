@@ -103,6 +103,55 @@ pub struct CaseState {
     pub solve_condition: SolveCondition,
 }
 
+/// CR 303.4 + CR 301.5: The host an attachment (Aura, Equipment, Fortification)
+/// is attached to. Equipment and Fortification can attach only to objects
+/// (CR 301.5 / CR 301.6); Auras can attach to objects OR players, depending on
+/// the Aura's `Enchant <type>` keyword (CR 303.4 / CR 702.5).
+///
+/// Storing the host as a typed enum (rather than `Option<ObjectId>` plus a
+/// parallel `Option<PlayerId>`) keeps "attached to whom" a single source of
+/// truth and lets exhaustive `match` arms force every consumer to handle both
+/// variants. Equipment-only call sites use `as_object()` with a CR-cited
+/// `expect` to assert the rules invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AttachTarget {
+    /// CR 301.5 / CR 303.4f: attached to a permanent.
+    Object(ObjectId),
+    /// CR 303.4 + CR 702.5: attached to a player (Curse cycle, Faith's
+    /// Fetters-class). Equipment can never be in this variant — CR 301.5
+    /// restricts Equipment hosts to creatures.
+    Player(PlayerId),
+}
+
+impl AttachTarget {
+    /// Returns `Some(ObjectId)` for `Object`, `None` for `Player`. Use this at
+    /// call sites that have a CR-grounded reason to expect an object host
+    /// (e.g., Equipment per CR 301.5) — pair with `.expect("CR …")` to make
+    /// the invariant explicit.
+    pub fn as_object(&self) -> Option<ObjectId> {
+        match self {
+            AttachTarget::Object(id) => Some(*id),
+            AttachTarget::Player(_) => None,
+        }
+    }
+
+    /// Returns `Some(PlayerId)` for `Player`, `None` for `Object`. Mirror of
+    /// `as_object`; used by player-aura code paths (Curse cycle, SBA CR 704.5n).
+    pub fn as_player(&self) -> Option<PlayerId> {
+        match self {
+            AttachTarget::Player(pid) => Some(*pid),
+            AttachTarget::Object(_) => None,
+        }
+    }
+}
+
+impl From<ObjectId> for AttachTarget {
+    fn from(id: ObjectId) -> Self {
+        AttachTarget::Object(id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -122,7 +171,9 @@ pub struct GameObject {
     pub dealt_deathtouch_damage: bool,
 
     // Attachments
-    pub attached_to: Option<ObjectId>,
+    /// CR 303.4 + CR 301.5: Host this attachment is attached to.
+    /// `None` if unattached. See `AttachTarget` for variants.
+    pub attached_to: Option<AttachTarget>,
     pub attachments: Vec<ObjectId>,
 
     // Counters

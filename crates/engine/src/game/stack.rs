@@ -347,6 +347,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // priority. Without this drain the choice would be silently dropped.
                     if let Some(effect_def) = state.post_replacement_effect.take() {
                         state.post_replacement_source = None;
+                        state.post_replacement_event_source = None;
                         let _ = super::engine_replacement::apply_post_replacement_effect(
                             state,
                             &effect_def,
@@ -415,14 +416,32 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
                 .unwrap_or(false);
             if is_aura {
-                if let Some(crate::types::ability::TargetRef::Object(target_id)) =
-                    spell_targets.first()
-                {
-                    // Verify target is still on the battlefield
-                    if state.battlefield.contains(target_id) {
+                match spell_targets.first() {
+                    // CR 303.4f + CR 608.2b: Object Aura — verify the target is
+                    // still on the battlefield (last-known-information check); a
+                    // gone target leaves the Aura unattached and SBA
+                    // (CR 704.5m) cleans it up at the next checkpoint.
+                    Some(crate::types::ability::TargetRef::Object(target_id))
+                        if state.battlefield.contains(target_id) =>
+                    {
                         effects::attach::attach_to(state, entry.id, *target_id);
                     }
-                    // If target is gone, SBA check_unattached_auras will handle cleanup
+                    Some(crate::types::ability::TargetRef::Object(_)) => {
+                        // Target left the battlefield — SBA cleanup follows.
+                    }
+                    // CR 303.4f + CR 702.5d: Player Aura (Curse cycle, Faith's
+                    // Fetters-class). Validity check is "player still in game"
+                    // — `attach_to_player` makes no liveness check itself, but
+                    // `check_unattached_auras` (CR 303.4c) will detach + grave
+                    // a Curse whose enchanted player has left the game.
+                    Some(crate::types::ability::TargetRef::Player(player_id)) => {
+                        effects::attach::attach_to_player(state, entry.id, *player_id);
+                    }
+                    None => {
+                        // CR 303.4g: An Aura entering the battlefield with no
+                        // legal target goes to its owner's graveyard. The SBA
+                        // path catches this on the next pass.
+                    }
                 }
             }
 
@@ -1124,7 +1143,12 @@ mod tests {
         assert!(state.battlefield.contains(&aura_id));
         // Aura should be attached to the creature
         assert_eq!(
-            state.objects.get(&aura_id).unwrap().attached_to,
+            state
+                .objects
+                .get(&aura_id)
+                .unwrap()
+                .attached_to
+                .and_then(|t| t.as_object()),
             Some(creature)
         );
         // Creature should list the Aura in its attachments

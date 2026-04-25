@@ -592,6 +592,55 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &ParseContext) -> Option
         }
     }
 
+    // CR 701.10b: "double <target>'s power [and toughness]" — possessive form covering
+    // "double target creature's power" (Bulk Up class) and "double ~'s power" (Devilish
+    // Valet / Okaun class, where ~ is the self-reference normalization). Composes with
+    // existing `parse_target` building block to cover any target phrase, then matches the
+    // possessive P/T tail. Sibling of the `tag("double its ")` and `tag("double the ")`
+    // arms below; placed first so the `parse_target`-driven possessive form takes
+    // precedence and the more specific "its" / "the X of Y" patterns fall through.
+    if let Some(((), after_double)) =
+        nom_on_lower(lower, lower, |i| value((), tag("double ")).parse(i))
+    {
+        // Skip patterns owned by sibling arms below.
+        let owned_by_sibling = nom_on_lower(after_double, after_double, |i| {
+            value(
+                (),
+                alt((
+                    tag("its "),
+                    tag("the "),
+                    tag("your "),
+                    tag("target player"),
+                    tag("the amount"),
+                    tag("the number"),
+                )),
+            )
+            .parse(i)
+        })
+        .is_some();
+        if !owned_by_sibling {
+            let (target, rem) = parse_target(after_double);
+            if !matches!(target, TargetFilter::Any) {
+                let rem_lower = rem.to_lowercase();
+                let mode: Option<DoublePTMode> = nom_on_lower(&rem_lower, &rem_lower, |i| {
+                    alt((
+                        value(
+                            DoublePTMode::PowerAndToughness,
+                            tag("'s power and toughness"),
+                        ),
+                        value(DoublePTMode::Power, tag("'s power")),
+                        value(DoublePTMode::Toughness, tag("'s toughness")),
+                    ))
+                    .parse(i)
+                })
+                .map(|(m, _)| m);
+                if let Some(mode) = mode {
+                    return Some(Effect::DoublePT { mode, target });
+                }
+            }
+        }
+    }
+
     // CR 608.2k: "double its power [and toughness]" — possessive "its" is context-dependent
     if let Some(((), rest)) = nom_on_lower(lower, lower, |i| value((), tag("double its ")).parse(i))
     {

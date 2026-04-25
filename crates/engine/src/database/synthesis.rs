@@ -319,10 +319,14 @@ pub fn synthesize_job_select(face: &mut CardFace) {
         },
     );
 
+    // CR 603.6a: Enters-the-battlefield abilities trigger when a permanent enters
+    // the battlefield. The trigger source must be on the battlefield for the
+    // evaluator to match, so `trigger_zones` must include `Zone::Battlefield`.
     face.triggers.push(
         TriggerDefinition::new(TriggerMode::ChangesZone)
             .destination(Zone::Battlefield)
             .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Battlefield])
             .execute(
                 AbilityDefinition::new(AbilityKind::Spell, token_effect).sub_ability(attach_effect),
             )
@@ -1910,6 +1914,17 @@ mod job_select_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_job_select(&mut face);
         assert!(face.triggers.is_empty());
+    }
+
+    /// CR 603.6a: ETB triggers fire from the battlefield. The synthesized
+    /// ChangesZone trigger must list `Zone::Battlefield` in `trigger_zones`
+    /// or the runtime evaluator never matches Job Select equipment's ETB.
+    #[test]
+    fn synthesize_job_select_binds_battlefield_trigger_zone() {
+        let mut face = face_with_job_select();
+        synthesize_job_select(&mut face);
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
     }
 }
 

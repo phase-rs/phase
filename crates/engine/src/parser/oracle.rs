@@ -55,7 +55,7 @@ use super::oracle_special::{
 use super::oracle_static::{
     parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
-use super::oracle_trigger::parse_trigger_lines;
+use super::oracle_trigger::parse_trigger_lines_at_index;
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, strip_reminder_text, TextPair,
 };
@@ -628,7 +628,11 @@ pub fn parse_oracle_text(
             minimum,
             maximum,
         };
-        let mut triggers = parse_trigger_lines(ability_text, card_name);
+        // CR 707.9a: Thread the running trigger count as the base index so
+        // any "and it has this ability" except clause inside a leveler trigger
+        // body resolves to the correct printed-trigger slot.
+        let mut triggers =
+            parse_trigger_lines_at_index(ability_text, card_name, Some(result.triggers.len()));
         for trigger in &mut triggers {
             trigger.condition = Some(trigger_condition.clone());
         }
@@ -642,8 +646,11 @@ pub fn parse_oracle_text(
     // (CR 721.2b) is synthesized post-parse in `database::synthesis::synthesize_station`
     // where `face.power` / `face.toughness` are available for the base P/T.
     let spacecraft_consumed = if subtypes.iter().any(|s| s == "Spacecraft") {
+        // CR 707.9a: Pass the running trigger count so any "has this ability"
+        // retain modification inside a Spacecraft threshold trigger body
+        // resolves to the correct printed-trigger slot.
         let (sc_statics, sc_triggers, sc_abilities, consumed) =
-            parse_spacecraft_threshold_lines(&lines, card_name);
+            parse_spacecraft_threshold_lines(&lines, card_name, result.triggers.len());
         result.statics.extend(sc_statics);
         result.triggers.extend(sc_triggers);
         for mut def in sc_abilities {
@@ -1017,7 +1024,11 @@ pub fn parse_oracle_text(
         // CR 603.2: Compound triggers ("When X and when Y, effect") produce
         // multiple TriggerDefinitions sharing the same execute effect.
         if has_trigger_prefix(&lower) {
-            let mut triggers = parse_trigger_lines(&line, card_name);
+            // CR 707.9a: Pass the running trigger count as the base index so
+            // any "and it has this ability" except clause in this trigger's
+            // body resolves to the correct printed-trigger slot.
+            let mut triggers =
+                parse_trigger_lines_at_index(&line, card_name, Some(result.triggers.len()));
             i += 1;
             // CR 706: If the trigger's effect ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
@@ -1039,7 +1050,12 @@ pub fn parse_oracle_text(
         if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
             let effect_lower = effect_text.to_lowercase();
             if has_trigger_prefix(&effect_lower) {
-                let mut triggers = parse_trigger_lines(&effect_text, card_name);
+                // CR 707.9a: Thread the running trigger count as the base index.
+                let mut triggers = parse_trigger_lines_at_index(
+                    &effect_text,
+                    card_name,
+                    Some(result.triggers.len()),
+                );
                 // B7: Attach ability-word condition as fallback when extract_if_condition
                 // doesn't recognize the intervening-if pattern.
                 for trigger in &mut triggers {
@@ -1473,6 +1489,8 @@ pub fn parse_oracle_text(
                 &ParseContext {
                     subject: None,
                     card_name: Some(card_name.to_string()),
+                    actor: None,
+                    ..Default::default()
                 },
             );
             def.description = Some(line.to_string());
@@ -1626,7 +1644,12 @@ pub fn parse_oracle_text(
 
             // Try as trigger
             if has_trigger_prefix(&effect_lower) {
-                let mut triggers = parse_trigger_lines(&effect_text, card_name);
+                // CR 707.9a: Thread the running trigger count as the base index.
+                let mut triggers = parse_trigger_lines_at_index(
+                    &effect_text,
+                    card_name,
+                    Some(result.triggers.len()),
+                );
                 i += 1;
                 // CR 706: Consume subsequent d20 table lines for triggered die rolls.
                 if has_roll_die_pattern(&effect_lower) {
@@ -1664,6 +1687,8 @@ pub fn parse_oracle_text(
                 &ParseContext {
                     subject: None,
                     card_name: Some(card_name.to_string()),
+                    actor: None,
+                    ..Default::default()
                 },
             );
             if !has_unimplemented(&def) {

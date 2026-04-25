@@ -1,11 +1,15 @@
 mod abigale_integration;
 mod adapter_contract_fixtures;
+mod aura_on_player;
 mod cr_annotations;
+mod elusive_otter_repro;
 #[cfg(feature = "proptest")]
 mod engine_invariants;
 mod export_runtime_canaries;
+mod exquisite_blood_routing;
 mod floodpits_drowner;
 mod gran_gran_integration;
+mod harrow_regression;
 mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
@@ -14,4 +18,5 @@ mod kaito_integration;
 mod madame_null_integration;
 mod oracle_parser;
 mod rules;
+mod swans_prevention_followup;
 mod ureni_attack_trigger;

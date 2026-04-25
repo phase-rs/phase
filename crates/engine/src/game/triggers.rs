@@ -5391,7 +5391,7 @@ pub mod tests {
         {
             let obj = state.objects.get_mut(&aura).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
-            obj.attached_to = Some(forest);
+            obj.attached_to = Some(forest.into());
             obj.entered_battlefield_turn = Some(1);
             obj.trigger_definitions.push(
                 TriggerDefinition::new(TriggerMode::TapsForMana)
@@ -5492,7 +5492,7 @@ pub mod tests {
         {
             let obj = state.objects.get_mut(&sprawl).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
-            obj.attached_to = Some(forest);
+            obj.attached_to = Some(forest.into());
             obj.entered_battlefield_turn = Some(1);
             // CR 603.6d: The chosen color landed on the aura during ETB (Red in this test).
             obj.chosen_attributes

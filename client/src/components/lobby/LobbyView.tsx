@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { GameFormat } from "../../adapter/types";
+import type { FormatGroup, GameFormat } from "../../adapter/types";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { parseJoinCode } from "../../services/serverDetection";
 import { FORMAT_DEFAULTS, isLobbyEntryCompatible, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
@@ -28,16 +29,23 @@ interface LobbyViewProps {
   onServerOffline?: () => void;
 }
 
-const FORMAT_FILTERS: { value: GameFormat | null; label: string }[] = [
-  { value: null, label: "All" },
-  { value: "Standard", label: "STD" },
-  { value: "Pioneer", label: "PIO" },
-  { value: "Pauper", label: "PAU" },
-  { value: "Commander", label: "CMD" },
-  { value: "Brawl", label: "BRL" },
-  { value: "HistoricBrawl", label: "HBR" },
-  { value: "FreeForAll", label: "FFA" },
-];
+// <optgroup> render order for the format filter <select>. New engine
+// FormatGroup variants become a TS exhaustiveness error here.
+const FILTER_GROUP_ORDER: Record<FormatGroup, number> = {
+  Constructed: 0,
+  Commander: 1,
+  Multiplayer: 2,
+};
+
+const FORMAT_FILTER_GROUPS = (Object.keys(FILTER_GROUP_ORDER) as FormatGroup[])
+  .sort((a, b) => FILTER_GROUP_ORDER[a] - FILTER_GROUP_ORDER[b])
+  .map((group) => ({
+    group,
+    items: FORMAT_REGISTRY.filter((m) => m.group === group),
+  }))
+  .filter((g) => g.items.length > 0);
+
+const FILTER_ALL_SENTINEL = "__all__";
 
 type RoomTypeFilter = "all" | "p2p" | "server";
 
@@ -268,22 +276,41 @@ export function LobbyView({
         </div>
       </div>
 
+      {/* Format filter -- grouped native <select>. Native is the
+          mobile/tablet UX win: a 14-chip segmented control overflows
+          horizontally on phone/tablet, while native <select> opens an
+          OS-level full-screen picker that's already touch-optimized.
+          Trigger is sized to the 44px touch-target rule. */}
       {isServer && (
-        <div className="flex rounded-[16px] bg-black/18 p-0.5 ring-1 ring-white/10">
-          {FORMAT_FILTERS.map((opt) => (
-            <button
-              key={opt.label}
-              onClick={() => setFormatFilter(opt.value)}
-              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-                formatFilter === opt.value
-                  ? "bg-white/10 text-white"
-                  : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
+        <label
+          htmlFor="lobby-format-filter"
+          className="flex min-h-[44px] items-center gap-2 self-start rounded-[16px] bg-black/18 px-3 py-1 ring-1 ring-white/10"
+        >
+          <span className="text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
+            Format
+          </span>
+          <select
+            id="lobby-format-filter"
+            value={formatFilter ?? FILTER_ALL_SENTINEL}
+            onChange={(e) =>
+              setFormatFilter(
+                e.target.value === FILTER_ALL_SENTINEL ? null : (e.target.value as GameFormat),
+              )
+            }
+            className="bg-transparent py-1.5 text-base font-medium text-white outline-none"
+          >
+            <option value={FILTER_ALL_SENTINEL}>All formats</option>
+            {FORMAT_FILTER_GROUPS.map(({ group, items }) => (
+              <optgroup key={group} label={group}>
+                {items.map((m) => (
+                  <option key={m.format} value={m.format}>
+                    {m.label}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </label>
       )}
 
       {isServer && showRoomTypeFilter && (

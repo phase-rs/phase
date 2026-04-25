@@ -133,10 +133,27 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         && tag::<_, _, VerboseError<&str>>("exile them")
                             .parse(remainder_trimmed)
                             .is_ok();
+                    // CR 707.9: ", except <body> and <body> [and …]" — inside
+                    // a copy-effect except clause, " and " is an internal
+                    // delimiter between recognised body shapes (SetName, P/T,
+                    // type additions, "has this ability", etc.) handled by
+                    // the shared `become_copy_except` parser. The chain
+                    // splitter must NOT bisect the body at this " and ", or
+                    // the second body fragment ("and she has this ability")
+                    // becomes a stray sub_ability and never reaches the
+                    // except parser.
+                    //
+                    // `scan_contains` matches phrases starting at word
+                    // boundaries (post-space), so we probe for the bare word
+                    // "except " rather than ", except " — a leading comma
+                    // never sits at a word start.
+                    let inside_except_clause =
+                        nom_primitives::scan_contains(&before_lower, "except ");
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
-                        || search_with_that_name;
+                        || search_with_that_name
+                        || inside_except_clause;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();

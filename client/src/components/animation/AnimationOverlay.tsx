@@ -2,7 +2,6 @@ import { AnimatePresence, motion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import type { StepEffect } from "../../animation/types.ts";
-import { SPEED_MULTIPLIERS } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
 import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
 import { fetchCardImageUrl } from "../../services/scryfall.ts";
@@ -79,8 +78,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const [activeCastArcs, setActiveCastArcs] = useState<ActiveCastArc[]>([]);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
-  const animationSpeed = usePreferencesStore((s) => s.animationSpeed);
-  const speedMultiplier = SPEED_MULTIPLIERS[animationSpeed];
+  const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
 
   const getObjectPosition = useCallback(
     (objectId: number): { x: number; y: number } | null => {

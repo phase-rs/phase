@@ -169,6 +169,11 @@ pub(crate) fn apply_damage_to_target(
             // prevented amount so `EventContextAmount` resolves correctly.
             if let Some(effect_def) = state.post_replacement_effect.take() {
                 let source = state.post_replacement_source.take();
+                // CR 615.5 + CR 609.7: leave `post_replacement_event_source`
+                // populated for the call so `TargetFilter::PostReplacementSourceController`
+                // can resolve against the prevented event's damage source. Clear
+                // after the call to prevent leakage into unrelated later
+                // replacements.
                 let _ = crate::game::engine_replacement::apply_post_replacement_effect(
                     state,
                     &effect_def,
@@ -176,6 +181,7 @@ pub(crate) fn apply_damage_to_target(
                     None,
                     events,
                 );
+                state.post_replacement_event_source = None;
             }
             Ok(DamageResult::Applied(0))
         }

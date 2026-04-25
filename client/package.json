@@ -1,7 +1,7 @@
 {
   "name": "phase-rs-client",
   "private": true,
-  "version": "0.1.18",
+  "version": "0.1.19",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,6 +21,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-updater": "^2.10.0",
+    "fflate": "^0.8.2",
     "framer-motion": "^12.35.1",
     "idb-keyval": "^6.2.2",
     "peerjs": "^1.5.5",

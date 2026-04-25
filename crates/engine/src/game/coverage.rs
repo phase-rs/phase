@@ -232,6 +232,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
+        TargetFilter::PostReplacementSourceController => {
+            "prevented event source's controller".into()
+        }
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
@@ -1720,6 +1723,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("set land type {}", land_type.as_subtype_str())
         }
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
+        ContinuousModification::RetainPrintedTriggerFromSource {
+            source_trigger_index,
+        } => format!("retain printed trigger {source_trigger_index}"),
     }
 }
 

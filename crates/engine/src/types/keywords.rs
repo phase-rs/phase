@@ -920,7 +920,12 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
     }
 }
 
-/// Parse an enchant target string into a simple TargetFilter.
+/// CR 303.4 + CR 702.5: Parse an enchant target string into a simple
+/// `TargetFilter`. "Enchant player" (CR 702.5d) maps to `TargetFilter::Player`
+/// so the Aura targets and attaches to a player; controller restrictions like
+/// "you control" or "an opponent controls" don't apply to the player axis (a
+/// player IS the entity, not something a player controls), so they're dropped
+/// for the Player base.
 fn parse_enchant_target(s: &str) -> TargetFilter {
     use super::ability::TypeFilter;
 
@@ -934,6 +939,26 @@ fn parse_enchant_target(s: &str) -> TargetFilter {
     } else {
         (None, lower.trim())
     };
+
+    // CR 702.5d: "Enchant player" / "Enchant opponent" — Aura attaches to a
+    // player. The existing `TargetFilter::Typed(default with controller=…)`
+    // path already targets *only* players matching the controller axis (see
+    // `targeting::find_legal_targets` lines 46-75: empty type_filters routes
+    // exclusively into `add_players` with the controller filter applied). So:
+    //   Enchant player           → TargetFilter::Player (any player)
+    //   Enchant opponent         → TargetFilter::Typed{controller=Opponent}
+    //   Enchant player you control → TargetFilter::Typed{controller=You}
+    // This composes uniformly with the rest of the cast-targeting pipeline
+    // without needing a new `And` arm in `find_legal_targets`.
+    if base == "player" || base == "opponent" {
+        return match (base, controller) {
+            ("opponent", _) => {
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+            }
+            ("player", Some(c)) => TargetFilter::Typed(TypedFilter::default().controller(c)),
+            _ => TargetFilter::Player,
+        };
+    }
 
     let type_filter = match base {
         "creature" => Some(TypeFilter::Creature),
@@ -1901,6 +1926,30 @@ mod tests {
             enchant,
             Keyword::Enchant(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+    }
+
+    /// CR 702.5d + CR 303.4: "Enchant player" maps to `TargetFilter::Player`,
+    /// which `find_legal_targets` resolves to every player at the table. The
+    /// Aura's resolution path then routes via `attach_to_player` (CR 303.4f).
+    #[test]
+    fn parse_enchant_player_emits_player_filter() {
+        let enchant = Keyword::from_str("Enchant:player").unwrap();
+        assert_eq!(enchant, Keyword::Enchant(TargetFilter::Player));
+    }
+
+    /// CR 702.5d + CR 303.4: "Enchant opponent" (Curse cycle) maps to a typed
+    /// filter with `controller = Opponent` and empty type filters — the
+    /// player-only branch of `find_legal_targets` (lines 46-75) restricts the
+    /// candidates to opposing players, exactly mirroring "target opponent".
+    #[test]
+    fn parse_enchant_opponent_targets_only_opponents() {
+        let enchant = Keyword::from_str("Enchant:opponent").unwrap();
+        assert_eq!(
+            enchant,
+            Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
             ))
         );
     }

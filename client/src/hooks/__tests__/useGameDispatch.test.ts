@@ -51,7 +51,7 @@ describe("useGameDispatch", () => {
     });
 
     useAnimationStore.getState().clearQueue();
-    usePreferencesStore.setState({ animationSpeed: "normal" });
+    usePreferencesStore.setState({ animationSpeedMultiplier: 1.0 });
 
     vi.clearAllMocks();
     mockAdapter.submitAction.mockResolvedValue({ events: mockEvents });
@@ -102,7 +102,7 @@ describe("useGameDispatch", () => {
   });
 
   it("skips animation wait when speed is instant", async () => {
-    usePreferencesStore.setState({ animationSpeed: "instant" });
+    usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
 
     const { result } = renderHook(() => useGameDispatch());
     const action = { type: "PassPriority" as const };

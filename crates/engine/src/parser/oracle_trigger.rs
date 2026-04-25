@@ -188,7 +188,21 @@ fn trigger_should_rewrite_cost_x(def: &TriggerDefinition) -> bool {
 /// Accepts raw card Oracle text; internally normalizes self-references via
 /// `normalize_card_name_refs`. When invoked via [`parse_oracle_text`] the
 /// text is already normalized and the internal call is an idempotent no-op.
+///
+/// External callers (and tests) pass `None` for the base trigger index, which
+/// disables the "and it has this ability" arm of the BecomeCopy except-clause.
+/// Production callers in [`parse_oracle_text`] pass the running
+/// `result.triggers.len()` so each compound-split trigger receives a unique
+/// index in the source object's `base_trigger_definitions` list (CR 707.9a).
 pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition> {
+    parse_trigger_lines_at_index(text, card_name, None)
+}
+
+pub(crate) fn parse_trigger_lines_at_index(
+    text: &str,
+    card_name: &str,
+    base_trigger_index: Option<usize>,
+) -> Vec<TriggerDefinition> {
     let stripped = strip_reminder_text(text);
     let normalized = normalize_self_refs(&stripped, card_name);
     let lower = normalized.to_lowercase();
@@ -204,13 +218,18 @@ pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition
     if let Some(halves) = split_and_when_compound(&cond_lower, &condition) {
         return halves
             .into_iter()
-            .map(|cond| {
+            .enumerate()
+            .map(|(i, cond)| {
                 let trigger_text = if effect.is_empty() {
                     cond
                 } else {
                     format!("{cond}, {effect}")
                 };
-                parse_trigger_line(&trigger_text, card_name)
+                parse_trigger_line_with_index(
+                    &trigger_text,
+                    card_name,
+                    base_trigger_index.map(|b| b + i),
+                )
             })
             .collect();
     }
@@ -221,19 +240,28 @@ pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition
     if let Some(halves) = split_or_event_compound(&cond_lower, &condition) {
         return halves
             .into_iter()
-            .map(|cond| {
+            .enumerate()
+            .map(|(i, cond)| {
                 let trigger_text = if effect.is_empty() {
                     cond
                 } else {
                     format!("{cond}, {effect}")
                 };
-                parse_trigger_line(&trigger_text, card_name)
+                parse_trigger_line_with_index(
+                    &trigger_text,
+                    card_name,
+                    base_trigger_index.map(|b| b + i),
+                )
             })
             .collect();
     }
 
     // No compound — single trigger.
-    vec![parse_trigger_line(text, card_name)]
+    vec![parse_trigger_line_with_index(
+        text,
+        card_name,
+        base_trigger_index,
+    )]
 }
 
 /// Part D: If `"for the first time each turn"` appears as a word-boundary
@@ -365,8 +393,28 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
 /// Accepts raw card Oracle text; internally normalizes self-references via
 /// `normalize_card_name_refs`. When invoked via [`parse_oracle_text`] the
 /// text is already normalized and the internal call is an idempotent no-op.
-#[tracing::instrument(level = "debug", skip(card_name))]
+///
+/// **Trigger index** (`current_trigger_index`): when known, the caller passes
+/// the index this trigger will occupy in the source object's
+/// `base_trigger_definitions` list. This is consumed by the BecomeCopy
+/// except-clause parser (CR 707.9a) for "and it has this ability" — the
+/// resulting `RetainPrintedTriggerFromSource { source_trigger_index }` points
+/// back into the source's printed triggers so the copy retains the trigger
+/// without needing a forward reference to the partial definition.
+///
+/// External callers (and the test API at `parse_trigger_line(text, card_name)`)
+/// pass `None`, in which case any "has this ability" clause inside the trigger
+/// body declines gracefully.
 pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
+    parse_trigger_line_with_index(text, card_name, None)
+}
+
+#[tracing::instrument(level = "debug", skip(card_name))]
+pub(crate) fn parse_trigger_line_with_index(
+    text: &str,
+    card_name: &str,
+    current_trigger_index: Option<usize>,
+) -> TriggerDefinition {
     let text = strip_reminder_text(text);
     // Replace self-references: "this creature", "this enchantment", card name → ~
     let normalized = normalize_self_refs(&text, card_name);
@@ -407,8 +455,15 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
     // "it"/"its"/"itself" in the effect refer to the trigger subject, not the source permanent.
     let trigger_subject = extract_trigger_subject_for_context(condition_text);
+    // CR 707.9a + CR 603.1: Forward the trigger's index into the parse context
+    // so the BecomeCopy except-clause parser ("she has this ability") can emit
+    // `RetainPrintedTriggerFromSource { source_trigger_index }` referencing
+    // this very trigger. Also forward `card_name` so the SetName override in
+    // "except her name is ~" carries the original-case card name.
     let effect_ctx = ParseContext {
         subject: Some(trigger_subject),
+        card_name: Some(card_name.to_string()),
+        current_trigger_index,
         ..Default::default()
     };
 
@@ -460,16 +515,6 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
         (Some(c), None) | (None, Some(c)) => Some(c),
         (None, None) => None,
     };
-
-    // CR 113.3c + CR 603.2: When the trigger's subject is a non-self player
-    // (e.g. "whenever another player attacks ..." → valid_target carries
-    // `ControllerRef::Opponent`), a player-scoped effect body like "they draw
-    // a card" / "they lose N life" must route to the triggering player, not
-    // the trigger controller. Surface this via `player_scope =
-    // PlayerFilter::TriggeringPlayer` on the execute ability so the shared
-    // player-scope iterator in `resolve_ability_chain` rebinds `controller`
-    // for the duration of the effect.
-    rewire_player_scoped_execute_to_triggering_player(&mut def);
 
     // CR 109.4 + CR 603.7c: When the execute ability references
     // `ControllerRef::TargetPlayer` in a filter (e.g. Ruthless Winnower's
@@ -1884,54 +1929,6 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     (mode, def)
 }
 
-/// CR 608.2k: Extract the trigger subject from condition text for pronoun context.
-/// Reuses `parse_trigger_subject` but only needs the `TargetFilter`, not the remainder.
-/// For subjectless triggers (phase, player-action, game mechanics), the result is `Any`
-/// and `resolve_it_pronoun` falls back to `SelfRef`.
-///
-/// Warnings from `parse_trigger_subject` are discarded — this function is a best-effort
-/// subject extraction for pronoun resolution, not a diagnostic site. Warnings for
-/// degraded subjects are emitted by the main trigger condition path instead.
-/// CR 113.3c + CR 603.2: If the trigger's subject is scoped to an opponent
-/// (the trigger fires off another player's action) AND its execute ability has
-/// a player-scoped effect with no explicit `player_scope`, rewire the execute
-/// to `PlayerFilter::TriggeringPlayer` so the effect resolves for the acting
-/// player rather than the trigger controller. Covers Firemane Commando's
-/// "they draw a card" branch and analogous cards whose effect is expressed
-/// from the acting player's perspective.
-fn rewire_player_scoped_execute_to_triggering_player(def: &mut TriggerDefinition) {
-    let is_opponent_subject = matches!(
-        &def.valid_target,
-        Some(TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::Opponent),
-            type_filters,
-            properties,
-            ..
-        })) if type_filters.is_empty() && properties.is_empty()
-    );
-    if !is_opponent_subject {
-        return;
-    }
-    let Some(execute) = def.execute.as_deref_mut() else {
-        return;
-    };
-    if execute.player_scope.is_some() {
-        return;
-    }
-    use crate::types::ability::{Effect, PlayerFilter};
-    let routable = matches!(
-        &*execute.effect,
-        Effect::Draw { .. }
-            | Effect::GainLife { .. }
-            | Effect::LoseLife { .. }
-            | Effect::Discard { .. }
-            | Effect::Mill { .. }
-    );
-    if routable {
-        execute.player_scope = Some(PlayerFilter::TriggeringPlayer);
-    }
-}
-
 /// CR 109.4 + CR 603.7c: Returns `true` when any filter inside the execute
 /// ability's effect chain references `ControllerRef::TargetPlayer`. Walks
 /// sub-abilities so triggers like Dokuchi Silencer (outer Discard, inner
@@ -1959,6 +1956,14 @@ fn execute_references_target_player(effect: &crate::types::ability::Effect) -> b
     false
 }
 
+/// CR 608.2k: Extract the trigger subject from condition text for pronoun context.
+/// Reuses `parse_trigger_subject` but only needs the `TargetFilter`, not the remainder.
+/// For subjectless triggers (phase, player-action, game mechanics), the result is `Any`
+/// and `resolve_it_pronoun` falls back to `SelfRef`.
+///
+/// Warnings from `parse_trigger_subject` are discarded — this function is a best-effort
+/// subject extraction for pronoun resolution, not a diagnostic site. Warnings for
+/// degraded subjects are emitted by the main trigger condition path instead.
 fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
     let lower = condition_text.to_lowercase();
     let after_keyword = alt((
@@ -4424,6 +4429,12 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     let filter = extract_spell_type_filter(rest);
     let mut def = make_base();
     def.mode = TriggerMode::SpellCast;
+    // CR 603.2: Trigger event must match — gate on caster=you so opponent's
+    // Nth spell does not fire this trigger. Mirrors the `Opponent` branch below
+    // that sets `valid_target` for symmetric per-caster scoping.
+    def.valid_target = Some(TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::You),
+    ));
     def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n, filter });
     if timing == NthSpellTimingKind::DuringOpponentsTurn {
         def.condition = Some(TriggerCondition::DuringOpponentsTurn);
@@ -5225,16 +5236,38 @@ fn try_parse_discard_trigger(
     let mut def = make_base();
     def.mode = TriggerMode::Discarded;
 
-    let type_filter = match controller_ref {
-        Some(cr) => TypedFilter::new(TypeFilter::Card).controller(cr),
-        None => TypedFilter::new(TypeFilter::Card),
+    // CR 701.9a + CR 603.2c: parse the type qualifier on the discarded card
+    // ("a land card", "a creature card", "a nonland card") so the trigger only
+    // fires when the matching card type is discarded. Reuses `parse_type_phrase`
+    // (the same building block `parse_discard_card_filter` uses for cost-form
+    // discards in `oracle_effect/imperative.rs`). The actor-derived
+    // `controller_ref` is preserved on the resulting filter.
+    let parsed_typed = {
+        let (filter, _rest) = parse_type_phrase(after_verb);
+        match filter {
+            TargetFilter::Typed(tf) => Some(tf),
+            _ => None,
+        }
+    };
+    let type_filter = match parsed_typed {
+        Some(tf)
+            if tf
+                .type_filters
+                .iter()
+                .any(|t| !matches!(t, TypeFilter::Card | TypeFilter::Any))
+                || !tf.properties.is_empty() =>
+        {
+            match controller_ref {
+                Some(cr) => tf.controller(cr),
+                None => tf,
+            }
+        }
+        _ => match controller_ref {
+            Some(cr) => TypedFilter::new(TypeFilter::Card).controller(cr),
+            None => TypedFilter::new(TypeFilter::Card),
+        },
     };
     def.valid_card = Some(TargetFilter::Typed(type_filter));
-
-    // Parse optional type filter from remainder: "a card", "a creature card", "a nonland card"
-    // For now, the basic "a card" / "one or more cards" is sufficient.
-    // Future: parse "a creature card" → add CardType filter property.
-    let _ = after_verb; // remainder available for future type-filter parsing
 
     Some((TriggerMode::Discarded, def))
 }
@@ -7225,7 +7258,7 @@ mod tests {
         // Effect amount should be the triggering event's amount, not Fixed 1.
         let execute = def.execute.as_ref().expect("execute ability present");
         match &*execute.effect {
-            crate::types::ability::Effect::GainLife { amount, .. } => {
+            crate::types::ability::Effect::GainLife { amount, player } => {
                 assert_eq!(
                     amount,
                     &QuantityExpr::Ref {
@@ -7233,9 +7266,28 @@ mod tests {
                     },
                     "Exquisite Blood: gain amount must reference event's life-loss amount"
                 );
+                // CR 608.2k: "you gain" — effect-level subject is the ability
+                // controller. Must NOT be rerouted to the trigger's opponent
+                // subject by a post-hoc `player_scope` override.
+                assert_eq!(
+                    player,
+                    &crate::types::ability::GainLifePlayer::Controller,
+                    "Exquisite Blood: 'you gain' recipient must be the ability controller"
+                );
             }
             other => panic!("expected GainLife effect, got {other:?}"),
         }
+        // CR 113.3c + CR 608.2k: The effect's subject ("you") is the single
+        // authority for who gains life. There must be NO `player_scope` on the
+        // execute ability — that field was historically (mis)used by a
+        // post-hoc rewire to redirect "you gain" effects to the triggering
+        // opponent, which is exactly the regression this guards against.
+        assert!(
+            execute.player_scope.is_none(),
+            "Exquisite Blood: execute.player_scope must be None — the effect-level \
+             subject is authoritative. Found {:?}",
+            execute.player_scope,
+        );
     }
 
     #[test]
@@ -7436,6 +7488,25 @@ mod tests {
         assert_eq!(
             def.constraint,
             Some(TriggerConstraint::NthSpellThisTurn { n: 3, filter: None })
+        );
+    }
+
+    /// CR 603.2: "you cast your Nth spell" must be gated on caster=you so the
+    /// trigger does not fire for opponents' casts. Mirrors the symmetric
+    /// `controller(Opponent)` scoping on the "an opponent casts their Nth"
+    /// branch (Alphinaud Leveilleur class).
+    #[test]
+    fn trigger_nth_spell_you_scopes_to_controller() {
+        let def = parse_trigger_line(
+            "Whenever you cast your second spell each turn, scry 1.",
+            "Alphinaud Leveilleur",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
         );
     }
 
@@ -7933,6 +8004,29 @@ mod tests {
                 TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be
+    /// preserved so a "discards a land card" trigger fires only on land
+    /// discards (Aclazotz, Deepest Betrayal class).
+    #[test]
+    fn trigger_opponent_discards_a_land_card() {
+        let def = parse_trigger_line(
+            "Whenever an opponent discards a land card, create a 1/1 black Bat creature token with flying.",
+            "Aclazotz, Deepest Betrayal",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        match def.valid_card.as_ref().expect("valid_card must be set") {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Land),
+                    "expected Land in type_filters, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
     }
 
     #[test]
@@ -10567,15 +10661,28 @@ mod tests {
                 "expected And(AttackersDeclaredMin, NoneOfAttackersTargetedYou), got {other:?}"
             ),
         }
-        // CR 113.3c + CR 603.2: "they draw a card" routes to the triggering player.
+        // CR 121.1 + CR 603.7c + CR 608.2k: "they draw a card" — the effect-level
+        // subject ("they") must be encoded directly on the Draw target as
+        // `TriggeringPlayer`, not via a post-hoc `player_scope` override on the
+        // execute ability. The runtime auto-binds `target: TriggeringPlayer`
+        // from `state.current_trigger_event` at resolution time
+        // (`extract_event_context_filter` in `effects/mod.rs`).
         let execute = def.execute.as_ref().expect("execute");
-        assert!(matches!(
-            &*execute.effect,
-            crate::types::ability::Effect::Draw { .. }
-        ));
-        assert_eq!(
+        match &*execute.effect {
+            crate::types::ability::Effect::Draw { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringPlayer,
+                    "Draw target must be TriggeringPlayer, not Controller"
+                );
+            }
+            other => panic!("expected Draw effect, got {other:?}"),
+        }
+        assert!(
+            execute.player_scope.is_none(),
+            "player_scope must be None — the effect-level subject is the single \
+             authority for routing. Found {:?}",
             execute.player_scope,
-            Some(crate::types::ability::PlayerFilter::TriggeringPlayer)
         );
     }
 
@@ -10763,5 +10870,191 @@ mod tests {
             !trigger_should_rewrite_cost_x(&def),
             "dies trigger should NOT have X rewritten to CostXPaid"
         );
+    }
+
+    // ── BecomeCopy via triggered ability — CR 707.9 + CR 707.9a ───────────
+    //
+    // Class: "[Self] becomes a copy of <target>, except <body>" inside a
+    // triggered ability body. Building blocks under test: shared
+    // `parse_except_clause` (oracle_effect::become_copy_except), the new
+    // `RetainPrintedTriggerFromSource` continuous modification (CR 707.9a),
+    // and trigger-index threading via `ParseContext::current_trigger_index`.
+    //
+    // The tests intentionally span multiple cards / phrasings (Irma, plus
+    // a synthetic gendered variant) so the building block is exercised
+    // across the class — not just the named card.
+
+    #[test]
+    fn trigger_become_copy_with_set_name_and_retain_this_ability() {
+        // Irma, Part-Time Mutant — the canonical card driving this work.
+        // Use the indexed entry point to simulate `parse_oracle_text`'s
+        // wiring of `current_trigger_index` (the trigger is the card's first
+        // and only printed trigger → index 0).
+        let def = parse_trigger_line_with_index(
+            "At the beginning of combat on your turn, ~ becomes a copy of up to one other target creature you control, except her name is ~ and she has this ability. Then put a +1/+1 counter on her.",
+            "Irma, Part-Time Mutant",
+            Some(0),
+        );
+        // Phase + constraint: BoC on your turn.
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+
+        let execute = def.execute.as_deref().expect("execute body must parse");
+        // Primary effect: BecomeCopy with target = creature you control + Another.
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                target,
+                additional_modifications,
+                ..
+            } => {
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(
+                            tf.properties.contains(&FilterProp::Another),
+                            "expected Another (other-target) property, got {:?}",
+                            tf.properties
+                        );
+                    }
+                    other => panic!("expected Typed creature target, got {other:?}"),
+                }
+                // Modifications must include SetName and RetainPrintedTriggerFromSource.
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::SetName { name }
+                            if name == "Irma, Part-Time Mutant"
+                    )),
+                    "expected SetName(Irma, Part-Time Mutant), got {additional_modifications:?}"
+                );
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::RetainPrintedTriggerFromSource {
+                            source_trigger_index: 0,
+                        }
+                    )),
+                    "expected RetainPrintedTriggerFromSource(0), got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy primary effect, got {other:?}"),
+        }
+        // Reflexive sub_ability: PutCounter on her (= SelfRef via is_it_pronoun).
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("Then put a +1/+1 counter on her — sub_ability must chain");
+        match sub.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                target,
+                ..
+            } => {
+                // +1/+1 counters use the normalized "P1P1" canonical form
+                // (see oracle_effect::counter::normalize_counter_type).
+                assert_eq!(counter_type, "P1P1");
+                assert!(
+                    matches!(target, TargetFilter::SelfRef),
+                    "+1/+1 counter must land on the post-copy self, got {target:?}"
+                );
+            }
+            other => panic!("expected PutCounter sub_ability, got {other:?}"),
+        }
+        // Optional targeting: "up to one" must surface optional_targeting=true.
+        assert!(
+            execute.optional_targeting,
+            "up to one target must mark the execute as optional_targeting=true"
+        );
+    }
+
+    #[test]
+    fn trigger_become_copy_he_has_this_ability() {
+        // Same class, gendered "he" variant — the building block must accept
+        // every pronoun without per-card branching.
+        let def = parse_trigger_line_with_index(
+            "At the beginning of your upkeep, ~ becomes a copy of target creature you control, except his name is ~ and he has this ability.",
+            "Test Mutant",
+            Some(0),
+        );
+        let execute = def.execute.as_deref().unwrap();
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(additional_modifications.iter().any(|m| matches!(
+                    m,
+                    crate::types::ability::ContinuousModification::SetName { name }
+                        if name == "Test Mutant"
+                )));
+                assert!(additional_modifications.iter().any(|m| matches!(
+                    m,
+                    crate::types::ability::ContinuousModification::RetainPrintedTriggerFromSource {
+                        source_trigger_index: 0
+                    }
+                )));
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_become_copy_it_has_this_ability_neuter() {
+        // Class: neuter "it" pronoun in the except clause. The trigger frame
+        // here is the simple "[Self] becomes ..." form (Irma family); the
+        // alternative "you may have ~ become ..." frame (Cryptoplasm proper)
+        // is a distinct grammatical pattern handled by the replacement parser
+        // — the building block under test is the except-clause arm regardless
+        // of which trigger frame produced the BecomeCopy.
+        let def = parse_trigger_line_with_index(
+            "At the beginning of your upkeep, ~ becomes a copy of another target creature, except it has this ability.",
+            "Test Cloner",
+            Some(0),
+        );
+        let execute = def.execute.as_deref().unwrap();
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::RetainPrintedTriggerFromSource { source_trigger_index: 0 }
+                    )),
+                    "trigger with 'except it has this ability' must emit \
+                     RetainPrintedTriggerFromSource(0); got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_become_copy_without_this_ability_clause_emits_no_retain() {
+        // The retain modification must only be emitted when the body contains
+        // "<pronoun> has this ability". A copy trigger without that clause
+        // must NOT spuriously retain the trigger.
+        let def = parse_trigger_line(
+            "When ~ enters, ~ becomes a copy of target creature you control.",
+            "Vanilla Cloner",
+        );
+        let execute = def.execute.as_deref().unwrap();
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    !additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::RetainPrintedTriggerFromSource { .. }
+                    )),
+                    "no 'has this ability' clause → no RetainPrintedTriggerFromSource"
+                );
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
     }
 }

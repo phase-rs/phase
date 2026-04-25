@@ -21,7 +21,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_replacement::parse_replacement_line;
 use super::oracle_special::normalize_self_refs_for_static;
 use super::oracle_static::parse_static_line;
-use super::oracle_trigger::parse_trigger_lines;
+use super::oracle_trigger::parse_trigger_lines_at_index;
 use super::oracle_util::{strip_reminder_text, TextPair};
 
 /// Detect a "{cost}: Level N" line using structural parsing.
@@ -142,7 +142,14 @@ pub(crate) fn parse_class_oracle_text(
                 || lower.starts_with("whenever ")
                 || lower.starts_with("at ")
             {
-                let mut triggers = parse_trigger_lines(line, card_name);
+                // CR 707.9a: Pass the running trigger count as the base index
+                // so any "and it has this ability" except clause inside a
+                // Class-level trigger body resolves to the correct printed
+                // trigger slot. Without this, level-gated triggers using
+                // `RetainPrintedTriggerFromSource` would point at the wrong
+                // (or non-existent) source trigger index.
+                let mut triggers =
+                    parse_trigger_lines_at_index(line, card_name, Some(result.triggers.len()));
                 // CR 716.2a: Gate continuous triggers at levels > 1.
                 if section.level > 1 {
                     for trigger in &mut triggers {
@@ -194,7 +201,14 @@ pub(crate) fn parse_class_oracle_text(
                     || effect_lower.starts_with("whenever ")
                     || effect_lower.starts_with("at ")
                 {
-                    let mut triggers = parse_trigger_lines(&effect_text, card_name);
+                    // CR 707.9a: Same trigger-index threading as the bare
+                    // trigger arm above — required for the "has this ability"
+                    // retain modification to point at the correct source slot.
+                    let mut triggers = parse_trigger_lines_at_index(
+                        &effect_text,
+                        card_name,
+                        Some(result.triggers.len()),
+                    );
                     if section.level > 1 {
                         for trigger in &mut triggers {
                             trigger.condition = Some(TriggerCondition::ClassLevelGE {
@@ -305,4 +319,119 @@ fn wrap_static_with_class_level(mut static_def: StaticDefinition, level: u8) -> 
         None => level_cond,
     });
     static_def
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::{ContinuousModification, Effect};
+
+    /// CR 707.9a + CR 716.2a: A Class-level trigger body using "becomes a copy
+    /// of <X>, except <pronoun> has this ability" must emit
+    /// `RetainPrintedTriggerFromSource { source_trigger_index: <N> }` where
+    /// `<N>` is the trigger's index in the card's full printed-trigger list.
+    /// This guards against the regression where Class-level triggers called
+    /// `parse_trigger_lines` (no index thread), causing the retain modification
+    /// to either silently drop or point at trigger index 0 regardless of where
+    /// the trigger actually sits in the printed list.
+    #[test]
+    fn class_level_trigger_become_copy_threads_trigger_index() {
+        // Synthetic two-level Class enchantment: level 1 has a trigger
+        // already (so the level-2 trigger occupies index 1 in the printed
+        // list, not index 0). Level 2 introduces a body trigger
+        // "At the beginning of your upkeep, ~ becomes a copy of … and
+        // it has this ability".
+        //
+        // Without the index thread, `RetainPrintedTriggerFromSource` would
+        // come out as `source_trigger_index: 0`, pointing at the wrong
+        // trigger. With the thread, it correctly points at index 1.
+        //
+        // The level-2 body uses a phase trigger (At the beginning of …)
+        // rather than the class-level `When ~ becomes level N` trigger,
+        // because the latter takes a special path that doesn't dispatch
+        // to the chain parser for the body — the AtClassLevel trigger is
+        // a registration-time event, not a body-effect trigger.
+        let lines = vec![
+            "When this Class enters, draw a card.",
+            "{2}: Level 2",
+            "At the beginning of your upkeep, ~ becomes a copy of target creature you control, except its name is ~ and it has this ability.",
+        ];
+        let result = parse_class_oracle_text(
+            &lines,
+            "Test Class",
+            &[],
+            ParsedAbilities {
+                abilities: Vec::new(),
+                triggers: Vec::new(),
+                statics: Vec::new(),
+                replacements: Vec::new(),
+                extracted_keywords: Vec::new(),
+                modal: None,
+                additional_cost: None,
+                casting_restrictions: Vec::new(),
+                casting_options: Vec::new(),
+                solve_condition: None,
+                strive_cost: None,
+                parse_warnings: Vec::new(),
+            },
+        );
+
+        // Find the level-2 BecomeCopy trigger.
+        let become_copy_trigger = result
+            .triggers
+            .iter()
+            .find(|t| {
+                t.execute
+                    .as_ref()
+                    .is_some_and(|e| matches!(*e.effect, Effect::BecomeCopy { .. }))
+            })
+            .expect("level-2 trigger should produce a BecomeCopy effect");
+
+        // The trigger's index in the printed list — should be 1 (the level-1
+        // ETB trigger occupies index 0).
+        let expected_index = result
+            .triggers
+            .iter()
+            .position(|t| std::ptr::eq(t, become_copy_trigger))
+            .unwrap();
+        assert_eq!(
+            expected_index, 1,
+            "level-2 BecomeCopy trigger must occupy index 1 (level-1 ETB at 0); \
+             test setup is wrong if this fails"
+        );
+
+        // The retain modification's source_trigger_index must match.
+        let execute = become_copy_trigger.execute.as_deref().unwrap();
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                let retain = additional_modifications
+                    .iter()
+                    .find_map(|m| match m {
+                        ContinuousModification::RetainPrintedTriggerFromSource {
+                            source_trigger_index,
+                        } => Some(*source_trigger_index),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "level-2 BecomeCopy must include a \
+                             RetainPrintedTriggerFromSource modification; \
+                             got {additional_modifications:?}"
+                        )
+                    });
+                // CR 707.9a: the retained-trigger index must equal this trigger's
+                // position in the printed list — guards against the regression where
+                // Class-level triggers don't thread the index.
+                assert_eq!(
+                    retain, expected_index,
+                    "CR 707.9a: retained-trigger index must equal this trigger's \
+                     position in the printed list ({expected_index}); got {retain}"
+                );
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+    }
 }

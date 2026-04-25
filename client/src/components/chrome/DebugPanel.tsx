@@ -1,3 +1,4 @@
+import { zipSync, strToU8 } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GameState } from "../../adapter/types";
@@ -141,21 +142,51 @@ export function DebugPanel() {
     });
   }, []);
 
+  const formatEntries = useCallback((entries: ConsoleEntry[]) =>
+    entries
+      .map((e) => {
+        const ts = new Date(e.timestamp).toISOString().slice(11, 23);
+        return `${ts} [${e.level}] ${e.message}`;
+      })
+      .join("\n"),
+  []);
+
   const handleCopyConsole = useCallback(() => {
     if (visibleEntries.length === 0) {
       setStatus({ type: "error", message: "No console entries to copy" });
       return;
     }
-    const text = visibleEntries
-      .map((e) => {
-        const ts = new Date(e.timestamp).toISOString().slice(11, 23);
-        return `${ts} [${e.level}] ${e.message}`;
-      })
-      .join("\n");
-    navigator.clipboard.writeText(text)
+    navigator.clipboard.writeText(formatEntries(visibleEntries))
       .then(() => setStatus({ type: "success", message: `Copied ${visibleEntries.length} entries` }))
       .catch(() => setStatus({ type: "error", message: "Failed to copy console" }));
-  }, [visibleEntries]);
+  }, [visibleEntries, formatEntries]);
+
+  const handleExportZip = useCallback(() => {
+    if (visibleEntries.length === 0) {
+      setStatus({ type: "error", message: "No console entries to export" });
+      return;
+    }
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const filename = `debug-log-${stamp}.log`;
+      const zipped = zipSync(
+        { [filename]: strToU8(formatEntries(visibleEntries)) },
+        { level: 9 },
+      );
+      const blob = new Blob([zipped as BlobPart], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `debug-log-${stamp}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setStatus({ type: "success", message: `Exported ${visibleEntries.length} entries` });
+    } catch {
+      setStatus({ type: "error", message: "Failed to export zip" });
+    }
+  }, [visibleEntries, formatEntries]);
 
   const handleConsoleScroll = useCallback(() => {
     const el = consoleContainerRef.current;
@@ -301,6 +332,13 @@ export function DebugPanel() {
                 className="text-[10px] text-gray-600 hover:text-gray-400"
               >
                 Copy
+              </button>
+              <button
+                onClick={handleExportZip}
+                className="text-[10px] text-gray-600 hover:text-gray-400"
+                title="Download visible console entries as a compressed .zip file"
+              >
+                Export ZIP
               </button>
               <button
                 onClick={() => { consoleLogs.length = 0; setConsoleSnapshot([]); prevSnapshotLenRef.current = 0; setNewMessageCount(0); }}

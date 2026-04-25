@@ -2,13 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
-import { FORMAT_REGISTRY } from "../data/formatRegistry";
+import { formatMetadata } from "../data/formatRegistry";
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
+import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel } from "../components/menu/MenuShell";
 import { MyDecks, StatusBadge } from "../components/menu/MyDecks";
+import { ModalPanelShell } from "../components/ui/ModalPanelShell";
 import {
   COLOR_DOT_CLASS,
   getRepresentativeCard,
@@ -22,18 +24,18 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
 
-// --- Format pill styling ---
+// --- Format trigger styling ---
 //
-// The list of formats itself comes from `FORMAT_REGISTRY` (engine-authored).
-// Only visual styling per group lives here.
+// One large touch-friendly chip shows the current format and opens the
+// rich <FormatPicker> in a modal/sheet on tap. This replaces the flat
+// pill row, which failed mobile touch-target rules (28px) and pushed the
+// deck grid below the fold once the format count grew past ~6.
 
-const GROUP_PILL_ACTIVE: Record<FormatGroup, string> = {
-  Constructed: "border-indigo-300/30 bg-indigo-500/20 text-indigo-100",
-  Commander: "border-amber-300/30 bg-amber-500/20 text-amber-100",
-  Multiplayer: "border-emerald-300/30 bg-emerald-500/20 text-emerald-100",
+const GROUP_TRIGGER_TONE: Record<FormatGroup, string> = {
+  Constructed: "border-indigo-300/40 bg-indigo-500/15 text-indigo-50 hover:bg-indigo-500/22",
+  Commander: "border-amber-300/40 bg-amber-500/15 text-amber-50 hover:bg-amber-500/22",
+  Multiplayer: "border-emerald-300/40 bg-emerald-500/15 text-emerald-50 hover:bg-emerald-500/22",
 };
-
-const PILL_INACTIVE = "border-white/10 text-slate-400 hover:border-white/18 hover:text-white";
 
 // --- Component ---
 
@@ -42,6 +44,10 @@ export function GameSetupPage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   useAudioContext("menu");
+
+  // Format picker modal -- opened by the hero chip below the title. Mobile
+  // gets a full-screen sheet via <ModalPanelShell>; desktop centers it.
+  const [formatPickerOpen, setFormatPickerOpen] = useState(false);
 
   // Format & config state
   const [selectedFormat, setSelectedFormat] = useState<GameFormat | null>(null);
@@ -158,26 +164,81 @@ export function GameSetupPage() {
       <div className="menu-scene__haze" />
 
       <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col px-6 pt-20 pb-10 lg:px-10">
-        {/* Header + format pills */}
-        <div className="mb-8 flex flex-col items-center gap-4">
+        {/* Header + format trigger -- one large touch chip showing the
+            current format, opens the rich picker modal on tap. The trigger
+            is tinted by the engine FormatGroup so the affordance reads at a
+            glance ("amber == Commander", "indigo == Constructed"). */}
+        <div className="mb-8 flex flex-col items-center gap-3">
           <div className="menu-kicker text-amber-100/58">Match Setup</div>
           <h1 className="menu-display text-balance text-center text-[2.4rem] leading-[1.02] text-white sm:text-[3.1rem]">
             Start a match.
           </h1>
-          <div className="flex flex-wrap justify-center gap-2">
-            {FORMAT_REGISTRY.map(({ format, label, group }) => (
-              <button
-                key={format}
-                onClick={() => applyFormat(format)}
-                className={`rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors ${
-                  selectedFormat === format ? GROUP_PILL_ACTIVE[group] : PILL_INACTIVE
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          {(() => {
+            const meta = selectedFormat ? formatMetadata(selectedFormat) : null;
+            const tone = meta
+              ? GROUP_TRIGGER_TONE[meta.group]
+              : "border-white/10 bg-black/18 text-slate-300 hover:border-white/18";
+            return (
+              <div className="mt-6 flex flex-col items-center gap-2">
+                <span className="text-[0.62rem] font-medium uppercase tracking-[0.22em] text-slate-400/70">
+                  Format
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setFormatPickerOpen(true)}
+                  aria-haspopup="dialog"
+                  aria-expanded={formatPickerOpen}
+                  aria-label={
+                    meta
+                      ? `Format: ${meta.label} (${meta.group}). Tap to change.`
+                      : "Choose match format"
+                  }
+                  className={`group flex min-h-[56px] items-center gap-4 rounded-full border-2 px-7 py-3 text-lg font-semibold shadow-[0_8px_24px_rgba(0,0,0,0.32)] transition-all hover:scale-[1.02] active:scale-[0.99] ${tone}`}
+                >
+                  <span className="text-[1.15rem] tracking-tight">
+                    {meta?.label ?? "Choose format"}
+                  </span>
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 transition-colors group-hover:bg-white/20">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                      className="h-4 w-4"
+                      aria-hidden="true"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.06l3.71-3.83a.75.75 0 1 1 1.08 1.04l-4.25 4.39a.75.75 0 0 1-1.08 0L5.21 8.27a.75.75 0 0 1 .02-1.06Z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  </span>
+                </button>
+                <span className="text-[0.7rem] text-slate-500">
+                  Tap to change
+                </span>
+              </div>
+            );
+          })()}
         </div>
+
+        {formatPickerOpen && (
+          <ModalPanelShell
+            eyebrow="Match Setup"
+            title="Choose a format"
+            subtitle="Pick the rules everyone at the table will play by."
+            onClose={() => setFormatPickerOpen(false)}
+            maxWidthClassName="max-w-3xl"
+            bodyClassName="overflow-y-auto px-2 py-4 lg:px-6 lg:py-6"
+          >
+            <FormatPicker
+              onFormatSelect={(format) => {
+                applyFormat(format);
+                setFormatPickerOpen(false);
+              }}
+            />
+          </ModalPanelShell>
+        )}
 
         {/* Main: deck grid (left) + sidebar (right) */}
         <div className="mx-auto grid w-full max-w-6xl gap-6 lg:grid-cols-[1fr_280px]">

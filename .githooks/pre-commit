@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Running pre-commit checks..."
+
+echo "  [rust] parser combinator gate"
+./scripts/check-parser-combinators.sh
+
+echo "All pre-commit checks passed."

@@ -458,6 +458,7 @@ mod tests {
             redirect_target: None,
             mana_modification: None,
             additional_token_spec: None,
+            ensure_token_specs: None,
         });
         object.replacement_definitions.push(ReplacementDefinition {
             destination_zone: None,

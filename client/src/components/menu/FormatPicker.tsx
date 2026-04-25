@@ -1,4 +1,5 @@
-import type { GameFormat } from "../../adapter/types";
+import type { FormatGroup as EngineFormatGroup, GameFormat } from "../../adapter/types";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 
 interface FormatOption {
   format: GameFormat;
@@ -7,39 +8,35 @@ interface FormatOption {
 }
 
 interface FormatGroup {
-  label: string;
+  label: EngineFormatGroup;
   tone: string;
   formats: FormatOption[];
 }
 
-const FORMAT_GROUPS: FormatGroup[] = [
-  {
-    label: "Constructed",
-    tone: "indigo",
-    formats: [
-      { format: "Standard", label: "Standard", description: "Rotating card pool" },
-      { format: "Pioneer", label: "Pioneer", description: "Non-rotating from 2012" },
-      { format: "Historic", label: "Historic", description: "Arena's eternal format" },
-      { format: "Pauper", label: "Pauper", description: "Commons only" },
-    ],
-  },
-  {
-    label: "Commander",
-    tone: "amber",
-    formats: [
-      { format: "Commander", label: "Commander", description: "100-card singleton, 2–4 players" },
-      { format: "Brawl", label: "Brawl", description: "60-card Standard singleton" },
-      { format: "HistoricBrawl", label: "Historic Brawl", description: "60-card eternal singleton" },
-    ],
-  },
-  {
-    label: "Multiplayer",
-    tone: "emerald",
-    formats: [
-      { format: "FreeForAll", label: "Free-for-All", description: "3–6 player battle royale" },
-    ],
-  },
-];
+// Map the engine's FormatGroup taxonomy to display tones. Engine adds a new
+// group → TS exhaustiveness check here forces us to assign a tone.
+const GROUP_TONE: Record<EngineFormatGroup, string> = {
+  Constructed: "indigo",
+  Commander: "amber",
+  Multiplayer: "emerald",
+};
+
+// Render order for groups; mirrors how players think about the game's
+// format hierarchy (sanctioned → Commander → casual).
+const GROUP_ORDER: EngineFormatGroup[] = ["Constructed", "Commander", "Multiplayer"];
+
+// Groups derive from the engine-authored FORMAT_REGISTRY so a new format
+// added in `crates/engine/src/types/format.rs` automatically appears under
+// the right group with the engine's label and description.
+const FORMAT_GROUPS: FormatGroup[] = GROUP_ORDER.map((group) => ({
+  label: group,
+  tone: GROUP_TONE[group],
+  formats: FORMAT_REGISTRY.filter((m) => m.group === group).map((m) => ({
+    format: m.format,
+    label: m.label,
+    description: m.description,
+  })),
+})).filter((g) => g.formats.length > 0);
 
 const GROUP_TONES: Record<string, { kicker: string; accent: string; border: string; bg: string; hover: string }> = {
   indigo: {

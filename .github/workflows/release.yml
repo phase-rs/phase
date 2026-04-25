@@ -8,8 +8,91 @@ permissions:
   contents: write
 
 jobs:
+  tauri-preflight:
+    name: Tauri Preflight
+    # Fast-fail sanity check before paying for the full release matrix. Catches
+    # the structural class of failures that historically only surfaced 30-45
+    # minutes into the build-tauri job: malformed JSON, version drift between
+    # workspace Cargo.toml / tauri.conf.json / package.json (which
+    # cargo-release-local should keep in sync but won't if the release commit
+    # was hand-edited), and Rust-side compile errors in phase-tauri (excluded
+    # from regular CI's clippy/test runs in ci.yml). Linux-only — caught
+    # 99% of failures historically come from cross-platform-agnostic config or
+    # generic Rust mistakes, not from platform-specific Tauri internals.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches workspace + Tauri + package versions
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          EXPECTED="${TAG#v}"
+
+          WORKSPACE_VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          TAURI_CONF_VERSION=$(jq -r '.version' client/src-tauri/tauri.conf.json)
+          PACKAGE_JSON_VERSION=$(jq -r '.version' client/package.json)
+
+          fail=0
+          if [ "$WORKSPACE_VERSION" != "$EXPECTED" ]; then
+            echo "::error::Workspace Cargo.toml version $WORKSPACE_VERSION does not match tag $TAG"; fail=1
+          fi
+          if [ "$TAURI_CONF_VERSION" != "$EXPECTED" ]; then
+            echo "::error::tauri.conf.json version $TAURI_CONF_VERSION does not match tag $TAG"; fail=1
+          fi
+          if [ "$PACKAGE_JSON_VERSION" != "$EXPECTED" ]; then
+            echo "::error::client/package.json version $PACKAGE_JSON_VERSION does not match tag $TAG"; fail=1
+          fi
+          [ "$fail" = "0" ]
+
+      - name: Validate Tauri JSON configs
+        run: |
+          set -euo pipefail
+          jq empty client/src-tauri/tauri.conf.json
+          for f in client/src-tauri/capabilities/*.json; do
+            jq empty "$f"
+          done
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-tauri-preflight
+
+      - name: Install Linux Tauri build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+
+      - name: Stub frontend dist for tauri::generate_context!
+        # `cargo check -p phase-tauri` runs `tauri::generate_context!()` which
+        # needs `frontendDist` (../dist per tauri.conf.json) to exist. We don't
+        # need the real frontend bundle for type-checking — a stub is enough.
+        run: |
+          mkdir -p client/dist
+          echo '<!doctype html><html></html>' > client/dist/index.html
+
+      - name: Stub phase-server sidecar + bundled resources for tauri-build
+        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
+        # and `resources: { "../public/card-data.json": "data/card-data.json" }`,
+        # so tauri-build's resource resolver requires both paths to exist
+        # at check time. The real sidecar / card-data are produced by the
+        # build-tauri matrix; for the preflight we only need the paths to
+        # exist (tauri-build validates existence, not content). Empty
+        # placeholders are sufficient.
+        run: |
+          mkdir -p client/src-tauri/binaries client/public
+          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
+          touch client/public/card-data.json
+
+      - name: cargo check phase-tauri
+        # phase-tauri is excluded from the root workspace (client/src-tauri),
+        # so `-p phase-tauri` from the repo root cannot resolve it. Drive the
+        # check via the crate's own manifest instead.
+        run: cargo check --manifest-path client/src-tauri/Cargo.toml
+
   build-wasm:
     name: Build WASM + Frontend
+    needs: [tauri-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -192,7 +275,10 @@ jobs:
 
   deploy-production:
     name: Deploy Production (Cloudflare Pages)
-    needs: [build-wasm]
+    # Gate on build-tauri: never ship the web build for a version whose
+    # desktop build failed — that's how partial releases happen (web + server
+    # live at v0.1.18 but no Tauri binaries on the GH release page).
+    needs: [build-wasm, build-tauri]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -211,7 +297,7 @@ jobs:
 
   build-server:
     name: Build Server (${{ matrix.os }})
-    needs: [build-wasm]
+    needs: [tauri-preflight, build-wasm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -297,7 +383,7 @@ jobs:
 
   build-tauri:
     name: Build Tauri (${{ matrix.os }})
-    needs: [build-wasm]
+    needs: [tauri-preflight, build-wasm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -430,7 +516,9 @@ jobs:
 
   deploy-server:
     name: Deploy Server (beebs)
-    needs: [build-server]
+    # Gate on build-tauri: keep web/server/desktop in lockstep — never ship a
+    # backend update whose paired desktop client failed to build.
+    needs: [build-server, build-tauri]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -485,7 +573,12 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-wasm, build-server, build-tauri]
-    if: always() && needs.build-wasm.result == 'success' && needs.build-server.result != 'failure'
+    # All three matrix builds must succeed. The previous condition let the
+    # release proceed when build-tauri failed (no check on its result),
+    # which produced a GitHub release missing the desktop binaries while
+    # web/server had already deployed — the partial-release scenario this
+    # workflow now refuses to enter.
+    if: needs.build-wasm.result == 'success' && needs.build-server.result == 'success' && needs.build-tauri.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -530,7 +623,11 @@ jobs:
           if [ "$PLATFORMS" = "{}" ]; then
             echo "::warning::No signed updater artifacts found — skipping update.json"
           else
-            echo "{\"version\":\"${TAG}\",\"notes\":\"Release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
+            # Tauri's plugin-updater parses `version` through Rust's `semver`
+            # crate, which rejects a leading `v`. Strip it (URL paths above
+            # already do this with `${TAG#v}`).
+            VERSION="${TAG#v}"
+            echo "{\"version\":\"${VERSION}\",\"notes\":\"Release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
               | jq . > artifacts/update.json
           fi
 

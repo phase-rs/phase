@@ -32,7 +32,7 @@ use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_special::normalize_self_refs_for_static;
 use super::oracle_static::{parse_static_line, parse_static_line_multi};
-use super::oracle_trigger::parse_trigger_lines;
+use super::oracle_trigger::parse_trigger_lines_at_index;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ActivationRestriction, ContinuousModification, StaticCondition,
@@ -59,9 +59,17 @@ pub fn max_spacecraft_threshold(lines: &[&str]) -> Option<u32> {
 ///
 /// Returns parsed statics / triggers / activated abilities, plus the set of
 /// consumed line indices (so the main oracle dispatcher can skip them).
+///
+/// `base_trigger_index` is the index that the *first* trigger emitted by this
+/// parser will occupy in the card's full printed-trigger list (i.e. the
+/// caller's `result.triggers.len()` at invocation time). It is forwarded to
+/// `parse_trigger_lines_at_index` so any "and it has this ability" except
+/// clause inside a Spacecraft threshold trigger body resolves to the correct
+/// printed-trigger slot (CR 707.9a).
 pub(crate) fn parse_spacecraft_threshold_lines(
     lines: &[&str],
     card_name: &str,
+    base_trigger_index: usize,
 ) -> (
     Vec<StaticDefinition>,
     Vec<TriggerDefinition>,
@@ -69,7 +77,7 @@ pub(crate) fn parse_spacecraft_threshold_lines(
     Vec<usize>,
 ) {
     let mut statics = Vec::new();
-    let mut triggers = Vec::new();
+    let mut triggers: Vec<TriggerDefinition> = Vec::new();
     let mut abilities = Vec::new();
     let mut consumed = Vec::new();
 
@@ -109,7 +117,16 @@ pub(crate) fn parse_spacecraft_threshold_lines(
         }
 
         if has_trigger_prefix(body) {
-            let mut parsed = parse_trigger_lines(body, card_name);
+            // CR 707.9a: Index for this trigger in the card's full printed
+            // trigger list = caller-provided base + triggers already emitted
+            // by this parser. Threading the index makes "has this ability"
+            // retain the correct printed trigger slot for Spacecraft-gated
+            // triggers.
+            let mut parsed = parse_trigger_lines_at_index(
+                body,
+                card_name,
+                Some(base_trigger_index + triggers.len()),
+            );
             for trig in &mut parsed {
                 trig.condition = Some(trigger_cond.clone());
             }
@@ -261,7 +278,7 @@ mod tests {
     fn keyword_threshold_line_parses_to_addkeyword_static() {
         let lines = ["12+ | Flying"];
         let (statics, triggers, abilities, consumed) =
-            parse_spacecraft_threshold_lines(&lines, "Test");
+            parse_spacecraft_threshold_lines(&lines, "Test", 0);
         assert_eq!(consumed, vec![0]);
         assert!(triggers.is_empty());
         assert!(abilities.is_empty());
@@ -281,7 +298,7 @@ mod tests {
     #[test]
     fn multi_keyword_threshold_line_parses_all() {
         let lines = ["8+ | Flying, trample"];
-        let (statics, _, _, consumed) = parse_spacecraft_threshold_lines(&lines, "Test");
+        let (statics, _, _, consumed) = parse_spacecraft_threshold_lines(&lines, "Test", 0);
         assert_eq!(consumed, vec![0]);
         assert_eq!(statics.len(), 1);
         assert_eq!(statics[0].modifications.len(), 2);
@@ -291,7 +308,7 @@ mod tests {
     fn trigger_threshold_line_parses_with_condition() {
         let lines = ["3+ | Whenever you cast an artifact spell, draw a card."];
         let (_, triggers, _, consumed) =
-            parse_spacecraft_threshold_lines(&lines, "Uthros Research Craft");
+            parse_spacecraft_threshold_lines(&lines, "Uthros Research Craft", 0);
         assert_eq!(consumed, vec![0]);
         assert_eq!(triggers.len(), 1);
         assert!(matches!(
@@ -303,7 +320,7 @@ mod tests {
     #[test]
     fn activated_threshold_line_gets_counter_threshold_restriction() {
         let lines = ["1+ | {T}: Draw a card."];
-        let (_, _, abilities, consumed) = parse_spacecraft_threshold_lines(&lines, "Test");
+        let (_, _, abilities, consumed) = parse_spacecraft_threshold_lines(&lines, "Test", 0);
         assert_eq!(consumed, vec![0]);
         assert_eq!(abilities.len(), 1);
         let restr = &abilities[0].activation_restrictions;

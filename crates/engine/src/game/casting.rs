@@ -1525,26 +1525,32 @@ pub fn handle_adventure_choice(
     creature: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if !creature {
-        // Swap to Adventure face characteristics
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            swap_to_adventure_face(obj);
-        }
+    if creature {
+        // Creature face is just a normal creature spell — delegate to the standard
+        // cast pipeline so vanilla creature faces (no spell ability), modal cards,
+        // X costs, and other shared casting features all work uniformly. Mirrors
+        // the Warp/Overload "cast normally" pattern.
+        return continue_cast_from_prepared(state, player, object_id, events);
     }
 
-    // Now proceed with normal casting using whichever face is active
+    // CR 715.3a: Swap to Adventure face characteristics
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        swap_to_adventure_face(obj);
+    }
+
     let prepared = prepare_spell_cast(state, player, object_id)?;
 
-    // CR 601.2a + CR 715.3a: Announce the (Adventure-or-creature) spell onto the
-    // stack before mode/target/cost processing. Adventure's dedicated casting
-    // path bypasses continue_with_prepared so it must announce explicitly.
+    // CR 601.2a + CR 715.3a: Announce the Adventure spell onto the stack before
+    // mode/target/cost processing. The Adventure path bypasses
+    // continue_with_prepared so it must announce explicitly.
     announce_spell_on_stack(state, player, &prepared, events);
 
-    // Adventure spells always have a spell ability (the adventure face is an instant/sorcery).
+    // The Adventure face is always an instant or sorcery, so it always has a
+    // spell ability_def (synthesized from its Oracle text).
     let ability_def = prepared
         .ability_def
         .as_ref()
-        .expect("adventure spell must have ability_def");
+        .expect("adventure spell face must have ability_def");
 
     let resolved = {
         let mut r = ResolvedAbility::new(
@@ -1574,32 +1580,18 @@ pub fn handle_adventure_choice(
         {
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
-            if creature {
-                return check_additional_cost_or_pay(
-                    state,
-                    player,
-                    prepared.object_id,
-                    prepared.card_id,
-                    resolved,
-                    &prepared.mana_cost,
-                    prepared.casting_variant,
-                    prepared.origin_zone,
-                    events,
-                );
-            } else {
-                return pay_and_push_adventure(
-                    state,
-                    player,
-                    prepared.object_id,
-                    prepared.card_id,
-                    resolved,
-                    &prepared.mana_cost,
-                    CastingVariant::Adventure,
-                    None,
-                    prepared.origin_zone,
-                    events,
-                );
-            }
+            return pay_and_push_adventure(
+                state,
+                player,
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                &prepared.mana_cost,
+                CastingVariant::Adventure,
+                None,
+                prepared.origin_zone,
+                events,
+            );
         }
 
         let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
@@ -1611,11 +1603,7 @@ pub fn handle_adventure_choice(
         );
         // CR 715.3a: Preserve Adventure casting variant so the spell resolves to exile.
         // prepare_spell_cast always returns CastingVariant::Normal — override here.
-        pending_adv.casting_variant = if creature {
-            prepared.casting_variant
-        } else {
-            CastingVariant::Adventure
-        };
+        pending_adv.casting_variant = CastingVariant::Adventure;
         pending_adv.distribute = ability_def.distribute.clone();
         pending_adv.origin_zone = prepared.origin_zone;
         return Ok(WaitingFor::TargetSelection {
@@ -1626,33 +1614,19 @@ pub fn handle_adventure_choice(
         });
     }
 
-    // No targets -- proceed to payment
-    if creature {
-        check_additional_cost_or_pay(
-            state,
-            player,
-            prepared.object_id,
-            prepared.card_id,
-            resolved,
-            &prepared.mana_cost,
-            prepared.casting_variant,
-            prepared.origin_zone,
-            events,
-        )
-    } else {
-        pay_and_push_adventure(
-            state,
-            player,
-            prepared.object_id,
-            prepared.card_id,
-            resolved,
-            &prepared.mana_cost,
-            CastingVariant::Adventure,
-            None,
-            prepared.origin_zone,
-            events,
-        )
-    }
+    // No targets -- proceed to payment.
+    pay_and_push_adventure(
+        state,
+        player,
+        prepared.object_id,
+        prepared.card_id,
+        resolved,
+        &prepared.mana_cost,
+        CastingVariant::Adventure,
+        None,
+        prepared.origin_zone,
+        events,
+    )
 }
 
 /// Handle Warp cost choice and proceed with casting.

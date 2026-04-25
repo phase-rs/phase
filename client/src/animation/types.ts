@@ -2,25 +2,52 @@ import type { GameEvent } from "../adapter/types";
 
 export type VfxQuality = "full" | "reduced" | "minimal";
 
-export type AnimationSpeed = "slow" | "normal" | "fast" | "instant";
-export type CombatPacing = "normal" | "slow" | "cinematic";
+/** Continuous animation-speed multiplier. `0` short-circuits the wait entirely
+ *  (the legacy "instant" mode). Values above 1 slow things down; below 1 speed
+ *  things up. The slider in settings exposes this directly. */
+export const ANIMATION_SPEED_DEFAULT = 1.0;
+export const ANIMATION_SPEED_MIN = 0;
+export const ANIMATION_SPEED_MAX = 2;
+export const ANIMATION_SPEED_STEP = 0.05;
 
-export const SPEED_MULTIPLIERS: Record<AnimationSpeed, number> = {
-  slow: 1.5,
-  normal: 1.0,
-  fast: 0.5,
-  instant: 0,
+/** Per-category pacing multipliers applied to event durations *before* the
+ *  global animation-speed multiplier. The `category()` lookup below routes
+ *  every animated event into exactly one of these buckets. */
+export type PacingCategory = "effects" | "combat" | "banners";
+
+export const PACING_CATEGORIES: readonly PacingCategory[] = ["effects", "combat", "banners"] as const;
+
+export const PACING_LABELS: Record<PacingCategory, string> = {
+  effects: "Effect Pacing",
+  combat: "Combat Pacing",
+  banners: "Banner Pacing",
 };
 
-/**
- * Additional pacing applied to combat choreography only.
- * Multiplies base combat event durations before global animation speed.
- */
-export const COMBAT_PACING_MULTIPLIERS: Record<CombatPacing, number> = {
-  normal: 1.0,
-  slow: 1.35,
-  cinematic: 1.75,
+export const PACING_DESCRIPTIONS: Record<PacingCategory, string> = {
+  effects: "Spell casts, zone changes, deaths, life changes, counters, tap/untap.",
+  combat: "Combat damage timing — how long blockers and attackers linger before damage resolves.",
+  banners: "Turn-start banner display.",
 };
+
+export const PACING_DEFAULT = 1.0;
+export const PACING_MIN = 0;
+export const PACING_MAX = 2;
+export const PACING_STEP = 0.05;
+
+export function defaultPacingMultipliers(): Record<PacingCategory, number> {
+  return { effects: PACING_DEFAULT, combat: PACING_DEFAULT, banners: PACING_DEFAULT };
+}
+
+/** Maps an event type to its pacing category. Anything not listed falls into
+ *  `"effects"`. Keep the table sparse — only events that need a non-default
+ *  category appear here. */
+const EVENT_PACING_CATEGORY: Record<string, PacingCategory> = {
+  DamageDealt: "combat",
+};
+
+export function eventCategory(eventType: string): PacingCategory {
+  return EVENT_PACING_CATEGORY[eventType] ?? "effects";
+}
 
 export interface StepEffect {
   event: GameEvent;
@@ -54,3 +81,7 @@ export const DEFAULT_DURATION = 200;
 
 /** How long the card slam flight phase takes before impact (ms, before speed multiplier). */
 export const CARD_SLAM_FLIGHT_MS = 200;
+
+/** Base "your turn / opponent's turn" banner display duration, before any
+ *  pacing multipliers apply. */
+export const TURN_BANNER_DURATION_MS = 1500;

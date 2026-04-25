@@ -51,6 +51,10 @@ pub fn find_legal_targets(
                 if player.is_phased_out() {
                     continue;
                 }
+                // CR 800.4a: Eliminated players are not legal targets.
+                if player.is_eliminated {
+                    continue;
+                }
                 // CR 702.16b + CR 702.16j: A player with protection from
                 // everything can't be targeted by spells or abilities.
                 if super::static_abilities::player_has_protection_from_everything(state, player.id)
@@ -261,6 +265,17 @@ pub fn resolve_event_context_target(
         TargetFilter::ParentTargetController => {
             let event = state.current_trigger_event.as_ref()?;
             let source_obj_id = extract_source_from_event(event)?;
+            let controller = state.objects.get(&source_obj_id)?.controller;
+            Some(TargetRef::Player(controller))
+        }
+        // CR 615.5 + CR 609.7: "the source's controller" / "that source's
+        // controller" inside a prevention follow-up resolves to the controller
+        // of the prevented event's damage source. Stashed by the prevention
+        // applier at `replacement.rs:Prevented`; read here during follow-up
+        // resolution. Returns `None` if invoked outside the post-replacement
+        // window — caller should never reach this filter from elsewhere.
+        TargetFilter::PostReplacementSourceController => {
+            let source_obj_id = state.post_replacement_event_source?;
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
@@ -539,6 +554,13 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>) {
         if player.is_phased_out() {
             continue;
         }
+        // CR 800.4a: When a player leaves the game in a multiplayer game, all
+        // objects they own/control leave the game and the player ceases to be
+        // a valid target. Eliminated players cannot be targeted by any spell
+        // or ability (CR 608.2b illegal-target fizzle applies on resolution).
+        if player.is_eliminated {
+            continue;
+        }
         // CR 702.16b + CR 702.16j: A player with protection from everything
         // can't be targeted by spells or abilities — any source, any quality.
         if super::static_abilities::player_has_protection_from_everything(state, player.id) {
@@ -726,6 +748,41 @@ mod tests {
 
     fn creature_filter() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature())
+    }
+
+    #[test]
+    fn post_replacement_source_controller_resolves_to_event_source_controller() {
+        // CR 615.5 + CR 609.7: When `state.post_replacement_event_source` is
+        // populated (set by the prevention applier's Prevented arm), the new
+        // filter resolves to the controller of that object — NOT to the
+        // ability source's controller. Swans of Bryn Argoll's regression test:
+        // damage was prevented from a P1-controlled source, so P1 (the source's
+        // controller) draws the cards, not Swans's controller (P0).
+        let (mut state, c0, _c1) = setup_with_creatures();
+        // c0 is controlled by P0 — pretend it's the prevented damage source
+        // and the prevention shield (e.g. Swans) is controlled by P1.
+        state.post_replacement_event_source = Some(c0);
+        let result = resolve_event_context_target(
+            &state,
+            &TargetFilter::PostReplacementSourceController,
+            ObjectId(999), // arbitrary ability source — unused for this filter
+        );
+        assert_eq!(result, Some(TargetRef::Player(PlayerId(0))));
+    }
+
+    #[test]
+    fn post_replacement_source_controller_returns_none_when_slot_empty() {
+        // Defensive: filter only resolves inside the post-replacement window.
+        // Outside that window the slot is `None` and the filter should return
+        // `None`, letting callers fall back to controller / target_player.
+        let (state, _c0, _c1) = setup_with_creatures();
+        assert!(state.post_replacement_event_source.is_none());
+        let result = resolve_event_context_target(
+            &state,
+            &TargetFilter::PostReplacementSourceController,
+            ObjectId(999),
+        );
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -1023,6 +1080,36 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+    }
+
+    /// CR 800.4a: Eliminated players are not legal targets in multiplayer.
+    /// Regression: AI was targeting dead opponents in commander multiplayer.
+    #[test]
+    fn find_legal_targets_excludes_eliminated_player() {
+        let (mut state, _c0, _c1, _land) = setup_with_typed_creatures();
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+
+        let player_targets =
+            find_legal_targets(&state, &TargetFilter::Player, PlayerId(0), ObjectId(99));
+        assert!(
+            !player_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "eliminated player must not appear in legal targets"
+        );
+
+        let any_targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
+        assert!(
+            !any_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "eliminated player must not appear under TargetFilter::Any either"
+        );
+
+        let opponent_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let opp_targets = find_legal_targets(&state, &opponent_filter, PlayerId(0), ObjectId(99));
+        assert!(
+            !opp_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "eliminated opponent must not match 'target opponent'"
+        );
     }
 
     #[test]
