@@ -1528,9 +1528,14 @@ fn parse_external_enters_tapped(
     build_external_entry_replacement(subject, original_text, true)
 }
 
-/// CR 614.1a: Parse "If [filter] would die, exile it instead" replacement effects.
-/// Handles non-self creature filters like "another creature", "a nontoken creature
-/// an opponent controls", "a creature an opponent controls".
+/// CR 614.1a: Parse "If [filter] would die, …instead…" replacement effects.
+/// Handles non-self creature filters like "another creature", "a nontoken
+/// creature an opponent controls", "a creature an opponent controls", and
+/// recognizes the exile-anaphor in either word order via
+/// [`parse_exile_anaphor_clause`] (see that function for the prefix vs.
+/// suffix grammar). Compound effects whose verb isn't a bare exile-anaphor
+/// (e.g., "exile that card with an ice counter on it instead", "return it
+/// to its owner's hand instead") fall through to the generic chain parser.
 fn parse_creature_die_exile_replacement(
     norm_lower: &str,
     original_text: &str,
@@ -1597,43 +1602,56 @@ fn parse_creature_die_exile_replacement(
         .trim_end();
 
     // Match the exile-anaphor in either word order via nom alt().
-    // Returns the (anaphor_text_consumed, post-anaphor remainder) so we can
-    // route any "and <continuation>" tail through parse_effect_chain.
-    let (continuation_pair, anaphor_matched) = parse_exile_anaphor_clause(effect_pair)?;
-    if !anaphor_matched {
-        return None;
-    }
+    // Returns the (continuation, matched) pair so we can route any
+    // "and <continuation>" tail through parse_effect_chain.
+    let (continuation_pair, anaphor_matched) = parse_exile_anaphor_clause(effect_pair);
 
-    // CR 614.1a: The anaphoric "it" / "that card" / "that creature" refers to the
-    // object whose event is being replaced. In the replacement pipeline, the
-    // execute effect's ChangeZone is used only for zone redirection (destination
-    // extraction) — the affected object is already known from the ProposedEvent.
-    // SelfRef is semantically correct: "exile the same object this replacement
-    // is modifying," consistent with how ETB-tapped replacements use SelfRef.
-    let mut execute = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::ChangeZone {
-            destination: Zone::Exile,
-            origin: None,
-            target: TargetFilter::SelfRef,
-            owner_library: false,
-            enter_transformed: false,
-            under_your_control: false,
-            enter_tapped: false,
-            enters_attacking: false,
-            up_to: false,
-        },
-    );
-
-    // CR 614.6: Trailing clauses (e.g., "and you gain 2 life", "and put a hit
-    // counter on it") are additional effects that resolve as part of the modified
-    // event. Attach them as sub_abilities — the chain parser strips a leading
-    // "and " automatically.
-    let continuation = continuation_pair.original.trim();
-    if !continuation.is_empty() {
-        let chain = parse_effect_chain(continuation, AbilityKind::Spell);
-        execute = execute.sub_ability(chain);
-    }
+    let execute = if anaphor_matched {
+        // CR 614.1a: The anaphoric "it" / "that card" / "that creature" refers
+        // to the object whose event is being replaced. In the replacement
+        // pipeline, the execute effect's ChangeZone is used only for zone
+        // redirection (destination extraction) — the affected object is already
+        // known from the ProposedEvent. SelfRef is semantically correct:
+        // "exile the same object this replacement is modifying," consistent
+        // with how ETB-tapped replacements use SelfRef.
+        let mut exile_self = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+        );
+        // CR 614.6: Trailing clauses (e.g., "and you gain 2 life", "and put a
+        // hit counter on it") are additional effects that resolve as part of
+        // the modified event. Attach them as sub_abilities — the chain parser
+        // strips a leading "and " automatically.
+        let continuation = continuation_pair.original.trim();
+        if !continuation.is_empty() {
+            let chain = parse_effect_chain(continuation, AbilityKind::Spell);
+            exile_self = exile_self.sub_ability(chain);
+        }
+        exile_self
+    } else {
+        // Fall through: the effect text isn't a bare exile-anaphor clause —
+        // hand the whole tail (with `instead` intact) to the chain parser.
+        // This preserves prior coverage for compound effects like
+        // "exile that card with an ice counter on it instead" (Draugr, Rayami)
+        // and "return it to its owner's hand instead" (Necromancer's Magemark).
+        let orig_effect =
+            if let Ok((_, (_, after))) = nom_primitives::split_once_on(original_text, ", ") {
+                after.trim()
+            } else {
+                continuation_pair.original.trim()
+            };
+        parse_effect_chain(orig_effect, AbilityKind::Spell)
+    };
 
     let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
         .execute(execute)
@@ -1645,22 +1663,26 @@ fn parse_creature_die_exile_replacement(
     Some(def)
 }
 
-/// CR 614.1a: Match the exile-anaphor clause in either word order, returning the
-/// continuation text after the anaphor.
+/// CR 614.1a: Match the exile-anaphor clause in either word order, returning
+/// the continuation text after the anaphor and whether a match occurred.
 ///
 /// Recognizes both equivalent phrasings:
 ///   * **suffix form** — `"exile <anaphor> instead"` (Void Maw, Valentin, Vren)
 ///   * **prefix form** — `"instead exile <anaphor>"` (Darkness Crystal, Kalitas,
 ///     Ravenloft Adventurer, Ravenous Slime, Doctor's Tomb)
 ///
-/// The anaphor is one of `"exile it"`, `"exile that card"`, `"exile that creature"`.
-/// Any text remaining after the matched clause (e.g., `" and you gain 2 life"`)
-/// is returned as the continuation `TextPair` for downstream chain parsing.
+/// The anaphor is one of `"exile it"`, `"exile that card"`, `"exile that
+/// creature"`. Any text remaining after the matched clause (e.g.,
+/// `" and you gain 2 life"`) is returned as the continuation `TextPair` for
+/// downstream chain parsing.
 ///
-/// Returns `None` if the input is empty or has unrecognized leading content.
-/// Returns `Some((continuation, false))` if the leading content does not match
-/// the exile-anaphor pattern (caller can fall through).
-fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> Option<(TextPair<'a>, bool)> {
+/// Returns `(continuation, true)` when a clause matched (continuation = post-
+/// anaphor remainder). Returns `(input, false)` when the leading content does
+/// not match — the caller falls through to a generic `parse_effect_chain` on
+/// the unmodified text, preserving coverage for compound effects like
+/// `"exile that card with an ice counter on it instead"` (Draugr, Rayami) or
+/// `"return it to its owner's hand instead"` (Necromancer's Magemark).
+fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> (TextPair<'a>, bool) {
     use nom::sequence::terminated;
 
     let lower = input.lower;
@@ -1685,9 +1707,9 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> Option<(TextPair<'a>, 
             // Compute the byte offset where the continuation starts.
             let consumed = lower.len() - rest.len();
             let (_, continuation) = input.split_at(consumed);
-            Some((continuation, true))
+            (continuation, true)
         }
-        Err(_) => Some((input, false)),
+        Err(_) => (input, false),
     }
 }
 
@@ -4186,6 +4208,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Regression guard: compound effects whose verb isn't a bare exile-anaphor
+    /// (e.g., `"exile that card with an ice counter on it instead"`) must still
+    /// produce a non-empty `ReplacementDefinition` via the chain-parser fall-
+    /// through path. The bare-anaphor combinator must not gate non-anaphor
+    /// effect text out entirely (Draugr Necromancer / Rayami / Necromancer's
+    /// Magemark would otherwise lose their Destroy replacement).
+    #[test]
+    fn creature_die_compound_non_anaphor_falls_through_to_chain_parser() {
+        let def = parse_replacement_line(
+            "If a nontoken creature an opponent controls would die, exile that card with an ice counter on it instead.",
+            "Draugr Necromancer",
+        )
+        .expect("expected non-empty ReplacementDefinition for compound die-replacement");
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        // valid_card filter still recognized
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+        // execute is delegated to parse_effect_chain; the exact shape is the
+        // chain parser's responsibility — this regression test only asserts
+        // a definition is produced, not what shape its execute takes.
+        assert!(def.execute.is_some(), "expected execute populated");
     }
 
     #[test]
