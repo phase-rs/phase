@@ -1062,11 +1062,18 @@ impl FromStr for StaticMode {
 /// Usage: `#[serde(deserialize_with = "crate::types::statics::deserialize_static_mode_fwd")]`
 ///
 /// # How it avoids infinite recursion
-/// - String values go through `FromStr`, which has an `Other(s)` fallback for
-///   unknown variants and never calls `<StaticMode as Deserialize>::deserialize`.
-/// - Non-string (object) values are fed to `serde_json::from_value::<StaticMode>`,
-///   which invokes the *derived* `StaticMode::Deserialize` impl directly (not this
-///   helper). No cycle is possible.
+/// For both string and object values, the function delegates to
+/// `serde_json::from_value::<StaticMode>`, which invokes the **derived**
+/// `StaticMode::Deserialize` impl — not this field-level helper. For unknown
+/// unit variants (string values that the derived impl rejects), the fallback
+/// wraps the raw string in `Other(s)`. No cycle is possible.
+///
+/// # Why not `FromStr`?
+/// `FromStr` for `StaticMode` does not enumerate every unit variant by its
+/// exact Rust identifier (it's a separate parser for human-facing strings).
+/// Using `FromStr` would map known variants like `"SpendManaAsAnyColor"` to
+/// `Other("SpendManaAsAnyColor")` whenever they aren't explicitly listed,
+/// breaking coverage and registry lookups for those cards.
 pub fn deserialize_static_mode_fwd<'de, D>(d: D) -> Result<StaticMode, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1075,9 +1082,15 @@ where
     let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
     match raw {
         serde_json::Value::String(ref s) => {
-            // Unit variant path. `FromStr` maps unknown strings to `Other(s)`
-            // so old binaries can load card data produced by newer code.
-            s.parse::<StaticMode>().map_err(serde::de::Error::custom)
+            // Unit variant path. Try the derived deserializer first so all
+            // known unit variants (e.g. "SpendManaAsAnyColor", "Flying", …)
+            // round-trip correctly. If the derived impl rejects the string
+            // (unknown variant from a newer engine build), fall back to
+            // Other(s) so the card still loads without a hard error.
+            match serde_json::from_value::<StaticMode>(serde_json::Value::String(s.clone())) {
+                Ok(mode) => Ok(mode),
+                Err(_) => Ok(StaticMode::Other(s.clone())),
+            }
         }
         other => {
             // Data-carrying variant path. Delegate to the derived Deserialize
