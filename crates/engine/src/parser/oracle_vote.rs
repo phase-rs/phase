@@ -141,7 +141,9 @@ fn parse_for_each_vote_clause<'a>(
     // Consume " vote, " (singular) — plural "votes" would imply the resolver
     // re-tally pattern that Council's dilemma never uses; reject to keep the
     // detector tight.
-    let after_vote = after_choice.strip_prefix(" vote, ")?;
+    let (after_vote, _): (&str, &str) = tag::<_, _, VerboseError<&str>>(" vote, ")
+        .parse(after_choice)
+        .ok()?;
     // Read up to terminator: either next "For each " OR end-of-string,
     // stripping trailing period.
     let (effect_text, rest) = read_effect_until_next_clause(after_vote);
@@ -170,6 +172,7 @@ fn read_effect_until_next_clause(input: &str) -> (&str, &str) {
     let head = &input[..cut];
     let tail = &input[cut..];
     let head_trimmed = head.trim_end();
+    // allow-noncombinator: structural period strip on pre-extracted sentence clause
     let head_no_period = head_trimmed.strip_suffix('.').unwrap_or(head_trimmed);
     (head_no_period.trim(), tail.trim_start())
 }
@@ -197,20 +200,33 @@ fn read_until_period(input: &str) -> Option<(&str, &str)> {
 /// Split a list like "evidence or bribery" or "guards, hounds, or dragons"
 /// into individual lowercase choices. Returns `None` if fewer than two
 /// choices were found.
+///
+/// Uses nom to consume word tokens separated by `", or "`, `" or "`, or `", "` —
+/// handling the standard MTG list formats without string-splitting on raw bytes.
 fn split_choices(input: &str) -> Option<Vec<String>> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
+    let lower = input.trim().to_lowercase();
+    if lower.is_empty() {
         return None;
     }
-    // Split on " or " for the final pair, then on ", " for the prefix.
-    // structural: not dispatch — splitting a known-finished list, not parsing.
-    let (head, tail) = trimmed.rsplit_once(" or ")?;
-    let mut choices: Vec<String> = head
-        .split(", ")
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect();
-    choices.push(tail.trim().to_lowercase());
+    let word_chars = |c: char| c.is_alphanumeric() || c == '\'' || c == '-';
+    let mut choices: Vec<String> = Vec::new();
+    let mut rest: &str = lower.as_str();
+    loop {
+        let (after_word, word) =
+            nom::bytes::complete::take_while1::<_, &str, VerboseError<&str>>(word_chars)
+                .parse(rest)
+                .ok()?;
+        choices.push(word.to_string());
+        rest = after_word;
+        if rest.is_empty() {
+            break;
+        }
+        // Consume separator; try longest match first to avoid partial matches.
+        let sep_res: nom::IResult<&str, (), VerboseError<&str>> =
+            value((), alt((tag(", or "), tag(" or "), tag(", ")))).parse(rest);
+        let (after_sep, ()) = sep_res.ok()?;
+        rest = after_sep;
+    }
     if choices.len() < 2 {
         return None;
     }
