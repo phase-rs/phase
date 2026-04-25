@@ -19,4 +19,5 @@ mod madame_null_integration;
 mod oracle_parser;
 mod rules;
 mod swans_prevention_followup;
+mod tivit_vote;
 mod ureni_attack_trigger;

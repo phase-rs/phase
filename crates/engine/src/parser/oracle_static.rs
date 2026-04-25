@@ -418,30 +418,57 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
-    // CR 701.38d: "While voting, you may vote an additional time." (Tivit,
-    // Seller of Secrets and the Council's-dilemma extra-vote family.) Built
-    // for the class — covers any phrasing where the controller gets one
-    // additional vote per session. Dispatched via nom so future variants
-    // ("two additional times", "while voting on a Council's dilemma you cast")
-    // can be added as new combinator arms rather than as additional
-    // string-equality checks.
+    // CR 701.38d: Extra-vote granters — "While voting, you may vote an
+    // additional time." (Tivit) / "While voting, you get an additional vote."
+    // (Brago's Representative). Built for the class via composed alt() axes
+    // so phrasing variants slot in without enumerating each card's exact
+    // string. Each active granter contributes +1 to the controller's votes
+    // per session at vote-session start (CR 701.38d).
+    //
+    // Decomposition:
+    //   <while-voting-prefix>, <extra-vote-clause>
+    //
+    // - <while-voting-prefix>: "while voting" with optional comma.
+    // - <extra-vote-clause>:
+    //     "you may vote an additional time"
+    //   | "you get an additional vote"
+    //   | "you get an extra vote"
+    //
+    // Phrasings that grant N>1 additional votes ("you may vote two additional
+    // times") are not yet modeled — `StaticMode::GrantsExtraVote` carries no
+    // multiplier today. When such a card lands, extend the static mode to
+    // `GrantsExtraVotes(u32)` and parse the count here.
     {
+        use nom::branch::alt;
+        use nom::bytes::complete::tag;
+        use nom::combinator::value;
+        use nom::sequence::preceded;
+        use nom::Parser;
+        use nom_language::error::VerboseError;
+
         let lower_trim = tp.lower.trim_end_matches('.').trim();
-        let res: nom::IResult<&str, (), nom_language::error::VerboseError<&str>> =
-            nom::combinator::value(
+        let while_voting: nom::IResult<&str, (), VerboseError<&str>> =
+            value((), alt((tag("while voting, "), tag("while voting ")))).parse(lower_trim);
+        if let Ok((after_while, ())) = while_voting {
+            let extra_vote: nom::IResult<&str, (), VerboseError<&str>> = value(
                 (),
-                nom::branch::alt((
-                    nom::bytes::complete::tag("while voting, you may vote an additional time"),
-                    nom::bytes::complete::tag("while voting you may vote an additional time"),
-                )),
+                preceded(
+                    tag("you "),
+                    alt((
+                        tag("may vote an additional time"),
+                        tag("get an additional vote"),
+                        tag("get an extra vote"),
+                    )),
+                ),
             )
-            .parse(lower_trim);
-        if res.is_ok() {
-            return Some(
-                StaticDefinition::new(StaticMode::GrantsExtraVote)
-                    .affected(TargetFilter::Player)
-                    .description(text.to_string()),
-            );
+            .parse(after_while);
+            if extra_vote.is_ok() {
+                return Some(
+                    StaticDefinition::new(StaticMode::GrantsExtraVote)
+                        .affected(TargetFilter::Player)
+                        .description(text.to_string()),
+                );
+            }
         }
     }
 

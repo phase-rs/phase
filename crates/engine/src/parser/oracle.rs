@@ -1076,6 +1076,28 @@ pub fn parse_oracle_text(
             }
         }
 
+        // Priority 6c: CR 701.38 + CR 207.2c: Sorcery / instant Council's-dilemma
+        // vote blocks (e.g., a hypothetical "Council's dilemma — Starting with you,
+        // each player votes for X or Y. For each X vote, A. For each Y vote, B.").
+        // The trigger pre-pass at oracle_trigger.rs already catches trigger-shaped
+        // vote blocks (Tivit's enters/combat-damage trigger); this hook catches
+        // the spell-on-the-stack sibling so cards in the same family aren't
+        // forced into Unimplemented just because they're sorceries.
+        //
+        // Note: only `Effect::Vote` (per-vote tally fan-out) is supported. Will-
+        // of-the-Council "If X gets more votes" plurality cards (Council's
+        // Judgment, Plea for Power, etc.) are explicitly rejected by the
+        // detector — see oracle_vote.rs module docs. They fall through to
+        // Unimplemented so coverage flags them as missing infrastructure rather
+        // than misparsing them as Vote.
+        if let Some(vote_def) =
+            crate::parser::oracle_vote::parse_vote_block(&line, AbilityKind::Spell)
+        {
+            result.abilities.push(vote_def);
+            i += 1;
+            continue;
+        }
+
         // CR 701.43d: "You may exert [creature] as it attacks" — optional attack cost.
         // Must intercept BEFORE Priority 7 (static patterns) because the "When you do"
         // linked effect often contains "gets +N/+M" which is_static_pattern would match.

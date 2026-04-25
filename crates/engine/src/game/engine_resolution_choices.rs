@@ -413,7 +413,7 @@ pub(super) fn handle_resolution_choice(
                         .zip(new_tallies.iter().copied())
                         .collect(),
                 });
-                let _ = effects::vote::resolve_tally(
+                effects::vote::resolve_tally(
                     state,
                     source_id,
                     controller,
@@ -421,7 +421,8 @@ pub(super) fn handle_resolution_choice(
                     &per_choice_effect,
                     &new_tallies,
                     events,
-                );
+                )
+                .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
                     state, controller, events,
                 ))

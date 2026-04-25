@@ -232,6 +232,7 @@ fn redundancy_delta(
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
         | Effect::Explore
         | Effect::ExploreAll { .. }
         | Effect::Investigate

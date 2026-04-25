@@ -68,6 +68,17 @@ pub fn resolve(
     let starting_player = resolve_starting_voter(state, controller, starting_with.clone());
 
     // CR 101.4 + CR 701.38a: Build APNAP voter order from the starting player.
+    //
+    // NOT IMPLEMENTED — CR 101.4d: APNAP restart. "If a choice made by a
+    // nonactive player causes the active player, or a different nonactive
+    // player earlier in the turn order, to have to make a choice, APNAP
+    // order is restarted for all outstanding choices." The voter queue
+    // built here is fixed at session start and never restarted. None of
+    // today's `Effect::Vote` per-choice sub-effects can introduce a new
+    // choice for an earlier voter (Tivit's per-vote effects are Investigate
+    // and Treasure-token creation — neither prompts the active player), so
+    // CR 101.4d is not load-bearing for current cards. Revisit if a
+    // future Council's-dilemma per-vote effect prompts an earlier voter.
     let voters_in_order = apnap_order_from(state, starting_player);
     if voters_in_order.is_empty() {
         // No eligible voters (e.g., everyone eliminated). Emit EffectResolved
@@ -316,13 +327,15 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let controller = state.players[0].id;
 
-        let inv_def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
-        let token_def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate); // simple stand-in
+        // Use distinguishable per-choice effects so the test catches a parser
+        // bug that swaps slots (e.g. evidence → Populate, bribery → Investigate).
+        let evidence_def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
+        let bribery_def = AbilityDefinition::new(AbilityKind::Spell, Effect::Populate);
 
         let ability = ResolvedAbility {
             effect: Effect::Vote {
                 choices: vec!["evidence".to_string(), "bribery".to_string()],
-                per_choice_effect: vec![Box::new(inv_def), Box::new(token_def)],
+                per_choice_effect: vec![Box::new(evidence_def), Box::new(bribery_def)],
                 starting_with: ControllerRef::You,
             },
             targets: vec![],
@@ -345,6 +358,7 @@ mod tests {
             distribution: None,
             player_scope: None,
             chosen_x: None,
+            ability_index: None,
         };
 
         let mut events = Vec::new();
@@ -357,6 +371,7 @@ mod tests {
                 ref options,
                 ref tallies,
                 ref remaining_voters,
+                ref per_choice_effect,
                 ..
             } => {
                 assert_eq!(player, controller);
@@ -370,6 +385,10 @@ mod tests {
                 assert_eq!(remaining_voters.len(), 1);
                 assert_ne!(remaining_voters[0].0, controller);
                 assert_eq!(remaining_voters[0].1, 1);
+                // Per-choice slot identity preserved: evidence → Investigate,
+                // bribery → Populate. Catches a parser bug that swaps slots.
+                assert!(matches!(*per_choice_effect[0].effect, Effect::Investigate));
+                assert!(matches!(*per_choice_effect[1].effect, Effect::Populate));
             }
             other => panic!("expected VoteChoice, got {:?}", other),
         }
