@@ -1200,6 +1200,62 @@ mod tests {
         assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
     }
 
+    /// Regression: Katsumasa, the Animator upkeep trigger uses `Effect::PutCounter`
+    /// with a `+1/+1` counter. Prior to the classifier fix, `effect_polarity`
+    /// fell through to the default `Contextual` arm, flipping the AI's
+    /// anti-self-harm preference and making it target opponents' artifacts.
+    #[test]
+    fn put_counter_plus_is_beneficial() {
+        let effect = Effect::PutCounter {
+            counter_type: "+1/+1".to_string(),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+        };
+        assert_eq!(effect_polarity(&effect), EffectPolarity::Beneficial);
+    }
+
+    #[test]
+    fn put_counter_all_minus_is_harmful() {
+        let effect = Effect::PutCounterAll {
+            counter_type: "-1/-1".to_string(),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+        };
+        assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn proliferate_is_contextual_before_target_selection() {
+        assert_eq!(
+            effect_polarity(&Effect::Proliferate),
+            EffectPolarity::Contextual
+        );
+    }
+
+    /// CR 122.1: Removing a +1/+1 counter harms its bearer; removing a
+    /// -1/-1 counter helps it (Hexcaster's Mark, Vampire Hexmage). Prior
+    /// to the fix RemoveCounter was lumped under the catch-all "harmful"
+    /// arm, inverting AI target preference for -1/-1 removal.
+    #[test]
+    fn remove_plus_counter_is_harmful() {
+        let effect = Effect::RemoveCounter {
+            counter_type: "+1/+1".to_string(),
+            count: 1,
+            target: TargetFilter::Any,
+        };
+        assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn remove_minus_counter_is_beneficial() {
+        let effect = Effect::RemoveCounter {
+            counter_type: "-1/-1".to_string(),
+            count: 1,
+            target: TargetFilter::Any,
+        };
+        assert_eq!(effect_polarity(&effect), EffectPolarity::Beneficial);
+    }
+
     #[test]
     fn unknown_effect_defaults_to_contextual() {
         let effect = Effect::GenericEffect {

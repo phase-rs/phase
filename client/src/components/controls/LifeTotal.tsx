@@ -1,7 +1,7 @@
 import { motion, useMotionValue, useTransform, animate } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 
-import { CARD_SLAM_FLIGHT_MS, SPEED_MULTIPLIERS } from "../../animation/types.ts";
+import { CARD_SLAM_FLIGHT_MS } from "../../animation/types.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -23,8 +23,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
   const [flashColor, setFlashColor] = useState<"red" | "green" | null>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const animationSpeed = usePreferencesStore((s) => s.animationSpeed);
-  const speedMultiplier = SPEED_MULTIPLIERS[animationSpeed];
+  const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
   const impactTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Animate life total in sync with damage/heal visuals. When a DamageDealt

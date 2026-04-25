@@ -19,6 +19,28 @@ pub(crate) enum EffectPolarity {
     Contextual,
 }
 
+/// Flip a polarity. `Contextual` stays put — there's no opposite of "unknown."
+fn invert(polarity: EffectPolarity) -> EffectPolarity {
+    match polarity {
+        EffectPolarity::Beneficial => EffectPolarity::Harmful,
+        EffectPolarity::Harmful => EffectPolarity::Beneficial,
+        EffectPolarity::Contextual => EffectPolarity::Contextual,
+    }
+}
+
+/// CR 122.1: Counters sign — `+1/+1` is beneficial to the bearer, `-1/-1`
+/// harmful. Non-P/T counter types (poison, loyalty, charge, etc.) are classified
+/// as Contextual because their value to the bearer depends on card semantics.
+fn counter_sign_polarity(counter_type: &str) -> EffectPolarity {
+    if counter_type.starts_with('+') {
+        EffectPolarity::Beneficial
+    } else if counter_type.starts_with('-') {
+        EffectPolarity::Harmful
+    } else {
+        EffectPolarity::Contextual
+    }
+}
+
 pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
     match effect {
         // Pump: beneficial only if both values are non-negative
@@ -35,16 +57,48 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
                 EffectPolarity::Harmful
             }
         }
-        // Counters: +1/+1 is beneficial, -1/-1 is harmful
-        Effect::AddCounter { counter_type, .. } => {
-            if counter_type.starts_with('+') {
-                EffectPolarity::Beneficial
-            } else if counter_type.starts_with('-') {
-                EffectPolarity::Harmful
+        // CR 122.1: Counter placement. Sign drives polarity: +1/+1 is beneficial,
+        // -1/-1 is harmful. AddCounter, PutCounter, and PutCounterAll share the
+        // same semantics — the effect puts counters of `counter_type` onto a target.
+        // MultiplyCounter (e.g., Doubling Season) amplifies existing counters: its
+        // polarity is context-dependent (doubling -1/-1 on a creature is harmful).
+        Effect::AddCounter { counter_type, .. }
+        | Effect::PutCounter { counter_type, .. }
+        | Effect::PutCounterAll { counter_type, .. } => counter_sign_polarity(counter_type),
+        // CR 122.1 + CR 121: Removing counters inverts the placement polarity —
+        // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
+        // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
+        // Hexmage). Same building-block class as PutCounter, opposite sign.
+        Effect::RemoveCounter { counter_type, .. } => invert(counter_sign_polarity(counter_type)),
+        Effect::MultiplyCounter {
+            counter_type,
+            multiplier,
+            ..
+        } => {
+            // Doubling +1/+1 is beneficial; halving (-1) or erasing (0) inverts.
+            let base = counter_sign_polarity(counter_type);
+            if *multiplier > 1 {
+                base
+            } else if *multiplier < 1 {
+                // Both negative multipliers and zero erase/invert counters —
+                // erasing +1/+1 is harmful, erasing -1/-1 is beneficial.
+                invert(base)
             } else {
+                // multiplier == 1 is a no-op
                 EffectPolarity::Contextual
             }
         }
+        // CR 122.5: Moving counters is target-relative (moving -1/-1 off your
+        // own creature onto an opponent's is beneficial), so leave as
+        // Contextual — the call site must inspect source/target controllers.
+        Effect::MoveCounters { .. } => EffectPolarity::Contextual,
+        // CR 701.34: Proliferate adds a counter of each existing kind on
+        // chosen permanents/players. Polarity depends on the counter mix on
+        // the chosen targets at resolution time — classify as Contextual;
+        // target-selection must inspect the target's counter sign.
+        Effect::Proliferate => EffectPolarity::Contextual,
+        // CR 701.10a: Doubling base P/T on a filter set is beneficial to that set.
+        Effect::DoublePTAll { .. } => EffectPolarity::Beneficial,
         Effect::Regenerate { .. }
         | Effect::PreventDamage { .. }
         | Effect::Animate { .. }
@@ -70,7 +124,6 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }
         | Effect::LoseLife { .. }
-        | Effect::RemoveCounter { .. }
         | Effect::Tap { .. }
         | Effect::Bounce { .. }
         | Effect::Counter { .. }
@@ -124,8 +177,12 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         // Beneficial effects
         Effect::Pump { target, .. }
         | Effect::AddCounter { target, .. }
+        | Effect::PutCounter { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::MultiplyCounter { target, .. }
         | Effect::Animate { target, .. }
         | Effect::DoublePT { target, .. }
+        | Effect::DoublePTAll { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::Untap { target }
         | Effect::PreventDamage { target, .. }
@@ -149,7 +206,8 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Attach { target, .. }
         | Effect::GivePlayerCounter { target, .. }
         | Effect::BecomeCopy { target, .. }
-        | Effect::ExtraTurn { target, .. } => Some(target),
+        | Effect::ExtraTurn { target, .. }
+        | Effect::MoveCounters { target, .. } => Some(target),
         // GenericEffect and LoseLife have Option<TargetFilter>
         Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
             target.as_ref()

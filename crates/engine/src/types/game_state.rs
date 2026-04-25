@@ -2056,6 +2056,19 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_source: Option<crate::types::identifiers::ObjectId>,
 
+    /// CR 615.5 + CR 609.7: Source object of the *prevented event itself*
+    /// (e.g. the damage dealer in a damage-prevention replacement) — distinct
+    /// from `post_replacement_source` (which is the replacement's own source,
+    /// e.g. Swans of Bryn Argoll). Used by `TargetFilter::PostReplacementSourceController`
+    /// to resolve "the source's controller draws cards" / "deals damage to the
+    /// source's controller" follow-ups. Architectural twin of `last_effect_count`
+    /// (the quantity-side post-replacement fallback at `replacement.rs:317`):
+    /// both stash event context that lives outside the trigger window. Set
+    /// only at the prevention applier's `Prevented` arm; cleared at every
+    /// other set-site of `post_replacement_source` and at every consume-site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_replacement_event_source: Option<crate::types::identifiers::ObjectId>,
+
     /// Transient: post-resolution context for a permanent spell whose ETB replacement
     /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
     /// after the zone change completes.
@@ -2594,6 +2607,7 @@ impl GameState {
             pending_replacement: None,
             post_replacement_effect: None,
             post_replacement_source: None,
+            post_replacement_event_source: None,
             pending_spell_resolution: None,
             layers_dirty: true,
             next_timestamp: 1,

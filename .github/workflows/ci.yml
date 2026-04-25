@@ -118,6 +118,41 @@ jobs:
       - name: WASM compile check
         run: cargo check --package engine-wasm --target wasm32-unknown-unknown
 
+      - name: Install Linux Tauri build deps
+        # Required by phase-tauri's transitive dependencies (webkit2gtk, gtk).
+        # Without these, `cargo check -p phase-tauri` fails at the linker.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+
+      - name: Stub frontend dist for tauri::generate_context!
+        # phase-tauri's build.rs runs `tauri::generate_context!()` which
+        # requires `frontendDist` (../dist per tauri.conf.json) to exist.
+        # An empty stub is enough for type-checking — we don't bundle assets.
+        run: |
+          mkdir -p client/dist
+          echo '<!doctype html><html></html>' > client/dist/index.html
+
+      - name: Stub phase-server sidecar + bundled resources for tauri-build
+        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
+        # and `resources: { "../public/card-data.json": ... }`, so
+        # tauri-build requires both paths to exist at check time. The real
+        # sidecar / card-data are built in the release matrix; for PR-time
+        # compile checks we only need the paths to exist.
+        run: |
+          mkdir -p client/src-tauri/binaries client/public
+          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
+          touch client/public/card-data.json
+
+      - name: Tauri compile check
+        # phase-tauri is excluded from the workspace clippy and nextest runs
+        # above (no proptest support, no tests). Without this step, compile
+        # errors in the desktop crate only surface at release time during the
+        # 30-45min build-tauri matrix. Catches them on every PR in ~3 min.
+        # Driven via --manifest-path because client/src-tauri is excluded
+        # from the root workspace, so `-p phase-tauri` cannot resolve it.
+        run: cargo check --manifest-path client/src-tauri/Cargo.toml
+
   frontend:
     name: Frontend (lint, type-check, test)
     runs-on: ubuntu-latest

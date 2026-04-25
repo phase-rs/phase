@@ -338,6 +338,25 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         });
     }
 
+    // CR 615.5 + CR 609.7: "[the] damage prevented this way" — same shape as
+    // the bare form already recognized by `parse_quantity_ref`, but as a
+    // complete quantity expression (e.g. "draws cards equal to the damage
+    // prevented this way" — Swans of Bryn Argoll). Resolves via
+    // `EventContextAmount`, which the prevention applier stamps into
+    // `last_effect_count`. Single combinator: optional "the " determiner
+    // composed via `nom::combinator::opt` over the bare phrase tag.
+    if nom::combinator::all_consuming(nom::sequence::preceded(
+        nom::combinator::opt(tag::<_, _, VerboseError<&str>>("the ")),
+        tag::<_, _, VerboseError<&str>>("damage prevented this way"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+    }
+
     match lower {
         "that much" | "that many" => {
             return Some(QuantityExpr::Ref {

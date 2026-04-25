@@ -21,6 +21,7 @@ use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
 use super::plus_one_counters::PlusOneCountersPolicy;
 use super::ramp_timing::RampTimingPolicy;
+use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
@@ -85,6 +86,7 @@ pub enum PolicyId {
     SpellslingerCasting,
     SpellslingerKeepablesMulligan,
     CombatTaxPayment,
+    ReactiveSelfProtection,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -206,6 +208,7 @@ impl Default for PolicyRegistry {
             Box::new(PlusOneCountersPolicy),
             Box::new(SpellslingerCastingPolicy),
             Box::new(super::combat_tax::CombatTaxPaymentPolicy),
+            Box::new(ReactiveSelfProtectionPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

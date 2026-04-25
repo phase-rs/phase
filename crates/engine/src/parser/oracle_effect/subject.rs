@@ -1691,6 +1691,16 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             value((), tag("that ")),
             value((), tag("the chosen ")),
             value((), tag("the player ")),
+            // CR 609.7 + CR 615.5: "the source's controller" / "the source's
+            // owner" as a subject in a damage-prevention follow-up (Swans of
+            // Bryn Argoll, Eye for an Eye class). The "that source's …" form
+            // is already covered by the bare `tag("that ")` arm above.
+            // `parse_subject_application` recognizes the full phrase via the
+            // generic "[the|that] <noun>'s controller" path and emits
+            // `TargetFilter::ParentTargetController`; the prevention call site
+            // then rewrites that to `PostReplacementSourceController`.
+            value((), tag("the source's controller ")),
+            value((), tag("the source's owner ")),
             value((), tag("they ")),
             value((), tag("this ")),
             value((), tag("those ")),

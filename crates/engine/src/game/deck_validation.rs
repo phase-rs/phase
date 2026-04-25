@@ -223,12 +223,24 @@ fn evaluate_constructed(
     }
 
     let mut illegal_cards = BTreeSet::new();
+    let mut restricted_canonical: HashSet<String> = HashSet::new();
     for name in all_deck_cards(request) {
         if unknown_cards.contains(name) {
             continue;
         }
-        match db.legality_status(resolve_card_name(db, name), legality_format) {
-            Some(status) if status.is_legal() => {}
+        let resolved = resolve_card_name(db, name);
+        match db.legality_status(resolved, legality_format) {
+            Some(LegalityStatus::Legal) => {}
+            // CR 100.2b: A card on a format's restricted list is legal but
+            // a deck may contain at most one copy of it. Vintage is the
+            // canonical user, but the rule is format-general — any format
+            // whose legality table marks a card `Restricted` follows the
+            // same 1-copy ceiling, enforced below. The card itself is not
+            // "illegal" — that was the bug that flagged Power 9 as banned
+            // in Vintage.
+            Some(LegalityStatus::Restricted) => {
+                restricted_canonical.insert(resolved.to_ascii_lowercase());
+            }
             Some(status) => {
                 illegal_cards.insert(format!("{name} ({})", status_label(status)));
             }
@@ -242,6 +254,16 @@ fn evaluate_constructed(
         reasons.push(summarize_cards(
             &format!("Not {format_label} legal"),
             &illegal_cards,
+            6,
+        ));
+    }
+
+    // CR 100.2b: Restricted cards may appear at most once in a deck.
+    let restricted_violations = restricted_copy_violations(db, &counts, &restricted_canonical);
+    if !restricted_violations.is_empty() {
+        reasons.push(summarize_cards(
+            "More than 1 copy of a restricted card",
+            &restricted_violations,
             6,
         ));
     }
@@ -910,6 +932,35 @@ fn copy_limit_violations(
             .get_face_by_name(canonical_name)
             .map(|f| f.name.clone())
             .unwrap_or_else(|| canonical_name.clone());
+        violations.insert(format!("{display} ({count} copies)"));
+    }
+    violations
+}
+
+/// CR 100.2b: Flag any card the active format marks as `Restricted` whose
+/// combined main+sideboard count exceeds 1. The 1-copy ceiling is
+/// format-general — Vintage is the canonical consumer, but the rule applies
+/// to any format whose legality table uses `Restricted`.
+/// `restricted_canonical` is the set of canonical (DFC-resolved, lowercased)
+/// names that the legality table marks as `Restricted` for the active format;
+/// `counts` is the combined main+sideboard map produced by `combined_copy_counts`.
+fn restricted_copy_violations(
+    db: &CardDatabase,
+    counts: &HashMap<String, u32>,
+    restricted_canonical: &HashSet<String>,
+) -> BTreeSet<String> {
+    let mut violations = BTreeSet::new();
+    for canonical in restricted_canonical {
+        let Some(count) = counts.get(canonical) else {
+            continue;
+        };
+        if *count <= 1 {
+            continue;
+        }
+        let display = db
+            .get_face_by_name(canonical)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| canonical.clone());
         violations.insert(format!("{display} ({count} copies)"));
     }
     violations
@@ -2526,6 +2577,98 @@ mod tests {
             result.commander.compatible,
             "1x Plains + 1x Snow-Covered Plains must pass; reasons: {:?}",
             result.commander.reasons
+        );
+    }
+
+    fn vintage_test_db() -> String {
+        // Power-9-shaped fixture: a "restricted" Vintage card and a generic
+        // legal Vintage filler so we can build a 60-card deck.
+        serde_json::json!({
+            "black lotus": {
+                "name": "Black Lotus",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Artifact"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
+                "legalities": { "vintage": "restricted" }
+            },
+            "island": {
+                "name": "Island",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Island"]
+                },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null,
+                "legalities": { "vintage": "legal" }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn vintage_one_copy_of_restricted_card_is_legal() {
+        // CR 100.2b: A restricted card is legal in Vintage at no more than
+        // one copy. Regression for a bug where `is_legal()` rejected the
+        // `Restricted` status, marking Power 9 as illegal in Vintage decks.
+        let db = CardDatabase::from_json_str(&vintage_test_db()).unwrap();
+        let mut main = vec!["Black Lotus".to_string()];
+        main.extend(expand("Island", 59));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            selected_format: Some(GameFormat::Vintage),
+            selected_match_type: None,
+        };
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(
+            result.selected_format_compatible,
+            Some(true),
+            "1x restricted card must be legal in Vintage; reasons: {:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    #[test]
+    fn vintage_two_copies_of_restricted_card_violate_one_copy_limit() {
+        // CR 100.2b: Two copies of a restricted card violate the 1-copy
+        // ceiling — the deck must be flagged, but the message is
+        // "More than 1 copy of a restricted card", not "banned".
+        let db = CardDatabase::from_json_str(&vintage_test_db()).unwrap();
+        let mut main = expand("Black Lotus", 2);
+        main.extend(expand("Island", 58));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            selected_format: Some(GameFormat::Vintage),
+            selected_match_type: None,
+        };
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains("More than 1 copy of a restricted card")
+                    && r.contains("Black Lotus")),
+            "expected restricted-copy violation; reasons: {:?}",
+            result.selected_format_reasons
+        );
+        assert!(
+            !result
+                .selected_format_reasons
+                .iter()
+                .any(|r| r.contains("Not Vintage legal")),
+            "restricted card must not be flagged as illegal; reasons: {:?}",
+            result.selected_format_reasons
         );
     }
 }

@@ -6,7 +6,21 @@ import { BUILT_IN_THEMES, findManifest, validateThemeManifest } from "../../audi
 import { PLANESWALKER_THEME } from "../../audio/planeswalkerTheme.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
-import type { AnimationSpeed, CombatPacing, VfxQuality } from "../../animation/types.ts";
+import {
+  ANIMATION_SPEED_DEFAULT,
+  ANIMATION_SPEED_MAX,
+  ANIMATION_SPEED_MIN,
+  ANIMATION_SPEED_STEP,
+  PACING_CATEGORIES,
+  PACING_DEFAULT,
+  PACING_DESCRIPTIONS,
+  PACING_LABELS,
+  PACING_MAX,
+  PACING_MIN,
+  PACING_STEP,
+  type PacingCategory,
+  type VfxQuality,
+} from "../../animation/types.ts";
 import type {
   CardSizePreference,
   LogDefaultState,
@@ -27,12 +41,18 @@ interface PreferencesModalProps {
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
-const ANIMATION_SPEEDS: AnimationSpeed[] = ["slow", "normal", "fast", "instant"];
-const COMBAT_PACINGS: CombatPacing[] = ["normal", "slow", "cinematic"];
+
+/** Format a multiplier as a user-facing label. `0` is a meaningful sentinel
+ *  (skip animations entirely), so call it out explicitly rather than showing
+ *  "0.00×" which reads like a typo. */
+function formatMultiplier(value: number): string {
+  if (value <= 0) return "Instant";
+  return `${value.toFixed(2)}×`;
+}
 const SETTINGS_TABS = [
   { id: "gameplay", label: "Gameplay" },
   { id: "visual", label: "Visual" },
-  { id: "combat", label: "Combat" },
+  { id: "combat", label: "Pacing" },
   { id: "audio", label: "Audio" },
   { id: "multiplayer", label: "Multiplayer" },
   { id: "data", label: "Data" },
@@ -91,15 +111,17 @@ export function PreferencesModal({
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
-  const animationSpeed = usePreferencesStore((s) => s.animationSpeed);
-  const combatPacing = usePreferencesStore((s) => s.combatPacing);
+  const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const pacingMultipliers = usePreferencesStore((s) => s.pacingMultipliers);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);
   const setCustomBackgroundUrl = usePreferencesStore((s) => s.setCustomBackgroundUrl);
   const setVfxQuality = usePreferencesStore((s) => s.setVfxQuality);
-  const setCombatPacing = usePreferencesStore((s) => s.setCombatPacing);
+  const setPacingMultiplier = usePreferencesStore((s) => s.setPacingMultiplier);
+  const resetPacing = usePreferencesStore((s) => s.resetPacing);
+  const resetAllPreferences = usePreferencesStore((s) => s.resetAllPreferences);
   const masterVolume = usePreferencesStore((s) => s.masterVolume);
   const sfxVolume = usePreferencesStore((s) => s.sfxVolume);
   const musicVolume = usePreferencesStore((s) => s.musicVolume);
@@ -108,7 +130,7 @@ export function PreferencesModal({
   const setMasterVolume = usePreferencesStore((s) => s.setMasterVolume);
   const setSfxVolume = usePreferencesStore((s) => s.setSfxVolume);
   const setMusicVolume = usePreferencesStore((s) => s.setMusicVolume);
-  const setAnimationSpeed = usePreferencesStore((s) => s.setAnimationSpeed);
+  const setAnimationSpeedMultiplier = usePreferencesStore((s) => s.setAnimationSpeedMultiplier);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const setShowKeywordStrip = usePreferencesStore((s) => s.setShowKeywordStrip);
 
@@ -259,14 +281,6 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
-                  <SettingGroup label="Animation Speed">
-                    <SegmentedControl
-                      options={ANIMATION_SPEEDS}
-                      value={animationSpeed}
-                      onChange={setAnimationSpeed}
-                    />
-                  </SettingGroup>
-
                   <SettingGroup label="Keyword Strip">
                     <label className="flex min-h-11 items-center gap-2">
                       <input
@@ -282,18 +296,13 @@ export function PreferencesModal({
               )}
 
               {activeTab === "combat" && (
-                <SettingsSection title="Combat">
-                  <SettingGroup label="Combat Pacing">
-                    <SegmentedControl
-                      options={COMBAT_PACINGS}
-                      value={combatPacing}
-                      onChange={setCombatPacing}
-                    />
-                  </SettingGroup>
-                  <p className="text-xs text-slate-500">
-                    Controls the pause before damage after blockers and between combat engagements.
-                  </p>
-                </SettingsSection>
+                <PacingSection
+                  animationSpeedMultiplier={animationSpeedMultiplier}
+                  setAnimationSpeedMultiplier={setAnimationSpeedMultiplier}
+                  pacingMultipliers={pacingMultipliers}
+                  setPacingMultiplier={setPacingMultiplier}
+                  resetPacing={resetPacing}
+                />
               )}
 
               {activeTab === "audio" && (<>
@@ -441,8 +450,37 @@ export function PreferencesModal({
 
               {activeTab === "data" && <DataSection />}
             </div>
+            <ResetAllFooter resetAllPreferences={resetAllPreferences} />
           </div>
     </ModalPanelShell>
+  );
+}
+
+/** Discreet trailing footer with a single "Reset to defaults" action that
+ *  wipes the entire preferences store back to factory defaults. Confirms
+ *  before firing — this clears AI seats, board background, audio levels,
+ *  and every pacing slider, which is rarely what someone means accidentally. */
+function ResetAllFooter({
+  resetAllPreferences,
+}: {
+  resetAllPreferences: () => void;
+}) {
+  const onClick = useCallback(() => {
+    if (window.confirm("Reset all preferences to defaults? This clears every setting in this dialog.")) {
+      resetAllPreferences();
+    }
+  }, [resetAllPreferences]);
+
+  return (
+    <div className="mt-4 flex justify-end border-t border-white/5 pt-3">
+      <button
+        type="button"
+        onClick={onClick}
+        className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500 transition-colors hover:text-rose-300"
+      >
+        Reset all preferences
+      </button>
+    </div>
   );
 }
 
@@ -559,6 +597,163 @@ function SettingGroup({ label, children }: { label: string; children: React.Reac
       </label>
       {children}
     </div>
+  );
+}
+
+/** Single labelled multiplier slider with an inline reset affordance. The
+ *  reset button is rendered always (so the layout doesn't shift), but is
+ *  visually faded and disabled when the value already equals `defaultValue`.
+ *  Aria + tooltip wired so screen readers and hover-help both work. */
+function MultiplierSlider({
+  label,
+  description,
+  value,
+  defaultValue,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  label: string;
+  description?: string;
+  value: number;
+  defaultValue: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (next: number) => void;
+}) {
+  const atDefault = Math.abs(value - defaultValue) < 1e-9;
+  return (
+    <div>
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <label className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+          {label}
+        </label>
+        <span className="font-mono text-xs tabular-nums text-slate-300">
+          {formatMultiplier(value)}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          onDoubleClick={() => onChange(defaultValue)}
+          aria-label={label}
+          className="flex-1 accent-cyan-500"
+        />
+        <button
+          type="button"
+          onClick={() => onChange(defaultValue)}
+          disabled={atDefault}
+          aria-label={`Reset ${label} to default`}
+          title={atDefault ? "At default" : "Reset to default"}
+          className={`flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-black/18 text-slate-300 transition-all ${
+            atDefault
+              ? "cursor-not-allowed opacity-30"
+              : "hover:border-cyan-400/40 hover:text-cyan-200 hover:bg-cyan-400/10"
+          }`}
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="h-3.5 w-3.5"
+            aria-hidden="true"
+          >
+            <path d="M3 12a9 9 0 1 0 3-6.7" />
+            <path d="M3 4v5h5" />
+          </svg>
+        </button>
+      </div>
+      {description && <p className="mt-2 text-xs text-slate-500">{description}</p>}
+    </div>
+  );
+}
+
+/** Unified pacing panel — global animation speed plus every per-category
+ *  multiplier in one place. Each slider has its own reset; the section also
+ *  offers a "Reset section" link that resets everything here without
+ *  touching unrelated preferences. */
+function PacingSection({
+  animationSpeedMultiplier,
+  setAnimationSpeedMultiplier,
+  pacingMultipliers,
+  setPacingMultiplier,
+  resetPacing,
+}: {
+  animationSpeedMultiplier: number;
+  setAnimationSpeedMultiplier: (n: number) => void;
+  pacingMultipliers: Record<PacingCategory, number>;
+  setPacingMultiplier: (category: PacingCategory, n: number) => void;
+  resetPacing: () => void;
+}) {
+  const allAtDefault =
+    Math.abs(animationSpeedMultiplier - ANIMATION_SPEED_DEFAULT) < 1e-9 &&
+    PACING_CATEGORIES.every(
+      (c) => Math.abs(pacingMultipliers[c] - PACING_DEFAULT) < 1e-9,
+    );
+
+  return (
+    <section className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.18)] backdrop-blur-md sm:p-5">
+      <header className="mb-4 flex items-center justify-between">
+        <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-slate-500">
+          Pacing
+        </h3>
+        <button
+          type="button"
+          onClick={resetPacing}
+          disabled={allAtDefault}
+          className={`text-[0.62rem] font-semibold uppercase tracking-[0.18em] transition-colors ${
+            allAtDefault
+              ? "cursor-not-allowed text-slate-700"
+              : "text-slate-500 hover:text-cyan-200"
+          }`}
+        >
+          Reset section
+        </button>
+      </header>
+
+      <div className="flex flex-col gap-5">
+        <MultiplierSlider
+          label="Animation Speed"
+          description="Master multiplier — scales every animation duration. 0× skips animations entirely."
+          value={animationSpeedMultiplier}
+          defaultValue={ANIMATION_SPEED_DEFAULT}
+          min={ANIMATION_SPEED_MIN}
+          max={ANIMATION_SPEED_MAX}
+          step={ANIMATION_SPEED_STEP}
+          onChange={setAnimationSpeedMultiplier}
+        />
+
+        {PACING_CATEGORIES.map((category) => (
+          <MultiplierSlider
+            key={category}
+            label={PACING_LABELS[category]}
+            description={PACING_DESCRIPTIONS[category]}
+            value={pacingMultipliers[category]}
+            defaultValue={PACING_DEFAULT}
+            min={PACING_MIN}
+            max={PACING_MAX}
+            step={PACING_STEP}
+            onChange={(n) => setPacingMultiplier(category, n)}
+          />
+        ))}
+      </div>
+
+      <p className="mt-4 text-[0.68rem] leading-relaxed text-slate-500">
+        Per-category sliders multiply on top of Animation Speed. Double-click any
+        slider — or tap the <span className="text-slate-300">↺</span> next to it — to reset.
+      </p>
+    </section>
   );
 }
 

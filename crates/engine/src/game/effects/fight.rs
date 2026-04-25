@@ -21,10 +21,15 @@ fn resolve_fight_subject(
         _ => return Ok(ability.source_id),
     };
     if refers_to_attached(subject) {
+        // CR 303.4 + CR 701.14a: "Enchanted creature fights" requires an Object
+        // host (a creature). If the source is attached to a player (CR 303.4 +
+        // CR 702.5d, Curse cycle), there's no creature subject — surface the
+        // same MissingParam error as the unattached case.
         state
             .objects
             .get(&ability.source_id)
             .and_then(|obj| obj.attached_to)
+            .and_then(|t| t.as_object())
             .ok_or_else(|| {
                 EffectError::MissingParam("Fight subject: source not attached to anything".into())
             })
@@ -326,7 +331,7 @@ mod tests {
         );
         let aura = state.objects.get_mut(&aura_id).unwrap();
         aura.card_types.core_types.push(CoreType::Enchantment);
-        aura.attached_to = Some(bear);
+        aura.attached_to = Some(crate::game::game_object::AttachTarget::Object(bear));
 
         // Fight with subject = enchanted creature (Typed filter with EnchantedBy)
         let ability = ResolvedAbility::new(

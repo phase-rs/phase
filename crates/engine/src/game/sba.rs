@@ -525,7 +525,10 @@ fn check_legend_rule(
     }
 }
 
-/// CR 704.5m: An Aura attached to an illegal object is put into its owner's graveyard.
+/// CR 704.5m: An Aura attached to an illegal object or player, or that is no
+/// longer attached to anything legal, is put into its owner's graveyard.
+/// CR 303.4c: An enchanted object that no longer exists, or an enchanted player
+/// who has left the game, is illegal — the Aura goes to its owner's graveyard.
 /// CR 702.26b: Phased-out Auras are treated as though they don't exist; their
 /// attachment-legality isn't checked by this SBA.
 fn check_unattached_auras(
@@ -541,10 +544,20 @@ fn check_unattached_auras(
                 .objects
                 .get(id)
                 .map(|obj| {
-                    // Check if it's an aura (Enchantment with attached_to)
-                    obj.card_types.core_types.contains(&CoreType::Enchantment)
-                        && obj.attached_to.is_some()
-                        && !is_valid_attachment_target(state, obj.attached_to.unwrap())
+                    if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
+                        return false;
+                    }
+                    // Note: the parser also routes player-attached Auras here.
+                    // CR 303.4c: A player who has left the game is an illegal host.
+                    match obj.attached_to {
+                        Some(crate::game::game_object::AttachTarget::Object(t)) => {
+                            !is_valid_attachment_target(state, t)
+                        }
+                        Some(crate::game::game_object::AttachTarget::Player(pid)) => {
+                            !is_player_in_game(state, pid)
+                        }
+                        None => false,
+                    }
                 })
                 .unwrap_or(false)
         })
@@ -556,7 +569,10 @@ fn check_unattached_auras(
     }
 }
 
-/// CR 704.5n + CR 301.5c: Equipment attached to an illegal permanent becomes unattached.
+/// CR 704.5n + CR 301.5c: Equipment attached to an illegal permanent (or, per
+/// CR 704.5n, to a player at all) becomes unattached. Equipment can never
+/// legally attach to a player (CR 301.5), so a `Player` host is *always*
+/// illegal and must be unattached on this SBA pass.
 /// CR 702.26b: Phased-out Equipment is treated as though it doesn't exist.
 fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
     let to_unattach: Vec<_> = state
@@ -567,22 +583,32 @@ fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
                 .objects
                 .get(id)
                 .map(|obj| {
-                    obj.card_types.subtypes.contains(&"Equipment".to_string())
-                        && obj.attached_to.is_some()
-                        && !is_valid_attachment_target(state, obj.attached_to.unwrap())
+                    if !obj.card_types.subtypes.contains(&"Equipment".to_string()) {
+                        return false;
+                    }
+                    match obj.attached_to {
+                        // CR 301.5: Equipment must attach to an object;
+                        // illegal-target check applies.
+                        Some(crate::game::game_object::AttachTarget::Object(t)) => {
+                            !is_valid_attachment_target(state, t)
+                        }
+                        // CR 704.5n: Equipment attached to a player is always illegal.
+                        Some(crate::game::game_object::AttachTarget::Player(_)) => true,
+                        None => false,
+                    }
                 })
                 .unwrap_or(false)
         })
         .collect();
 
     for equipment_id in to_unattach {
-        // Clear the attachment reference on the equipment
-        if let Some(old_target_id) = state
+        // Clear the attachment reference on the equipment. Only Object hosts
+        // have an `attachments` list to clean up — Player hosts do not.
+        if let Some(crate::game::game_object::AttachTarget::Object(old_target_id)) = state
             .objects
             .get(&equipment_id)
             .and_then(|obj| obj.attached_to)
         {
-            // Remove from old target's attachments if it still exists
             if let Some(old_target) = state.objects.get_mut(&old_target_id) {
                 old_target.attachments.retain(|&id| id != equipment_id);
             }
@@ -685,12 +711,13 @@ fn check_battle_unattached(state: &mut GameState, any_performed: &mut bool) {
         .collect();
 
     for battle_id in battles_to_unattach {
-        // Remove from host's attachments list first.
-        let host_id = state
+        // Remove from host's attachments list first. Only Object hosts have an
+        // `attachments` list; Player hosts (CR 303.4 + CR 702.5d) do not.
+        if let Some(crate::game::game_object::AttachTarget::Object(host)) = state
             .objects
             .get(&battle_id)
-            .and_then(|obj| obj.attached_to);
-        if let Some(host) = host_id {
+            .and_then(|obj| obj.attached_to)
+        {
             if let Some(host_obj) = state.objects.get_mut(&host) {
                 host_obj.attachments.retain(|&id| id != battle_id);
             }
@@ -958,6 +985,16 @@ fn is_valid_attachment_target(
         .unwrap_or(false)
 }
 
+/// CR 303.4c: A player has "left the game" when they are eliminated. Multiplayer
+/// exits flip the same flag (CR 800.4a). Out-of-range PlayerIds (defensive) are
+/// treated as not in game so the Aura SBA cleans up the dangling reference.
+fn is_player_in_game(state: &GameState, player_id: crate::types::player::PlayerId) -> bool {
+    state
+        .players
+        .get(player_id.0 as usize)
+        .is_some_and(|p| !p.is_eliminated)
+}
+
 /// CR 704.5t: If a player's venture marker is on the bottommost room of a dungeon card,
 /// and that dungeon card isn't the source of a room ability that has triggered but not yet
 /// left the stack, the dungeon card's owner removes it from the game.
@@ -1176,7 +1213,7 @@ mod tests {
         );
         let obj = state.objects.get_mut(&aura_id).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
-        obj.attached_to = Some(ObjectId(999)); // nonexistent target
+        obj.attached_to = Some(ObjectId(999).into()); // nonexistent target
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
@@ -1202,7 +1239,7 @@ mod tests {
         );
         let obj = state.objects.get_mut(&aura_id).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
-        obj.attached_to = Some(id);
+        obj.attached_to = Some(id.into());
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
@@ -1277,7 +1314,7 @@ mod tests {
             .core_types
             .push(crate::types::card_type::CoreType::Artifact);
         obj.card_types.subtypes.push("Equipment".to_string());
-        obj.attached_to = Some(creature_id);
+        obj.attached_to = Some(creature_id.into());
 
         state
             .objects
@@ -1338,7 +1375,7 @@ mod tests {
         );
         let obj = state.objects.get_mut(&aura_id).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
-        obj.attached_to = Some(creature_id);
+        obj.attached_to = Some(creature_id.into());
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);

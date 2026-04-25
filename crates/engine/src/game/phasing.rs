@@ -352,7 +352,7 @@ mod tests {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.card_types.core_types = vec![CoreType::Enchantment];
             obj.card_types.subtypes = vec!["Aura".to_string()];
-            obj.attached_to = Some(attached_to);
+            obj.attached_to = Some(attached_to.into());
         }
         if let Some(host) = state.objects.get_mut(&attached_to) {
             host.attachments.push(id);

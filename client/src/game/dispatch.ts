@@ -4,7 +4,6 @@ import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } fr
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { getPlayerId } from "../hooks/usePlayerId";
 import type { AnimationStep } from "../animation/types";
-import { SPEED_MULTIPLIERS } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
@@ -216,12 +215,11 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   }
 
   // 6. Normalize events into animation steps
-  const combatPacing = usePreferencesStore.getState().combatPacing;
-  const steps = normalizeEvents(events, { combatPacing });
+  const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
+  const steps = normalizeEvents(events, { pacingMultipliers });
 
-  // 7. Play animations (unless instant)
-  const speed = usePreferencesStore.getState().animationSpeed;
-  const multiplier = SPEED_MULTIPLIERS[speed];
+  // 7. Play animations (unless instant — multiplier === 0)
+  const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().enqueueSteps(steps);
@@ -440,12 +438,11 @@ async function processRemoteUpdateInner(
   }
 
   // 3. Normalize events into animation steps
-  const combatPacing = usePreferencesStore.getState().combatPacing;
-  const steps = normalizeEvents(events, { combatPacing });
+  const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
+  const steps = normalizeEvents(events, { pacingMultipliers });
 
-  // 4. Play animations (unless instant)
-  const speed = usePreferencesStore.getState().animationSpeed;
-  const multiplier = SPEED_MULTIPLIERS[speed];
+  // 4. Play animations (unless instant — multiplier === 0)
+  const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
 
   if (steps.length > 0 && multiplier > 0) {
     useAnimationStore.getState().enqueueSteps(steps);

@@ -1581,6 +1581,25 @@ pub enum TargetFilter {
     /// Used for "its controller" in compound effects (e.g., "counter target spell. Its controller
     /// loses 2 life."). At resolution time, looks up the controller of the first parent target.
     ParentTargetController,
+    /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
+    /// damage source. Used by prevention follow-up sentences such as "the source's
+    /// controller draws cards equal to the damage prevented this way" (Swans of
+    /// Bryn Argoll) and "deals damage to that source's controller" (Deflecting
+    /// Palm class). At resolution time, looks up `state.post_replacement_event_source`
+    /// and returns its controller.
+    ///
+    /// Distinct from `ParentTargetController` (which resolves via the parent
+    /// ability's target slot) and `TriggeringSpellController` (which resolves
+    /// via `state.current_trigger_event`, which is `None` during post-replacement
+    /// resolution). Architectural twin of the quantity-side `last_effect_count`
+    /// fallback at `replacement.rs:317` — both stash event context that lives
+    /// outside the trigger window. The parser never emits this variant directly;
+    /// the prevention follow-up call site rewrites `ParentTargetController`
+    /// → `PostReplacementSourceController` via `each_target_filter_mut` after
+    /// `parse_effect_chain` returns, so the surface phrase "the source's
+    /// controller" can stay consolidated in `parse_target` for non-prevention
+    /// callers.
+    PostReplacementSourceController,
     /// CR 506.3d: Resolves to the player being attacked by the source creature.
     /// Looked up from `state.combat.attackers` using the trigger's source_id.
     DefendingPlayer,
@@ -4089,6 +4108,7 @@ impl TargetFilter {
                 | TargetFilter::DefendingPlayer
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetController
+                | TargetFilter::PostReplacementSourceController
         )
     }
 
@@ -5616,6 +5636,17 @@ pub enum ReplacementCondition {
     /// Used by Stranglehold ("If a player would begin an extra turn...").
     /// Evaluated by `begin_turn_matcher` against `ProposedEvent::BeginTurn`.
     OnlyExtraTurn,
+    /// CR 614.1a + CR 111.1: Gate a `CreateToken` replacement on whether the
+    /// proposed event creates a token whose subtypes overlap a fixed set.
+    /// Used by Xorn ("if you would create one or more Treasure tokens, …") and
+    /// Academy Manufactor ("if you would create a Clue, Food, or Treasure
+    /// token, …"). Subtype strings are matched case-insensitively against the
+    /// proposed `TokenSpec.subtypes`. Substantive subtype canonicalization
+    /// remains the parser's job.
+    ///
+    /// `subtypes` is `Vec<String>` to mirror the existing `TokenSpec.subtypes`
+    /// shape; introducing a typed `Subtype` enum is a separate, broader refactor.
+    TokenSubtypeMatches { subtypes: Vec<String> },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
@@ -6083,6 +6114,20 @@ pub struct ReplacementDefinition {
     /// reflected in the Squirrel count per CR 616.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_token_spec: Option<Box<crate::types::proposed_event::TokenSpec>>,
+    /// CR 614.1a + CR 111.1: Ensure-all token-creation replacement. Used by
+    /// Academy Manufactor ("If you would create a Clue, Food, or Treasure
+    /// token, instead create one of each"). Each listed spec whose subtype
+    /// is *not already present* in the proposed event's `TokenSpec.subtypes`
+    /// is emitted as an additional `CreateToken` event via the same recursive
+    /// `replace_event` path Chatterfang uses, preserving CR 616.1 ordering
+    /// and idempotence (the `applied: HashSet<ReplacementId>` set on each
+    /// spawned event blocks re-application of the same Manufactor).
+    ///
+    /// Distinct from `additional_token_spec` (which always appends): this
+    /// field is *conditional* on subtype absence. The two fields are
+    /// orthogonal — a single replacement may set either, but not both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ensure_token_specs: Option<Vec<crate::types::proposed_event::TokenSpec>>,
 }
 
 impl ReplacementDefinition {
@@ -6109,6 +6154,7 @@ impl ReplacementDefinition {
             redirect_target: None,
             mana_modification: None,
             additional_token_spec: None,
+            ensure_token_specs: None,
         }
     }
 
@@ -6203,6 +6249,17 @@ impl ReplacementDefinition {
     /// overwritten with the replacement source at apply time.
     pub fn additional_token_spec(mut self, spec: crate::types::proposed_event::TokenSpec) -> Self {
         self.additional_token_spec = Some(Box::new(spec));
+        self
+    }
+
+    /// CR 614.1a + CR 111.1: Attach the ensure-all token-spec list (Manufactor).
+    /// At apply time, only specs whose subtype is missing from the proposed
+    /// event's `TokenSpec.subtypes` are emitted.
+    pub fn ensure_token_specs(
+        mut self,
+        specs: Vec<crate::types::proposed_event::TokenSpec>,
+    ) -> Self {
+        self.ensure_token_specs = Some(specs);
         self
     }
 }

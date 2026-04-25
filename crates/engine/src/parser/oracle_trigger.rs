@@ -515,16 +515,6 @@ pub(crate) fn parse_trigger_line_with_index(
         (None, None) => None,
     };
 
-    // CR 113.3c + CR 603.2: When the trigger's subject is a non-self player
-    // (e.g. "whenever another player attacks ..." → valid_target carries
-    // `ControllerRef::Opponent`), a player-scoped effect body like "they draw
-    // a card" / "they lose N life" must route to the triggering player, not
-    // the trigger controller. Surface this via `player_scope =
-    // PlayerFilter::TriggeringPlayer` on the execute ability so the shared
-    // player-scope iterator in `resolve_ability_chain` rebinds `controller`
-    // for the duration of the effect.
-    rewire_player_scoped_execute_to_triggering_player(&mut def);
-
     // CR 109.4 + CR 603.7c: When the execute ability references
     // `ControllerRef::TargetPlayer` in a filter (e.g. Ruthless Winnower's
     // "that player sacrifices a non-Elf creature" → `Sacrifice { target:
@@ -1938,54 +1928,6 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     (mode, def)
 }
 
-/// CR 608.2k: Extract the trigger subject from condition text for pronoun context.
-/// Reuses `parse_trigger_subject` but only needs the `TargetFilter`, not the remainder.
-/// For subjectless triggers (phase, player-action, game mechanics), the result is `Any`
-/// and `resolve_it_pronoun` falls back to `SelfRef`.
-///
-/// Warnings from `parse_trigger_subject` are discarded — this function is a best-effort
-/// subject extraction for pronoun resolution, not a diagnostic site. Warnings for
-/// degraded subjects are emitted by the main trigger condition path instead.
-/// CR 113.3c + CR 603.2: If the trigger's subject is scoped to an opponent
-/// (the trigger fires off another player's action) AND its execute ability has
-/// a player-scoped effect with no explicit `player_scope`, rewire the execute
-/// to `PlayerFilter::TriggeringPlayer` so the effect resolves for the acting
-/// player rather than the trigger controller. Covers Firemane Commando's
-/// "they draw a card" branch and analogous cards whose effect is expressed
-/// from the acting player's perspective.
-fn rewire_player_scoped_execute_to_triggering_player(def: &mut TriggerDefinition) {
-    let is_opponent_subject = matches!(
-        &def.valid_target,
-        Some(TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::Opponent),
-            type_filters,
-            properties,
-            ..
-        })) if type_filters.is_empty() && properties.is_empty()
-    );
-    if !is_opponent_subject {
-        return;
-    }
-    let Some(execute) = def.execute.as_deref_mut() else {
-        return;
-    };
-    if execute.player_scope.is_some() {
-        return;
-    }
-    use crate::types::ability::{Effect, PlayerFilter};
-    let routable = matches!(
-        &*execute.effect,
-        Effect::Draw { .. }
-            | Effect::GainLife { .. }
-            | Effect::LoseLife { .. }
-            | Effect::Discard { .. }
-            | Effect::Mill { .. }
-    );
-    if routable {
-        execute.player_scope = Some(PlayerFilter::TriggeringPlayer);
-    }
-}
-
 /// CR 109.4 + CR 603.7c: Returns `true` when any filter inside the execute
 /// ability's effect chain references `ControllerRef::TargetPlayer`. Walks
 /// sub-abilities so triggers like Dokuchi Silencer (outer Discard, inner
@@ -2013,6 +1955,14 @@ fn execute_references_target_player(effect: &crate::types::ability::Effect) -> b
     false
 }
 
+/// CR 608.2k: Extract the trigger subject from condition text for pronoun context.
+/// Reuses `parse_trigger_subject` but only needs the `TargetFilter`, not the remainder.
+/// For subjectless triggers (phase, player-action, game mechanics), the result is `Any`
+/// and `resolve_it_pronoun` falls back to `SelfRef`.
+///
+/// Warnings from `parse_trigger_subject` are discarded — this function is a best-effort
+/// subject extraction for pronoun resolution, not a diagnostic site. Warnings for
+/// degraded subjects are emitted by the main trigger condition path instead.
 fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
     let lower = condition_text.to_lowercase();
     let after_keyword = alt((
@@ -7279,7 +7229,7 @@ mod tests {
         // Effect amount should be the triggering event's amount, not Fixed 1.
         let execute = def.execute.as_ref().expect("execute ability present");
         match &*execute.effect {
-            crate::types::ability::Effect::GainLife { amount, .. } => {
+            crate::types::ability::Effect::GainLife { amount, player } => {
                 assert_eq!(
                     amount,
                     &QuantityExpr::Ref {
@@ -7287,9 +7237,28 @@ mod tests {
                     },
                     "Exquisite Blood: gain amount must reference event's life-loss amount"
                 );
+                // CR 608.2k: "you gain" — effect-level subject is the ability
+                // controller. Must NOT be rerouted to the trigger's opponent
+                // subject by a post-hoc `player_scope` override.
+                assert_eq!(
+                    player,
+                    &crate::types::ability::GainLifePlayer::Controller,
+                    "Exquisite Blood: 'you gain' recipient must be the ability controller"
+                );
             }
             other => panic!("expected GainLife effect, got {other:?}"),
         }
+        // CR 113.3c + CR 608.2k: The effect's subject ("you") is the single
+        // authority for who gains life. There must be NO `player_scope` on the
+        // execute ability — that field was historically (mis)used by a
+        // post-hoc rewire to redirect "you gain" effects to the triggering
+        // opponent, which is exactly the regression this guards against.
+        assert!(
+            execute.player_scope.is_none(),
+            "Exquisite Blood: execute.player_scope must be None — the effect-level \
+             subject is authoritative. Found {:?}",
+            execute.player_scope,
+        );
     }
 
     #[test]
@@ -10621,15 +10590,28 @@ mod tests {
                 "expected And(AttackersDeclaredMin, NoneOfAttackersTargetedYou), got {other:?}"
             ),
         }
-        // CR 113.3c + CR 603.2: "they draw a card" routes to the triggering player.
+        // CR 121.1 + CR 603.7c + CR 608.2k: "they draw a card" — the effect-level
+        // subject ("they") must be encoded directly on the Draw target as
+        // `TriggeringPlayer`, not via a post-hoc `player_scope` override on the
+        // execute ability. The runtime auto-binds `target: TriggeringPlayer`
+        // from `state.current_trigger_event` at resolution time
+        // (`extract_event_context_filter` in `effects/mod.rs`).
         let execute = def.execute.as_ref().expect("execute");
-        assert!(matches!(
-            &*execute.effect,
-            crate::types::ability::Effect::Draw { .. }
-        ));
-        assert_eq!(
+        match &*execute.effect {
+            crate::types::ability::Effect::Draw { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringPlayer,
+                    "Draw target must be TriggeringPlayer, not Controller"
+                );
+            }
+            other => panic!("expected Draw effect, got {other:?}"),
+        }
+        assert!(
+            execute.player_scope.is_none(),
+            "player_scope must be None — the effect-level subject is the single \
+             authority for routing. Found {:?}",
             execute.player_scope,
-            Some(crate::types::ability::PlayerFilter::TriggeringPlayer)
         );
     }
 

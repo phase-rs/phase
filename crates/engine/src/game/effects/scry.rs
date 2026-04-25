@@ -20,11 +20,9 @@ pub fn resolve(
     let (scry_num, scry_player): (usize, _) = match &ability.effect {
         Effect::Scry { count, target } => (
             resolve_quantity_with_targets(state, count, ability) as usize,
-            if target.is_context_ref() {
-                ability.controller
-            } else {
-                ability.target_player()
-            },
+            // CR 121.1 + CR 615.5 + CR 609.7: see draw.rs for rationale —
+            // context-ref filters resolve via state slots, not controller.
+            super::resolve_player_for_context_ref(state, ability, target),
         ),
         _ => (1, ability.controller),
     };

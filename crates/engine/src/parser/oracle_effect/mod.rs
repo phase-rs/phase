@@ -2999,6 +2999,20 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
         return clause;
     }
 
+    // CR 121.1 + CR 615.5: "{verb} cards equal to {quantity}" inside a
+    // subject-aware predicate (e.g. "the source's controller draws cards equal
+    // to the damage prevented this way" — Swans of Bryn Argoll). Mirrors the
+    // bare-imperative arm at `parse_effect_clause`: must run BEFORE the
+    // simpler "draw cards" matchers to avoid being dropped to a default
+    // count of 1.
+    {
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, lower.as_str());
+        if let Some(clause) = try_parse_equal_to_quantity_effect(tp) {
+            return clause;
+        }
+    }
+
     // Compound shuffle subjects: "shuffle ~ and target creature ... into their owners' libraries"
     // Must come before try_split_targeted_compound because "shuffle" is the verb, not the subject.
     if let Some(clause) = try_parse_compound_shuffle(text) {
@@ -5129,6 +5143,60 @@ fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mut QuantityE
         | Effect::Surveil { count, .. }
         | Effect::PutCounter { count, .. } => f(count),
         Effect::Sacrifice { count, .. } => f(count),
+        _ => {}
+    }
+}
+
+/// CR 109.4 + CR 608.2c: Apply `f` to every `TargetFilter` reachable through
+/// the common target-bearing fields of an `Effect`. Companion to
+/// `each_quantity_expr_mut`; used by callers that need to rewrite target slots
+/// across an effect chain (e.g. the prevention follow-up call site rewrites
+/// `ParentTargetController` → `PostReplacementSourceController` so "the source's
+/// controller draws cards" resolves against the prevented event's damage source).
+///
+/// Pragmatic visitor — covers the subset of `Effect` variants whose target
+/// slots are statically declared as `TargetFilter` or `Option<TargetFilter>`.
+/// Variants not listed here keep their target slots untouched; **add an arm
+/// when introducing a new target-bearing variant** so future rewrites cover it.
+/// Variant list mirrors `replace_target_with_parent` plus a handful of
+/// player-targetable effects (Draw, LoseLife, Discard, Mill, Scry, Surveil,
+/// RevealFromHand) whose `target` field is a `TargetFilter` and can therefore
+/// hold a player ref like `ParentTargetController`.
+pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut TargetFilter)) {
+    match effect {
+        Effect::Tap { target }
+        | Effect::Untap { target }
+        | Effect::Destroy { target, .. }
+        | Effect::Regenerate { target, .. }
+        | Effect::Sacrifice { target, .. }
+        | Effect::GainControl { target }
+        | Effect::Fight { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::DealDamage { target, .. }
+        | Effect::Pump { target, .. }
+        | Effect::Attach { target, .. }
+        | Effect::Counter { target, .. }
+        | Effect::Transform { target, .. }
+        | Effect::Connive { target, .. }
+        | Effect::PhaseOut { target }
+        | Effect::ForceBlock { target }
+        | Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Scry { target, .. }
+        | Effect::Surveil { target, .. } => f(target),
+        Effect::PutCounter { target, .. }
+        | Effect::AddCounter { target, .. }
+        | Effect::RemoveCounter { target, .. } => f(target),
+        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
+        Effect::LoseLife {
+            target: Some(target),
+            ..
+        } => f(target),
+        Effect::GenericEffect {
+            target: Some(target),
+            ..
+        } => f(target),
         _ => {}
     }
 }

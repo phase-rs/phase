@@ -232,6 +232,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
+        TargetFilter::PostReplacementSourceController => {
+            "prevented event source's controller".into()
+        }
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),

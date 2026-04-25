@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router";
 
 import type { GameFormat } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
+import { DiscordBadge } from "../components/chrome/DiscordBadge";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { BrokerOfflinePrompt } from "../components/lobby/BrokerOfflinePrompt";
 import { HostSetup } from "../components/lobby/HostSetup";
@@ -556,6 +557,9 @@ export function MultiplayerPage() {
         settingsOpen={showSettings}
         onSettingsOpenChange={setShowSettings}
       />
+      <div className="fixed left-20 top-[calc(env(safe-area-inset-top)+1rem)] z-20 flex h-11 items-center">
+        <DiscordBadge />
+      </div>
       <div className="menu-scene__vignette" />
       <div className="menu-scene__sigil menu-scene__sigil--left" />
       <div className="menu-scene__sigil menu-scene__sigil--right" />

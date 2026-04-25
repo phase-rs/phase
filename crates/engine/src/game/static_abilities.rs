@@ -247,12 +247,21 @@ pub(crate) fn prohibition_scope_matches_player(
         ProhibitionScope::Opponents => player != source_obj.controller,
         ProhibitionScope::AllPlayers => true,
         ProhibitionScope::Controller => player == source_obj.controller,
-        // CR 303.4e: "Enchanted player" / "enchanted creature's controller" style scopes
-        // follow the currently attached object's controller.
-        ProhibitionScope::EnchantedCreatureController => source_obj
-            .attached_to
-            .and_then(|target_id| state.objects.get(&target_id))
-            .is_some_and(|enchanted| enchanted.controller == player),
+        // CR 303.4e: For an Aura attached to an object ("enchanted creature's
+        // controller"), the prohibition scopes to that object's current
+        // controller. For an Aura attached directly to a player (CR 303.4 +
+        // CR 702.5d, Curse cycle), the "enchanted player" IS the player and we
+        // compare directly. Recall CR 303.4e: an Aura's controller is separate
+        // from the enchanted player's controller — `source_obj.controller` would
+        // give the wrong answer for the Curse case.
+        ProhibitionScope::EnchantedCreatureController => match source_obj.attached_to {
+            Some(crate::game::game_object::AttachTarget::Object(target_id)) => state
+                .objects
+                .get(&target_id)
+                .is_some_and(|enchanted| enchanted.controller == player),
+            Some(crate::game::game_object::AttachTarget::Player(pid)) => pid == player,
+            None => false,
+        },
     }
 }
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { useCardDataMeta, formatRelativeDate } from "../../hooks/useCardDataMeta";
 import { checkForServiceWorkerUpdate } from "../../pwa/registerServiceWorker";
+import { checkForTauriUpdate } from "../../pwa/tauriUpdater";
 import { consumeRecentAutoUpdateMarker } from "../../pwa/updateMarker";
 import {
   useUpdateStatus,
@@ -47,7 +48,10 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
   const hasUpdateIssue = Boolean(updateError);
 
   const handleCheckUpdate = () => {
-    if (isTauri()) return;
+    if (isTauri()) {
+      checkForTauriUpdate();
+      return;
+    }
     checkForServiceWorkerUpdate();
   };
 

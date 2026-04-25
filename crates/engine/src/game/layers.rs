@@ -295,8 +295,10 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|obj| obj.controller == *player),
         // CR 301.5a: True when at least one Equipment is attached to the source object.
         // Mirrors the attacher-is-equipment subtype check from `effects/attach.rs:64-67`.
+        // CR 301.5: Equipment can only attach to objects, so any non-Object host
+        // is rejected by `as_object`.
         StaticCondition::SourceIsEquipped => state.objects.values().any(|obj| {
-            obj.attached_to == Some(source_id)
+            obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
                 && obj.card_types.subtypes.iter().any(|s| s == "Equipment")
         }),
         // CR 701.37: True when the source permanent is monstrous.
@@ -304,11 +306,14 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.monstrous),
-        // CR 301.5 + CR 303.4: True when source Aura/Equipment is attached to a creature.
+        // CR 301.5 + CR 303.4: True when source Aura/Equipment is attached to a
+        // creature. A Player host (CR 303.4 + CR 702.5d) is never a creature, so
+        // we filter to Object hosts via `as_object`.
         StaticCondition::SourceAttachedToCreature => state
             .objects
             .get(&source_id)
             .and_then(|obj| obj.attached_to)
+            .and_then(|t| t.as_object())
             .and_then(|target_id| state.objects.get(&target_id))
             .is_some_and(|target| {
                 target
@@ -323,11 +328,13 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|obj| obj.zone == *zone),
         // CR 708.2 + CR 707.2: True when the creature this Aura/Equipment is attached to
         // is face-down. Traverses `attached_to` to the target object and reads its
-        // `face_down` status (false if source is not attached to any object).
+        // `face_down` status (false if source is not attached, or attached to a
+        // player — players have no face-down state).
         StaticCondition::EnchantedIsFaceDown => state
             .objects
             .get(&source_id)
             .and_then(|obj| obj.attached_to)
+            .and_then(|t| t.as_object())
             .and_then(|target_id| state.objects.get(&target_id))
             .is_some_and(|target| target.face_down),
         // CR 608.2c: Check if the source object matches a type filter (leveler gates).
@@ -1927,7 +1934,7 @@ mod tests {
             obj.card_types
                 .core_types
                 .push(crate::types::card_type::CoreType::Enchantment);
-            obj.attached_to = Some(bear_a);
+            obj.attached_to = Some(bear_a.into());
             obj.timestamp = ts;
 
             let enchanted_creature = TargetFilter::Typed(
@@ -3154,7 +3161,7 @@ mod tests {
         }
 
         // Attach aura to land
-        state.objects.get_mut(&aura_id).unwrap().attached_to = Some(land_id);
+        state.objects.get_mut(&aura_id).unwrap().attached_to = Some(land_id.into());
 
         evaluate_layers(&mut state);
 
@@ -3201,7 +3208,7 @@ mod tests {
         let aura = make_creature(&mut state, "Aura", 0, 0, PlayerId(0));
         let creature = make_creature(&mut state, "Manifested", 2, 2, PlayerId(0));
         state.objects.get_mut(&creature).unwrap().face_down = true;
-        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature.into());
         assert!(evaluate_condition_for_test(
             &state,
             &StaticCondition::EnchantedIsFaceDown,
@@ -3215,7 +3222,7 @@ mod tests {
         let mut state = setup();
         let aura = make_creature(&mut state, "Aura", 0, 0, PlayerId(0));
         let creature = make_creature(&mut state, "Face Up", 2, 2, PlayerId(0));
-        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature.into());
         assert!(!evaluate_condition_for_test(
             &state,
             &StaticCondition::EnchantedIsFaceDown,
