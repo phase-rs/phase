@@ -661,11 +661,29 @@ pub fn resolve_all(
     );
     let matching: Vec<_> = if let Some(player) = player_scope {
         // Player-scoped mass move: select every card in any of the origin zones
-        // controlled by the target player, regardless of type.
+        // belonging to the target player, regardless of type.
+        //
+        // CR 404.2 + CR 110.2: Hand / library / graveyard / exile membership is
+        // keyed by *owner*, not controller — only permanents on the battlefield
+        // have a controller. A creature stolen via Mind Control retains
+        // `obj.controller = thief` even after dying into its owner's graveyard
+        // (`reset_for_battlefield_exit` does not reset controller; only the
+        // layer pass over `battlefield_phased_in_ids` does, and it skips zones
+        // off the battlefield). Filtering by owner is therefore both rules-
+        // correct and robust to that state divergence. For battlefield-origin
+        // mass moves ("exile all permanents you control"), `obj.controller`
+        // is authoritative, so we keep that filter for the battlefield case.
         state
             .objects
             .iter()
-            .filter(|(_, obj)| origin_zones.contains(&obj.zone) && obj.controller == player)
+            .filter(|(_, obj)| {
+                origin_zones.contains(&obj.zone)
+                    && if obj.zone == Zone::Battlefield {
+                        obj.controller == player
+                    } else {
+                        obj.owner == player
+                    }
+            })
             .map(|(id, _)| *id)
             .collect()
     } else {
@@ -1248,6 +1266,72 @@ mod tests {
             Zone::Graveyard,
             "controller's graveyard must be untouched"
         );
+    }
+
+    #[test]
+    fn change_zone_all_exile_target_player_graveyard_includes_stolen_then_died() {
+        // CR 404.2 + CR 110.2: A creature stolen via Mind Control / Bribery
+        // dies into its *owner's* graveyard, but `obj.controller` retains the
+        // thief's PlayerId because `reset_for_battlefield_exit` does not reset
+        // controller and the layer pass only re-applies controller modifications
+        // to permanents that are still on the battlefield. "Exile target
+        // player's graveyard" must filter by `obj.owner`, not `obj.controller`,
+        // so the stolen-then-died corpse is not silently left behind.
+        //
+        // Regression for the bug shipped in 08ab17b97: `create_object` sets
+        // `controller = owner`, so the original test could not exercise this
+        // divergent state — only an explicit overwrite reproduces the case.
+        let mut state = GameState::new_two_player(42);
+
+        // Three "normal" cards in opponent's graveyard (controller == owner).
+        let mut opp_grave_ids = Vec::new();
+        for i in 0..3 {
+            let id = create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(1),
+                format!("Opp Card {i}"),
+                Zone::Graveyard,
+            );
+            opp_grave_ids.push(id);
+        }
+        // One stolen-then-died corpse: owner = PlayerId(1), controller =
+        // PlayerId(0) (the thief). Must still be exiled when targeting
+        // PlayerId(1)'s graveyard.
+        let stolen = create_object(
+            &mut state,
+            CardId(150),
+            PlayerId(1),
+            "Stolen Corpse".to_string(),
+            Zone::Graveyard,
+        );
+        if let Some(obj) = state.objects.get_mut(&stolen) {
+            obj.controller = PlayerId(0);
+        }
+        opp_grave_ids.push(stolen);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        for id in &opp_grave_ids {
+            let obj = &state.objects[id];
+            assert_eq!(
+                obj.zone,
+                Zone::Exile,
+                "opponent-owned graveyard card {id:?} should be exiled regardless of stale controller",
+            );
+        }
     }
 
     #[test]
