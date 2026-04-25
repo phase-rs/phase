@@ -8328,11 +8328,24 @@ fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
 }
 
 fn infer_origin_zone(lower: &str) -> Option<Zone> {
+    // CR 400.7: An object that moves from one zone to another becomes a new
+    // object — the "from" prepositional phrase identifies that origin zone.
+    // Adjective-qualified indefinite forms ("a single graveyard", "a random
+    // graveyard") share the same semantic origin as bare "a graveyard"; the
+    // qualifier constrains *which* instance, not which zone.
     if contains_possessive(lower, "from", "graveyard")
         || scan_contains_phrase(lower, "from a graveyard")
+        || scan_contains_phrase(lower, "from a single graveyard")
+        || scan_contains_phrase(lower, "from a random graveyard")
     {
         Some(Zone::Graveyard)
-    } else if scan_contains_phrase(lower, "from exile") {
+    } else if scan_contains_phrase(lower, "from exile")
+        // CR 406.6: "[card] exiled with [source]" identifies the card via the
+        // exile-link from a prior linked exile ability — the implicit origin
+        // is the exile zone. Used by reanimation/return effects on cards that
+        // previously exiled their target (Darkness Crystal, Mimeoplasm, etc.).
+        || scan_contains_phrase(lower, "exiled with")
+    {
         Some(Zone::Exile)
     } else if contains_possessive(lower, "from", "hand") {
         Some(Zone::Hand)

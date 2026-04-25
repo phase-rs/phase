@@ -1209,6 +1209,37 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         }
     }
 
+    // CR 406.6: "exiled with [source]" linkage suffix on a typed reference.
+    // Singular targeted form ("target creature card exiled with ~") composes
+    // with the typed filter via `TargetFilter::And { [Typed, ExiledBySource] }`,
+    // mirroring the `exclude_chosen_type` wrapping pattern below. The plural
+    // and "each card" forms are handled at the top of `parse_target` since
+    // they bypass type-phrase parsing entirely.
+    let mut exiled_by_source = false;
+    let remaining_exiled = lower[pos..].trim_start();
+    let exiled_offset = lower[pos..].len() - remaining_exiled.len();
+    // Try "exiled with this <type>" first (longest-match-first); the trailing
+    // type word identifies the source object's card type and is informational
+    // here — consume it as a single non-space run via take_till1 so it doesn't
+    // leak into the remainder.
+    if let Ok((rest, _)) = (
+        tag::<_, _, nom_language::error::VerboseError<&str>>("exiled with this "),
+        nom::bytes::complete::take_till1::<_, _, nom_language::error::VerboseError<&str>>(
+            |c: char| c.is_whitespace(),
+        ),
+    )
+        .parse(remaining_exiled)
+    {
+        exiled_by_source = true;
+        pos += exiled_offset + (remaining_exiled.len() - rest.len());
+    } else if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("exiled with ~")
+            .parse(remaining_exiled)
+    {
+        exiled_by_source = true;
+        pos += exiled_offset + (remaining_exiled.len() - rest.len());
+    }
+
     // CR 608.2d: "of their choice" / "of his or her choice" — informational qualifier
     // on opponent-choice effects. The actual choice is handled by the WaitingFor state machine.
     let remaining_choice = lower[pos..].trim_start();
@@ -1267,6 +1298,19 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
                     )),
                 },
             ],
+        }
+    } else {
+        filter
+    };
+
+    // CR 406.6: Compose the typed filter with the exile-link constraint when
+    // the singular "exiled with ~" suffix was present. Runtime evaluation of
+    // `TargetFilter::And` requires every inner filter to match (game/filter.rs
+    // line 347), and `extract_in_zone` surfaces `Zone::Exile` from the
+    // `ExiledBySource` arm so the resolver scans the correct zone.
+    let filter = if exiled_by_source {
+        TargetFilter::And {
+            filters: vec![filter, TargetFilter::ExiledBySource],
         }
     } else {
         filter
@@ -2840,7 +2884,14 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
                 tag("each player's "),
             )),
         ),
-        value(ZoneQual::Plain, alt((tag("a "), tag("the ")))),
+        // CR 400.7: Adjective-qualified zone references — "a single graveyard" /
+        // "a random graveyard" — share the indefinite-article semantics with
+        // bare "a "/"the " for origin-zone tracking (the modifier constrains
+        // which instance, not which zone). Longest-match-first ordering.
+        value(
+            ZoneQual::Plain,
+            alt((tag("a single "), tag("a random "), tag("a "), tag("the "))),
+        ),
         // Bare form (e.g., "from exile"): zero-width match so the zone_word combinator runs next.
         value(ZoneQual::Plain, tag("")),
     ))
@@ -3825,6 +3876,68 @@ mod tests {
     fn cards_exiled_with_tilde_produces_exiled_by_source() {
         let (f, _) = parse_target("cards exiled with ~");
         assert_eq!(f, TargetFilter::ExiledBySource);
+    }
+
+    #[test]
+    fn target_creature_card_exiled_with_tilde_produces_and_filter() {
+        // CR 406.6: Singular targeted form — composes typed filter with the
+        // exile-link constraint via TargetFilter::And.
+        let (f, rest) = parse_target("target creature card exiled with ~");
+        assert_eq!(
+            f,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::ExiledBySource,
+                ],
+            }
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_creature_card_exiled_with_this_creature_produces_and_filter() {
+        let (f, rest) = parse_target("target creature card exiled with this creature");
+        assert_eq!(
+            f,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::ExiledBySource,
+                ],
+            }
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    // ── "from a single graveyard" zone qualifier ──
+
+    #[test]
+    fn target_card_from_a_single_graveyard() {
+        // CR 400.7: "a single graveyard" shares origin-zone semantics with
+        // bare "a graveyard"; the modifier constrains which instance, not
+        // which zone.
+        let (f, rest) = parse_target("target card from a single graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn up_to_two_target_cards_from_a_single_graveyard() {
+        // Hearse activated ability target text after "exile " is stripped.
+        let (f, rest) = parse_target("up to two target cards from a single graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
+        );
+        assert_eq!(rest.trim(), "");
     }
 
     // ── Bare type phrase fallback ──
