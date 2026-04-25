@@ -2252,6 +2252,20 @@ pub struct GameState {
         with = "tuple_key_map"
     )]
     pub activated_abilities_this_game: HashMap<(ObjectId, usize), u32>,
+    /// CR 603.4: Per-ability per-turn resolution counter.
+    /// Keyed by `(source_id, ability_index)` — identifies a specific printed
+    /// ability on a specific source object. Incremented at the top of
+    /// `resolve_ability_chain` (depth 0) when the resolving ability has a
+    /// `Some(ability_index)` stamp; read by
+    /// `AbilityCondition::NthResolutionThisTurn` to gate Omnath-style
+    /// "if this is the [Nth] time this ability has resolved this turn" patterns.
+    /// Cleared in `start_next_turn` alongside other per-turn counters.
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        with = "tuple_key_map"
+    )]
+    pub ability_resolutions_this_turn: HashMap<(ObjectId, usize), u32>,
     /// CR 601.2a: Tracks which graveyard-cast permission sources have been
     /// used this turn. Keyed by the granting permanent's ObjectId.
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
@@ -2651,6 +2665,7 @@ impl GameState {
             triggers_fired_this_game: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
+            ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             hand_cast_free_permissions_used: HashSet::new(),
             first_card_drawn_this_turn: HashMap::new(),
@@ -2817,6 +2832,7 @@ impl PartialEq for GameState {
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
+            && self.ability_resolutions_this_turn == other.ability_resolutions_this_turn
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn

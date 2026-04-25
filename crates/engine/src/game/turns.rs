@@ -195,6 +195,10 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.activated_abilities_this_turn.clear();
+    // CR 514 + CR 603.4: Per-ability per-turn resolution counter resets at turn
+    // boundary alongside other "this turn" trackers (mirrors the cleanup of
+    // `trigger_fire_counts_this_turn`).
+    state.ability_resolutions_this_turn.clear();
     state.graveyard_cast_permissions_used.clear();
     // CR 601.2b: Reset per-turn CastFromHandFree once-per-turn tracking (Zaffai).
     state.hand_cast_free_permissions_used.clear();

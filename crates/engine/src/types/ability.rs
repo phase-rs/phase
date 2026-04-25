@@ -5389,6 +5389,14 @@ pub enum AbilityCondition {
     /// Used by Daybound/Nightbound ETB initialization: "If it's neither day nor night,
     /// it becomes day as this creature enters."
     DayNightIsNeither,
+    /// CR 603.4: Intervening-if gate for "if this is the [Nth] time this ability has
+    /// resolved this turn". Counter is keyed by `(source_id, ability_index)` and
+    /// incremented at the top of `resolve_ability_chain` (depth 0). The condition is
+    /// satisfied when, after the increment, the per-turn resolution count equals `n`.
+    /// Cleared at end-of-turn cleanup alongside other per-turn counters.
+    /// Used by Omnath, Locus of Creation and the broader nth-resolution class
+    /// (Ashling the Pilgrim, Nissa Resurgent Animist, Teething Wurmlet, etc.).
+    NthResolutionThisTurn { n: u32 },
 }
 
 /// Casting-time facts that flow with a spell from casting through resolution.
@@ -6645,6 +6653,13 @@ pub struct ResolvedAbility {
     /// Read during resolution by `QuantityRef::Variable { name: "X" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_x: Option<u32>,
+    /// CR 603.4: Index of the printed ability this resolution came from on the
+    /// source object's ability list. Identifies "this ability" for per-turn
+    /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
+    /// synthesized/runtime-only abilities (prowess, firebending) and activated
+    /// abilities for which nth-resolution gating is not yet wired through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_index: Option<usize>,
 }
 
 impl ResolvedAbility {
@@ -6677,6 +6692,7 @@ impl ResolvedAbility {
             distribution: None,
             player_scope: None,
             chosen_x: None,
+            ability_index: None,
         }
     }
 

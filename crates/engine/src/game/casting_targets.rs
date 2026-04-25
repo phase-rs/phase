@@ -194,6 +194,9 @@ pub(crate) fn handle_select_targets(
 
         let entry_id = ObjectId(state.next_object_id);
         state.next_object_id += 1;
+        // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
+        let mut ability = ability;
+        ability.ability_index = Some(ability_index);
         stack::push_to_stack(
             state,
             StackEntry {
@@ -288,6 +291,9 @@ pub(crate) fn handle_choose_target(
 
                 let entry_id = ObjectId(state.next_object_id);
                 state.next_object_id += 1;
+                // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
+                let mut ability = ability;
+                ability.ability_index = Some(ability_index);
                 stack::push_to_stack(
                     state,
                     StackEntry {

@@ -69,6 +69,7 @@ mod tests {
             description: None,
             player_scope: None,
             chosen_x: None,
+            ability_index: None,
             repeat_for: None,
             forward_result: false,
             unless_pay: None,

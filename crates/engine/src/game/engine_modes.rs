@@ -118,6 +118,10 @@ fn handle_activated_mode_choice(
 
             let entry_id = ObjectId(state.next_object_id);
             state.next_object_id += 1;
+            // CR 603.4: Stamp the printed-ability index for per-turn resolution
+            // tracking (`AbilityCondition::NthResolutionThisTurn`) before push.
+            let mut resolved_with_idx = resolved;
+            resolved_with_idx.ability_index = ability_index;
             super::stack::push_to_stack(
                 state,
                 crate::types::game_state::StackEntry {
@@ -126,7 +130,7 @@ fn handle_activated_mode_choice(
                     controller: player,
                     kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
                         source_id,
-                        ability: resolved,
+                        ability: resolved_with_idx,
                     },
                 },
                 events,
@@ -162,6 +166,9 @@ fn handle_activated_mode_choice(
         }
         let entry_id = ObjectId(state.next_object_id);
         state.next_object_id += 1;
+        // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
+        let mut resolved_with_idx = resolved;
+        resolved_with_idx.ability_index = ability_index;
         super::stack::push_to_stack(
             state,
             crate::types::game_state::StackEntry {
@@ -170,7 +177,7 @@ fn handle_activated_mode_choice(
                 controller: player,
                 kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
                     source_id,
-                    ability: resolved,
+                    ability: resolved_with_idx,
                 },
             },
             events,

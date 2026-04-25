@@ -3975,6 +3975,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::And { .. } => ("And", Handled),
         // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
+        // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.
+        AbilityCondition::NthResolutionThisTurn { .. } => ("NthResolutionThisTurn", Handled),
     }
 }
 

@@ -176,7 +176,11 @@ fn collect_matching_triggers(
                     continue;
                 }
             }
-            let ability = build_triggered_ability(state, trig_def, obj_id, controller);
+            let mut ability = build_triggered_ability(state, trig_def, obj_id, controller);
+            // CR 603.4: Stamp the printed-trigger index so per-turn resolution
+            // tracking (`AbilityCondition::NthResolutionThisTurn`) can identify
+            // "this ability" at resolution time.
+            ability.ability_index = Some(trig_idx);
             let (modal, mode_abilities) = trig_def
                 .execute
                 .as_ref()

@@ -16991,4 +16991,119 @@ mod tests {
             "filter must be Non(Land)"
         );
     }
+
+    // CR 603.4: Parser arms for `AbilityCondition::NthResolutionThisTurn`.
+    // Covers Omnath / Ashling / Nissa / Sephiroth / Teething Wurmlet class.
+
+    #[test]
+    fn nth_resolution_first_full_form() {
+        // "this is the first time this ability has resolved this turn" — the
+        // form printed in the LEADING-suffix sentence (Omnath, Teething Wurmlet).
+        let result = try_nom_condition_as_ability_condition(
+            "this is the first time this ability has resolved this turn",
+        );
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 1 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_third_full_form() {
+        // Ashling the Pilgrim print form.
+        let result = try_nom_condition_as_ability_condition(
+            "this is the third time this ability has resolved this turn",
+        );
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 3 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_anaphoric_second() {
+        // Omnath's continuation sentence: "If it's the second time, ..."
+        // The "this ability has resolved this turn" tail is anaphoric.
+        let result = try_nom_condition_as_ability_condition("it's the second time");
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 2 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_anaphoric_third() {
+        let result = try_nom_condition_as_ability_condition("it's the third time");
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 3 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_fourth() {
+        // Sephiroth, Fabled SOLDIER print form.
+        let result = try_nom_condition_as_ability_condition(
+            "this is the fourth time this ability has resolved this turn",
+        );
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 4 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_partial_text_returns_none() {
+        // A leftover after the recognized phrase must not match — the parser
+        // requires either the full tail or empty remainder (anaphoric).
+        let result = try_nom_condition_as_ability_condition(
+            "this is the first time something else happened",
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn nth_resolution_omnath_chain_populates_three_branches() {
+        // End-to-end: Omnath's landfall trigger description should chain three
+        // sub-abilities, each gated on `NthResolutionThisTurn { n: 1/2/3 }`.
+        std::thread::Builder::new()
+            .name("omnath-nth".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let def = parse_effect_chain(
+                    "you gain 4 life if this is the first time this ability has resolved this turn. \
+                     If it's the second time, add {R}{G}{W}{U}. \
+                     If it's the third time, ~ deals 4 damage to each opponent.",
+                    AbilityKind::Spell,
+                );
+                assert!(
+                    matches!(*def.effect, Effect::GainLife { .. }),
+                    "first effect should be GainLife, got {:?}",
+                    def.effect
+                );
+                assert_eq!(
+                    def.condition,
+                    Some(AbilityCondition::NthResolutionThisTurn { n: 1 }),
+                    "first branch must gate on n=1, got {:?}",
+                    def.condition
+                );
+                let sub_n2 = def.sub_ability.as_ref().expect("must have n=2 branch");
+                assert_eq!(
+                    sub_n2.condition,
+                    Some(AbilityCondition::NthResolutionThisTurn { n: 2 }),
+                    "second branch must gate on n=2, got {:?}",
+                    sub_n2.condition
+                );
+                let sub_n3 = sub_n2.sub_ability.as_ref().expect("must have n=3 branch");
+                assert_eq!(
+                    sub_n3.condition,
+                    Some(AbilityCondition::NthResolutionThisTurn { n: 3 }),
+                    "third branch must gate on n=3, got {:?}",
+                    sub_n3.condition
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }
