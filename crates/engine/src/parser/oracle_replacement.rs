@@ -2494,8 +2494,11 @@ fn parse_xorn_subtype_token_replacement(
         ))
         .parse(i)?;
         let start_offset = total_len - i.len();
-        let (i, article) =
-            peek(opt(alt((tag::<_, _, VerboseError<&str>>("a "), tag("an "))))).parse(i)?;
+        let (i, article) = peek(opt(alt((
+            tag::<_, _, VerboseError<&str>>("a "),
+            tag("an "),
+        ))))
+        .parse(i)?;
         let needs_article = article.is_none();
         let (i, descriptor) = alt((
             take_until::<_, _, VerboseError<&str>>("."),

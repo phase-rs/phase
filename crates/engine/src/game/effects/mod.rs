@@ -633,11 +633,20 @@ pub(crate) fn resolve_player_for_context_ref(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> PlayerId {
-    if let Some(player) = ability.targets.iter().find_map(|target| match target {
-        TargetRef::Player(player) => Some(*player),
-        _ => None,
-    }) {
-        return player;
+    // CR 115.1: For non-context-ref filters (e.g. `TargetFilter::Player` from
+    // "target player draws"), the drawing player was chosen at announcement
+    // and lives in `ability.targets`. Context-ref filters (Controller,
+    // PostReplacementSourceController, …) MUST NOT consult `ability.targets`:
+    // chain target-propagation (resolve_ability_chain) inherits parent targets
+    // into a sub-ability with empty targets, so a sub Draw whose filter is
+    // `Controller` would otherwise pick up the parent's Player target.
+    if !target_filter.is_context_ref() {
+        if let Some(player) = ability.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            _ => None,
+        }) {
+            return player;
+        }
     }
     if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
         state,
