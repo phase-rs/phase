@@ -176,10 +176,13 @@ fn modification_is_defensive(m: &ContinuousModification) -> bool {
 }
 
 /// Returns true if the filter scopes effects to the source's controller
-/// (the caster) — i.e., affects "you" or "permanents you control."
+/// (the caster) — i.e., affects "you", "permanents you control", or the
+/// source itself. The parser emits `TargetFilter::SelfRef` for ~570 cards
+/// with "this permanent" / "~ has X" patterns; without `SelfRef` the
+/// classifier silently misses every such self-buff.
 fn target_filter_self_scoped(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Controller => true,
+        TargetFilter::Controller | TargetFilter::SelfRef => true,
         TargetFilter::Typed(tf) => matches!(tf.controller, Some(ControllerRef::You)),
         _ => false,
     }
@@ -252,5 +255,32 @@ mod tests {
     #[test]
     fn classifier_ignores_unrelated_proliferate_effect() {
         assert!(!is_self_protection_effect(&Effect::Proliferate));
+    }
+
+    /// Regression: 570+ cards parse "this permanent gains X" with
+    /// `affected = TargetFilter::SelfRef`. Prior to the fix, the
+    /// classifier's `target_filter_self_scoped` only matched `Controller`
+    /// and `Typed{controller: You}`, silently missing every self-targeted
+    /// keyword grant.
+    #[test]
+    fn classifier_recognises_self_ref_indestructible_grant() {
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected: Some(TargetFilter::SelfRef),
+                modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Indestructible,
+                }],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: Vec::new(),
+                characteristic_defining: false,
+                description: None,
+            }],
+            target: None,
+            duration: None,
+        };
+        assert!(is_self_protection_effect(&effect));
     }
 }

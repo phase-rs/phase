@@ -1232,6 +1232,30 @@ mod tests {
         );
     }
 
+    /// CR 122.1: Removing a +1/+1 counter harms its bearer; removing a
+    /// -1/-1 counter helps it (Hexcaster's Mark, Vampire Hexmage). Prior
+    /// to the fix RemoveCounter was lumped under the catch-all "harmful"
+    /// arm, inverting AI target preference for -1/-1 removal.
+    #[test]
+    fn remove_plus_counter_is_harmful() {
+        let effect = Effect::RemoveCounter {
+            counter_type: "+1/+1".to_string(),
+            count: 1,
+            target: TargetFilter::Any,
+        };
+        assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
+    }
+
+    #[test]
+    fn remove_minus_counter_is_beneficial() {
+        let effect = Effect::RemoveCounter {
+            counter_type: "-1/-1".to_string(),
+            count: 1,
+            target: TargetFilter::Any,
+        };
+        assert_eq!(effect_polarity(&effect), EffectPolarity::Beneficial);
+    }
+
     #[test]
     fn unknown_effect_defaults_to_contextual() {
         let effect = Effect::GenericEffect {

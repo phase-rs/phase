@@ -19,6 +19,15 @@ pub(crate) enum EffectPolarity {
     Contextual,
 }
 
+/// Flip a polarity. `Contextual` stays put — there's no opposite of "unknown."
+fn invert(polarity: EffectPolarity) -> EffectPolarity {
+    match polarity {
+        EffectPolarity::Beneficial => EffectPolarity::Harmful,
+        EffectPolarity::Harmful => EffectPolarity::Beneficial,
+        EffectPolarity::Contextual => EffectPolarity::Contextual,
+    }
+}
+
 /// CR 122.1: Counters sign — `+1/+1` is beneficial to the bearer, `-1/-1`
 /// harmful. Non-P/T counter types (poison, loyalty, charge, etc.) are classified
 /// as Contextual because their value to the bearer depends on card semantics.
@@ -56,33 +65,37 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::AddCounter { counter_type, .. }
         | Effect::PutCounter { counter_type, .. }
         | Effect::PutCounterAll { counter_type, .. } => counter_sign_polarity(counter_type),
+        // CR 122.1 + CR 121: Removing counters inverts the placement polarity —
+        // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
+        // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
+        // Hexmage). Same building-block class as PutCounter, opposite sign.
+        Effect::RemoveCounter { counter_type, .. } => invert(counter_sign_polarity(counter_type)),
         Effect::MultiplyCounter {
             counter_type,
             multiplier,
             ..
         } => {
-            // Doubling a +1/+1 is beneficial; halving (-1) inverts. Zero is contextual.
+            // Doubling +1/+1 is beneficial; halving (-1) or erasing (0) inverts.
             let base = counter_sign_polarity(counter_type);
             if *multiplier > 1 {
                 base
-            } else if *multiplier < 0 {
-                match base {
-                    EffectPolarity::Beneficial => EffectPolarity::Harmful,
-                    EffectPolarity::Harmful => EffectPolarity::Beneficial,
-                    EffectPolarity::Contextual => EffectPolarity::Contextual,
-                }
+            } else if *multiplier < 1 {
+                // Both negative multipliers and zero erase/invert counters —
+                // erasing +1/+1 is harmful, erasing -1/-1 is beneficial.
+                invert(base)
             } else {
+                // multiplier == 1 is a no-op
                 EffectPolarity::Contextual
             }
         }
-        // CR 121.5: Moving counters is target-relative (moving -1/-1 off your own
-        // creature onto an opponent's is beneficial to both parties of YOUR goals),
-        // so leave as Contextual — the call site must inspect source/target controllers.
+        // CR 122.5: Moving counters is target-relative (moving -1/-1 off your
+        // own creature onto an opponent's is beneficial), so leave as
+        // Contextual — the call site must inspect source/target controllers.
         Effect::MoveCounters { .. } => EffectPolarity::Contextual,
-        // CR 701.23: Proliferate adds a counter of each existing kind on chosen
-        // permanents/players. Polarity depends on the counter mix on the chosen
-        // targets at resolution time — classify as Contextual; target-selection
-        // must inspect the target's counter sign.
+        // CR 701.34: Proliferate adds a counter of each existing kind on
+        // chosen permanents/players. Polarity depends on the counter mix on
+        // the chosen targets at resolution time — classify as Contextual;
+        // target-selection must inspect the target's counter sign.
         Effect::Proliferate => EffectPolarity::Contextual,
         // CR 701.10a: Doubling base P/T on a filter set is beneficial to that set.
         Effect::DoublePTAll { .. } => EffectPolarity::Beneficial,
@@ -111,7 +124,6 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }
         | Effect::LoseLife { .. }
-        | Effect::RemoveCounter { .. }
         | Effect::Tap { .. }
         | Effect::Bounce { .. }
         | Effect::Counter { .. }
