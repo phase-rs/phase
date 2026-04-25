@@ -3,6 +3,8 @@ import type {
   GameAction,
   ObjectId,
 } from "../adapter/types";
+import { TURN_BANNER_DURATION_MS } from "../animation/types";
+import { usePreferencesStore } from "./preferencesStore";
 
 // Guard against spurious mouseleave events caused by Framer Motion layout
 // recalculations or pointer-events-auto overlays stealing focus from the card.
@@ -188,8 +190,17 @@ export const useUiStore = create<UiStore>()((set) => ({
   setPreviewSticky: (sticky) => set({ previewSticky: sticky }),
   setDragging: (dragging) => set({ isDragging: dragging }),
   flashTurnBanner: (text) => {
+    // Banner duration scales with both the global Animation Speed slider
+    // (animationSpeedMultiplier) and the per-category Banner Pacing slider
+    // (pacingMultipliers.banners). When animationSpeedMultiplier is 0
+    // ("instant"), skip the banner entirely so it never lingers.
+    const prefs = usePreferencesStore.getState();
+    const speed = prefs.animationSpeedMultiplier;
+    if (speed <= 0) return;
+    const banner = prefs.pacingMultipliers.banners;
+    const duration = TURN_BANNER_DURATION_MS * speed * banner;
     set({ showTurnBanner: true, turnBannerText: text });
-    setTimeout(() => set({ showTurnBanner: false }), 1500);
+    setTimeout(() => set({ showTurnBanner: false }), duration);
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
