@@ -585,13 +585,32 @@ fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// Parse a list of type filters joined by `" and "`, `" or "`, or `" and/or "`.
+///
+/// CR 604.3: In zone-count contexts ("two or more instant and/or sorcery cards
+/// in your graveyard"), the joining conjunction is semantically a disjunction
+/// — a card matches if it has any of the listed types. The result
+/// `Vec<TypeFilter>` is consumed by `matches_zone_card_filter`
+/// (`game/quantity.rs:1151`), which uses `.iter().any(...)` (logical OR).
+///
+/// All three separators (`and`, `or`, `and/or`) are accepted so the combinator
+/// covers the grammatical variants Wizards uses across templating eras
+/// (e.g. "instant and/or sorcery", "instant or sorcery", "creatures and
+/// artifacts"). The longest-prefix-first ordering (`and/or` before `and`) is
+/// load-bearing — without it, `tag(" and ")` would consume the `" and "` head
+/// of `" and/or "` and the `/or` tail would derail `parse_type_filter_word`.
 fn parse_type_filter_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     let (mut rest, first) = parse_type_filter_word(input)?;
     let mut filters = vec![first];
-    while let Ok((next_rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" and ").parse(rest)
-    {
-        let (after_type, next) = parse_type_filter_word(next_rest)?;
+    loop {
+        let sep = tag::<_, _, nom_language::error::VerboseError<&str>>(" and/or ")
+            .parse(rest)
+            .or_else(|_| tag::<_, _, nom_language::error::VerboseError<&str>>(" and ").parse(rest))
+            .or_else(|_| tag::<_, _, nom_language::error::VerboseError<&str>>(" or ").parse(rest));
+        let Ok((next_rest, _)) = sep else { break };
+        let Ok((after_type, next)) = parse_type_filter_word(next_rest) else {
+            break;
+        };
         filters.push(next);
         rest = after_type;
     }
@@ -1062,6 +1081,101 @@ mod tests {
             }
         );
         assert_eq!(rest, " and");
+    }
+
+    /// CR 604.3: `" and/or "` joins multiple type filters as a disjunction,
+    /// matching cards with any of the listed types. Used by the Ghitu
+    /// Lavarunner / Magmatic Channeler / Curious Homunculus class ("instant
+    /// and/or sorcery cards in your graveyard").
+    #[test]
+    fn test_parse_quantity_ref_and_or_type_list_in_graveyard() {
+        let (rest, q) =
+            parse_quantity_ref("instant and/or sorcery cards in your graveyard").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                scope: CountScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 604.3: Plain `" or "` joining is also valid in Oracle text — both
+    /// forms appear historically depending on era ("instant or sorcery
+    /// cards"). Resolves identically to the `and/or` form.
+    #[test]
+    fn test_parse_quantity_ref_or_type_list_in_graveyard() {
+        let (rest, q) = parse_quantity_ref("instant or sorcery cards in your graveyard").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                scope: CountScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 604.3: `" and "` joining for compound type lists in zone-count
+    /// phrases ("artifact and creature cards in your graveyard"). Disjunction
+    /// at the count level (`matches_zone_card_filter` uses `.iter().any(...)`).
+    #[test]
+    fn test_parse_quantity_ref_and_type_list_in_graveyard() {
+        let (rest, q) =
+            parse_quantity_ref("artifact and creature cards in your graveyard").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![TypeFilter::Artifact, TypeFilter::Creature],
+                scope: CountScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 604.3: End-to-end through `parse_inner_condition`, the path used by
+    /// `parse_static_condition` for "as long as ..." gates. Pins the Ghitu
+    /// Lavarunner regression at the static-condition layer.
+    #[test]
+    fn test_parse_inner_condition_there_are_and_or() {
+        use crate::parser::oracle_nom::condition::parse_inner_condition;
+        use crate::types::ability::{Comparator, StaticCondition};
+
+        let (rest, cond) = parse_inner_condition(
+            "there are two or more instant and/or sorcery cards in your graveyard",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match cond {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 2 });
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone,
+                                card_types,
+                                scope,
+                            },
+                    } => {
+                        assert_eq!(zone, ZoneRef::Graveyard);
+                        assert_eq!(card_types, vec![TypeFilter::Instant, TypeFilter::Sorcery]);
+                        assert_eq!(scope, CountScope::Controller);
+                    }
+                    other => panic!("expected ZoneCardCount lhs, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
     }
 
     #[test]
