@@ -123,11 +123,18 @@ fn run_on_decline_now(
     // `apply_post_replacement_effect`, which threads the ETB'd object in the same
     // way — we mirror that convention here because this path runs immediately
     // (no player prompt) when the hand has no eligible card.
+    //
+    // CR 608.2c: Route through `resolve_ability_chain` (not `resolve_effect`) so
+    // any condition on the on_decline ability is evaluated. Reveal-tribal lands
+    // (Fortified Beachhead, Temple of the Dragon Queen) gate the on_decline Tap
+    // on `AbilityCondition::ControllerControlsMatching { negated: true }` — the
+    // Tap fires only when the controller doesn't already control a [filter]
+    // permanent. Bypassing the chain would skip that check.
     let mut resolved = build_resolved_from_def(def, source_id, controller);
     if resolved.targets.is_empty() {
         resolved.targets.push(TargetRef::Object(source_id));
     }
-    let _ = super::resolve_effect(state, &resolved, events);
+    let _ = super::resolve_ability_chain(state, &resolved, events, 0);
 }
 
 #[cfg(test)]
@@ -251,6 +258,147 @@ mod tests {
         assert!(
             state.pending_continuation.is_some(),
             "on_decline should be stashed as pending continuation"
+        );
+    }
+
+    /// CR 608.2c + CR 614.1d: Tarkir reveal-tribal land — when controller has
+    /// no Soldier card in hand AND no Soldier on battlefield, the on_decline's
+    /// `ControllerControlsMatching{negated:true}` condition is met (no
+    /// matching permanent) → Tap fires → land enters tapped.
+    #[test]
+    fn tarkir_reveal_land_taps_when_no_match_in_hand_or_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fortified Beachhead".to_string(),
+            Zone::Battlefield,
+        );
+        // Non-Soldier card in hand: not eligible for the reveal.
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Hand,
+        );
+
+        let mut soldier_filter = TypedFilter::card();
+        soldier_filter
+            .type_filters
+            .push(TypeFilter::Subtype("Soldier".to_string()));
+        let reveal_filter = TargetFilter::Typed(soldier_filter.clone());
+        let cond_filter = TargetFilter::Typed(
+            soldier_filter.controller(crate::types::ability::ControllerRef::You),
+        );
+        let conditional_tap = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .condition(
+            crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                filter: cond_filter,
+                negated: true,
+            },
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealFromHand {
+                filter: reveal_filter,
+                on_decline: Some(Box::new(conditional_tap)),
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Empty eligible hand → on_decline runs immediately. No Soldier on
+        // battlefield → ControllerControlsMatching{negated:true} is satisfied → Tap.
+        assert!(
+            state.objects.get(&source).unwrap().tapped,
+            "should tap when no Soldier card in hand and no Soldier on battlefield"
+        );
+    }
+
+    /// CR 608.2c + CR 614.1d: Mirror of the above — controller has no Soldier
+    /// in hand BUT controls a Soldier on the battlefield → on_decline's
+    /// condition fails (controls_any = true, negated → false) → Tap suppressed
+    /// → land enters untapped via the disjunction's second arm.
+    #[test]
+    fn tarkir_reveal_land_skips_tap_when_controls_matching() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fortified Beachhead".to_string(),
+            Zone::Battlefield,
+        );
+        // Non-Soldier card in hand: not eligible for the reveal.
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Hand,
+        );
+        // Soldier creature on battlefield → satisfies the OR's second arm.
+        let soldier = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Squire".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&soldier).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec!["Soldier".to_string()];
+        }
+
+        let mut soldier_filter = TypedFilter::card();
+        soldier_filter
+            .type_filters
+            .push(TypeFilter::Subtype("Soldier".to_string()));
+        let reveal_filter = TargetFilter::Typed(soldier_filter.clone());
+        let cond_filter = TargetFilter::Typed(
+            soldier_filter.controller(crate::types::ability::ControllerRef::You),
+        );
+        let conditional_tap = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .condition(
+            crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                filter: cond_filter,
+                negated: true,
+            },
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealFromHand {
+                filter: reveal_filter,
+                on_decline: Some(Box::new(conditional_tap)),
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Empty eligible hand → on_decline runs immediately. Controls Soldier
+        // → ControllerControlsMatching{negated:true} fails → Tap skipped.
+        assert!(
+            !state.objects.get(&source).unwrap().tapped,
+            "should NOT tap when controller already controls a Soldier"
         );
     }
 }

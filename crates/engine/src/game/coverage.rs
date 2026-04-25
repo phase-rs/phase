@@ -3965,6 +3965,12 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::IsYourTurn { .. } => ("IsYourTurn", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
+        // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by
+        // evaluate_condition (effects/mod.rs); used by reveal-tribal land cycle
+        // (Fortified Beachhead, Temple of the Dragon Queen) on_decline gating.
+        AbilityCondition::ControllerControlsMatching { .. } => {
+            ("ControllerControlsMatching", Handled)
+        }
         // Variants below are parsed but have no runtime resolver today.
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),

@@ -377,24 +377,6 @@ fn parse_reveal_land(
     let remainder = after_filter;
     let remainder_lower = remainder.to_lowercase();
 
-    // The tail must be exactly the decline sentence. Accept both "it enters
-    // tapped" (pronoun) and "~ enters tapped" (normalized) variants; trailing
-    // punctuation is tolerated by `trim_end`.
-    let ((), tail) = nom_on_lower(remainder, &remainder_lower, |i| {
-        value(
-            (),
-            (
-                tag(" card from your hand. if you don't, "),
-                alt((tag("~ "), tag("it "))),
-                alt((tag("enters tapped"), tag("enters the battlefield tapped"))),
-            ),
-        )
-        .parse(i)
-    })?;
-    if !tail.trim_end_matches('.').trim().is_empty() {
-        return None;
-    }
-
     // Parse the filter phrase (e.g., "Plains or Island", "Elf") into a TargetFilter.
     // `parse_type_phrase` handles union types via `TargetFilter::Or` and single
     // subtypes via `TargetFilter::Typed`. Reject phrases we cannot classify —
@@ -408,20 +390,35 @@ fn parse_reveal_land(
         return None;
     }
 
+    // The tail dispatches between two grammatical variants:
+    //   (A) Port Town / Gilt-Leaf Palace: "if you don't, ~ enters tapped"
+    //   (B) Tarkir reveal-tribal cycle (Fortified Beachhead, Temple of the Dragon
+    //       Queen): "~ enters tapped unless you revealed a [filter] card this way
+    //       or you control a [filter]"
+    // Variant (B) is rules-correct as a single replacement: the on_decline Tap
+    // is gated by `AbilityCondition::ControllerControlsMatching { negated: true }`,
+    // so the Tap fires only when the controller doesn't already control a
+    // [filter] permanent. The accept-reveal path naturally short-circuits the
+    // on_decline branch (the optional reveal was satisfied), giving the Or
+    // semantics required by CR 614.1d.
+    let tail_variant = parse_reveal_land_tail(remainder, &remainder_lower, &filter)?;
+
     // The accept branch: a RevealFromHand effect that, when resolved, prompts
-    // the controller to pick a matching card or decline. on_decline taps self.
-    let tap_self = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Tap {
-            target: TargetFilter::SelfRef,
-        },
-    );
+    // the controller to pick a matching card or decline. on_decline runs the
+    // tail-specific decline ability (unconditional Tap for variant A, conditional
+    // Tap for variant B).
+    let on_decline = match tail_variant {
+        RevealLandTail::IfYouDontTap => unconditional_tap_self_ability(),
+        RevealLandTail::TappedUnlessRevealedOrControl => {
+            tap_self_unless_controls_matching_ability(&filter)
+        }
+    };
 
     let reveal = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::RevealFromHand {
             filter,
-            on_decline: Some(Box::new(tap_self)),
+            on_decline: Some(Box::new(on_decline)),
         },
     );
 
@@ -430,6 +427,141 @@ fn parse_reveal_land(
             .execute(reveal)
             .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1d: Distinguishes the two grammatical tails of the reveal-land cycle.
+/// The filter-bearing variant carries the disjunction structure into the resolver
+/// via the on_decline ability's condition, not via a new ReplacementCondition.
+enum RevealLandTail {
+    /// "if you don't, ~ enters tapped" — Port Town / Gilt-Leaf Palace cycle.
+    IfYouDontTap,
+    /// "~ enters tapped unless you revealed a [filter] card this way or you
+    /// control a [filter]" — Tarkir Dragonstorm reveal-tribal cycle (Fortified
+    /// Beachhead, Temple of the Dragon Queen).
+    TappedUnlessRevealedOrControl,
+}
+
+/// Parse the tail of a reveal-land Oracle text starting at `" card from your
+/// hand"`. Both grammatical variants share that prefix, so we dispatch on the
+/// remainder via a single `alt()` of nested combinators.
+///
+/// `expected_filter` is the filter parsed from the lead sentence. For the
+/// Tarkir variant we require the post-"or you control" filter phrase to match
+/// the same type — a coherence check that mirrors CR 614.1d (the disjunction
+/// gates the same permanent class).
+fn parse_reveal_land_tail(
+    remainder: &str,
+    remainder_lower: &str,
+    expected_filter: &TargetFilter,
+) -> Option<RevealLandTail> {
+    // Variant (A): "if you don't, [~|it] enters [the battlefield] tapped".
+    // Trailing punctuation (period) is tolerated by `trim_end_matches`.
+    let variant_a = nom_on_lower(remainder, remainder_lower, |i| {
+        value(
+            (),
+            (
+                tag(" card from your hand. if you don't, "),
+                alt((tag("~ "), tag("it "))),
+                alt((tag("enters tapped"), tag("enters the battlefield tapped"))),
+            ),
+        )
+        .parse(i)
+    });
+    if let Some(((), tail)) = variant_a {
+        if tail.trim_end_matches('.').trim().is_empty() {
+            return Some(RevealLandTail::IfYouDontTap);
+        }
+    }
+
+    // Variant (B): "[~|it] enters [the battlefield] tapped unless you revealed
+    // [a|an] " — match through the unless-you-revealed lead, then check the
+    // post-"this way or you control [a|an] " filter against the expected filter.
+    let variant_b = nom_on_lower(remainder, remainder_lower, |i| {
+        value(
+            (),
+            (
+                tag(" card from your hand. "),
+                alt((tag("~ "), tag("it "))),
+                alt((tag("enters tapped"), tag("enters the battlefield tapped"))),
+                tag(" unless you revealed "),
+                alt((tag("a "), tag("an "))),
+            ),
+        )
+        .parse(i)
+    });
+    let ((), after_unless) = variant_b?;
+    let after_unless_lower = after_unless.to_lowercase();
+
+    // Take until " card this way or you control " — between is the first
+    // disjunction filter phrase; it must match `expected_filter` for coherence.
+    let ((), after_first_filter) = nom_on_lower(after_unless, &after_unless_lower, |i| {
+        value(
+            (),
+            take_until::<_, _, VerboseError<&str>>(" card this way or you control "),
+        )
+        .parse(i)
+    })?;
+    let first_filter_consumed = after_unless.len() - after_first_filter.len();
+    let first_filter_phrase = &after_unless[..first_filter_consumed];
+    let (first_filter, first_remainder) = parse_type_phrase(first_filter_phrase.trim());
+    if !first_remainder.trim().is_empty() || first_filter != *expected_filter {
+        return None;
+    }
+
+    // Step past " card this way or you control " then "a "/"an ", and parse
+    // the second disjunction filter phrase up to end-of-string. Both filter
+    // phrases must canonicalize identically.
+    let after_first_filter_lower = after_first_filter.to_lowercase();
+    let ((), after_or) = nom_on_lower(after_first_filter, &after_first_filter_lower, |i| {
+        value(
+            (),
+            (
+                tag(" card this way or you control "),
+                alt((tag("a "), tag("an "))),
+            ),
+        )
+        .parse(i)
+    })?;
+    let second_filter_phrase = after_or.trim().trim_end_matches('.').trim();
+    let (second_filter, second_remainder) = parse_type_phrase(second_filter_phrase);
+    if !second_remainder.trim().is_empty() || second_filter != *expected_filter {
+        return None;
+    }
+
+    Some(RevealLandTail::TappedUnlessRevealedOrControl)
+}
+
+/// Build the unconditional `Tap SelfRef` on_decline used by Port Town / Gilt-Leaf
+/// Palace and the rest of the if-you-don't reveal-land cycle.
+fn unconditional_tap_self_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
+            target: TargetFilter::SelfRef,
+        },
+    )
+}
+
+/// CR 608.2c + CR 614.1d: Build the conditional `Tap SelfRef` on_decline used by
+/// the Tarkir reveal-tribal cycle. The Tap fires only when the controller
+/// doesn't already control a [filter] permanent, encoding the "or you control a
+/// [filter]" disjunction as an AbilityCondition gate on the decline branch.
+/// `filter` is cloned and bound to `ControllerRef::You` so the runtime evaluates
+/// it against the ability controller's permanents.
+fn tap_self_unless_controls_matching_ability(filter: &TargetFilter) -> AbilityDefinition {
+    let bound_filter = inject_controller(filter.clone(), ControllerRef::You);
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .condition(
+        crate::types::ability::AbilityCondition::ControllerControlsMatching {
+            filter: bound_filter,
+            negated: true,
+        },
     )
 }
 
@@ -3708,6 +3840,159 @@ mod tests {
         };
         // Single-subtype filter: tribal reveal-lands use TargetFilter::Typed, not Or.
         assert!(matches!(filter, TargetFilter::Typed(_)));
+    }
+
+    /// CR 614.1d + CR 701.20a: Tarkir Dragonstorm reveal-tribal land cycle —
+    /// Fortified Beachhead. The disjunction "tapped unless revealed [filter]
+    /// this way OR you control [filter]" is encoded as a single replacement:
+    /// the on_decline Tap is gated by ControllerControlsMatching{filter,
+    /// negated:true}, so the decline branch only taps when the controller
+    /// doesn't already control a matching permanent. The accept-reveal path
+    /// short-circuits the on_decline entirely (via reveal_from_hand's pending
+    /// continuation drop on pick), giving the second OR arm semantically.
+    #[test]
+    fn reveal_land_fortified_beachhead_tarkir_disjunction() {
+        let def = parse_replacement_line(
+            "As Fortified Beachhead enters, you may reveal a Soldier card from your hand. Fortified Beachhead enters tapped unless you revealed a Soldier card this way or you control a Soldier.",
+            "Fortified Beachhead",
+        )
+        .expect("Tarkir reveal-tribal land must parse");
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+
+        let execute = def.execute.as_ref().unwrap();
+        let (filter, on_decline) = match &*execute.effect {
+            Effect::RevealFromHand { filter, on_decline } => (filter, on_decline),
+            other => panic!("expected RevealFromHand, got {other:?}"),
+        };
+        // Sentence-1 reveal filter: Soldier (single-subtype Typed).
+        match filter {
+            TargetFilter::Typed(tf) => assert!(tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Soldier"))),
+            other => panic!("expected Typed Soldier filter, got {other:?}"),
+        }
+
+        // Sentence-2 conditional Tap: gated by ControllerControlsMatching{Soldier,
+        // negated:true} — Tap fires only when controller controls no Soldier.
+        let decline = on_decline.as_ref().expect("on_decline must be present");
+        assert!(matches!(
+            *decline.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let cond = decline
+            .condition
+            .as_ref()
+            .expect("Tarkir variant on_decline must carry a condition");
+        match cond {
+            crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                filter: cond_filter,
+                negated,
+            } => {
+                assert!(*negated, "Tap is suppressed when controller has matching");
+                // Coherence check: condition filter has You-bound and Soldier subtype.
+                match cond_filter {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Soldier")));
+                    }
+                    other => panic!("expected Typed Soldier condition filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ControllerControlsMatching, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1d + CR 701.20a: Tarkir Dragonstorm — Temple of the Dragon Queen
+    /// covers the Dragon-tribal printing of the cycle. Verifies the pattern
+    /// scales across subtypes by parsing a different filter than Beachhead.
+    #[test]
+    fn reveal_land_temple_dragon_queen_tarkir_disjunction() {
+        let def = parse_replacement_line(
+            "As Temple of the Dragon Queen enters, you may reveal a Dragon card from your hand. Temple of the Dragon Queen enters tapped unless you revealed a Dragon card this way or you control a Dragon.",
+            "Temple of the Dragon Queen",
+        )
+        .expect("Temple of the Dragon Queen must parse");
+
+        let execute = def.execute.as_ref().unwrap();
+        let on_decline = match &*execute.effect {
+            Effect::RevealFromHand { on_decline, .. } => on_decline,
+            other => panic!("expected RevealFromHand, got {other:?}"),
+        };
+        let decline = on_decline.as_ref().unwrap();
+        match decline.condition.as_ref() {
+            Some(crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                filter,
+                negated,
+            }) => {
+                assert!(*negated);
+                match filter {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dragon")));
+                    }
+                    other => panic!("expected Typed Dragon filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ControllerControlsMatching, got {other:?}"),
+        }
+    }
+
+    /// Regression: Port Town (and the rest of the if-you-don't reveal-land
+    /// cycle) must continue to emit an unconditional Tap on_decline. The
+    /// Tarkir-variant tail recognizer must not fire on the older grammar.
+    #[test]
+    fn reveal_land_port_town_unchanged_after_tarkir_extension() {
+        let def = parse_replacement_line(
+            "As Port Town enters, you may reveal a Plains or Island card from your hand. If you don't, Port Town enters tapped.",
+            "Port Town",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        let on_decline = match &*execute.effect {
+            Effect::RevealFromHand { on_decline, .. } => on_decline,
+            other => panic!("expected RevealFromHand, got {other:?}"),
+        };
+        let decline = on_decline.as_ref().unwrap();
+        // No condition gates the Tap — Port Town's on_decline runs unconditionally.
+        assert!(
+            decline.condition.is_none(),
+            "Port Town on_decline must remain unconditional, got {:?}",
+            decline.condition
+        );
+    }
+
+    /// Negative: a mismatched filter pair ("reveal a Soldier ... or you control
+    /// a Dragon") must NOT be accepted as a Tarkir variant — the parser bails
+    /// rather than synthesize a coherently-typed disjunction from incoherent
+    /// text, preserving the existing fallback path for unrecognized tails.
+    #[test]
+    fn reveal_land_tarkir_rejects_mismatched_filter_pair() {
+        let def = parse_replacement_line(
+            "As Test Land enters, you may reveal a Soldier card from your hand. Test Land enters tapped unless you revealed a Soldier card this way or you control a Dragon.",
+            "Test Land",
+        );
+        // Falls through to the generic enters-tapped-unless fallback (Unrecognized
+        // condition) rather than emitting a malformed RevealFromHand.
+        let def = def.expect("must still parse via fallback");
+        assert!(
+            !matches!(
+                def.execute.as_ref().unwrap().effect.as_ref(),
+                Effect::RevealFromHand { .. }
+            ),
+            "mismatched filter pair must not be accepted as Tarkir variant",
+        );
     }
 
     #[test]

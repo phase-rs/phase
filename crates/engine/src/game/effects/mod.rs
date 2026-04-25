@@ -1745,6 +1745,20 @@ fn evaluate_condition(
                 &crate::game::filter::FilterContext::from_ability(ability),
             )
         }
+        // CR 608.2c + CR 614.1d: "if you control a/no [filter]" — scan the battlefield
+        // for any other permanent owned/controlled by the ability controller matching
+        // `filter`. Excludes the source itself so a Soldier-typed land doesn't satisfy
+        // its own "you control a Soldier" check. `filter` carries `ControllerRef::You`
+        // pre-bound by the parser; FilterContext provides the source binding.
+        AbilityCondition::ControllerControlsMatching { filter, negated } => {
+            let ctx = crate::game::filter::FilterContext::from_ability(ability);
+            let controls_any = state.objects.values().any(|o| {
+                o.zone == crate::types::zones::Zone::Battlefield
+                    && o.id != ability.source_id
+                    && crate::game::filter::matches_target_filter(state, o.id, filter, &ctx)
+            });
+            controls_any != *negated
+        }
         // CR 608.2c: "If it's your turn" — check active player against controller.
         AbilityCondition::IsYourTurn { negated } => {
             (state.active_player == ability.controller) != *negated
