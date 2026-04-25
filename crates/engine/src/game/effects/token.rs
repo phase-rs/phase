@@ -1706,10 +1706,16 @@ mod tests {
             panic!("affected must be a TypedFilter");
         };
         assert!(tf.properties.contains(&FilterProp::EnchantedBy));
-        assert!(s.modifications.contains(&ContinuousModification::AddPower { value: 1 }));
-        assert!(s.modifications.contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
         let ward = s.modifications.iter().find_map(|m| match m {
-            ContinuousModification::AddKeyword { keyword: Keyword::Ward(cost) } => Some(cost),
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(cost),
+            } => Some(cost),
             _ => None,
         });
         let Some(WardCost::Mana(ManaCost::Cost { generic, .. })) = ward else {
