@@ -954,6 +954,13 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
                 tag("that player lost life this turn"),
             )),
         ),
+        // CR 119.3 + CR 603.4: "a player lost N or more life this turn"
+        // (Y'shtola, Night's Blessed; Knight of the Ebon Legion). The "a
+        // player" quantifier covers controller + opponents; the threshold
+        // semantic is "any single player crossed N", not "sum across
+        // players" — see QuantityRef::MaxLifeLostThisTurnAcrossPlayers
+        // doc comment.
+        parse_player_lost_life_this_turn,
         // CR 701.9 + CR 603.4: "an opponent discarded a card this turn"
         value(
             make_quantity_ge(QuantityRef::OpponentDiscardedCardThisTurn, 1),
@@ -1200,6 +1207,27 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
     // "life this turn" (minimum 1)
     let (rest, _) = tag("life this turn").parse(rest)?;
     Ok((rest, make_quantity_ge(QuantityRef::LifeGainedThisTurn, 1)))
+}
+
+/// CR 119.3 + CR 603.4: Parse "a player lost N or more life this turn".
+///
+/// Y'shtola, Night's Blessed and Knight of the Ebon Legion use this idiom for
+/// the intervening-`if` clause of a phase trigger. The "a player" quantifier
+/// covers controller + opponents (not just opponents), and the per-player max
+/// semantic is enforced by `QuantityRef::MaxLifeLostThisTurnAcrossPlayers`
+/// (one player must individually have lost ≥ N — not the sum across players).
+///
+/// Grammar: `"a player lost " + parse_ge_threshold + "life this turn"`.
+/// Composes through the existing `StaticCondition::QuantityComparison` →
+/// `static_condition_to_trigger_condition` bridge with no new variants.
+fn parse_player_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("a player lost ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let (rest, _) = tag("life this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(QuantityRef::MaxLifeLostThisTurnAcrossPlayers, n),
+    ))
 }
 
 /// Parse "you cast another spell this turn" / "you cast a [type] spell this turn".
@@ -3280,5 +3308,64 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 2 },
             }
         ));
+    }
+
+    /// CR 119.3 + CR 603.4: Y'shtola's "a player lost 4 or more life this
+    /// turn" must parse to MaxLifeLostThisTurnAcrossPlayers ≥ 4 — the
+    /// per-player-max semantic, not the cross-opponent sum semantic of
+    /// `OpponentLifeLostThisTurn`.
+    #[test]
+    fn test_parse_condition_a_player_lost_four_or_more_life() {
+        let (rest, c) = parse_inner_condition("a player lost 4 or more life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+    }
+
+    /// CR 119.3 + CR 603.4: Same idiom must parse via the "if " prefix
+    /// (intervening-if reading) — confirming `parse_condition` reaches
+    /// `parse_player_lost_life_this_turn` through the dispatcher.
+    #[test]
+    fn test_parse_condition_if_a_player_lost_two_or_more_life() {
+        let (rest, c) = parse_condition("if a player lost 2 or more life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            }
+        );
+    }
+
+    /// CR 119.3 + CR 603.4: The "at least N" idiom must share the threshold
+    /// alternative with "N or more" — `parse_ge_threshold` is the single
+    /// authority. Future cards using the synonym compose without per-card
+    /// code.
+    #[test]
+    fn test_parse_condition_a_player_lost_at_least_n_life() {
+        let (rest, c) = parse_inner_condition("a player lost at least 5 life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }
+        );
     }
 }

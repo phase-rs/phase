@@ -1821,6 +1821,21 @@ pub enum QuantityRef {
     /// CR 119.3: Amount of life any opponent has lost this turn.
     /// Used for "if an opponent lost life this turn" conditions.
     OpponentLifeLostThisTurn,
+    /// CR 119.3 + CR 603.4: Maximum amount of life lost this turn by any single
+    /// player (controller or opponent). Resolves to
+    /// `state.players.iter().map(|p| p.life_lost_this_turn).max()`.
+    ///
+    /// Used for the intervening-if clause "if a player lost N or more life this
+    /// turn" — semantically "any single player has individually lost ≥ N", not
+    /// "the sum of life lost across all players is ≥ N". Y'shtola, Night's
+    /// Blessed and Knight of the Ebon Legion both use this idiom with N=4.
+    ///
+    /// Distinct from `OpponentLifeLostThisTurn` because:
+    /// - The "a player" quantifier covers controller + opponents (not just
+    ///   opponents).
+    /// - The semantic is per-player max (one player crossed the threshold), not
+    ///   cross-player sum.
+    MaxLifeLostThisTurnAcrossPlayers,
     /// CR 122.1: Whether the controller added any counter to any permanent this turn.
     CounterAddedThisTurn,
     /// CR 701.9 + CR 603.4: Whether any opponent of the controller discarded a

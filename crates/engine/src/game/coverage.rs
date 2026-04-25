@@ -641,6 +641,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
         QuantityRef::OpponentLifeLostThisTurn => "opponent life lost this turn".into(),
+        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => {
+            "max life lost this turn across players".into()
+        }
         QuantityRef::CounterAddedThisTurn => "counter added this turn".into(),
         QuantityRef::OpponentDiscardedCardThisTurn => "opponent discarded card this turn".into(),
         QuantityRef::OpponentLifeTotal => "opponent life total".into(),
@@ -4004,6 +4007,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
         QuantityRef::OpponentLifeLostThisTurn => ("OpponentLifeLostThisTurn", Unhandled),
+        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => {
+            ("MaxLifeLostThisTurnAcrossPlayers", Handled)
+        }
         QuantityRef::CounterAddedThisTurn => ("CounterAddedThisTurn", Unhandled),
         QuantityRef::OpponentDiscardedCardThisTurn => ("OpponentDiscardedCardThisTurn", Handled),
         QuantityRef::OpponentLifeTotal => ("OpponentLifeTotal", Unhandled),
