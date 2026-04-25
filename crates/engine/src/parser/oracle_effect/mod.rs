@@ -2399,9 +2399,49 @@ fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
 }
 
 fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
-    // Match: "exile cards from the top of your library until you exile a/an {filter} card"
+    // CR 701.57a + CR 702.85a + CR 400.7: Parse `exile[s] cards from the top of
+    // <possessive> library until <pronoun> exile[s] a/an {filter} card`.
+    //
+    // 701.57a / 702.85a (Discover / Cascade): canonical "exile from top until
+    // a nonland card" pattern that the typed `Effect::ExileFromTopUntil`
+    // generalizes — same shape with a parameterized hit filter (Etali, Primal
+    // Conqueror's "until they exile a nonland card").
+    // 400.7: each exiled card is a new object; tracked by ExileLink in the
+    // resolver so downstream `TargetFilter::ExiledBySource` lookups (Etali's
+    // "from among the nonland cards exiled this way" sub-clause) resolve
+    // correctly.
+    //
+    // Both second-person ("exile … your library … until you exile") and
+    // third-person ("exile … their library … until they exile") possessive
+    // variants are accepted. The "each player " subject is stripped upstream
+    // by `strip_each_player_subject`, which deconjugates "exiles" → "exile";
+    // by the time we get here Etali's trigger body reads
+    //   "exile cards from the top of their library until they exile a nonland card"
+    // — same verb form as the second-person path with a different determiner.
+    //
+    // Mirrors the analogous sub-combinator pattern in
+    // `parse_reveal_until_prefix` (oracle_effect/mod.rs:2433) which handles
+    // the same possessive variation for `RevealUntil`.
     let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("exile cards from the top of your library until you exile ").parse(i)?;
+        let (i, _) = alt((tag("exile "), tag("exiles "))).parse(i)?;
+        let (i, _) = tag("cards from the top of ").parse(i)?;
+        let (i, _) = alt((
+            tag("your "),
+            tag("their "),
+            tag("his "),
+            tag("her "),
+            tag("its "),
+        ))
+        .parse(i)?;
+        let (i, _) = tag("library until ").parse(i)?;
+        let (i, _) = alt((
+            tag("you exile "),
+            tag("they exile "),
+            tag("he exiles "),
+            tag("she exiles "),
+            tag("it exiles "),
+        ))
+        .parse(i)?;
         nom_primitives::parse_article(i)
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
@@ -16684,6 +16724,87 @@ mod tests {
             target,
             TargetFilter::LastCreated,
             "ChangeZone target must be rewritten from ParentTarget to LastCreated"
+        );
+    }
+
+    /// CR 701.57a + CR 702.85a: `Effect::ExileFromTopUntil` must accept the
+    /// second-person possessive form ("your library" / "you exile").
+    /// Regression-protection for the pre-existing path Etali's parser
+    /// extension was layered onto.
+    #[test]
+    fn exile_from_top_until_second_person_nonland_filter() {
+        let e =
+            parse_effect("exile cards from the top of your library until you exile a nonland card");
+        let Effect::ExileFromTopUntil { filter } = e else {
+            panic!("expected ExileFromTopUntil, got {:?}", e);
+        };
+        // Filter is `Typed { type_filters: [Non(Land)] }`.
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter");
+        };
+        assert!(typed
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))));
+    }
+
+    /// CR 701.57a + CR 702.85a: Etali, Primal Conqueror's trigger body uses
+    /// the third-person possessive form ("their library" / "they exile") that
+    /// `strip_each_player_subject` produces after stripping "each player ".
+    /// Without the third-person prefix arms, the parser falls through to a
+    /// flat `ChangeZone` lowering and silently drops both the
+    /// "until …" loop semantic and the nonland filter.
+    #[test]
+    fn exile_from_top_until_third_person_possessive_etali_form() {
+        let e = parse_effect(
+            "exile cards from the top of their library until they exile a nonland card",
+        );
+        let Effect::ExileFromTopUntil { filter } = e else {
+            panic!("expected ExileFromTopUntil, got {:?}", e);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter");
+        };
+        assert!(typed
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))));
+    }
+
+    /// CR 603.2 + CR 701.57a + CR 702.85a + CR 608.2: Etali's outer ETB trigger
+    /// sentence — the "each player " subject phrase routes through
+    /// `strip_each_player_subject` which strips the subject and deconjugates
+    /// "exiles" → "exile", then the third-person possessive arm of
+    /// `try_parse_exile_from_top_until` finalizes the lowering. Outer ability
+    /// must carry `player_scope: All` so the resolver iterates per player;
+    /// outer effect must be `ExileFromTopUntil { filter: Non(Land) }`. (The
+    /// follow-up `cast any number of spells from among …` sub-sentence is a
+    /// separate parser path — not asserted here; see the runtime tests in
+    /// `game::effects::exile_from_top_until::tests` for per-resolution exile
+    /// linkage that the future sub-ability filter will consume.)
+    #[test]
+    fn each_player_exiles_outer_effect_lowers_to_exile_from_top_until() {
+        let def = parse_effect_chain(
+            "each player exiles cards from the top of their library until they exile a nonland card.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "player_scope must propagate from \"each player\" subject"
+        );
+        let Effect::ExileFromTopUntil { ref filter } = *def.effect else {
+            panic!("expected outer ExileFromTopUntil, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {:?}", filter);
+        };
+        assert!(
+            typed.type_filters.iter().any(
+                |t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))
+            ),
+            "filter must be Non(Land)"
         );
     }
 }
