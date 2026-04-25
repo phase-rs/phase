@@ -921,4 +921,161 @@ mod tests {
             token.counters
         );
     }
+
+    /// Regression: Helm of the Host (DOM, MH3, BLC) — pin the already-shipped
+    /// non-legendary token-copy behavior so a future refactor cannot silently
+    /// drop the `RemoveSupertype { Legendary }` stamp.
+    ///
+    /// Helm of the Host's begin-combat trigger creates a token that's a copy
+    /// of equipped creature, "except the token isn't legendary." When the
+    /// equipped creature IS legendary, the synthesized token must not be
+    /// legendary — both the layered view (`card_types.supertypes`) and the
+    /// copiable-values view (`base_card_types.supertypes`) must be free of
+    /// `Supertype::Legendary`. Otherwise the legend rule (CR 704.5j) would
+    /// collapse the token alongside its source.
+    ///
+    /// This test exercises the resolver with Helm's full ability shape:
+    /// `Effect::CopyTokenOf { target: Typed[Creature]+EquippedBy,
+    /// additional_modifications: [RemoveSupertype(Legendary)] }`. The general
+    /// resolver behavior is also pinned by
+    /// `copy_token_remove_supertype_strips_legendary_from_token` (Miirym
+    /// class); this test anchors the named card so the behavior cannot
+    /// regress without an explicit failure pointing at Helm of the Host.
+    ///
+    /// CR 707.9b + CR 205.4 + CR 301.5a: copy modifications, supertype
+    /// semantics, and the equipped-creature relationship.
+    #[test]
+    fn helm_of_the_host_token_copy_strips_legendary_from_equipped_creature() {
+        use crate::types::ability::{ContinuousModification, FilterProp, TypeFilter, TypedFilter};
+        use crate::types::card_type::Supertype;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Equipped creature: a legendary 7/7 Dragon (e.g., Bahamut).
+        let equipped_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bahamut".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&equipped_id).unwrap();
+            s.base_power = Some(7);
+            s.base_toughness = Some(7);
+            s.power = Some(7);
+            s.toughness = Some(7);
+            s.base_card_types = CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Dragon".to_string()],
+            };
+            s.card_types = s.base_card_types.clone();
+        }
+
+        // Helm of the Host: non-legendary Equipment artifact attached to the
+        // equipped creature. The trigger source for the begin-combat trigger.
+        let helm_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Helm of the Host".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&helm_id).unwrap();
+            s.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Equipment".to_string()],
+            };
+            s.card_types = s.base_card_types.clone();
+            s.attached_to = Some(equipped_id.into());
+        }
+
+        // Resolve Helm's begin-combat trigger: CopyTokenOf with the exact
+        // Helm AST shape (`target: Typed[Creature]+EquippedBy`,
+        // `additional_modifications: [RemoveSupertype(Legendary)]`). After
+        // trigger resolution the engine has bound `EquippedBy` to the
+        // equipped creature, so the resolved ability carries
+        // `targets: [Object(equipped_id)]`.
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::EquippedBy],
+                }),
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary,
+                }],
+            },
+            vec![TargetRef::Object(equipped_id)],
+            helm_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+
+        // CR 707.2: token copies the equipped creature's name, P/T, and types.
+        assert!(token.is_token);
+        assert_eq!(token.name, "Bahamut");
+        assert_eq!(token.power, Some(7));
+        assert_eq!(token.toughness, Some(7));
+
+        // CR 707.9b + CR 205.4: layered view has Legendary stripped.
+        assert!(
+            !token.card_types.supertypes.contains(&Supertype::Legendary),
+            "token must not be Legendary; got supertypes={:?}",
+            token.card_types.supertypes
+        );
+
+        // CR 707.9b: copiable-values view also has Legendary stripped — the
+        // exception is part of the copy effect's bake-in, so future copies
+        // of this token also start without Legendary.
+        assert!(
+            !token
+                .base_card_types
+                .supertypes
+                .contains(&Supertype::Legendary),
+            "token's base_card_types must not contain Legendary; got {:?}",
+            token.base_card_types.supertypes
+        );
+
+        // CR 704.5j: with the original legendary creature and the
+        // non-legendary token-copy both on the battlefield, the legend rule
+        // SBA must NOT fire — there is exactly one Legendary permanent named
+        // "Bahamut" (the source); the token shares the name but is not
+        // legendary, so it is not a candidate for collapse.
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+
+        assert!(
+            !matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::ChooseLegend { .. }
+            ),
+            "legend rule must not present a choice when the token is not legendary; \
+             got waiting_for={:?}",
+            state.waiting_for
+        );
+        // Both permanents survive on the battlefield.
+        assert_eq!(
+            state.objects[&equipped_id].zone,
+            Zone::Battlefield,
+            "original legendary creature must remain on battlefield"
+        );
+        assert_eq!(
+            state.objects[&token_id].zone,
+            Zone::Battlefield,
+            "non-legendary token-copy must remain on battlefield"
+        );
+    }
 }
