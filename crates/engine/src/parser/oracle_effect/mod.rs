@@ -3946,6 +3946,14 @@ fn replace_target_with_parent(effect: &mut Effect) {
 /// Check if an effect has a `Typed(...)` target filter (not SelfRef/ParentTarget/Any).
 /// Used to guard anaphoric replacement scope — prevents false positives when a
 /// pronoun clause follows a conditional effect without a typed target.
+///
+/// CR 608.2k: An anaphor in a later clause of a multi-step ability binds to the
+/// typed target chosen for an earlier clause. The predicate gates the rebinding
+/// so non-targeting prior clauses (e.g. `Effect::Draw`, untargeted `LoseLife`)
+/// don't capture a later "it" reference. `Effect::GenericEffect` carries an
+/// `Option<TargetFilter>` (becomes/animate/transform-class clauses such as
+/// "Target legendary creature becomes a God"); when populated with a typed
+/// filter, a following anaphor refers to the same chosen object.
 fn has_typed_target(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -3972,6 +3980,9 @@ fn has_typed_target(effect: &Effect) -> bool {
             ..
         } | Effect::Attach {
             target: TargetFilter::Typed(_),
+            ..
+        } | Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(_)),
             ..
         }
     )
@@ -15670,6 +15681,73 @@ mod tests {
             "expected PutCounter with ParentTarget, got: {:?}",
             sub.effect
         );
+    }
+
+    /// CR 608.2c + CR 608.2k: A `GenericEffect` (becomes/animate clause) with a typed
+    /// target must thread that target through to a following anaphoric sub-ability.
+    /// Tyrite Sanctum's "Target legendary creature becomes a God in addition to its
+    /// other types. Put a +1/+1 counter on it." — "it" refers to the chosen legendary
+    /// creature, not the activating land.
+    #[test]
+    fn generic_effect_with_typed_target_threads_anaphor_to_parent_target() {
+        let def = parse_effect_chain(
+            "Target legendary creature becomes a God in addition to its other types. Put a +1/+1 counter on it.",
+            crate::types::ability::AbilityKind::Activated,
+        );
+
+        // Primary effect: GenericEffect with Some(Typed(_)) target.
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::GenericEffect {
+                    target: Some(TargetFilter::Typed(_)),
+                    ..
+                }
+            ),
+            "expected GenericEffect with typed target, got: {:?}",
+            def.effect
+        );
+
+        // Sub-ability: PutCounter targeting ParentTarget (the chosen legendary creature).
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("should have sub_ability for 'put counters on it'");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::PutCounter {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "expected sub_ability PutCounter with ParentTarget, got: {:?}",
+            sub.effect
+        );
+    }
+
+    /// CR 608.2k: Predicate guard — the anaphor-rebinding gate must NOT fire when the
+    /// preceding effect lacks a typed target. An untargeted prior clause has no
+    /// antecedent for "it" to bind to via `ParentTarget`, so the resolver-side
+    /// `resolve_it_pronoun` default must be preserved.
+    #[test]
+    fn generic_effect_without_target_does_not_thread_anaphor() {
+        // Use an explicit no-target leading effect (Draw) so any "it" in the trailing
+        // clause cannot be interpreted as referring back to a typed antecedent.
+        let def = parse_effect_chain(
+            "Draw a card. Put a +1/+1 counter on it.",
+            crate::types::ability::AbilityKind::Activated,
+        );
+
+        // Sub-ability target must NOT be ParentTarget — there is no typed antecedent.
+        if let Some(sub) = def.sub_ability.as_ref() {
+            if let Effect::PutCounter { target, .. } = sub.effect.as_ref() {
+                assert!(
+                    !matches!(target, TargetFilter::ParentTarget),
+                    "anaphor must not thread through a non-targeted prior effect, got ParentTarget on sub_ability"
+                );
+            }
+        }
     }
 
     // ── RevealUntil tests ──
