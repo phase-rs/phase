@@ -963,6 +963,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::DestroyAll { target, .. }
         | Effect::TapAll { target }
         | Effect::UntapAll { target }
+        | Effect::BounceAll { target, .. }
         | Effect::DamageAll {
             amount: _,
             target,
@@ -981,6 +982,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 if let Some(pf) = player_filter {
                     d.push(("player_filter".into(), format!("{pf:?}")));
                 }
+            }
+            if let Effect::BounceAll {
+                destination: Some(dest),
+                ..
+            } = effect
+            {
+                d.push(("destination".into(), format!("{dest:?}")));
             }
         }
         Effect::DamageEachPlayer {

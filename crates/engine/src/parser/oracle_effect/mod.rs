@@ -9539,6 +9539,153 @@ mod tests {
         assert!(matches!(e, Effect::Bounce { .. }));
     }
 
+    /// CR 400.7 + CR 611.2c: Mass-bounce class — "return all/each [filter]"
+    /// must lower to `Effect::BounceAll`, not single-target `Effect::Bounce`,
+    /// so the runtime resolver iterates every matching permanent instead of
+    /// prompting for one.
+    #[test]
+    fn effect_bounce_all_creatures_evacuation() {
+        let e = parse_effect("Return all creatures to their owners' hands");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                destination,
+            } => {
+                assert!(destination.is_none(), "default destination = owner's hand");
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+                assert!(filter.controller.is_none(), "no controller scoping");
+            }
+            other => panic!("expected BounceAll, got {other:?}"),
+        }
+    }
+
+    /// Plural "all nonland permanents" filter from Devastation Tide / Coastal
+    /// Breach / Crush of Tentacles / Worldpurge. The `Non(Land)` property must
+    /// thread through the parser unchanged.
+    #[test]
+    fn effect_bounce_all_nonland_permanents_devastation_tide() {
+        let e = parse_effect("Return all nonland permanents to their owners' hands");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert!(
+                    filter
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Permanent)),
+                    "permanent type filter present"
+                );
+                assert!(
+                    filter.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land)
+                    )),
+                    "nonland exclusion present, got {:?}",
+                    filter.type_filters
+                );
+            }
+            other => panic!("expected BounceAll {{ Permanent, Non(Land) }}, got {other:?}"),
+        }
+    }
+
+    /// Sunderflock-shape: "return all non-Elemental creatures" — class with a
+    /// subtype exclusion. Parser must preserve `Non(Subtype: Elemental)` in
+    /// the property list.
+    #[test]
+    fn effect_bounce_all_non_subtype_creatures_sunderflock() {
+        let e = parse_effect("Return all non-Elemental creatures to their owners' hands");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert!(
+                    filter
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Creature)),
+                    "creature type filter present"
+                );
+                assert!(
+                    filter.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if matches!(&**inner, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Elemental"))
+                    )),
+                    "non-Elemental subtype exclusion present, got {:?}",
+                    filter.type_filters
+                );
+            }
+            other => {
+                panic!("expected BounceAll {{ Creature, Non(Subtype: Elemental) }}, got {other:?}")
+            }
+        }
+    }
+
+    /// "Return each creature ..." pluralizer is the same class as "return all
+    /// creatures ..." per the verb-dispatch precheck.
+    #[test]
+    fn effect_bounce_all_each_creature_variant() {
+        let e = parse_effect("Return each creature to its owner's hand");
+        assert!(matches!(e, Effect::BounceAll { .. }), "got {e:?}");
+    }
+
+    /// CR 115.1 + CR 608.2c: Single-target "return target creature" must NOT
+    /// promote to `BounceAll` — it identifies one selected permanent. The
+    /// `tag("return ")` arm (without the `all`/`each` precheck) handles this
+    /// case unchanged. This regression test pins the boundary.
+    #[test]
+    fn effect_bounce_single_target_preservation() {
+        let e = parse_effect("Return target creature to its owner's hand");
+        assert!(
+            matches!(e, Effect::Bounce { .. }),
+            "single-target return must stay Bounce, got {e:?}"
+        );
+    }
+
+    /// CR 400.7: "Return all <filter> to the battlefield" (Open the Vaults,
+    /// Replenish, Splendid Reclamation, etc.) must NOT promote to `BounceAll`
+    /// — the destination is the battlefield, not hand. Routes through
+    /// `ReturnToBattlefield` ⇒ `Effect::ChangeZone { destination: Battlefield }`.
+    /// Pins the destination-routing boundary on the unified return arm.
+    #[test]
+    fn effect_return_all_to_battlefield_stays_change_zone() {
+        let e = parse_effect(
+            "Return all artifact and enchantment cards from all graveyards to the battlefield under their owners' control",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ),
+            "return-all-to-battlefield must lower to ChangeZone, not BounceAll, got {e:?}"
+        );
+    }
+
+    /// Praetor's Counsel: "Return all cards from your graveyard to your hand"
+    /// — origin is graveyard, destination is hand. The `BounceAll` resolver
+    /// only scans the battlefield, so this MUST remain a `ChangeZone` with
+    /// `origin: Graveyard, destination: Hand`. Regression guard.
+    #[test]
+    fn effect_return_all_from_graveyard_to_hand_stays_change_zone() {
+        let e = parse_effect("Return all cards from your graveyard to your hand");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Hand,
+                    ..
+                }
+            ),
+            "return-all from graveyard→hand must lower to ChangeZone, not BounceAll, got {e:?}"
+        );
+    }
+
     #[test]
     fn strip_return_destination_hand() {
         let (target, dest) = strip_return_destination_ext("target creature to its owner's hand");

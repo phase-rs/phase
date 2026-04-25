@@ -295,6 +295,7 @@ pub fn resolve_effect(
         Effect::Surveil { .. } => surveil::resolve(state, ability, events),
         Effect::Fight { .. } => fight::resolve(state, ability, events),
         Effect::Bounce { .. } => bounce::resolve(state, ability, events),
+        Effect::BounceAll { .. } => bounce::resolve_all(state, ability, events),
         Effect::Explore => explore::resolve(state, ability, events),
         Effect::ExploreAll { .. } => explore::resolve_all(state, ability, events),
         Effect::Investigate => investigate::resolve(state, ability, events),
@@ -1169,6 +1170,12 @@ pub fn resolve_ability_chain(
                     Effect::ChangeZone { destination, .. }
                     | Effect::ChangeZoneAll { destination, .. } => Some(*destination),
                     Effect::ExileTop { .. } => Some(crate::types::zones::Zone::Exile),
+                    // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
+                    // Hand; downstream "those creatures" / "for each of those
+                    // permanents" tracking must filter by the actual landing zone.
+                    Effect::BounceAll { destination, .. } => {
+                        Some(destination.unwrap_or(crate::types::zones::Zone::Hand))
+                    }
                     _ => None,
                 };
                 events[events_before..]

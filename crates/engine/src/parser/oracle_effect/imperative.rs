@@ -693,15 +693,43 @@ pub(super) fn parse_targeted_action_ast(
             filter,
         });
     }
-    if let Some((_, rest)) =
-        nom_on_lower(text, lower, |input| value((), tag("return ")).parse(input))
-    {
+    // CR 400.7 + CR 611.2c: Unified `return [all|each]?` dispatcher. Consumes
+    // the verb plus an optional `all`/`each` plural quantifier, then routes
+    // by destination + origin. Mass-bounce ("return all creatures to their
+    // owners' hands") promotes to `ReturnAll` ⇒ `Effect::BounceAll`.
+    // Battlefield-targeted return-all ("return all artifact and enchantment
+    // cards from all graveyards to the battlefield") falls through to the
+    // single-target `ReturnToBattlefield` AST — promoting it to a mass
+    // variant requires an `Effect::ChangeZoneAll` field-shape extension that
+    // is out of scope here. Mirrors the `tap all`/`tap each` precheck arms
+    // above plus the bare `tag("return ")` arm's destination routing.
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value(
+            (),
+            alt((tag("return all "), tag("return each "), tag("return "))),
+        )
+        .parse(input)
+    }) {
+        // Detect whether the consumed prefix was `return all `/`return each `
+        // (mass) or just `return ` (single). The lowercase head bytes are the
+        // same length as the original-case head, so byte-arithmetic on `lower`
+        // is safe here.
+        let consumed_len = lower.len() - rest.len();
+        let head_lower = &lower[..consumed_len];
+        let is_mass = head_lower == "return all " || head_lower == "return each ";
+
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (target_text, dest) = super::strip_return_destination_ext(rest);
         let (target, _rem) = parse_target(target_text);
         let origin = super::infer_origin_zone(rest_lower);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);
+
+        // CR 400.7: Battlefield destination ⇒ ChangeZone (single-target until
+        // a separate ChangeZoneAll-shape extension lands). Non-hand non-
+        // battlefield destinations route through ReturnToZone unchanged. Only
+        // pure mass-bounce (battlefield⇒hand, no graveyard/library origin)
+        // promotes to `ReturnAll` ⇒ `Effect::BounceAll`.
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
                 Some(TargetedImperativeAst::ReturnToBattlefield {
@@ -712,13 +740,39 @@ pub(super) fn parse_targeted_action_ast(
                     enter_tapped: d.enter_tapped,
                 })
             }
-            Some(d) if d.zone == Zone::Hand => Some(TargetedImperativeAst::Return { target }),
+            Some(d) if d.zone == Zone::Hand => {
+                // Mass return only when the source zone is implicit (battlefield):
+                // "return all <filter> from your graveyard to your hand" must
+                // remain `ChangeZone { origin: Graveyard, destination: Hand }`,
+                // not `BounceAll` (whose resolver only scans the battlefield).
+                if is_mass && origin.is_none() {
+                    Some(TargetedImperativeAst::ReturnAll { target })
+                } else if is_mass {
+                    Some(TargetedImperativeAst::ReturnToZone {
+                        target,
+                        origin,
+                        destination: Zone::Hand,
+                    })
+                } else {
+                    Some(TargetedImperativeAst::Return { target })
+                }
+            }
             Some(d) => Some(TargetedImperativeAst::ReturnToZone {
                 target,
                 origin,
                 destination: d.zone,
             }),
-            None => Some(TargetedImperativeAst::Return { target }),
+            // No explicit destination phrase. "Return all <filter>" with no
+            // "to ..." tail still defaults to owner's hand for the
+            // mass-bounce class. Single-target "return <X>" likewise defaults
+            // to hand — preserves the pre-existing behavior.
+            None => {
+                if is_mass {
+                    Some(TargetedImperativeAst::ReturnAll { target })
+                } else {
+                    Some(TargetedImperativeAst::Return { target })
+                }
+            }
         };
     }
     if let Some((_, rest)) =
@@ -822,6 +876,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             filter,
         },
         TargetedImperativeAst::Return { target } => Effect::Bounce {
+            target,
+            destination: None,
+        },
+        // CR 400.7 + CR 611.2c: "Return all/each [filter]" mass-bounce — the
+        // resolver iterates every matching permanent. Class filter is preserved
+        // as-is; single-object refs (SelfRef / TriggeringSource / AttachedTo /
+        // ParentTarget) cannot reach this AST variant because the bare
+        // `tag("return ")` arm above handles those.
+        TargetedImperativeAst::ReturnAll { target } => Effect::BounceAll {
             target,
             destination: None,
         },

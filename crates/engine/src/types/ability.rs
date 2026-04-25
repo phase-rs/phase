@@ -3178,6 +3178,19 @@ pub enum Effect {
         #[serde(default)]
         destination: Option<Zone>,
     },
+    /// CR 400.7 + CR 611.2c: Mass-bounce — return every permanent matching
+    /// `target` to its owner's hand (default) or `destination` if set. Mirrors
+    /// `Effect::DestroyAll` / `Effect::PumpAll` / `Effect::TapAll` for the
+    /// "return all/each [filter]" Oracle text class (Evacuation, Devastation
+    /// Tide, Upheaval, Sunderflock, Wash Out, Whelming Wave, Crush of
+    /// Tentacles, Coastal Breach, etc.). The default destination is the
+    /// owner's hand; `Some(Zone::Library)` covers top-of-library variants.
+    BounceAll {
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<Zone>,
+    },
     Explore,
     /// CR 701.44d: Simultaneous multi-permanent explore instruction.
     /// The resolver processes matching permanents one explore at a time in
@@ -4317,6 +4330,7 @@ impl Effect {
             | Effect::DestroyAll { .. }
             | Effect::TapAll { .. }
             | Effect::UntapAll { .. }
+            | Effect::BounceAll { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::Dig { .. }
             | Effect::PutCounterAll { .. }
@@ -4431,6 +4445,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Surveil { .. } => "Surveil",
         Effect::Fight { .. } => "Fight",
         Effect::Bounce { .. } => "Bounce",
+        Effect::BounceAll { .. } => "BounceAll",
         Effect::Explore => "Explore",
         Effect::ExploreAll { .. } => "ExploreAll",
         Effect::Investigate => "Investigate",
@@ -4589,6 +4604,7 @@ pub enum EffectKind {
     Surveil,
     Fight,
     Bounce,
+    BounceAll,
     Explore,
     ExploreAll,
     Investigate,
@@ -4748,6 +4764,7 @@ impl From<&Effect> for EffectKind {
             Effect::Surveil { .. } => EffectKind::Surveil,
             Effect::Fight { .. } => EffectKind::Fight,
             Effect::Bounce { .. } => EffectKind::Bounce,
+            Effect::BounceAll { .. } => EffectKind::BounceAll,
             Effect::Explore => EffectKind::Explore,
             Effect::ExploreAll { .. } => EffectKind::ExploreAll,
             Effect::Investigate => EffectKind::Investigate,

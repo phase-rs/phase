@@ -487,6 +487,13 @@ pub(super) enum TargetedImperativeAst {
     Return {
         target: TargetFilter,
     },
+    /// CR 400.7 + CR 611.2c: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
+    /// for "return all/each [filter] to their owners' hands" Oracle text.
+    /// Lowers to `Effect::BounceAll`, not `Effect::Bounce`, so the runtime
+    /// resolver iterates every matching permanent instead of prompting for one.
+    ReturnAll {
+        target: TargetFilter,
+    },
     /// CR 400.7: Return to the battlefield (zone change, not bounce).
     ReturnToBattlefield {
         target: TargetFilter,
