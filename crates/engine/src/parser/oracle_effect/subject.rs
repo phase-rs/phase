@@ -173,7 +173,7 @@ fn try_parse_subject_become_clause(text: &str, ctx: &ParseContext) -> Option<Par
         .parse(predicate_lower.as_str())
         .ok()?;
     let application = parse_subject_application(subject, ctx)?;
-    build_become_clause(application, &predicate)
+    build_become_clause(application, &predicate, ctx)
 }
 
 fn try_parse_subject_restriction_clause(
@@ -1046,6 +1046,7 @@ fn strip_for_each_for_duration(text: &str) -> &str {
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
+    ctx: &ParseContext,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
@@ -1115,19 +1116,43 @@ fn build_become_clause(
 
     // CR 707.2 / CR 613.1a: "become a copy of [target]" — copy copiable characteristics.
     // Must intercept before parse_animation_spec which rejects "copy of" patterns.
-    const COPY_PREFIX: &str = "a copy of ";
-    if let Some(copy_target_text) = become_text
-        .get(..COPY_PREFIX.len())
-        .filter(|s| s.eq_ignore_ascii_case(COPY_PREFIX))
-        .map(|_| &become_text[COPY_PREFIX.len()..])
+    //
+    // Mirrors `parse_clone_replacement` in `oracle_replacement.rs` but for the
+    // triggered / spell-effect form. Both paths produce `Effect::BecomeCopy`
+    // with the same `additional_modifications` shape; the only grammatical
+    // difference is the trigger frame ("Irma becomes a copy of …") vs the
+    // replacement frame ("you may have ~ enter as a copy of …"). The shared
+    // `, except <body>` clause parser (CR 707.9) lives in the
+    // `become_copy_except` module so the trigger and replacement paths
+    // contribute to the same building block.
+    if let Ok((after_copy, _)) =
+        tag::<_, _, VerboseError<&str>>("a copy of ").parse(become_lower.as_str())
     {
-        let (target, _) = parse_target(copy_target_text);
+        // `parse_target` lower-cases internally; pass it the lowercase tail so
+        // its returned remainder is also lowercase (we'll feed that to
+        // `parse_except_clause` whose tags are lowercase).
+        let (target, remainder) = parse_target(after_copy);
+        // CR 707.9: optional `, except <body> [and <body>]*`. The card name
+        // for any SetName override comes from the parse context (set by
+        // `parse_oracle_text`). When `ctx.card_name` is `None` or empty
+        // (e.g. a test calling the chain parser without threading a card
+        // name), the body parser's `parse_name_override` arm declines —
+        // emitting `SetName { name: "" }` would silently set `obj.name = ""`
+        // at Layer 1, strictly worse than dropping the override entirely.
+        let card_name = ctx.card_name.as_deref().unwrap_or("");
+        let except_ctx = super::become_copy_except::ExceptClauseContext {
+            current_trigger_index: ctx.current_trigger_index,
+        };
+        let additional_modifications =
+            super::become_copy_except::parse_except_clause(remainder, card_name, except_ctx)
+                .map(|(_, mods)| mods)
+                .unwrap_or_default();
         return Some(ParsedEffectClause {
             effect: Effect::BecomeCopy {
                 target,
                 duration: duration.clone(),
                 mana_value_limit: None,
-                additional_modifications: Vec::new(),
+                additional_modifications,
             },
             duration,
             sub_ability: None,

@@ -1,4 +1,5 @@
 pub(crate) mod animation;
+pub(crate) mod become_copy_except;
 mod conditions;
 pub(crate) mod counter;
 pub(crate) mod imperative;
@@ -75,6 +76,14 @@ pub(crate) struct ParseContext {
     pub subject: Option<TargetFilter>,
     /// The card name for self-name effect parsing (e.g. "Exile Card Name.").
     pub card_name: Option<String>,
+    /// CR 707.9a + CR 603.1: Index of the printed trigger whose body is being
+    /// parsed, in the source object's `base_trigger_definitions` list. Set by
+    /// the trigger parser before invoking the effect chain. Consumed by the
+    /// `<subject pronoun> has this ability` arm of the BecomeCopy except-clause
+    /// parser to emit `RetainPrintedTriggerFromSource { source_trigger_index }`.
+    /// `None` for non-trigger contexts (replacements, instants, sorceries),
+    /// in which case the "has this ability" arm declines gracefully.
+    pub current_trigger_index: Option<usize>,
 }
 
 /// CR 608.2k: True when `text` is a standalone object pronoun referring to
@@ -10333,6 +10342,7 @@ mod tests {
             &ParseContext {
                 subject: Some(TargetFilter::SelfRef),
                 card_name: None,
+                ..Default::default()
             },
         );
         let sub = clause.sub_ability.expect("should have sub_ability");
@@ -10357,6 +10367,7 @@ mod tests {
             &ParseContext {
                 subject: Some(TargetFilter::SelfRef),
                 card_name: None,
+                ..Default::default()
             },
         );
         let sub = def.sub_ability.expect("should have sub_ability");

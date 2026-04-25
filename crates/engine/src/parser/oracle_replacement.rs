@@ -7,18 +7,17 @@ use nom::combinator::{opt, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::oracle_effect::become_copy_except::{parse_except_clause, ExceptClauseContext};
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
-use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_static::split_keyword_list;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{
-    canonicalize_subtype_name, normalize_card_name_refs, parse_count_expr, parse_number,
-    parse_ordinal, strip_after, strip_reminder_text, TextPair,
+    normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
+    strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
@@ -27,7 +26,6 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
-use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -761,8 +759,12 @@ fn parse_clone_suffix<'a>(
     // at cleanup. Appears between the zone clause and the except clause on
     // Cursed Mirror; absent on Phantasmal Image / Clever Impersonator (permanent).
     let (remaining, duration) = parse_leading_duration(remaining);
+    // Replacement-form clones don't have a "current trigger" — `has this
+    // ability` arms inside an except clause decline gracefully when the
+    // context's `current_trigger_index` is `None`.
     let (post_except, modifications) =
-        parse_except_clause(remaining, card_name).unwrap_or((remaining, Vec::new()));
+        parse_except_clause(remaining, card_name, ExceptClauseContext::default())
+            .unwrap_or((remaining, Vec::new()));
 
     (mana_value_limit, duration, modifications, post_except)
 }
@@ -795,278 +797,11 @@ fn parse_mana_value_limit_clause(suffix: &str) -> Option<(&str, Option<CopyManaV
     Some((rest, Some(CopyManaValueLimit::AmountSpentToCastSource)))
 }
 
-/// CR 707.9a: ", except {except_body} [and {except_body}]*[.]"
-///
-/// Each `except_body` independently contributes typed modifications. Bodies
-/// that don't match a known shape are silently skipped so we still keep the
-/// ones that do. The trailing '.' is optional and non-load-bearing.
-///
-/// The remainder returned is the span after any sentence-terminating `.` so
-/// callers can continue parsing trailing clauses (e.g. "When you do, ...").
-fn parse_except_clause<'a>(
-    input: &'a str,
-    card_name: &str,
-) -> Option<(&'a str, Vec<ContinuousModification>)> {
-    // ", except " — if missing, there are no modifications to extract.
-    let (mut rest, _) = tag::<_, _, VerboseError<&str>>(", except ")
-        .parse(input)
-        .ok()?;
-    let mut modifications = Vec::new();
-
-    loop {
-        let before = rest;
-        if let Some((after, mods)) = parse_except_body(rest, card_name) {
-            modifications.extend(mods);
-            rest = after;
-        } else {
-            // Unknown body — jump to the next " and " so recognised bodies
-            // that follow are not lost. If none exists, we're done.
-            rest = skip_to_next_conjunction(rest);
-        }
-
-        // Bodies are joined by " and " — consume it to parse another body.
-        if let Ok((after_and, _)) = tag::<_, _, VerboseError<&str>>(" and ").parse(rest) {
-            rest = after_and;
-        } else {
-            break;
-        }
-
-        // Safety: if nothing was consumed this iteration, stop.
-        if rest == before {
-            break;
-        }
-    }
-
-    let (rest, _) = opt(char::<_, VerboseError<&str>>('.')).parse(rest).ok()?;
-    Some((rest, modifications))
-}
-
-/// Parse a single "except ..." body, producing zero or more modifications.
-/// Recognised shapes:
-///   - "it's a(n) {subtype} in addition to its other types"   → AddSubtype
-///   - "it's a(n) {core_type} in addition to its other types" → AddType
-///   - "it has {keyword[, keyword, ...]}"                     → AddKeyword per kw
-///   - "<possessive> name is ~"                               → SetName(card_name)
-///   - "<subject>'s N/M {type list} in addition to its other types"
-///     → SetPower + SetToughness + AddType/AddSubtype per word
-fn parse_except_body<'a>(
-    input: &'a str,
-    card_name: &str,
-) -> Option<(&'a str, Vec<ContinuousModification>)> {
-    if let Some((rest, name_mod)) = parse_name_override(input, card_name) {
-        return Some((rest, vec![name_mod]));
-    }
-    if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
-        return Some((rest, mods));
-    }
-    if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
-        return Some((rest, vec![subtype]));
-    }
-    if let Some((rest, keywords)) = parse_it_has_keywords(input) {
-        return Some((rest, keywords));
-    }
-    None
-}
-
-/// CR 707.9b + CR 707.2: "his/her/its name is ~" — emit a `SetName` override
-/// keyed to the original card name. The `~` here is the self-ref sentinel
-/// inserted by `normalize_card_name_refs`; we don't need to peel the card's
-/// literal name because the suffix text was produced from the already-
-/// normalised Oracle line.
-fn parse_name_override<'a>(
-    input: &'a str,
-    card_name: &str,
-) -> Option<(&'a str, ContinuousModification)> {
-    let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("his name is "),
-        tag("her name is "),
-        tag("its name is "),
-    ))
-    .parse(input)
-    .ok()?;
-    // Accept "~" (normalised self-ref) as the name target. This keeps the
-    // parser strict — "except its name is Whatever" should only emit SetName
-    // when the name is the card's own (which is what normalisation produces).
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("~").parse(rest).ok()?;
-    Some((
-        rest,
-        ContinuousModification::SetName {
-            name: card_name.to_string(),
-        },
-    ))
-}
-
-/// CR 707.9b: "<subject> N/M {type list} in addition to its other types" where
-/// the subject is a pronoun-contraction ("he's" / "she's" / "it's" with either
-/// straight or curly apostrophes). Produces `SetPower` + `SetToughness`
-/// (overriding the copied P/T per CR 707.9b) and one `AddType`/`AddSubtype`
-/// per word in the type list. Layer placement is automatic from the variants'
-/// own `layer()` methods: SetPT at layer 7b, type additions at layer 4
-/// (CR 613.1d) — the layer system applies type additions after the copy's
-/// own types via timestamp order.
-fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("he's a "),
-        tag("he\u{2019}s a "),
-        tag("she's a "),
-        tag("she\u{2019}s a "),
-        tag("it's a "),
-        tag("it\u{2019}s a "),
-    ))
-    .parse(input)
-    .ok()?;
-
-    // Parse "N/M " — both components are positive integers.
-    let (rest, (power, toughness)) = parse_pt_pair(rest)?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
-
-    // Grab the type list up to " in addition to its/his/her other types".
-    let (type_text, rest) = split_on_first_of(
-        rest,
-        &[
-            " in addition to its other types",
-            " in addition to his other types",
-            " in addition to her other types",
-        ],
-    )?;
-
-    let mut mods = vec![
-        ContinuousModification::SetPower { value: power },
-        ContinuousModification::SetToughness { value: toughness },
-    ];
-
-    // Type list is space-separated in the copy class ("Spider Human Hero").
-    // Reuse the shared core-type vs subtype dispatch from parse_its_a_type_in_addition.
-    for word in type_text.split_whitespace() {
-        if word.is_empty() {
-            continue;
-        }
-        let canonical = canonicalize_subtype_name(word);
-        let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
-            ContinuousModification::AddType { core_type }
-        } else {
-            ContinuousModification::AddSubtype { subtype: canonical }
-        };
-        mods.push(modification);
-    }
-
-    Some((rest, mods))
-}
-
-/// Structural multi-candidate splitter: return the (before, after) pair for the
-/// earliest-matching phrase in `candidates`. None if no candidate matches.
-fn split_on_first_of<'a>(text: &'a str, candidates: &[&str]) -> Option<(&'a str, &'a str)> {
-    let mut best: Option<(usize, usize)> = None;
-    for phrase in candidates {
-        if let Ok((_, (before, _))) = nom_primitives::split_once_on(text, phrase) {
-            let pos = before.len();
-            if best.is_none_or(|(bp, _)| pos < bp) {
-                best = Some((pos, phrase.len()));
-            }
-        }
-    }
-    let (pos, len) = best?;
-    Some((&text[..pos], &text[pos + len..]))
-}
-
-/// Parse "N/M" where N and M are positive integers. Input is already lowercase.
-/// Returns the remainder positioned immediately after "N/M" (caller peels the
-/// following space) and the `(power, toughness)` pair.
-fn parse_pt_pair(input: &str) -> Option<(&str, (i32, i32))> {
-    use nom::character::complete::digit1;
-    let parser = |i| -> nom::IResult<&str, (&str, &str), VerboseError<&str>> {
-        let (i, p) = digit1(i)?;
-        let (i, _) = char('/')(i)?;
-        let (i, t) = digit1(i)?;
-        Ok((i, (p, t)))
-    };
-    let (rest, (p, t)) = parser(input).ok()?;
-    let power: i32 = p.parse().ok()?;
-    let toughness: i32 = t.parse().ok()?;
-    Some((rest, (power, toughness)))
-}
-
-/// "it's a(n) {type_word} in addition to its other types"
-/// The type_word is either a core type (`"artifact"`, `"creature"`, ...) → `AddType`,
-/// or anything else → treated as a subtype and canonicalized.
-fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
-    let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("it's an "),
-        tag("it's a "),
-        tag("it\u{2019}s an "),
-        tag("it\u{2019}s a "),
-    ))
-    .parse(input)
-    .ok()?;
-    let (type_word, rest) = nom_primitives::split_once_on(rest, " in addition to its other types")
-        .ok()
-        .map(|(_, pair)| pair)?;
-    let type_word = type_word.trim();
-    if type_word.is_empty() {
-        return None;
-    }
-    // Try core type first (canonicalize capitalization before FromStr).
-    let canonical = canonicalize_subtype_name(type_word);
-    let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
-        ContinuousModification::AddType { core_type }
-    } else {
-        ContinuousModification::AddSubtype { subtype: canonical }
-    };
-    Some((rest, modification))
-}
-
-/// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.
-/// Terminates at the next body separator (" and it ", end-of-string, or '.').
-fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("it has ")
-        .parse(input)
-        .ok()?;
-    // Keyword list terminates at " and it " (next body), the period, or end.
-    let (kw_text, remainder) = split_at_body_boundary(rest);
-    let mut modifications = Vec::new();
-    for part in split_keyword_list(kw_text) {
-        if let Some(keyword) = parse_keyword_from_oracle(part.trim()) {
-            modifications.push(ContinuousModification::AddKeyword { keyword });
-        }
-    }
-    if modifications.is_empty() {
-        return None;
-    }
-    Some((remainder, modifications))
-}
-
-/// Return `(body, remainder)` where `body` is the text up to the next
-/// body-level boundary (`" and it "`, `" and it's "`, or `"."`) and
-/// `remainder` still contains that boundary. Delegates to `split_once_on`
-/// (a nom-built primitive) for every boundary candidate and keeps the
-/// earliest match — purely structural position lookup, no dispatch logic.
-fn split_at_body_boundary(text: &str) -> (&str, &str) {
-    let candidates = [" and it ", " and it\u{2019}s ", " and it's ", "."];
-    let mut best: Option<usize> = None;
-    for pat in candidates {
-        if let Ok((_, (before, _))) = nom_primitives::split_once_on(text, pat) {
-            let pos = before.len();
-            best = Some(best.map_or(pos, |b| b.min(pos)));
-        }
-    }
-    match best {
-        Some(i) => (&text[..i], &text[i..]),
-        None => (text, ""),
-    }
-}
-
-/// Advance past the next " and " that starts a fresh body. Used to skip an
-/// unrecognised body so the rest of the except clause can still be parsed.
-/// `split_once_on` is a nom-built primitive — structural position lookup only.
-fn skip_to_next_conjunction(text: &str) -> &str {
-    match nom_primitives::split_once_on(text, " and ") {
-        Ok((_, (_, after))) => {
-            // Return the span starting at " and " so the caller can consume it.
-            &text[text.len() - after.len() - " and ".len()..]
-        }
-        Err(_) => "",
-    }
-}
+// CR 707.9 + CR 707.9b + CR 707.9a: The `, except <body>` clause grammar lives
+// in `oracle_effect/become_copy_except.rs` so both the replacement-form clones
+// (`parse_clone_replacement` above) and the triggered-form copies (Irma's
+// "becomes a copy of … except her name is ~ and she has this ability") share
+// one parser. See that module for the recognised body shapes.
 
 /// Parse check land pattern: "enters tapped unless you control a [LandType] or a [LandType]"
 /// Returns Mandatory ReplacementDefinition with an UnlessControlsSubtype condition.
@@ -2947,7 +2682,7 @@ mod tests {
         Comparator, ControllerRef, QuantityExpr, QuantityModification, QuantityRef,
         ReplacementCondition, ShieldKind,
     };
-    use crate::types::card_type::Supertype;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
 
     #[test]
@@ -5156,23 +4891,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_pt_pair_handles_single_and_double_digit_values() {
-        // Sanity: the 4/4 used by Superior Spider-Man works, as does a
-        // two-digit "12/12" (hypothetical future card).
-        let (rest, (p, t)) = parse_pt_pair("4/4 spider").unwrap();
-        assert_eq!((p, t), (4, 4));
-        assert_eq!(rest, " spider");
-        let (rest, (p, t)) = parse_pt_pair("12/12 giant").unwrap();
-        assert_eq!((p, t), (12, 12));
-        assert_eq!(rest, " giant");
-    }
-
-    #[test]
-    fn parse_pt_pair_rejects_non_numeric_halves() {
-        assert!(parse_pt_pair("a/4").is_none());
-        assert!(parse_pt_pair("4/").is_none());
-    }
+    // `parse_pt_pair` building-block tests moved to
+    // `oracle_effect::become_copy_except` along with the helper itself.
 
     #[test]
     fn split_on_clone_source_zone_prefers_battlefield_when_present() {

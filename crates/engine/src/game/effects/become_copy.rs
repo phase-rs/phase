@@ -835,6 +835,242 @@ mod tests {
         );
     }
 
+    // ── CR 707.9a: Retain printed trigger from source ─────────────────────
+    //
+    // Class: Irma, Part-Time Mutant / Cryptoplasm / Volrath's Shapeshifter —
+    // the source object copies a target but retains its own printed trigger
+    // ("and she has this ability"). The retained trigger must end up in the
+    // source's `trigger_definitions` after Layer 1 application alongside any
+    // copied triggers; idempotent under repeat application.
+    #[test]
+    fn become_copy_retains_printed_trigger_from_source() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, TriggerDefinition,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
+        state.objects.get_mut(&target).unwrap().base_keywords = vec![Keyword::Trample];
+
+        // Source ("Irma") has one printed trigger that must be retained.
+        let source = create_creature(&mut state, 2, PlayerId(0), "Irma", 1, 1);
+        let printed_trigger = TriggerDefinition::new(TriggerMode::Phase)
+            .phase(crate::types::phase::Phase::BeginCombat)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .base_trigger_definitions = Arc::new(vec![printed_trigger.clone()]);
+        state.objects.get_mut(&source).unwrap().trigger_definitions =
+            crate::types::definitions::Definitions::from(vec![printed_trigger.clone()]);
+
+        // Build the BecomeCopy ability with the retain modification — exactly
+        // what the parser emits for "except she has this ability" with
+        // current_trigger_index = 0.
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::SetName {
+                        name: "Irma".to_string(),
+                    },
+                    ContinuousModification::RetainPrintedTriggerFromSource {
+                        source_trigger_index: 0,
+                    },
+                ],
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied = state.objects.get(&source).unwrap();
+        // CopyValues overwrites trigger_definitions with the target's (Bear's)
+        // empty list. SetName overrides the name back to "Irma". Then the
+        // RetainPrintedTriggerFromSource pushes the printed trigger back.
+        assert_eq!(copied.name, "Irma", "SetName must override the copy name");
+        assert_eq!(
+            copied.trigger_definitions.iter_all().count(),
+            1,
+            "exactly one trigger after retain (printed source trigger only — Bear has none); \
+             got {:?}",
+            copied.trigger_definitions.iter_all().collect::<Vec<_>>()
+        );
+        assert!(
+            copied
+                .trigger_definitions
+                .iter_all()
+                .any(|t| matches!(t.mode, TriggerMode::Phase)),
+            "retained trigger must be the printed BeginCombat phase trigger"
+        );
+    }
+
+    // CR 707.9a: A retained ability is part of the COPIABLE values of the
+    // copy. When a *second* copy effect targets a permanent that already
+    // retained a trigger via a prior copy, the second copy must see the
+    // retained trigger as one of the source's copiable triggers — i.e.
+    // `compute_current_copiable_values` must honour
+    // `RetainPrintedTriggerFromSource`, not silently drop it.
+    //
+    // Concrete scenario: Irma becomes a copy of a Bear (Irma's first copy
+    // retains her own trigger). Then Phantasmal Image enters as a copy of
+    // Irma — it must inherit the retained trigger as part of Irma's
+    // copiable values. If `compute_current_copiable_values` short-circuits
+    // on the unknown variant, the second copy's `trigger_definitions` will
+    // be Bear's (empty) and the cycle breaks.
+    #[test]
+    fn retained_trigger_propagates_through_chained_copy() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, TriggerDefinition,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Bear: vanilla 2/2 with no triggers.
+        let bear = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
+
+        // Irma: 1/1 with a printed BoC phase trigger. Mirror the printed
+        // setup the database uses (base_trigger_definitions + trigger_definitions
+        // both populated).
+        let irma = create_creature(&mut state, 2, PlayerId(0), "Irma", 1, 1);
+        let printed_trigger = TriggerDefinition::new(TriggerMode::Phase)
+            .phase(crate::types::phase::Phase::BeginCombat)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        state
+            .objects
+            .get_mut(&irma)
+            .unwrap()
+            .base_trigger_definitions = Arc::new(vec![printed_trigger.clone()]);
+        state.objects.get_mut(&irma).unwrap().trigger_definitions =
+            crate::types::definitions::Definitions::from(vec![printed_trigger.clone()]);
+
+        // Step 1: Irma becomes a copy of Bear (with the retain modification —
+        // exactly what the parser emits for "and she has this ability").
+        let irma_to_bear = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::SetName {
+                        name: "Irma".to_string(),
+                    },
+                    ContinuousModification::RetainPrintedTriggerFromSource {
+                        source_trigger_index: 0,
+                    },
+                ],
+            },
+            vec![TargetRef::Object(bear)],
+            irma,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &irma_to_bear, &mut events).unwrap();
+        evaluate_layers(&mut state);
+        // Sanity: Irma now has Bear's stats but retains her own trigger.
+        assert_eq!(state.objects[&irma].name, "Irma");
+        assert_eq!(
+            state.objects[&irma].trigger_definitions.iter_all().count(),
+            1,
+            "step 1: Irma must keep her retained trigger"
+        );
+
+        // Step 2: Phantasmal Image (a vanilla 0/0 with no abilities of its
+        // own) becomes a copy of Irma — uses the COPIABLE values of Irma,
+        // which per CR 707.9a must include the retained trigger.
+        let phantasmal = create_creature(&mut state, 3, PlayerId(0), "Phantasmal Image", 0, 0);
+        let phantasmal_to_irma = make_copy_ability(irma, phantasmal, PlayerId(0), None);
+        resolve(&mut state, &phantasmal_to_irma, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // The chained copy must propagate the retained trigger.
+        let phantasmal_obj = state.objects.get(&phantasmal).unwrap();
+        assert_eq!(
+            phantasmal_obj.name, "Irma",
+            "chained copy reads the SetName-overridden copiable name"
+        );
+        assert_eq!(
+            phantasmal_obj.trigger_definitions.iter_all().count(),
+            1,
+            "CR 707.9a: chained copy must inherit the retained trigger as a \
+             copiable value (compute_current_copiable_values must honour \
+             RetainPrintedTriggerFromSource); got {:?}",
+            phantasmal_obj
+                .trigger_definitions
+                .iter_all()
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            phantasmal_obj
+                .trigger_definitions
+                .iter_all()
+                .any(|t| matches!(t.mode, TriggerMode::Phase)),
+            "the propagated trigger must be the printed BoC phase trigger"
+        );
+    }
+
+    // CR 707.9a: When the source's printed trigger list has no entry at the
+    // requested index (defensive — should not happen for well-formed parses),
+    // retain is a no-op rather than a panic. This guards against parser
+    // regressions where the index drift past the printed list.
+    #[test]
+    fn retain_printed_trigger_with_out_of_bounds_index_is_a_noop() {
+        use crate::types::ability::ContinuousModification;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
+        let source = create_creature(&mut state, 2, PlayerId(0), "Source", 1, 1);
+        // Source has zero printed triggers — index 0 is out of bounds.
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::RetainPrintedTriggerFromSource {
+                        source_trigger_index: 5,
+                    },
+                ],
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+        // No panic, no extra triggers.
+        assert_eq!(
+            state.objects[&source]
+                .trigger_definitions
+                .iter_all()
+                .count(),
+            0,
+            "out-of-bounds retain must be a no-op (no panic, no spurious trigger)"
+        );
+    }
+
     // ── Reset regression: abilities revert when copy ends ─────────────────
     #[test]
     fn abilities_revert_to_empty_when_copy_expires() {

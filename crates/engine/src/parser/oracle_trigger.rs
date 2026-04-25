@@ -188,7 +188,21 @@ fn trigger_should_rewrite_cost_x(def: &TriggerDefinition) -> bool {
 /// Accepts raw card Oracle text; internally normalizes self-references via
 /// `normalize_card_name_refs`. When invoked via [`parse_oracle_text`] the
 /// text is already normalized and the internal call is an idempotent no-op.
+///
+/// External callers (and tests) pass `None` for the base trigger index, which
+/// disables the "and it has this ability" arm of the BecomeCopy except-clause.
+/// Production callers in [`parse_oracle_text`] pass the running
+/// `result.triggers.len()` so each compound-split trigger receives a unique
+/// index in the source object's `base_trigger_definitions` list (CR 707.9a).
 pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition> {
+    parse_trigger_lines_at_index(text, card_name, None)
+}
+
+pub(crate) fn parse_trigger_lines_at_index(
+    text: &str,
+    card_name: &str,
+    base_trigger_index: Option<usize>,
+) -> Vec<TriggerDefinition> {
     let stripped = strip_reminder_text(text);
     let normalized = normalize_self_refs(&stripped, card_name);
     let lower = normalized.to_lowercase();
@@ -204,13 +218,18 @@ pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition
     if let Some(halves) = split_and_when_compound(&cond_lower, &condition) {
         return halves
             .into_iter()
-            .map(|cond| {
+            .enumerate()
+            .map(|(i, cond)| {
                 let trigger_text = if effect.is_empty() {
                     cond
                 } else {
                     format!("{cond}, {effect}")
                 };
-                parse_trigger_line(&trigger_text, card_name)
+                parse_trigger_line_with_index(
+                    &trigger_text,
+                    card_name,
+                    base_trigger_index.map(|b| b + i),
+                )
             })
             .collect();
     }
@@ -221,19 +240,28 @@ pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition
     if let Some(halves) = split_or_event_compound(&cond_lower, &condition) {
         return halves
             .into_iter()
-            .map(|cond| {
+            .enumerate()
+            .map(|(i, cond)| {
                 let trigger_text = if effect.is_empty() {
                     cond
                 } else {
                     format!("{cond}, {effect}")
                 };
-                parse_trigger_line(&trigger_text, card_name)
+                parse_trigger_line_with_index(
+                    &trigger_text,
+                    card_name,
+                    base_trigger_index.map(|b| b + i),
+                )
             })
             .collect();
     }
 
     // No compound — single trigger.
-    vec![parse_trigger_line(text, card_name)]
+    vec![parse_trigger_line_with_index(
+        text,
+        card_name,
+        base_trigger_index,
+    )]
 }
 
 /// Part D: If `"for the first time each turn"` appears as a word-boundary
@@ -365,8 +393,28 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
 /// Accepts raw card Oracle text; internally normalizes self-references via
 /// `normalize_card_name_refs`. When invoked via [`parse_oracle_text`] the
 /// text is already normalized and the internal call is an idempotent no-op.
-#[tracing::instrument(level = "debug", skip(card_name))]
+///
+/// **Trigger index** (`current_trigger_index`): when known, the caller passes
+/// the index this trigger will occupy in the source object's
+/// `base_trigger_definitions` list. This is consumed by the BecomeCopy
+/// except-clause parser (CR 707.9a) for "and it has this ability" — the
+/// resulting `RetainPrintedTriggerFromSource { source_trigger_index }` points
+/// back into the source's printed triggers so the copy retains the trigger
+/// without needing a forward reference to the partial definition.
+///
+/// External callers (and the test API at `parse_trigger_line(text, card_name)`)
+/// pass `None`, in which case any "has this ability" clause inside the trigger
+/// body declines gracefully.
 pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
+    parse_trigger_line_with_index(text, card_name, None)
+}
+
+#[tracing::instrument(level = "debug", skip(card_name))]
+pub(crate) fn parse_trigger_line_with_index(
+    text: &str,
+    card_name: &str,
+    current_trigger_index: Option<usize>,
+) -> TriggerDefinition {
     let text = strip_reminder_text(text);
     // Replace self-references: "this creature", "this enchantment", card name → ~
     let normalized = normalize_self_refs(&text, card_name);
@@ -407,9 +455,15 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
     // "it"/"its"/"itself" in the effect refer to the trigger subject, not the source permanent.
     let trigger_subject = extract_trigger_subject_for_context(condition_text);
+    // CR 707.9a + CR 603.1: Forward the trigger's index into the parse context
+    // so the BecomeCopy except-clause parser ("she has this ability") can emit
+    // `RetainPrintedTriggerFromSource { source_trigger_index }` referencing
+    // this very trigger. Also forward `card_name` so the SetName override in
+    // "except her name is ~" carries the original-case card name.
     let effect_ctx = ParseContext {
         subject: Some(trigger_subject),
-        ..Default::default()
+        card_name: Some(card_name.to_string()),
+        current_trigger_index,
     };
 
     // CR 109.4 + CR 115.1 + CR 506.2: When the trigger condition introduces a
@@ -10763,5 +10817,191 @@ mod tests {
             !trigger_should_rewrite_cost_x(&def),
             "dies trigger should NOT have X rewritten to CostXPaid"
         );
+    }
+
+    // ── BecomeCopy via triggered ability — CR 707.9 + CR 707.9a ───────────
+    //
+    // Class: "[Self] becomes a copy of <target>, except <body>" inside a
+    // triggered ability body. Building blocks under test: shared
+    // `parse_except_clause` (oracle_effect::become_copy_except), the new
+    // `RetainPrintedTriggerFromSource` continuous modification (CR 707.9a),
+    // and trigger-index threading via `ParseContext::current_trigger_index`.
+    //
+    // The tests intentionally span multiple cards / phrasings (Irma, plus
+    // a synthetic gendered variant) so the building block is exercised
+    // across the class — not just the named card.
+
+    #[test]
+    fn trigger_become_copy_with_set_name_and_retain_this_ability() {
+        // Irma, Part-Time Mutant — the canonical card driving this work.
+        // Use the indexed entry point to simulate `parse_oracle_text`'s
+        // wiring of `current_trigger_index` (the trigger is the card's first
+        // and only printed trigger → index 0).
+        let def = parse_trigger_line_with_index(
+            "At the beginning of combat on your turn, ~ becomes a copy of up to one other target creature you control, except her name is ~ and she has this ability. Then put a +1/+1 counter on her.",
+            "Irma, Part-Time Mutant",
+            Some(0),
+        );
+        // Phase + constraint: BoC on your turn.
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+
+        let execute = def.execute.as_deref().expect("execute body must parse");
+        // Primary effect: BecomeCopy with target = creature you control + Another.
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                target,
+                additional_modifications,
+                ..
+            } => {
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(
+                            tf.properties.contains(&FilterProp::Another),
+                            "expected Another (other-target) property, got {:?}",
+                            tf.properties
+                        );
+                    }
+                    other => panic!("expected Typed creature target, got {other:?}"),
+                }
+                // Modifications must include SetName and RetainPrintedTriggerFromSource.
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::SetName { name }
+                            if name == "Irma, Part-Time Mutant"
+                    )),
+                    "expected SetName(Irma, Part-Time Mutant), got {additional_modifications:?}"
+                );
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::RetainPrintedTriggerFromSource {
+                            source_trigger_index: 0,
+                        }
+                    )),
+                    "expected RetainPrintedTriggerFromSource(0), got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy primary effect, got {other:?}"),
+        }
+        // Reflexive sub_ability: PutCounter on her (= SelfRef via is_it_pronoun).
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("Then put a +1/+1 counter on her — sub_ability must chain");
+        match sub.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                target,
+                ..
+            } => {
+                // +1/+1 counters use the normalized "P1P1" canonical form
+                // (see oracle_effect::counter::normalize_counter_type).
+                assert_eq!(counter_type, "P1P1");
+                assert!(
+                    matches!(target, TargetFilter::SelfRef),
+                    "+1/+1 counter must land on the post-copy self, got {target:?}"
+                );
+            }
+            other => panic!("expected PutCounter sub_ability, got {other:?}"),
+        }
+        // Optional targeting: "up to one" must surface optional_targeting=true.
+        assert!(
+            execute.optional_targeting,
+            "up to one target must mark the execute as optional_targeting=true"
+        );
+    }
+
+    #[test]
+    fn trigger_become_copy_he_has_this_ability() {
+        // Same class, gendered "he" variant — the building block must accept
+        // every pronoun without per-card branching.
+        let def = parse_trigger_line_with_index(
+            "At the beginning of your upkeep, ~ becomes a copy of target creature you control, except his name is ~ and he has this ability.",
+            "Test Mutant",
+            Some(0),
+        );
+        let execute = def.execute.as_deref().unwrap();
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(additional_modifications.iter().any(|m| matches!(
+                    m,
+                    crate::types::ability::ContinuousModification::SetName { name }
+                        if name == "Test Mutant"
+                )));
+                assert!(additional_modifications.iter().any(|m| matches!(
+                    m,
+                    crate::types::ability::ContinuousModification::RetainPrintedTriggerFromSource {
+                        source_trigger_index: 0
+                    }
+                )));
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_become_copy_it_has_this_ability_neuter() {
+        // Class: neuter "it" pronoun in the except clause. The trigger frame
+        // here is the simple "[Self] becomes ..." form (Irma family); the
+        // alternative "you may have ~ become ..." frame (Cryptoplasm proper)
+        // is a distinct grammatical pattern handled by the replacement parser
+        // — the building block under test is the except-clause arm regardless
+        // of which trigger frame produced the BecomeCopy.
+        let def = parse_trigger_line_with_index(
+            "At the beginning of your upkeep, ~ becomes a copy of another target creature, except it has this ability.",
+            "Test Cloner",
+            Some(0),
+        );
+        let execute = def.execute.as_deref().unwrap();
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::RetainPrintedTriggerFromSource { source_trigger_index: 0 }
+                    )),
+                    "trigger with 'except it has this ability' must emit \
+                     RetainPrintedTriggerFromSource(0); got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_become_copy_without_this_ability_clause_emits_no_retain() {
+        // The retain modification must only be emitted when the body contains
+        // "<pronoun> has this ability". A copy trigger without that clause
+        // must NOT spuriously retain the trigger.
+        let def = parse_trigger_line(
+            "When ~ enters, ~ becomes a copy of target creature you control.",
+            "Vanilla Cloner",
+        );
+        let execute = def.execute.as_deref().unwrap();
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    !additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::RetainPrintedTriggerFromSource { .. }
+                    )),
+                    "no 'has this ability' clause → no RetainPrintedTriggerFromSource"
+                );
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
     }
 }

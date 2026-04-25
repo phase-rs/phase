@@ -6363,6 +6363,20 @@ pub enum ContinuousModification {
     SetBasicLandType {
         land_type: BasicLandType,
     },
+    /// CR 707.9a: Retain a printed triggered ability from the source object's
+    /// printed trigger list at the given index. Used by "becomes a copy of <X>,
+    /// except it has this ability" patterns (Irma Part-Time Mutant, Cryptoplasm,
+    /// Volrath's Shapeshifter), where "this ability" refers to the trigger
+    /// containing the BecomeCopy effect — the trigger must persist on the copy
+    /// so the cycle continues each turn.
+    ///
+    /// Applied at Layer 1 because CR 707.9a states the granted ability "becomes
+    /// part of the copiable values for the copy". The runtime reads the source
+    /// object's `base_trigger_definitions[source_trigger_index]` and pushes a
+    /// clone onto the affected object's `trigger_definitions`.
+    RetainPrintedTriggerFromSource {
+        source_trigger_index: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------

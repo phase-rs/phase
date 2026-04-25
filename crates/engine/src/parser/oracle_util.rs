@@ -1275,9 +1275,17 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // "Me, the Immortal", "MJ, Rising Star") are legitimate self-references —
     // common two-letter English words are never legendary card names with this
     // structure, so `>= 2` is safe.
+    //
+    // Run the comma-form replacement *unconditionally* (even when the full
+    // name already produced a `~`). Modern Oracle text routinely mixes both
+    // forms in a single card — e.g. Irma, Part-Time Mutant uses both
+    // "Irma becomes a copy of …" (short form) and "her name is Irma,
+    // Part-Time Mutant" (full form, inside an except clause). The earlier
+    // `replace_all_words` is word-boundary-aware, so re-running on the
+    // residue cannot re-touch a `~` produced by the prior pass.
     if let Some(comma_pos) = effective_name.find(", ") {
         let short_name = &effective_name[..comma_pos];
-        if short_name.len() >= 2 && !result.contains('~') {
+        if short_name.len() >= 2 {
             result = replace_all_words(&result, short_name, "~");
         }
     }

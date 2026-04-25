@@ -981,6 +981,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
+            | ContinuousModification::RetainPrintedTriggerFromSource { .. }
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
@@ -1108,6 +1109,23 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             ))
         }
         _ => None,
+    };
+
+    // CR 707.9a: Pre-read the printed trigger to retain from the source object's
+    // `base_trigger_definitions`. Reads here (immutable) before we take the
+    // per-object mutable borrow inside the loop. Cloning out the trigger keeps
+    // the dispatch arm's mutation site free of nested borrows.
+    let retained_printed_trigger = if let ContinuousModification::RetainPrintedTriggerFromSource {
+        source_trigger_index,
+    } = &effect.modification
+    {
+        state.objects.get(&effect.source_id).and_then(|src| {
+            src.base_trigger_definitions
+                .get(*source_trigger_index)
+                .cloned()
+        })
+    } else {
+        None
     };
 
     for id in affected_ids {
@@ -1336,6 +1354,18 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 obj.static_definitions.clear();
                 obj.keywords.clear();
             }
+            // CR 707.9a: Retain the source's printed trigger on the copy.
+            // After `CopyValues` overwrote `obj.trigger_definitions` with the
+            // copied values, push the source's printed trigger back so the
+            // copy retains "this ability". Idempotent — duplicate retain calls
+            // (same trigger structurally) collapse into one.
+            ContinuousModification::RetainPrintedTriggerFromSource { .. } => {
+                if let Some(trigger) = retained_printed_trigger.clone() {
+                    if !obj.trigger_definitions.iter_all().any(|t| t == &trigger) {
+                        obj.trigger_definitions.push(trigger);
+                    }
+                }
+            }
         }
     }
 }
@@ -1429,6 +1459,29 @@ pub(crate) fn compute_current_copiable_values(
             // source's name.
             ContinuousModification::SetName { name } => {
                 values.name = name.clone();
+            }
+            // CR 707.9a: A copy effect that grants/retains an ability ("…
+            // and it has this ability") makes that ability part of the
+            // copiable values of the copy. A subsequent copy of this object
+            // must see the retained trigger as one of its copiable triggers.
+            // Read the printed trigger from the *effect's source object*
+            // (the original printer of the retain modification — Irma) by
+            // index, mirroring the write-side application in
+            // `apply_continuous_effect`. Idempotent under stacking: a
+            // structurally-equal trigger already present is not duplicated.
+            ContinuousModification::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            } => {
+                if let Some(trigger) = state.objects.get(&effect.source_id).and_then(|src| {
+                    src.base_trigger_definitions
+                        .get(*source_trigger_index)
+                        .cloned()
+                }) {
+                    let triggers = Arc::make_mut(&mut values.trigger_definitions);
+                    if !triggers.iter().any(|t| t == &trigger) {
+                        triggers.push(trigger);
+                    }
+                }
             }
             _ => {}
         }
