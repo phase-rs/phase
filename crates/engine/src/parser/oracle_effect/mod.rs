@@ -2990,7 +2990,7 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
         return clause;
     }
 
-    // CR 121.6 + CR 615.5: "{verb} cards equal to {quantity}" inside a
+    // CR 121.1 + CR 615.5: "{verb} cards equal to {quantity}" inside a
     // subject-aware predicate (e.g. "the source's controller draws cards equal
     // to the damage prevented this way" — Swans of Bryn Argoll). Mirrors the
     // bare-imperative arm at `parse_effect_clause`: must run BEFORE the

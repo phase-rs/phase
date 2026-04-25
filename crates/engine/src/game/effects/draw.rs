@@ -70,11 +70,12 @@ pub fn resolve(
         // context-ref filters that don't surface a target slot.
         Effect::Draw { count, target } => (
             resolve_quantity_with_targets(state, count, ability) as u32,
-            if target.is_context_ref() {
-                ability.controller
-            } else {
-                ability.target_player()
-            },
+            // CR 121.1 + CR 615.5 + CR 609.7: context-ref target filters
+            // (PostReplacementSourceController, ParentTargetController, etc.)
+            // resolve via state slots — falling straight to `ability.controller`
+            // would draw cards for the wrong player on prevention follow-ups
+            // like Swans of Bryn Argoll.
+            super::resolve_player_for_context_ref(state, ability, target),
         ),
         _ => (1, ability.controller),
     };

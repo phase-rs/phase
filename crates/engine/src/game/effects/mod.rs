@@ -614,6 +614,48 @@ pub(crate) fn controller_for_relative_filter(
     }
 }
 
+/// CR 121.1 + CR 615.5 + CR 609.7: Resolve the acting player for an effect
+/// whose target slot may be a context-ref. Mirrors `life::resolve_life_loss_target`
+/// for the Draw/Scry/Surveil class — those handlers historically short-circuited
+/// to `ability.controller` whenever `target.is_context_ref()`, which is wrong
+/// for `PostReplacementSourceController` (the prevented event's source has its
+/// own controller, distinct from the replacement's controller).
+///
+/// Resolution order:
+/// 1. First `TargetRef::Player` in `ability.targets` (chosen at announcement).
+/// 2. `resolve_event_context_target` on the filter — reads `state` slots like
+///    `current_trigger_event` (TriggeringSpellController) and
+///    `post_replacement_event_source` (PostReplacementSourceController).
+/// 3. Fall back to `ability.controller` (preserves prior semantics for context
+///    refs whose state slots are empty in the current resolution window).
+pub(crate) fn resolve_player_for_context_ref(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> PlayerId {
+    if let Some(player) = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Player(player) => Some(*player),
+        _ => None,
+    }) {
+        return player;
+    }
+    if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
+        state,
+        target_filter,
+        ability.source_id,
+    ) {
+        return match target_ref {
+            TargetRef::Player(player) => player,
+            TargetRef::Object(id) => state
+                .objects
+                .get(&id)
+                .map(|obj| obj.controller)
+                .unwrap_or(ability.controller),
+        };
+    }
+    ability.controller
+}
+
 /// CR 117.3a: Determine which player receives the "may" prompt for an optional
 /// effect. Most optional effects go to the caster (CR 609.3). Subject-anchored
 /// optional effects — "its controller may search their library" (Assassin's

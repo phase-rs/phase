@@ -751,6 +751,41 @@ mod tests {
     }
 
     #[test]
+    fn post_replacement_source_controller_resolves_to_event_source_controller() {
+        // CR 615.5 + CR 609.7: When `state.post_replacement_event_source` is
+        // populated (set by the prevention applier's Prevented arm), the new
+        // filter resolves to the controller of that object — NOT to the
+        // ability source's controller. Swans of Bryn Argoll's regression test:
+        // damage was prevented from a P1-controlled source, so P1 (the source's
+        // controller) draws the cards, not Swans's controller (P0).
+        let (mut state, c0, _c1) = setup_with_creatures();
+        // c0 is controlled by P0 — pretend it's the prevented damage source
+        // and the prevention shield (e.g. Swans) is controlled by P1.
+        state.post_replacement_event_source = Some(c0);
+        let result = resolve_event_context_target(
+            &state,
+            &TargetFilter::PostReplacementSourceController,
+            ObjectId(999), // arbitrary ability source — unused for this filter
+        );
+        assert_eq!(result, Some(TargetRef::Player(PlayerId(0))));
+    }
+
+    #[test]
+    fn post_replacement_source_controller_returns_none_when_slot_empty() {
+        // Defensive: filter only resolves inside the post-replacement window.
+        // Outside that window the slot is `None` and the filter should return
+        // `None`, letting callers fall back to controller / target_player.
+        let (state, _c0, _c1) = setup_with_creatures();
+        assert!(state.post_replacement_event_source.is_none());
+        let result = resolve_event_context_target(
+            &state,
+            &TargetFilter::PostReplacementSourceController,
+            ObjectId(999),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn find_legal_targets_creature_returns_only_creatures() {
         let (state, c0, c1) = setup_with_creatures();
         let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
