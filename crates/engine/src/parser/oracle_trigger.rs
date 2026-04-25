@@ -3874,9 +3874,14 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some(result);
     }
 
+    // CR 119.3 + CR 603.2: "Whenever you gain life" scopes the trigger event to the
+    // source's controller. Without `valid_target = Controller`, `valid_player_matches`
+    // accepts any player, so opponent life-gain incorrectly triggers (e.g. Vito,
+    // Thorn of the Dusk Rose; Ajani's Pridemate; Heliod, Sun-Crowned).
     if scan_contains(lower, "you gain life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeGained;
+        def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::LifeGained, def));
     }
 
@@ -5947,6 +5952,60 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::LifeGained);
         assert_eq!(def.constraint, None);
+    }
+
+    // CR 119.3 + CR 603.2: "Whenever you gain life" must restrict the trigger to
+    // the source's controller. Regression for Vito, Thorn of the Dusk Rose and
+    // every other "you gain life" trigger that previously fired on opponent
+    // life-gain because `valid_target` was None.
+    #[test]
+    fn trigger_you_gain_life_scopes_to_controller() {
+        let def = parse_trigger_line(
+            "Whenever you gain life, target opponent loses that much life.",
+            "Vito, Thorn of the Dusk Rose",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_gain_life_pridemate_scopes_to_controller() {
+        let def = parse_trigger_line(
+            "Whenever you gain life, put a +1/+1 counter on this creature.",
+            "Ajani's Pridemate",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // Negative test: "an opponent gains life" must remain opponent-scoped, not
+    // pick up `Controller` from the "you gain life" fast-path.
+    #[test]
+    fn trigger_opponent_gains_life_scopes_to_opponent() {
+        let def = parse_trigger_line(
+            "Whenever an opponent gains life, you gain that much life.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    // Negative test: "a player gains life" (no scope qualifier) must accept any
+    // player. The subject-bearing handler stores the parsed subject filter, which
+    // for "a player" is the unscoped player filter.
+    #[test]
+    fn trigger_a_player_gains_life_unscoped() {
+        let def = parse_trigger_line("Whenever a player gains life, draw a card.", "Some Card");
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        // Whatever filter the subject parser produces for "a player", the key
+        // invariant is that it is NOT scoped to Controller (which would silently
+        // restrict to the source's controller).
+        assert_ne!(def.valid_target, Some(TargetFilter::Controller));
     }
 
     #[test]
