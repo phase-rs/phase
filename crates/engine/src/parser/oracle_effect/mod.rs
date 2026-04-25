@@ -1225,9 +1225,15 @@ fn try_parse_have_causative(tp: TextPair<'_>, ctx: &ParseContext) -> Option<Pars
                 }));
             }
         }
-        // Fallback: parse remaining as a generic imperative effect
-        let clause = parse_effect_clause(rest.original, ctx);
-        return Some(clause);
+        // CR 611.2b: When the specific causative "deal damage" pattern does
+        // not match, decline so the more general `try_parse_have_redirection`
+        // (subject-predicate dispatch downstream of `parse_effect_clause`) can
+        // take this clause. Recursing through `parse_effect_clause` here would
+        // erase the subject (`~` / `it`) and reduce the remainder to a bare
+        // imperative — which `try_parse_subject_become_clause` and other
+        // subject-aware arms can no longer reach (Sarkhan, Soul Aflame's
+        // "have ~ become a copy of it ..." class).
+        return None;
     }
 
     // Pattern B: "have you [verb]" — controller performs an action directed by opponent
@@ -6199,6 +6205,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
             enters_attacking,
             tapped,
             extra_keywords,
+            additional_modifications,
             ..
         } => Some(Effect::CopyTokenOf {
             target: target.clone(),
@@ -6208,6 +6215,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
                 value: count as i32,
             },
             extra_keywords: extra_keywords.clone(),
+            additional_modifications: additional_modifications.clone(),
         }),
         Effect::Token {
             name,

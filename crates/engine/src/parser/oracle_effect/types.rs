@@ -561,6 +561,10 @@ pub(super) enum SearchCreationImperativeAst {
         /// CR 707.2 + CR 702: "except it has [keyword]" — extra keywords granted
         /// to each created copy token. See `Effect::CopyTokenOf::extra_keywords`.
         extra_keywords: Vec<crate::types::keywords::Keyword>,
+        /// CR 707.9 + CR 707.2: "except <body>" non-keyword modifications
+        /// (e.g., `RemoveSupertype` for Miirym's "isn't legendary"). See
+        /// `Effect::CopyTokenOf::additional_modifications`.
+        additional_modifications: Vec<crate::types::ability::ContinuousModification>,
     },
     Token {
         token: Box<TokenDescription>,

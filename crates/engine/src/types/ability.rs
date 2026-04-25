@@ -3270,6 +3270,16 @@ pub enum Effect {
         /// Twinflame ("…except it has haste") is the canonical example.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extra_keywords: Vec<crate::types::keywords::Keyword>,
+        /// CR 707.9 + CR 707.2: Non-keyword "except" exceptions applied to the
+        /// synthesized token (e.g., Miirym, Sentinel Wyrm: "except the token
+        /// isn't legendary"). Mirrors `BecomeCopy.additional_modifications` so
+        /// the same building block (`become_copy_except.rs::parse_except_body`)
+        /// produces the modifications for both forms. The token-copy resolver
+        /// stamps each modification onto the synthesized token directly (see
+        /// `game/effects/token_copy.rs`), since copiable values for tokens are
+        /// baked in at creation rather than evaluated through the layer system.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_modifications: Vec<ContinuousModification>,
     },
     /// CR 707.2 / CR 613.1a: Become a copy of target permanent.
     /// Sets copiable characteristics at Layer 1.
@@ -6491,6 +6501,43 @@ pub enum ContinuousModification {
     /// clone onto the affected object's `trigger_definitions`.
     RetainPrintedTriggerFromSource {
         source_trigger_index: usize,
+    },
+    /// CR 205.4 + CR 707.9d: Add a supertype to the affected object's
+    /// supertypes (e.g., Sarkhan, Soul Aflame: "it's legendary in addition
+    /// to its other types"). Idempotent: pushing an already-present supertype
+    /// is a no-op. Applied at Layer 4 (CR 613.1d) because supertypes are
+    /// types per CR 205.4b.
+    AddSupertype {
+        supertype: Supertype,
+    },
+    /// CR 205.4 + CR 707.9b: Remove a supertype from the affected object
+    /// (e.g., Miirym, Sentinel Wyrm: "except the token isn't legendary").
+    /// Applied at Layer 4 (CR 613.1d). For tokens, the synthesized object's
+    /// `base_card_types.supertypes` is also pruned at the resolver site
+    /// because copiable values for tokens are baked in at creation
+    /// (CR 707.2) rather than re-evaluated layer-by-layer.
+    RemoveSupertype {
+        supertype: Supertype,
+    },
+    /// CR 122.1 + CR 614.1c: Place counters on the entering / synthesized
+    /// object as part of the copy resolution, optionally gated by the
+    /// resolved core type of the entering object (Spark Double: "additional
+    /// +1/+1 counter on it if it's a creature, additional loyalty counter
+    /// if it's a planeswalker").
+    ///
+    /// This variant is NOT a continuous effect — it is consumed at
+    /// resolution time by the BecomeCopy / CopyTokenOf resolvers and never
+    /// reaches `apply_continuous_effect`. The placed counter then interacts
+    /// with the layer system normally (Layer 7c/7d) via the CounterPT
+    /// machinery already in place.
+    AddCounterOnEnter {
+        counter_type: String,
+        count: QuantityExpr,
+        /// `None` = unconditional. `Some(t)` gates the counter on the
+        /// resolved object having `core_type == t` after copy values are
+        /// applied (CR 707.9f-style "if the copy is or has certain
+        /// characteristics").
+        if_type: Option<CoreType>,
     },
 }
 

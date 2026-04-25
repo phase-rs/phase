@@ -968,6 +968,8 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::AddSupertype { .. }
+            | ContinuousModification::RemoveSupertype { .. }
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
@@ -1212,6 +1214,28 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::RemoveSubtype { ref subtype } => {
                 obj.card_types.subtypes.retain(|s| s != subtype);
+            }
+            // CR 205.4 + CR 707.9d: "in addition to its other types" — append
+            // the supertype if absent. Idempotent.
+            ContinuousModification::AddSupertype { supertype } => {
+                if !obj.card_types.supertypes.contains(supertype) {
+                    obj.card_types.supertypes.push(*supertype);
+                }
+            }
+            // CR 205.4 + CR 707.9b: "isn't legendary" / "isn't basic" copy
+            // exception. Strip the supertype from the layered view.
+            ContinuousModification::RemoveSupertype { supertype } => {
+                obj.card_types.supertypes.retain(|s| s != supertype);
+            }
+            // CR 122.1 + CR 614.1c: One-shot counter placement is consumed at
+            // copy resolution by token_copy::resolve / become_copy::resolve.
+            // Reaching this arm means a wiring bug.
+            ContinuousModification::AddCounterOnEnter { .. } => {
+                debug_assert!(
+                    false,
+                    "AddCounterOnEnter must be consumed at resolution time, \
+                     not via apply_continuous_effect"
+                );
             }
             ContinuousModification::AddAllCreatureTypes => {
                 for subtype in &state.all_creature_types {

@@ -7,7 +7,9 @@ use nom::Parser;
 use nom_language::error::VerboseError;
 
 use crate::parser::oracle_nom::error::OracleResult;
-use crate::types::ability::{Effect, FilterProp, PtValue, QuantityExpr, QuantityRef, TargetFilter};
+use crate::types::ability::{
+    ContinuousModification, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef, TargetFilter,
+};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -45,12 +47,18 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         } else {
             after_copy_tp.original
         };
-        // CR 707.2 + CR 702: "…copy of {target}, except it has [keyword list]" —
-        // strip the optional "except" tail before target parsing so the trailing
-        // keyword phrase doesn't pollute the target filter, and capture the
-        // additional keywords as `extra_keywords`. Twinflame ("…except it has
-        // haste") is the canonical case.
-        let (target_text, extra_keywords) = strip_except_it_has_keywords(target_text);
+        // CR 707.2 + CR 707.9: "…copy of {target}, except <body>" — strip the
+        // optional except clause before target parsing so the trailing
+        // modification phrase doesn't pollute the target filter. The except
+        // body may produce both keyword grants (`extra_keywords`) and
+        // non-keyword modifications such as `RemoveSupertype` for Miirym's
+        // "except the token isn't legendary" — both are channelled through
+        // the shared `parse_except_clause` building block. `card_name` is
+        // empty here because the copy source is unknown at parse time;
+        // `SetName` arms in the except clause decline gracefully when
+        // `card_name` is empty (see `become_copy_except.rs::parse_name_override`).
+        let (target_text, extra_keywords, additional_modifications) =
+            split_token_except_clause(target_text);
         let (mut target, _) = parse_target(target_text);
         if has_another {
             if let TargetFilter::Typed(ref mut typed) = target {
@@ -65,6 +73,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords,
+            additional_modifications,
         });
     }
 
@@ -91,32 +100,57 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
     })
 }
 
-/// CR 707.2 + CR 702: Split off a trailing ", except it has [keyword list]"
-/// clause from a copy-of-target phrase. Returns the truncated text and the
-/// parsed keyword list. If no "except it has " phrase is present, returns
-/// the original text and an empty vec. Uses the existing
-/// `split_token_keyword_list` + `map_token_keyword` building blocks.
+/// CR 707.2 + CR 707.9: Split off a trailing `, except <body>` clause from a
+/// copy-of-target phrase, channeling both keyword grants and non-keyword
+/// modifications through the shared `parse_except_clause` building block.
+///
+/// Returns `(target_text_without_clause, extra_keywords, additional_modifications)`.
+///
+/// The keyword list is extracted from the modifications by filtering out
+/// `ContinuousModification::AddKeyword` variants — `Effect::CopyTokenOf` keeps
+/// `extra_keywords: Vec<Keyword>` as a typed convenience for the keyword case
+/// (Twinflame), and the rest of the modifications populate
+/// `additional_modifications: Vec<ContinuousModification>` (Miirym's
+/// `RemoveSupertype`, conditional counter additions, etc.).
 ///
 /// Example: `"that creature, except it has haste"` →
-///   (`"that creature"`, `vec![Keyword::Haste]`)
-fn strip_except_it_has_keywords(text: &str) -> (&str, Vec<Keyword>) {
+///   (`"that creature"`, `vec![Keyword::Haste]`, `vec![]`)
+///
+/// Example: `"it, except the token isn't legendary"` →
+///   (`"it"`, `vec![]`, `vec![RemoveSupertype { Legendary }]`)
+fn split_token_except_clause(text: &str) -> (&str, Vec<Keyword>, Vec<ContinuousModification>) {
     let lower = text.to_lowercase();
-    // structural: not dispatch — locate the ", except it has " clause on the
-    // lower'd copy to compute the cut byte index in the original-case text.
-    const NEEDLE: &str = ", except it has ";
+    // structural: not dispatch — locate the `, except ` boundary on the
+    // lower-cased copy to compute the cut byte index in the original-case text.
+    const NEEDLE: &str = ", except ";
     let Some(pos) = lower.find(NEEDLE) else {
-        return (text, Vec::new());
+        return (text, Vec::new(), Vec::new());
     };
     let head = &text[..pos];
-    let tail = text[pos + NEEDLE.len()..]
-        .trim()
-        .trim_end_matches('.')
-        .trim_end_matches(',');
-    let keywords: Vec<Keyword> = split_token_keyword_list(tail)
-        .into_iter()
-        .filter_map(map_token_keyword)
-        .collect();
-    (head, keywords)
+    // Pass the lowercase suffix starting at `, except ` to the shared
+    // building block. The except parser is the single authority for the
+    // grammar (CR 707.9 + CR 707.2): keyword lists, supertype additions /
+    // removals, conditional counter placement, etc.
+    let except_input = &lower[pos..];
+    let card_name = ""; // SetName cannot apply to token-copy (source unknown at parse time).
+    let (_, modifications) = match super::become_copy_except::parse_except_clause(
+        except_input,
+        card_name,
+        super::become_copy_except::ExceptClauseContext::default(),
+    ) {
+        Some(parts) => parts,
+        None => return (head, Vec::new(), Vec::new()),
+    };
+
+    let mut extra_keywords = Vec::new();
+    let mut additional_modifications = Vec::new();
+    for modification in modifications {
+        match modification {
+            ContinuousModification::AddKeyword { keyword } => extra_keywords.push(keyword),
+            other => additional_modifications.push(other),
+        }
+    }
+    (head, extra_keywords, additional_modifications)
 }
 
 pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {

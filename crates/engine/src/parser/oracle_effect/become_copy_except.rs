@@ -72,8 +72,8 @@ use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::split_keyword_list;
 use super::super::oracle_util::canonicalize_subtype_name;
-use crate::types::ability::ContinuousModification;
-use crate::types::card_type::CoreType;
+use crate::types::ability::{ContinuousModification, QuantityExpr};
+use crate::types::card_type::{CoreType, Supertype};
 
 /// Optional context used by [`parse_except_body`] arms that need to know
 /// which printed trigger of the source object we're currently parsing.
@@ -129,9 +129,18 @@ pub(crate) fn parse_except_clause<'a>(
             rest = skip_to_next_conjunction(rest);
         }
 
-        // Bodies are joined by " and " — consume it to parse another body.
-        if let Ok((after_and, _)) = tag::<_, _, VerboseError<&str>>(" and ").parse(rest) {
-            rest = after_and;
+        // Bodies are joined by ", and ", " and ", or just ", " (Spark Double's
+        // three-clause "X, Y, and Z" pattern uses comma between bodies and
+        // ", and " before the last). Consume the longest match so the next
+        // body starts cleanly.
+        if let Ok((after, _)) = alt((
+            tag::<_, _, VerboseError<&str>>(", and "),
+            tag(" and "),
+            tag(", "),
+        ))
+        .parse(rest)
+        {
+            rest = after;
         } else {
             break;
         }
@@ -169,6 +178,15 @@ pub(crate) fn parse_except_body<'a>(
         return Some((rest, mods));
     }
     if let Some((rest, modification)) = parse_has_this_ability(input, ctx) {
+        return Some((rest, vec![modification]));
+    }
+    if let Some((rest, modification)) = parse_is_supertype_in_addition(input) {
+        return Some((rest, vec![modification]));
+    }
+    if let Some((rest, modification)) = parse_isnt_supertype(input) {
+        return Some((rest, vec![modification]));
+    }
+    if let Some((rest, modification)) = parse_enters_with_additional_counter(input) {
         return Some((rest, vec![modification]));
     }
     if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
@@ -361,6 +379,221 @@ fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModificatio
         return None;
     }
     Some((remainder, modifications))
+}
+
+/// CR 205.4 + CR 707.9b: Match `"the token isn't <supertype>"` /
+/// `"it isn't <supertype>"` (and apostrophe-free / "is not" variants).
+/// Emits [`ContinuousModification::RemoveSupertype`].
+///
+/// Miirym, Sentinel Wyrm: `"create a token that's a copy of it, except the
+/// token isn't legendary"` is the canonical case. The arm is permissive about
+/// subject phrasing because both forms appear across token-copy and
+/// replacement-copy texts (Spark Double's `"and it isn't legendary"` is the
+/// replacement-form variant).
+fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("the token isn't "),
+        tag("the token isnt "),
+        tag("the token is not "),
+        tag("it isn't "),
+        tag("it isnt "),
+        tag("it is not "),
+        tag("he isn't "),
+        tag("he isnt "),
+        tag("he is not "),
+        tag("she isn't "),
+        tag("she isnt "),
+        tag("she is not "),
+    ))
+    .parse(input)
+    .ok()?;
+    parse_supertype_word(rest)
+        .map(|(rest, supertype)| (rest, ContinuousModification::RemoveSupertype { supertype }))
+}
+
+/// CR 205.4 + CR 707.9d: Match `"<subject pronoun>'s <supertype> in addition
+/// to its other types"`. Mirrors [`parse_subject_pt_and_types`]'s pronoun
+/// dispatch. Emits [`ContinuousModification::AddSupertype`].
+///
+/// Sarkhan, Soul Aflame: `"… except its name is ~ and it's legendary in
+/// addition to its other types"` is the canonical case.
+fn parse_is_supertype_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("it's "),
+        tag("it\u{2019}s "),
+        tag("he's "),
+        tag("he\u{2019}s "),
+        tag("she's "),
+        tag("she\u{2019}s "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (rest, supertype) = parse_supertype_word(rest)?;
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>(" in addition to its other types"),
+        tag(" in addition to his other types"),
+        tag(" in addition to her other types"),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some((rest, ContinuousModification::AddSupertype { supertype }))
+}
+
+/// CR 205.4: Match a supertype word and return the typed [`Supertype`].
+/// Uses [`alt`] over the five CR-defined supertypes (CR 205.4a) so callers
+/// don't have to remember the casing rules of [`Supertype::from_str`].
+fn parse_supertype_word(input: &str) -> Option<(&str, Supertype)> {
+    let (rest, word) = alt((
+        tag::<_, _, VerboseError<&str>>("legendary"),
+        tag("basic"),
+        tag("snow"),
+        tag("world"),
+        tag("ongoing"),
+    ))
+    .parse(input)
+    .ok()?;
+    // Uppercase first character so `Supertype::from_str` (which expects
+    // titlecase) accepts the lowercase Oracle form.
+    let mut canonical = String::with_capacity(word.len());
+    let mut chars = word.chars();
+    if let Some(c) = chars.next() {
+        canonical.extend(c.to_uppercase());
+    }
+    canonical.extend(chars);
+    let supertype = Supertype::from_str(&canonical).ok()?;
+    Some((rest, supertype))
+}
+
+/// CR 122.1 + CR 614.1c: Match `"it enters with an additional <N> <counter>
+/// counter[s] on it [if it's a <type>]"`. Emits
+/// [`ContinuousModification::AddCounterOnEnter`] with optional `if_type` gate
+/// derived from the trailing conditional.
+///
+/// Spark Double: `"… except it enters with an additional +1/+1 counter on
+/// it if it's a creature, it enters with an additional loyalty counter on
+/// it if it's a planeswalker, and it isn't legendary"` is the canonical
+/// case. The clause is parsed body-by-body; this arm handles a single
+/// counter clause and the parent `parse_except_clause` loop chains across
+/// `" and "` for the multi-clause sequence.
+fn parse_enters_with_additional_counter(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("it enters with ")
+        .parse(input)
+        .ok()?;
+    // CR 122.1: "an additional N counter[s]" — N defaults to 1 for "an
+    // additional <counter>". Try the explicit-N form first, fall back to
+    // the implicit-1 form.
+    let (rest, count) = parse_additional_count(rest)?;
+    // Counter type token: `+1/+1`, `loyalty`, etc. The counter-type word may
+    // be hyphenated/numeric, so consume everything up to ` counter ` or
+    // ` counters `. Use `nom_primitives::split_once_on` for the structural
+    // boundary; the token-text is then re-parsed by the canonical
+    // `types::counter::parse_counter_type`.
+    let (counter_text, after_counter) = match nom_primitives::split_once_on(rest, " counters on it")
+    {
+        Ok((_, pair)) => pair,
+        Err(_) => match nom_primitives::split_once_on(rest, " counter on it") {
+            Ok((_, pair)) => pair,
+            Err(_) => return None,
+        },
+    };
+    if counter_text.is_empty() {
+        return None;
+    }
+    let counter_type = crate::types::counter::parse_counter_type(counter_text)
+        .as_str()
+        .to_string();
+    // Optional `" if it's a <core_type>"` tail. Multiple Oracle variants:
+    // "if it's a", "if it's an", "if it is a", smart quotes.
+    let (rest, if_type) = parse_optional_if_type(after_counter);
+    Some((
+        rest,
+        ContinuousModification::AddCounterOnEnter {
+            counter_type,
+            count: QuantityExpr::Fixed { value: count },
+            if_type,
+        },
+    ))
+}
+
+/// Parse `"an additional N "` / `"an additional "` (implicit N=1) leading the
+/// counter clause. Returns the count and remainder positioned at the start of
+/// the counter-type word.
+fn parse_additional_count(input: &str) -> Option<(&str, i32)> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("an additional ")
+        .parse(input)
+        .ok()?;
+    // Try a leading number first (covers Spark Double's "an additional +1/+1
+    // counter" — there is no number, so we fall through to the default of 1).
+    // For texts like "an additional 2 +1/+1 counters" the explicit-N branch
+    // grabs the count.
+    use nom::character::complete::digit1;
+    let digit_parser = |i| -> nom::IResult<&str, &str, VerboseError<&str>> {
+        let (i, n) = digit1(i)?;
+        let (i, _) = tag::<_, _, VerboseError<&str>>(" ").parse(i)?;
+        Ok((i, n))
+    };
+    if let Ok((rest, n)) = digit_parser(rest) {
+        let count: i32 = n.parse().ok()?;
+        return Some((rest, count));
+    }
+    Some((rest, 1))
+}
+
+/// Parse the optional `" if it's a <core_type>"` tail trailing a counter
+/// clause and return the typed [`CoreType`] if present. Falls through to
+/// `(input, None)` when no conditional is present, so callers don't have to
+/// guard the absence case.
+fn parse_optional_if_type(input: &str) -> (&str, Option<CoreType>) {
+    let prefix = match alt((
+        tag::<_, _, VerboseError<&str>>(" if it's a "),
+        tag(" if it\u{2019}s a "),
+        tag(" if it's an "),
+        tag(" if it\u{2019}s an "),
+        tag(" if it is a "),
+        tag(" if it is an "),
+    ))
+    .parse(input)
+    {
+        Ok((rest, _)) => rest,
+        Err(_) => return (input, None),
+    };
+    // Type word ends at a body boundary — comma, period, " and ", or end of
+    // string. Spark Double's three-clause `it enters ... if it's a creature,
+    // it enters ... if it's a planeswalker, and it isn't legendary` uses a
+    // bare comma as the clause separator, so the boundary set here must
+    // include `,` (which `split_at_body_boundary` deliberately does NOT —
+    // keyword lists like "flying, vigilance, and trample" need commas
+    // *inside* a body).
+    let (type_word, remainder) = split_at_if_type_boundary(prefix);
+    let canonical = canonicalize_subtype_name(type_word.trim());
+    if let Ok(core_type) = CoreType::from_str(&canonical) {
+        (remainder, Some(core_type))
+    } else {
+        // Unknown type word — back out so the surrounding except-clause loop
+        // can recover by jumping to the next conjunction.
+        (input, None)
+    }
+}
+
+/// Body-boundary splitter for the `if_type` arm, matching at the next
+/// comma, period, or `" and "` — preserving the structural conjunction
+/// grammar for the surrounding except-clause loop. Distinct from
+/// [`split_at_body_boundary`] because keyword bodies (`it has X, Y, and Z`)
+/// must be allowed to contain commas internally; the if-type tail does
+/// not have that flexibility.
+fn split_at_if_type_boundary(text: &str) -> (&str, &str) {
+    let candidates = [",", ".", " and "];
+    let mut best: Option<usize> = None;
+    for pat in candidates {
+        if let Ok((_, (before, _))) = nom_primitives::split_once_on(text, pat) {
+            let pos = before.len();
+            best = Some(best.map_or(pos, |b| b.min(pos)));
+        }
+    }
+    match best {
+        Some(i) => (&text[..i], &text[i..]),
+        None => (text, ""),
+    }
 }
 
 /// Structural multi-candidate splitter: return the (before, after) pair for the
@@ -690,5 +923,121 @@ mod tests {
         assert!(mods
             .iter()
             .any(|m| matches!(m, ContinuousModification::SetName { name } if name == "Test")));
+    }
+
+    /// CR 205.4 + CR 707.9b: "the token isn't legendary" / "it isn't legendary"
+    /// (Miirym, Sentinel Wyrm; Spark Double's terminal clause). Both subject
+    /// phrasings emit `RemoveSupertype(Legendary)` so the same building block
+    /// covers token-copy and replacement-copy texts.
+    #[test]
+    fn token_isnt_legendary_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except the token isn't legendary",
+            "Card",
+            ExceptClauseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    #[test]
+    fn it_isnt_legendary_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it isn't legendary",
+            "Card",
+            ExceptClauseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 205.4 + CR 707.9d: "<pronoun>'s legendary in addition to its other
+    /// types" (Sarkhan, Soul Aflame). Apostrophe-contraction follows the same
+    /// pronoun grammar as `parse_subject_pt_and_types`.
+    #[test]
+    fn its_legendary_in_addition_emits_add_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's legendary in addition to its other types",
+            "Card",
+            ExceptClauseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 122.1 + CR 614.1c: Spark Double-class conditional counter clause.
+    /// "it enters with an additional +1/+1 counter on it if it's a creature"
+    /// → AddCounterOnEnter { P1P1, 1, Some(Creature) }.
+    #[test]
+    fn enters_with_additional_counter_creature_branch() {
+        let (_, mods) = parse_except_clause(
+            ", except it enters with an additional +1/+1 counter on it if it's a creature",
+            "Card",
+            ExceptClauseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(mods.len(), 1);
+        match &mods[0] {
+            ContinuousModification::AddCounterOnEnter {
+                counter_type,
+                count,
+                if_type,
+            } => {
+                assert_eq!(counter_type, "P1P1");
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(*if_type, Some(CoreType::Creature));
+            }
+            other => panic!("expected AddCounterOnEnter, got {other:?}"),
+        }
+    }
+
+    /// CR 122.1 + CR 614.1c: Spark Double's three-clause body — bare comma
+    /// separator between bodies plus ", and " before the last.
+    #[test]
+    fn spark_double_three_clause_chain() {
+        let (_, mods) = parse_except_clause(
+            ", except it enters with an additional +1/+1 counter on it if it's a creature, it enters with an additional loyalty counter on it if it's a planeswalker, and it isn't legendary",
+            "Card",
+            ExceptClauseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(mods.len(), 3);
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddCounterOnEnter {
+                if_type: Some(CoreType::Creature),
+                counter_type,
+                ..
+            } if counter_type == "P1P1"
+        )));
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddCounterOnEnter {
+                if_type: Some(CoreType::Planeswalker),
+                counter_type,
+                ..
+            } if counter_type == "loyalty"
+        )));
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )));
     }
 }
