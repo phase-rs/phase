@@ -168,6 +168,10 @@ pub fn resolve_tally(
             distribution: None,
             player_scope: None,
             chosen_x: None,
+            // CR 603.4: Per-vote sub-resolutions are not the source ability themselves —
+            // they fan out from the parent Vote, so they don't participate in the
+            // parent's nth-resolution counter.
+            ability_index: None,
         };
         resolve_ability_chain(state, &chain, events, 0)?;
     }
@@ -211,6 +215,10 @@ fn resolved_from_def(
         distribution: None,
         player_scope: None,
         chosen_x: None,
+        // CR 603.4: Sub-effects fanned out from the parent Vote do not own
+        // their own ability_index — only the parent ability resolution counts
+        // toward NthResolutionThisTurn.
+        ability_index: None,
     }
 }
 
