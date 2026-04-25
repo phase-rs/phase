@@ -1729,6 +1729,29 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
         } => format!("retain printed trigger {source_trigger_index}"),
+        ContinuousModification::AddSupertype { supertype } => {
+            format!("add supertype {supertype}")
+        }
+        ContinuousModification::RemoveSupertype { supertype } => {
+            format!("remove supertype {supertype}")
+        }
+        ContinuousModification::AddCounterOnEnter {
+            counter_type,
+            count,
+            if_type,
+        } => {
+            let count_str = match count {
+                crate::types::ability::QuantityExpr::Fixed { value } => value.to_string(),
+                _ => format!("{count:?}"),
+            };
+            match if_type {
+                Some(t) => format!(
+                    "enter with {count_str} {counter_type} counter if {}",
+                    fmt_core_type(t)
+                ),
+                None => format!("enter with {count_str} {counter_type} counter"),
+            }
+        }
     }
 }
 

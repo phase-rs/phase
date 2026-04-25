@@ -690,10 +690,28 @@ fn split_on_clone_source_zone(after_copy: &str) -> Option<(&str, &str, Zone)> {
             }
         }
     }
-    let (pos, len, zone) = best?;
-    let type_text = &after_copy[..pos];
-    let suffix = &after_copy[pos + len..];
-    Some((type_text, suffix, zone))
+    if let Some((pos, len, zone)) = best {
+        let type_text = &after_copy[..pos];
+        let suffix = &after_copy[pos + len..];
+        return Some((type_text, suffix, zone));
+    }
+    // CR 614.1c fallback: no explicit zone qualifier means battlefield
+    // (Spark Double's "you may have ~ enter as a copy of a creature or
+    // planeswalker you control, except <body>"; Deceptive Frostkite's
+    // "a creature you control with power 4 or greater, except <body>").
+    // The except clause itself becomes the type/suffix boundary so the
+    // type phrase doesn't absorb the modification text. When no except
+    // clause is present either, treat the entire post-`copy of` text as
+    // the type phrase with an empty suffix.
+    if let Ok((_, (before, _))) = nom_primitives::split_once_on(after_copy, ", except") {
+        let pos = before.len();
+        let type_text = &after_copy[..pos];
+        // Suffix INCLUDES the leading `, except <body>` so `parse_clone_suffix`
+        // → `parse_except_clause` sees the expected `, except ` start.
+        let suffix = &after_copy[pos..];
+        return Some((type_text, suffix, Zone::Battlefield));
+    }
+    Some((after_copy, "", Zone::Battlefield))
 }
 
 /// Attach `FilterProp::InZone { zone }` to a filter produced by `parse_type_phrase`.

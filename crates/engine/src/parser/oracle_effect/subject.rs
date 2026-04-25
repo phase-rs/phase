@@ -1043,6 +1043,64 @@ fn strip_for_each_for_duration(text: &str) -> &str {
     }
 }
 
+/// CR 611.2b + CR 707.9: Strip a duration phrase that appears immediately
+/// before a `, except` clause (Sarkhan, Soul Aflame:
+/// `"a copy of it until end of turn, except its name is ~ ..."`).
+///
+/// `strip_trailing_duration` only matches end-of-string durations; this helper
+/// fills the gap for the BecomeCopy class where the except clause shifts the
+/// duration away from the suffix. Returns `(rebuilt_text_without_duration,
+/// Some(d))` (head + ", except <body>") when a recognised duration is found
+/// between an object phrase and ", except"; otherwise returns
+/// `(text.to_string(), None)` so callers can fall back to the prior duration.
+fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
+    use nom::combinator::eof;
+    let lower = text.to_lowercase();
+    // Locate the `, except` boundary via the canonical nom-built primitive.
+    // Returns `(head_lower, ", except<...>")` with `head_lower` containing
+    // everything before the boundary. When no boundary exists the text has
+    // no except clause and there's nothing to do.
+    let Ok((_, (head_lower, _))) = nom_primitives::split_once_on(&lower, ", except") else {
+        return (text.to_string(), None);
+    };
+    let except_pos = head_lower.len();
+    // Each duration phrase is a leaf-level `tag` on the lowercase suffix.
+    // The duration "ends at" the comma exactly when the tag, followed by
+    // `eof`, consumes the head text from some byte offset. Scan forward at
+    // word boundaries inside `head_lower` and try the tag-then-eof
+    // combinator at each — the first match wins.
+    let duration_alt = |i| -> nom::IResult<&str, Duration, VerboseError<&str>> {
+        alt((
+            value(Duration::UntilEndOfTurn, tag(" until end of turn")),
+            value(Duration::UntilEndOfTurn, tag(" this turn")),
+            value(
+                Duration::UntilYourNextTurn,
+                tag(" until the end of your next turn"),
+            ),
+            value(Duration::UntilYourNextTurn, tag(" until your next turn")),
+            value(
+                Duration::UntilYourNextTurn,
+                tag(" until the end of their next turn"),
+            ),
+            value(Duration::UntilYourNextTurn, tag(" until their next turn")),
+        ))
+        .parse(i)
+    };
+    for (idx, byte) in head_lower.bytes().enumerate() {
+        if byte != b' ' {
+            continue;
+        }
+        if let Ok((rest, duration)) = duration_alt(&head_lower[idx..]) {
+            if eof::<_, VerboseError<&str>>(rest).is_ok() {
+                let head = text[..idx].trim_end();
+                let tail = &text[except_pos..];
+                return (format!("{head}{tail}"), Some(duration));
+            }
+        }
+    }
+    (text.to_string(), None)
+}
+
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -1128,10 +1186,22 @@ fn build_become_clause(
     if let Ok((after_copy, _)) =
         tag::<_, _, VerboseError<&str>>("a copy of ").parse(become_lower.as_str())
     {
+        // CR 611.2b + CR 707.9: Sarkhan-class triggers carry a mid-sentence
+        // duration directly before the optional ", except <body>" clause
+        // ("become a copy of it **until end of turn**, except its name is ~ ...").
+        // `strip_trailing_duration` at the start of `build_become_clause`
+        // only strips end-of-string durations; here we extract the duration
+        // from the position just before `, except`. Any duration found
+        // overrides the default `Permanent` so the copy effect expires
+        // correctly. Falls through to (text.to_string(), None) when no
+        // mid-sentence duration is present (Irma class).
+        let (after_copy_owned, mid_sentence_duration) = strip_pre_except_duration(after_copy);
+        let duration = mid_sentence_duration.map(Some).unwrap_or(duration);
+
         // `parse_target` lower-cases internally; pass it the lowercase tail so
         // its returned remainder is also lowercase (we'll feed that to
         // `parse_except_clause` whose tags are lowercase).
-        let (target, remainder) = parse_target(after_copy);
+        let (target, remainder) = parse_target(&after_copy_owned);
         // CR 707.9: optional `, except <body> [and <body>]*`. The card name
         // for any SetName override comes from the parse context (set by
         // `parse_oracle_text`). When `ctx.card_name` is `None` or empty
@@ -1833,7 +1903,57 @@ fn add_another_property(filter: TargetFilter) -> TargetFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TypeFilter;
+    use crate::types::ability::{AbilityKind, ContinuousModification, Effect, TypeFilter};
+    use crate::types::card_type::Supertype;
+
+    /// CR 707.9 + CR 611.2b: Sarkhan, Soul Aflame's "have ~ become a copy of
+    /// it until end of turn, except its name is ~ and it's legendary in
+    /// addition to its other types" routes through `try_parse_have_redirection`
+    /// → `try_parse_subject_become_clause` → `build_become_clause` →
+    /// `try_parse_become_copy` block. The mid-sentence "until end of turn"
+    /// lives between the target and the except clause; `strip_pre_except_duration`
+    /// is the seam that pulls the duration through.
+    #[test]
+    fn sarkhan_soul_aflame_have_become_copy() {
+        let ctx = ParseContext {
+            card_name: Some("Sarkhan, Soul Aflame".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "have ~ become a copy of it until end of turn, except its name is ~ and it's legendary in addition to its other types",
+            AbilityKind::Spell,
+            &ctx,
+        );
+        match &*ability.effect {
+            Effect::BecomeCopy {
+                duration,
+                additional_modifications,
+                ..
+            } => {
+                assert_eq!(
+                    duration,
+                    &Some(crate::types::ability::Duration::UntilEndOfTurn),
+                    "mid-sentence duration must be extracted"
+                );
+                assert!(
+                    additional_modifications
+                        .iter()
+                        .any(|m| matches!(m, ContinuousModification::SetName { name } if name == "Sarkhan, Soul Aflame")),
+                    "SetName missing in {additional_modifications:?}"
+                );
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddSupertype {
+                            supertype: Supertype::Legendary
+                        }
+                    )),
+                    "AddSupertype(Legendary) missing in {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+    }
 
     #[test]
     fn starts_with_subject_prefix_each_of() {

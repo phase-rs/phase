@@ -1056,10 +1056,12 @@ pub(super) fn parse_search_and_creation_ast(
             Some(Effect::CopyTokenOf {
                 target,
                 extra_keywords,
+                additional_modifications,
                 ..
             }) => Some(SearchCreationImperativeAst::CopyTokenOf {
                 target,
                 extra_keywords,
+                additional_modifications,
             }),
             Some(Effect::Token {
                 name,
@@ -1131,12 +1133,14 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         SearchCreationImperativeAst::CopyTokenOf {
             target,
             extra_keywords,
+            additional_modifications,
         } => Effect::CopyTokenOf {
             target,
             enters_attacking: false,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords,
+            additional_modifications,
         },
         SearchCreationImperativeAst::Token { token } => Effect::Token {
             name: token.name,
