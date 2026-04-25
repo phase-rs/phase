@@ -361,6 +361,7 @@ mod tests {
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         )));
         ability
@@ -544,6 +545,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         )));
         let mut face = card_face_with_types("Gift Spell", vec![CoreType::Sorcery]);
@@ -590,6 +592,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         )));
         let mut face = card_face_with_types("Fetchland", vec![CoreType::Land]);

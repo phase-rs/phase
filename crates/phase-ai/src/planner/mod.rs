@@ -117,13 +117,33 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
     // Command zone (commander availability)
     state.command_zone.hash(&mut hasher);
 
-    // Players (life, energy, zone sizes, mana)
+    // Players (life, energy, zone contents, mana).
+    //
+    // Hand and graveyard contents are hashed by ObjectId (not just length)
+    // because the candidate-action set depends on *which* cards are in those
+    // zones — castable spells in hand, flashback / escape / delve / unearth
+    // candidates in the graveyard. Two search-tree positions differing only
+    // by which card was drawn would otherwise collide in `candidate_cache`
+    // and return cached candidates that reference cards no longer present
+    // (silent decision corruption: AI tries to cast cards it doesn't have,
+    // or skips ones it just drew).
+    //
+    // Library length stays as a count: the order is only AI-decision-relevant
+    // for narrow top-card-visibility effects (Future Sight, scry-then-act on
+    // a known top card), which carry their own state through other channels.
+    // Hashing the full library every node would dominate the hash cost.
     for player in &state.players {
         player.life.hash(&mut hasher);
         player.energy.hash(&mut hasher);
         player.hand.len().hash(&mut hasher);
+        for &id in &player.hand {
+            id.hash(&mut hasher);
+        }
         player.library.len().hash(&mut hasher);
         player.graveyard.len().hash(&mut hasher);
+        for &id in &player.graveyard {
+            id.hash(&mut hasher);
+        }
         player.mana_pool.total().hash(&mut hasher);
         for unit in &player.mana_pool.mana {
             unit.color.hash(&mut hasher);

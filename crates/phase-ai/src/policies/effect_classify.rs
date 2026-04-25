@@ -133,6 +133,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ForceBlock { .. }
         | Effect::DestroyAll { .. }
         | Effect::DamageAll { .. }
+        | Effect::BounceAll { .. }
         | Effect::LoseTheGame => EffectPolarity::Harmful,
         // ChangeZone: depends on destination
         Effect::ChangeZone { destination, .. } => match destination {
@@ -426,7 +427,9 @@ fn is_harmful_all_excluding_target(effect: &Effect) -> bool {
             target,
             ..
         } => Some(target),
-        Effect::DestroyAll { target, .. } | Effect::DamageAll { target, .. } => Some(target),
+        Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::BounceAll { target, .. } => Some(target),
         _ => return false,
     };
     filter.is_some_and(filter_excludes_parent_target)
