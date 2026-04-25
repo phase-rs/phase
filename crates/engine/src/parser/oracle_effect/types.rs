@@ -669,6 +669,11 @@ pub(super) enum PutImperativeAst {
         under_your_control: bool,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
+        /// CR 508.4: "tapped and attacking [<player_phrase>]" — the moved
+        /// object enters the battlefield as an attacking creature (without
+        /// having been declared as one). Set by the inline-tail patcher in
+        /// `try_parse_put_zone_change` for the Kaalia / Ilharg class.
+        enters_attacking: bool,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.

@@ -1930,6 +1930,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         target,
         under_your_control,
         enter_tapped,
+        enters_attacking,
         enter_with_counters,
         ..
     }) = super::try_parse_put_zone_change(lower, text)
@@ -1940,6 +1941,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             target,
             under_your_control,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
         });
     }
@@ -1963,6 +1965,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target,
             under_your_control,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
         } => {
             // CR 610.3: Mass filters (ExiledBySource, TrackedSet) act on all matching
@@ -1990,7 +1993,9 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enter_transformed: false,
                     under_your_control,
                     enter_tapped,
-                    enters_attacking: false,
+                    // CR 508.4: Propagated from the inline-tail patcher in
+                    // `try_parse_put_zone_change` (Kaalia / Ilharg class).
+                    enters_attacking,
                     up_to: false,
                     enter_with_counters,
                 }

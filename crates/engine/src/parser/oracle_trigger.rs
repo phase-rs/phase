@@ -8541,6 +8541,89 @@ mod tests {
         assert!(matches!(*exec.effect, Effect::CopyTokenOf { .. }));
     }
 
+    /// CR 508.4 + CR 614.1 — Kaalia of the Vast: the inline-tail patcher in
+    /// `try_parse_put_zone_change` must lift "tapped and attacking that
+    /// opponent" onto the produced `Effect::ChangeZone`, setting both
+    /// `enter_tapped` and `enters_attacking`.
+    #[test]
+    fn trigger_attacks_inline_tail_kaalia_tapped_and_attacking() {
+        let def = parse_trigger_line(
+            "Whenever Kaalia attacks an opponent, you may put an Angel, Demon, or Dragon creature card from your hand onto the battlefield tapped and attacking that opponent.",
+            "Kaalia of the Vast",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let exec = def.execute.as_ref().expect("expected execute");
+        match &*exec.effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Battlefield);
+                assert!(*enter_tapped, "expected enter_tapped");
+                assert!(*enters_attacking, "expected enters_attacking");
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Ilharg / Preeminent Captain bare form: tail without a
+    /// trailing player phrase. Both flags must still be set.
+    #[test]
+    fn trigger_attacks_inline_tail_ilharg_bare_tapped_and_attacking() {
+        let def = parse_trigger_line(
+            "Whenever Ilharg attacks, you may put a creature card from your hand onto the battlefield tapped and attacking.",
+            "Ilharg, the Raze-Boar",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let exec = def.execute.as_ref().expect("expected execute");
+        match &*exec.effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Battlefield);
+                assert!(*enter_tapped);
+                assert!(*enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Negative regression for the existing separate-sentence
+    /// patcher (`ContinuationAst::EntersTappedAttacking`). Stangg / Shark
+    /// Shredder / Thousand-Faced Shadow style "It enters tapped and attacking"
+    /// in a follow-on sentence must continue to set both flags on the prior
+    /// effect — the inline-tail patcher must not interfere.
+    #[test]
+    fn trigger_separate_sentence_patcher_still_sets_both_flags() {
+        // Synthetic Stangg-style: a token effect followed by a separate
+        // "It enters tapped and attacking" sentence patcher.
+        let def = parse_trigger_line(
+            "When this creature enters, create a 3/3 red Cat creature token. It enters tapped and attacking.",
+            "Stangg-Style Test",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        let exec = def.execute.as_ref().expect("expected execute");
+        match &*exec.effect {
+            Effect::Token {
+                tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(*tapped, "separate-sentence patcher must set tapped");
+                assert!(
+                    *enters_attacking,
+                    "separate-sentence patcher must set enters_attacking"
+                );
+            }
+            other => panic!("expected Token, got {other:?}"),
+        }
+    }
+
     #[test]
     fn cast_variant_paid_sneak_condition() {
         // CR 702.190a: "if its sneak cost was paid" → CastVariantPaid { variant: Sneak }

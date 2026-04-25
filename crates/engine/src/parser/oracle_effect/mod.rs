@@ -8316,7 +8316,7 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
         (" on the bottom of", Zone::Library),
         (" on top of", Zone::Library),
     ] {
-        if let Some((before, _)) = after_put_tp.split_around(needle) {
+        if let Some((before, after)) = after_put_tp.split_around(needle) {
             let target_text = before.original.trim();
             if target_text.is_empty() {
                 return None;
@@ -8351,6 +8351,21 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             // activated abilities. The combinator scans the post-destination
             // remainder so the suffix is consumed only when present.
             let enter_with_counters = parse_with_counters_suffix(after_put_tp.lower);
+            // CR 508.4 + CR 614.1: The post-destination tail may carry inline
+            // entry-qualifier clauses ("tapped" / "tapped and attacking
+            // [<player_phrase>]") that propagate flags onto the produced
+            // `Effect::ChangeZone`. The combinator inspects the immediate tail
+            // (the slice starting right after the destination needle) so the
+            // single-sentence Kaalia/Ilharg pattern — where the qualifiers
+            // trail the destination in the same clause — sets both flags in
+            // one pass. The separate-sentence form ("It enters tapped and
+            // attacking") is handled by the `EntersTappedAttacking`
+            // continuation patcher in `oracle_effect/sequence.rs`.
+            let (enter_tapped, enters_attacking) = if destination == Zone::Battlefield {
+                parse_battlefield_entry_qualifiers(after.lower)
+            } else {
+                (false, false)
+            };
             return Some(Effect::ChangeZone {
                 origin: infer_origin_zone(after_put_tp.lower),
                 destination,
@@ -8358,10 +8373,8 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
                 owner_library: false,
                 enter_transformed: false,
                 under_your_control,
-                // CR 603.6d: "enters tapped" — detect tapped qualifier after battlefield destination.
-                enter_tapped: destination == Zone::Battlefield
-                    && scan_contains_phrase(after_put_tp.lower, "battlefield tapped"),
-                enters_attacking: false,
+                enter_tapped,
+                enters_attacking,
                 up_to: false,
                 enter_with_counters,
             });
@@ -8369,6 +8382,62 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
     }
 
     None
+}
+
+/// CR 508.4 + CR 614.1: Detect inline entry-qualifier clauses ("tapped" or
+/// "tapped and attacking [<player_phrase>]") immediately following a "put X
+/// onto the battlefield" destination needle. Returns
+/// `(enter_tapped, enters_attacking)`.
+///
+/// The single-sentence "tapped and attacking" pattern is the Kaalia / Ilharg
+/// class: 25+ commander/legacy cards whose Oracle text reads
+/// "...onto the battlefield tapped and attacking[ that opponent | that player |
+/// defending player or a planeswalker they control | during your declare
+/// attackers step | , where X is ... | and the rest ...]." Without this
+/// inline-tail patcher, `enters_attacking` was silently dropped and the
+/// summoned creature entered tapped but not attacking (CR 508.4 violation).
+///
+/// The bare "tapped" branch preserves the prior behavior for the
+/// "onto the battlefield tapped" tutor / reanimation class (Coming Attraction,
+/// Dance of the Dead, Hunting Wilds, etc.).
+///
+/// `tail_lower` is the lowercase slice starting *immediately after* the
+/// destination needle (e.g. `" tapped and attacking that opponent."`); the
+/// leading space is part of the needle's word-boundary contract.
+fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
+    // Word-boundary anchor for the qualifier clause: the qualifier must end at
+    // a real boundary so " tapped" doesn't accidentally consume " tappedly".
+    // EOF, whitespace, or sentence punctuation all qualify.
+    fn qualifier_boundary(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        alt((
+            value((), nom::combinator::eof),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(input)
+    }
+
+    // Try "tapped and attacking" first — it's the more specific match. The
+    // boundary check then absorbs the trailing player phrase ("that opponent",
+    // "defending player ...") or sentence terminator without consuming it.
+    let mut tapped_and_attacking = preceded(
+        tag::<_, _, VerboseError<&str>>(" tapped and attacking"),
+        qualifier_boundary,
+    );
+    if tapped_and_attacking.parse(tail_lower).is_ok() {
+        return (true, true);
+    }
+    // Fallback: bare "tapped" (no "and attacking"). Preserves the existing
+    // tutor / reanimation behavior.
+    let mut just_tapped = preceded(
+        tag::<_, _, VerboseError<&str>>(" tapped"),
+        qualifier_boundary,
+    );
+    if just_tapped.parse(tail_lower).is_ok() {
+        return (true, false);
+    }
+    (false, false)
 }
 
 /// CR 118.12: Parse "unless its controller pays {X}" from counter/trigger text.
@@ -17330,6 +17399,162 @@ mod tests {
                 ..
             } => {
                 assert!(enter_with_counters.is_empty());
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 + CR 614.1 — Kaalia of the Vast: "put X from your hand onto
+    /// the battlefield tapped and attacking that opponent." The inline-tail
+    /// patcher in `try_parse_put_zone_change` must set both `enter_tapped`
+    /// and `enters_attacking` from the same trailing clause.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_and_attacking_with_player_phrase() {
+        let text = "put an angel, demon, or dragon creature card from your hand onto the battlefield tapped and attacking that opponent";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Kaalia inline tail");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(enter_tapped, "expected enter_tapped");
+                assert!(enters_attacking, "expected enters_attacking");
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Ilharg / Preeminent Captain bare form: "...onto the
+    /// battlefield tapped and attacking." with no trailing player phrase.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_and_attacking_bare() {
+        let text = "put a creature card from your hand onto the battlefield tapped and attacking";
+        let lower = text.to_lowercase();
+        let effect =
+            try_parse_put_zone_change(&lower, text).expect("expected ChangeZone for bare tail");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(enter_tapped);
+                assert!(enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Hans Eriksson form with "defending player" suffix.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_and_attacking_defending_player() {
+        let text = "put it onto the battlefield tapped and attacking defending player or a planeswalker they control";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Hans Eriksson tail");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(enter_tapped);
+                assert!(enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Paladin Elizabeth Taggerdy / Kinscaer Sentry "where X is" tail.
+    /// The qualifier boundary must accept comma so the trailing clause "where X
+    /// is ..." doesn't break the match.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_and_attacking_where_x_is() {
+        let text = "put a creature card with mana value x or less from your hand onto the battlefield tapped and attacking, where x is the number of attacking creatures you control";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for where-X-is tail");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(enter_tapped);
+                assert!(enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1 — Bare "tapped" without the "and attacking" continuation.
+    /// Preserves the existing tutor / reanimation behavior (Coming Attraction,
+    /// Dance of the Dead) where `enter_tapped` is true but `enters_attacking`
+    /// remains false.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_only_does_not_set_attacking() {
+        let text = "put target creature card onto the battlefield tapped under your control";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for tapped-only tail");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                under_your_control,
+                ..
+            } => {
+                assert!(enter_tapped);
+                assert!(!enters_attacking, "tapped-only must not set attacking");
+                assert!(under_your_control);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 400.7 — No qualifier tail at all: neither flag set. Regression-
+    /// protects untapped reanimation forms (e.g., "put it onto the battlefield
+    /// under your control").
+    #[test]
+    fn put_zone_change_no_inline_tail_neither_flag() {
+        let text = "put target creature card onto the battlefield";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text).expect("expected ChangeZone");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(!enter_tapped);
+                assert!(!enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Negative: a non-battlefield destination must never set
+    /// `enters_attacking` even if "tapped" or "attacking" appear in the text.
+    #[test]
+    fn put_zone_change_non_battlefield_destination_never_attacks() {
+        let text = "put target creature card into your hand";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text).expect("expected ChangeZone");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Hand);
+                assert!(!enter_tapped);
+                assert!(!enters_attacking);
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }
