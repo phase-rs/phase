@@ -163,6 +163,17 @@ fn matches_player_scope(
                         .as_ref()
                         .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
                         .is_some_and(|pid| pid == p.id),
+                    // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
+                    // Falls back to plain Opponent semantics when no trigger event is in scope.
+                    PlayerFilter::OpponentOtherThanTriggering => {
+                        if p.id == controller {
+                            return false;
+                        }
+                        let triggering = state.current_trigger_event.as_ref().and_then(|e| {
+                            crate::game::targeting::extract_player_from_event(e, state)
+                        });
+                        triggering.is_none_or(|pid| pid != p.id)
+                    }
                 }
         })
 }

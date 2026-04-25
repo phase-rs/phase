@@ -3580,7 +3580,7 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
             Some((qty, rest))
         })?;
 
-    // Match: "each [opponent/player] and each [type phrase] they control"
+    // Match: "each [opponent/player] and each [type phrase] {they control | you don't control | your opponents control}"
     let (after_each, _) = tag::<_, _, VerboseError<&str>>("each ")
         .parse(after_amount)
         .ok()?;
@@ -3591,22 +3591,53 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
         .parse(after_player)
         .ok()?;
 
-    // Strip "they control" suffix to get the type phrase
-    // "creature and planeswalker they control" or "planeswalker they control"
-    let type_phrase_lower = after_and_each
-        .strip_suffix(" they control")
-        .or_else(|| after_and_each.strip_suffix(" they control."))?
-        .trim();
-    if type_phrase_lower.is_empty() {
+    // Trim a trailing period so suffix-anchored controller phrases match cleanly.
+    let after_and_each = after_and_each.trim_end_matches('.').trim_end();
+    if after_and_each.is_empty() {
         return None;
     }
 
-    // Use parse_target on "each [type]" to get the correct typed filter with controller
-    let target_text = format!("each {type_phrase_lower}");
+    // CR 109.4 + CR 109.5: Probe for one of the three controller-suffix variants
+    // this compound class uses. All three resolve to ControllerRef::Opponent for
+    // the object filter — "they" anaphors the opponent set named in the first
+    // half; "you don't control" and "your opponents control" are direct opponent
+    // refs. The suffix presence is the gate for the compound shape — without it
+    // the " and " is part of an unrelated clause and falls through to general
+    // split. `take_until` + an anchored controller-tag alt() is the single-pass
+    // gate; the take_until result (the type-phrase prefix) is unused here because
+    // we hand the full slice to parse_target below for native consumption.
+    let mut probe = alt((
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" they control"),
+            tag(" they control"),
+        ),
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" you don't control"),
+            tag(" you don't control"),
+        ),
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" your opponents control"),
+            tag(" your opponents control"),
+        ),
+    ));
+    let (gate_rest, _) = probe.parse(after_and_each).ok()?;
+    if !gate_rest.is_empty() {
+        return None;
+    }
+
+    // Use parse_target on "each [type phrase + controller suffix]" so the controller
+    // suffix is consumed natively by the parser pipeline. parse_target returns the
+    // typed filter with controller already populated (Opponent for "you don't control"
+    // / "your opponents control"; You for "they control" — we rewrite that below).
+    let target_text = format!("each {after_and_each}");
     let (mut object_filter, _rem) = parse_target(&target_text);
 
-    // Set controller to Opponent to match "they control" (where "they" = opponents).
-    // The filter may be a single Typed or an Or of multiple Typed filters.
+    // CR 109.5: "they" in this compound damage context anaphors back to the
+    // opponent set in the first half of the conjunction, NOT to the controller.
+    // Rewrite ControllerRef::You (parse_target's default for "they control") to
+    // Opponent so the runtime targets the same opponent set as `player_filter`.
+    // "you don't control" and "your opponents control" already resolve to
+    // Opponent via `parse_zone_controller` and are left unchanged.
     fn set_opponent_controller(filter: &mut TargetFilter) {
         match filter {
             TargetFilter::Typed(tf) => {
@@ -6766,12 +6797,33 @@ pub(super) fn parse_damage_player_scope(
     .parse(input)
 }
 
-/// Parse an exact `each player` / `each opponent` / `each foe` damage scope.
+/// Parse an exact `each player` / `each opponent` / `each foe` / `each other opponent`
+/// / `each other player` damage scope.
 /// Returns `None` for compound phrases so dedicated compound parsers can handle them.
+///
+/// CR 120.3 + CR 603.2c: "each other opponent" anaphors back to the triggering
+/// opponent named in the preceding "deals combat damage to an opponent" clause,
+/// so the dispatch routes to `OpponentOtherThanTriggering` (a `PlayerFilter`
+/// variant that excludes both the controller and the triggering player).
+/// "each other player" excludes the controller (the only "other" antecedent
+/// available outside trigger context) and reduces to plain `Opponent`.
 pub(super) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter> {
-    let (rest, filter) = preceded(tag("each "), parse_damage_player_scope)
-        .parse(text)
-        .ok()?;
+    let (rest, filter) = preceded(
+        tag("each "),
+        alt((
+            value(
+                PlayerFilter::OpponentOtherThanTriggering,
+                alt((
+                    tag::<_, _, VerboseError<&str>>("other opponent"),
+                    tag("other foe"),
+                )),
+            ),
+            value(PlayerFilter::Opponent, tag("other player")),
+            parse_damage_player_scope,
+        )),
+    )
+    .parse(text)
+    .ok()?;
     rest.chars()
         .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
         .then_some(filter)
@@ -8682,6 +8734,138 @@ mod tests {
                 player_filter: PlayerFilter::All,
             }
         ));
+    }
+
+    /// CR 120.3 + CR 603.2c: "each other opponent" routes to the
+    /// `OpponentOtherThanTriggering` variant — the trigger context excludes
+    /// the opponent who already received damage from the source. Hydra
+    /// Omnivore class.
+    #[test]
+    fn damage_each_player_scope_other_opponent() {
+        assert_eq!(
+            parse_damage_each_player_scope("each other opponent"),
+            Some(PlayerFilter::OpponentOtherThanTriggering)
+        );
+    }
+
+    /// "each other player" reduces to plain `Opponent` — outside trigger
+    /// context "other" anaphors the controller, leaving only opponents.
+    /// Syphon Soul class.
+    #[test]
+    fn damage_each_player_scope_other_player() {
+        assert_eq!(
+            parse_damage_each_player_scope("each other player"),
+            Some(PlayerFilter::Opponent)
+        );
+    }
+
+    /// Trailing punctuation after "each other opponent" is allowed.
+    #[test]
+    fn damage_each_player_scope_other_opponent_with_trailing_punctuation() {
+        assert_eq!(
+            parse_damage_each_player_scope("each other opponent."),
+            Some(PlayerFilter::OpponentOtherThanTriggering)
+        );
+    }
+
+    /// CR 120.3 + CR 603.2c: Effect-level lowering for Hydra Omnivore's body
+    /// "it deals that much damage to each other opponent".
+    #[test]
+    fn effect_damage_to_each_other_opponent_uses_player_scope() {
+        let e = parse_effect("~ deals that much damage to each other opponent");
+        assert!(
+            matches!(
+                e,
+                Effect::DamageEachPlayer {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    player_filter: PlayerFilter::OpponentOtherThanTriggering,
+                }
+            ),
+            "expected DamageEachPlayer{{OpponentOtherThanTriggering}}, got {e:?}"
+        );
+    }
+
+    /// CR 120.3: Composite "each opponent and each [type] you don't control"
+    /// routes to `DamageAll` with the typed object filter populated and the
+    /// `player_filter` set to Opponent. Omnath, Locus of Creation 3rd-branch class.
+    #[test]
+    fn effect_damage_compound_planeswalker_you_dont_control() {
+        let e = parse_effect(
+            "~ deals 4 damage to each opponent and each planeswalker you don't control",
+        );
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target,
+                player_filter: Some(PlayerFilter::Opponent),
+            } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    assert!(tf
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Planeswalker)));
+                }
+                other => panic!("expected Typed{{Planeswalker, Opponent}}, got {other:?}"),
+            },
+            other => panic!("expected DamageAll with player_filter Opponent, got {other:?}"),
+        }
+    }
+
+    /// Regression: "your opponents control" suffix variant (Sarkhan, Dragonsoul
+    /// class) routes through the same compound parser as "you don't control".
+    #[test]
+    fn effect_damage_compound_creature_your_opponents_control() {
+        let e = parse_effect(
+            "~ deals 1 damage to each opponent and each creature your opponents control",
+        );
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target,
+                player_filter: Some(PlayerFilter::Opponent),
+            } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    assert!(tf
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Creature)));
+                }
+                other => panic!("expected Typed{{Creature, Opponent}}, got {other:?}"),
+            },
+            other => panic!("expected DamageAll with player_filter Opponent, got {other:?}"),
+        }
+    }
+
+    /// Regression: existing "they control" suffix continues to work after the
+    /// refactor. Goblin Chainwhirler class.
+    #[test]
+    fn effect_damage_compound_creature_planeswalker_they_control() {
+        let e = parse_effect(
+            "~ deals 1 damage to each opponent and each creature and planeswalker they control",
+        );
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Or { filters },
+                player_filter: Some(PlayerFilter::Opponent),
+            } => {
+                assert_eq!(filters.len(), 2);
+                for f in &filters {
+                    if let TargetFilter::Typed(tf) = f {
+                        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    } else {
+                        panic!("expected Typed inside Or, got {f:?}");
+                    }
+                }
+            }
+            other => {
+                panic!("expected DamageAll Or{{...}} with player_filter Opponent, got {other:?}")
+            }
+        }
     }
 
     #[test]

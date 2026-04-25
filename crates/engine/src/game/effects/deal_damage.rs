@@ -691,6 +691,17 @@ fn collect_matching_players(
                         .as_ref()
                         .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
                         .is_some_and(|pid| pid == p.id),
+                    // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
+                    // Falls back to plain Opponent semantics when no trigger event is in scope.
+                    PlayerFilter::OpponentOtherThanTriggering => {
+                        if p.id == source_controller {
+                            return false;
+                        }
+                        let triggering = state.current_trigger_event.as_ref().and_then(|e| {
+                            crate::game::targeting::extract_player_from_event(e, state)
+                        });
+                        triggering != Some(p.id)
+                    }
                 }
         })
         .map(|p| p.id)
@@ -762,6 +773,17 @@ pub fn resolve_each_player(
                         .as_ref()
                         .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
                         .is_some_and(|pid| pid == p.id),
+                    // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
+                    // Falls back to plain Opponent semantics when no trigger event is in scope.
+                    PlayerFilter::OpponentOtherThanTriggering => {
+                        if p.id == ability.controller {
+                            return false;
+                        }
+                        let triggering = state.current_trigger_event.as_ref().and_then(|e| {
+                            crate::game::targeting::extract_player_from_event(e, state)
+                        });
+                        triggering != Some(p.id)
+                    }
                 }
         })
         .map(|p| p.id)
@@ -2326,5 +2348,188 @@ mod tests {
             effect_resolved_count, 1,
             "mixed DamageAll must produce exactly one EffectResolved event",
         );
+    }
+
+    /// CR 120.3 + CR 603.2c: `PlayerFilter::OpponentOtherThanTriggering` excludes
+    /// the controller AND the triggering player (extracted from `current_trigger_event`).
+    /// Hydra Omnivore: combat damage to opponent A → trigger fires →
+    /// "deals that much damage to each other opponent" hits opponents B and C
+    /// but skips A (already took combat damage).
+    #[test]
+    fn damage_each_other_opponent_excludes_triggering_player_in_3p() {
+        use crate::types::ability::PlayerFilter;
+        use crate::types::events::GameEvent;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let controller = PlayerId(0);
+        let triggered_opponent = PlayerId(1);
+        let other_opponent = PlayerId(2);
+        let source_id = ObjectId(1000);
+
+        // Set the triggering event to "DamageDealt to opponent A". The
+        // resolver reads this via extract_player_from_event to identify the
+        // triggering player.
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(triggered_opponent),
+            amount: 5,
+            is_combat: true,
+            excess: 0,
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player_filter: PlayerFilter::OpponentOtherThanTriggering,
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+
+        let life_controller_before = state.players[controller.0 as usize].life;
+        let life_triggered_before = state.players[triggered_opponent.0 as usize].life;
+        let life_other_before = state.players[other_opponent.0 as usize].life;
+
+        let mut events = Vec::new();
+        resolve_each_player(&mut state, &ability, &mut events)
+            .expect("DamageEachPlayer{OpponentOtherThanTriggering} resolves cleanly");
+
+        // Controller never takes damage (always excluded from any opponent filter).
+        assert_eq!(
+            state.players[controller.0 as usize].life, life_controller_before,
+            "controller must not take damage"
+        );
+        // Triggered opponent did NOT take additional damage from the trigger
+        // body (already took combat damage as the trigger event).
+        assert_eq!(
+            state.players[triggered_opponent.0 as usize].life, life_triggered_before,
+            "triggering opponent must be excluded from each-other-opponent damage"
+        );
+        // Other opponent took full 5 damage.
+        assert_eq!(
+            state.players[other_opponent.0 as usize].life,
+            life_other_before - 5,
+            "non-triggering opponent must receive the source's damage"
+        );
+    }
+
+    /// Without `current_trigger_event` set, `OpponentOtherThanTriggering`
+    /// degrades to plain `Opponent` semantics — every opponent except the
+    /// controller is hit. Verifies the safety fallback for non-trigger
+    /// activation paths.
+    #[test]
+    fn damage_each_other_opponent_falls_back_to_opponent_when_no_trigger_event() {
+        use crate::types::ability::PlayerFilter;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        // No current_trigger_event set — fallback path.
+        assert!(state.current_trigger_event.is_none());
+
+        let source_id = ObjectId(1000);
+        let ability = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player_filter: PlayerFilter::OpponentOtherThanTriggering,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        let life_p0_before = state.players[0].life;
+        let life_p1_before = state.players[1].life;
+        let life_p2_before = state.players[2].life;
+
+        let mut events = Vec::new();
+        resolve_each_player(&mut state, &ability, &mut events).expect("fallback resolves cleanly");
+
+        assert_eq!(
+            state.players[0].life, life_p0_before,
+            "controller unchanged"
+        );
+        assert_eq!(
+            state.players[1].life,
+            life_p1_before - 3,
+            "opponent 1 takes damage in fallback"
+        );
+        assert_eq!(
+            state.players[2].life,
+            life_p2_before - 3,
+            "opponent 2 takes damage in fallback"
+        );
+    }
+
+    /// CR 120.3: `DamageAll` with `player_filter: Some(Opponent)` deals damage
+    /// to BOTH the typed object set and every opponent. Omnath, Locus of
+    /// Creation 3rd-branch shape: 4 damage to each opponent + 4 damage to
+    /// each non-controller planeswalker.
+    #[test]
+    fn damage_all_with_player_filter_opponent_hits_both_sets_in_3p() {
+        use crate::types::ability::{ControllerRef, PlayerFilter, TypeFilter};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let controller = PlayerId(0);
+        let opp_a = PlayerId(1);
+        let opp_b = PlayerId(2);
+
+        // Set up: controller's own planeswalker (must NOT take damage),
+        // opponent A's planeswalker, opponent B's planeswalker.
+        let make_pw = |state: &mut GameState, owner: PlayerId, name: &str| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(state.objects.len() as u64 + 1),
+                owner,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.loyalty = Some(6);
+            obj.counters.insert(CounterType::Loyalty, 6);
+            id
+        };
+        let own_pw = make_pw(&mut state, controller, "Own PW");
+        let opp_a_pw = make_pw(&mut state, opp_a, "A PW");
+        let opp_b_pw = make_pw(&mut state, opp_b, "B PW");
+
+        let source_id = ObjectId(2000);
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Planeswalker],
+                    controller: Some(ControllerRef::Opponent),
+                    properties: vec![],
+                }),
+                player_filter: Some(PlayerFilter::Opponent),
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+
+        let life_controller_before = state.players[controller.0 as usize].life;
+        let life_opp_a_before = state.players[opp_a.0 as usize].life;
+        let life_opp_b_before = state.players[opp_b.0 as usize].life;
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).expect("composite DamageAll resolves");
+
+        // Controller: untouched (life and own PW).
+        assert_eq!(
+            state.players[controller.0 as usize].life,
+            life_controller_before
+        );
+        assert_eq!(state.objects[&own_pw].loyalty, Some(6));
+        // Both opponents: -4 life.
+        assert_eq!(state.players[opp_a.0 as usize].life, life_opp_a_before - 4);
+        assert_eq!(state.players[opp_b.0 as usize].life, life_opp_b_before - 4);
+        // Both opponents' planeswalkers: -4 loyalty (6 - 4 = 2).
+        assert_eq!(state.objects[&opp_a_pw].loyalty, Some(2));
+        assert_eq!(state.objects[&opp_b_pw].loyalty, Some(2));
     }
 }

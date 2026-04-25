@@ -690,6 +690,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
+        PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
     }
     .into()
 }
@@ -4074,6 +4075,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::ZoneChangedThisWay => ("ZoneChangedThisWay", Unhandled),
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
+        PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
     }
 }
 

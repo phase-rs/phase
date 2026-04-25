@@ -1955,6 +1955,15 @@ pub enum PlayerFilter {
     /// "they [verb]" effects on triggers whose subject is a player (e.g. Firemane
     /// Commando's "another player ... they draw a card").
     TriggeringPlayer,
+    /// CR 120.3 + CR 603.2c: Each opponent other than the player identified by
+    /// `state.current_trigger_event`. Used by "each other opponent" phrasing on
+    /// damage triggers — the triggering opponent has already received the source's
+    /// damage in the same chain (e.g. Hydra Omnivore's "Whenever ~ deals combat
+    /// damage to an opponent, it deals that much damage to each other opponent.").
+    /// The "other" anaphors back to the triggering opponent named in the trigger
+    /// event clause. Falls back to plain `Opponent` semantics when no trigger
+    /// event is in scope (i.e. only excludes the controller).
+    OpponentOtherThanTriggering,
 }
 
 /// An expression that produces an integer for quantity comparisons.
