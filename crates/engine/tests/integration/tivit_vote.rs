@@ -246,6 +246,45 @@ fn tivit_full_vote_session_drives_to_tally() {
     );
 }
 
+/// Wire-shape contract: `WaitingFor::VoteChoice.per_choice_effect` is an
+/// engine-internal payload (only `vote::resolve_tally` reads it) and must
+/// NOT serialize to JSON — opponents would otherwise receive the full
+/// per-choice ability tree on every multiplayer state echo, and the
+/// hand-written TypeScript adapter type already omits it.
+#[test]
+fn vote_choice_per_choice_effect_skipped_from_serialization() {
+    let mut state = GameState::new_two_player(42);
+    let controller = state.players[0].id;
+    let tivit_id = create_tivit(&mut state, controller);
+
+    let ability = build_tivit_vote(tivit_id, controller);
+    let mut events = Vec::new();
+    effects::vote::resolve(&mut state, &ability, &mut events).expect("vote resolves");
+
+    // Sanity: the in-memory state still carries the per-choice effects so
+    // the resolver can fan out the tally.
+    match state.waiting_for {
+        WaitingFor::VoteChoice {
+            ref per_choice_effect,
+            ..
+        } => assert_eq!(per_choice_effect.len(), 2),
+        ref other => panic!("expected VoteChoice, got {:?}", other),
+    }
+
+    // Round-trip through serde and confirm the field drops out — the
+    // serialized JSON must not contain the field name nor any encoded
+    // sub-effect type tag.
+    let json = serde_json::to_string(&state.waiting_for).expect("serialize");
+    assert!(
+        !json.contains("per_choice_effect"),
+        "per_choice_effect must be skipped in serialized output, got: {json}"
+    );
+    assert!(
+        !json.contains("Investigate"),
+        "no encoded sub-effect should appear in serialized output, got: {json}"
+    );
+}
+
 /// CR 701.38a: Casting a vote not in `options` must be rejected by the
 /// engine, not silently absorbed. Protects the "you can't abstain"
 /// invariant (Council's-dilemma rulings: "You must vote for one of the

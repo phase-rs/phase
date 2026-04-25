@@ -1434,6 +1434,17 @@ pub enum WaitingFor {
         /// WaitingFor so the resolver chain doesn't need to re-find the source
         /// ability — voting can outlive permanents (LKI) and the WaitingFor is
         /// always the canonical state.
+        ///
+        /// `#[serde(skip)]`: engine-internal payload. The full encoded
+        /// `AbilityDefinition` chain is needed only by `vote::resolve_tally`
+        /// in the same process that built the `WaitingFor`, so excluding it
+        /// from serialization keeps the wire shape aligned with the
+        /// hand-written TypeScript type and avoids echoing per-choice ability
+        /// trees to opponents on every multiplayer state update. Caveat:
+        /// pausing a game mid-vote and round-tripping the state through
+        /// JSON would lose the per-choice effects — not a supported flow
+        /// today (no save/restore happens between vote-cast actions).
+        #[serde(skip)]
         per_choice_effect: Vec<Box<super::ability::AbilityDefinition>>,
         /// Ability controller — the player who owns the Vote effect. Used by
         /// the tally resolver to scope sub-effects to the correct controller.

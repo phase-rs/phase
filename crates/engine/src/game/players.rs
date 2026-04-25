@@ -55,20 +55,30 @@ pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 /// Returns living players in APNAP order, starting from the active player
 /// and proceeding in seat order.
 pub fn apnap_order(state: &GameState) -> Vec<PlayerId> {
+    turn_order_from(state, state.active_player)
+}
+
+/// CR 101.4 + CR 701.38a: Living players in seat (turn) order, starting
+/// from the given player and wrapping around. Skips eliminated players.
+///
+/// Generalization of `apnap_order` for effects that pick an arbitrary
+/// starting player ("starting with you" voting, "starting with the player
+/// to your left"-style targeted effects). When `start == active_player`,
+/// the result is identical to `apnap_order(state)`.
+///
+/// Returns an empty vector if `seat_order` is empty.
+pub fn turn_order_from(state: &GameState, start: PlayerId) -> Vec<PlayerId> {
     let seat_order = &state.seat_order;
     let len = seat_order.len();
     if len == 0 {
         return Vec::new();
     }
 
-    let active_idx = seat_order
-        .iter()
-        .position(|&id| id == state.active_player)
-        .unwrap_or(0);
+    let start_idx = seat_order.iter().position(|&id| id == start).unwrap_or(0);
 
     let mut result = Vec::new();
     for offset in 0..len {
-        let idx = (active_idx + offset) % len;
+        let idx = (start_idx + offset) % len;
         let candidate = seat_order[idx];
         if is_alive(state, candidate) {
             result.push(candidate);

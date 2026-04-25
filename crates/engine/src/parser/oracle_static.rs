@@ -13114,4 +13114,40 @@ mod tests {
             _ => panic!("expected TargetFilter::Typed"),
         }
     }
+
+    // CR 701.38d: Extra-vote granters — siblings of Tivit's "may vote an
+    // additional time" wording all map to `StaticMode::GrantsExtraVote`.
+    // These tests pin the `alt()` arms in `parse_static_line_inner` so a
+    // future regression that drops a phrasing arm fails at parse time
+    // (not at runtime when Brago's Representative quietly stops granting
+    // an extra vote).
+    #[test]
+    fn extra_vote_grants_tivit_phrasing() {
+        let def = parse_static_line("While voting, you may vote an additional time.")
+            .expect("Tivit phrasing must parse");
+        assert!(matches!(def.mode, StaticMode::GrantsExtraVote));
+    }
+
+    #[test]
+    fn extra_vote_grants_brago_representative_phrasing() {
+        let def = parse_static_line("While voting, you get an additional vote.")
+            .expect("Brago's Representative phrasing must parse");
+        assert!(matches!(def.mode, StaticMode::GrantsExtraVote));
+    }
+
+    #[test]
+    fn extra_vote_grants_extra_vote_alias() {
+        let def = parse_static_line("While voting, you get an extra vote.")
+            .expect("'extra vote' alias must parse");
+        assert!(matches!(def.mode, StaticMode::GrantsExtraVote));
+    }
+
+    /// Negative: text that mentions "vote" but isn't a granter must NOT
+    /// parse as `GrantsExtraVote`. Guards against an over-broad alt() arm
+    /// that swallows e.g. casting restrictions on vote spells.
+    #[test]
+    fn extra_vote_rejects_unrelated_voting_text() {
+        assert!(parse_static_line("You can't vote.").is_none());
+        assert!(parse_static_line("Each player votes once.").is_none());
+    }
 }

@@ -251,26 +251,17 @@ fn resolve_starting_voter(
     }
 }
 
-/// CR 101.4: Build a turn-order voter sequence beginning with `start`, walking
-/// forward through PlayerId order and skipping eliminated players. Supports
-/// arbitrary player counts (multiplayer).
+/// CR 101.4 + CR 701.38a: Build the voter sequence beginning with `start`,
+/// walking through seated turn order and skipping eliminated players.
+///
+/// Delegates to the canonical `players::turn_order_from` helper so the
+/// queue follows `state.seat_order` (the same source of truth used by
+/// turn rotation, priority passing, and `apnap_order`) rather than
+/// `state.players` Vec index. This is invariant-preserving today (Vec
+/// index and seat order coincide for the 2-player case Tivit ships with),
+/// and remains correct in any future multiplayer or seat-shuffled setup.
 fn apnap_order_from(state: &GameState, start: PlayerId) -> Vec<PlayerId> {
-    let n = state.players.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let start_idx = state
-        .players
-        .iter()
-        .position(|p| p.id == start)
-        .unwrap_or(0);
-    (0..n)
-        .map(|offset| (start_idx + offset) % n)
-        .filter_map(|i| {
-            let p = &state.players[i];
-            (!p.is_eliminated).then_some(p.id)
-        })
-        .collect()
+    crate::game::players::turn_order_from(state, start)
 }
 
 /// CR 701.38d: A player's total votes for one Council's dilemma session is
