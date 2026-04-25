@@ -41,6 +41,10 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
   const decks = useDecks();
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>(ALL_TYPES);
+  // Multi-select state. Keyed by deck id (filename stem) so it survives the
+  // filtered list reordering as the user types — a deck stays selected even
+  // when the search query temporarily hides it.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
 
   // Esc-to-close, bound only while the modal is open.
   useEffect(() => {
@@ -92,6 +96,66 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
     savePreconDeck(chosen, deck);
     onImported(chosen);
     onClose();
+  };
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  // Bulk import. Auto-names every selection as `Name (CODE)` (matching the
+  // single-import suggested-default), batches collision handling into one
+  // confirm, and fires `onImported` exactly once at the end with the last
+  // imported name so the parent's deck-list refresh + select-mode auto-pick
+  // run as a single transition rather than per-deck.
+  const handleImportSelected = () => {
+    if (!decks || selectedIds.size === 0) return;
+    const picks: Array<{ savedName: string; deck: DeckEntry }> = [];
+    for (const id of selectedIds) {
+      const deck = decks[id];
+      if (!deck) continue;
+      picks.push({ savedName: `${deck.name} (${deck.code})`, deck });
+    }
+    if (picks.length === 0) return;
+
+    const conflicts = picks.filter((p) => preconExists(p.savedName));
+    let overwrite = true;
+    if (conflicts.length > 0) {
+      const msg =
+        conflicts.length === picks.length
+          ? `All ${picks.length} selected decks already exist. Overwrite?`
+          : `${conflicts.length} of ${picks.length} selected decks already exist. Overwrite the duplicates? (Cancel keeps existing copies and imports the rest.)`;
+      overwrite = confirm(msg);
+    }
+
+    let lastImported: string | null = null;
+    let imported = 0;
+    let skipped = 0;
+    for (const { savedName, deck } of picks) {
+      if (preconExists(savedName) && !overwrite) {
+        skipped++;
+        continue;
+      }
+      savePreconDeck(savedName, deck);
+      lastImported = savedName;
+      imported++;
+    }
+
+    if (lastImported) onImported(lastImported);
+    clearSelection();
+    onClose();
+    if (skipped > 0) {
+      // No toast system in this surface — a single alert keeps the user
+      // informed without ambiguity. Fires AFTER onClose so the dialog tears
+      // down first and the alert lands in the deck-list view.
+      alert(`Imported ${imported} deck${imported === 1 ? "" : "s"}; skipped ${skipped} existing.`);
+    }
   };
 
   const typeOptions = Array.from(typeCounts.entries())
@@ -164,45 +228,101 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
             <div className="p-8 text-center text-sm text-slate-500">No decks match.</div>
           ) : (
             <ul className="divide-y divide-white/5">
-              {filtered.map(([id, deck]) => (
-                <li key={id}>
-                  <button
-                    onClick={() => handlePick(deck)}
-                    className="flex w-full items-center justify-between gap-3 px-4 py-2 text-left transition hover:bg-white/5"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium text-white">{deck.name}</div>
-                      <div className="truncate text-[11px] text-slate-500">
-                        {deck.type}
-                        {deck.releaseDate && <span> · {deck.releaseDate}</span>}
-                        <span> · {deck.code}</span>
+              {filtered.map(([id, deck]) => {
+                const checked = selectedIds.has(id);
+                return (
+                  <li key={id} className="flex items-stretch">
+                    {/* Checkbox column — toggles multi-select. Stops propagation
+                        so the keyboard "space" / click here doesn't fire the
+                        row's single-pick handler. */}
+                    <label
+                      className="flex cursor-pointer items-center pl-4 pr-2"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleSelected(id)}
+                        className="h-4 w-4 cursor-pointer accent-indigo-400"
+                        aria-label={`Select ${deck.name}`}
+                      />
+                    </label>
+                    {/* Row body — single-import fast path. Multi-select users
+                        just click the checkbox; everyone else clicks the row. */}
+                    <button
+                      onClick={() => handlePick(deck)}
+                      className="flex flex-1 items-center justify-between gap-3 py-2 pr-4 text-left transition hover:bg-white/5"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium text-white">{deck.name}</div>
+                        <div className="truncate text-[11px] text-slate-500">
+                          {deck.type}
+                          {deck.releaseDate && <span> · {deck.releaseDate}</span>}
+                          <span> · {deck.code}</span>
+                        </div>
                       </div>
-                    </div>
-                    <span className="flex shrink-0 items-baseline gap-2 text-[11px]">
-                      <span className={`font-semibold ${coverageTone(deck.coveragePct)}`}>
-                        {deck.coveragePct}%
+                      <span className="flex shrink-0 items-baseline gap-2 text-[11px]">
+                        <span className={`font-semibold ${coverageTone(deck.coveragePct)}`}>
+                          {deck.coveragePct}%
+                        </span>
+                        <span className="text-slate-600">
+                          {mainBoardCount(deck)} cards
+                          {deck.commander && deck.commander.length > 0 && " · cmdr"}
+                        </span>
                       </span>
-                      <span className="text-slate-600">
-                        {mainBoardCount(deck)} cards
-                        {deck.commander && deck.commander.length > 0 && " · cmdr"}
-                      </span>
-                    </span>
-                  </button>
-                </li>
-              ))}
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
 
-        <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>
-            {decks && filtered.length === MAX_RESULTS
-              ? `Showing first ${MAX_RESULTS} — refine search to narrow.`
-              : null}
+        <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+          <span className="flex flex-wrap items-center gap-3">
+            {decks && filtered.length === MAX_RESULTS && (
+              <span>{`Showing first ${MAX_RESULTS} — refine search to narrow.`}</span>
+            )}
+            {/* Bulk-select helpers. Hidden until the catalog has loaded. */}
+            {decks && filtered.length > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setSelectedIds((cur) => {
+                    const next = new Set(cur);
+                    for (const [id] of filtered) next.add(id);
+                    return next;
+                  })
+                }
+                className="text-slate-400 underline-offset-2 hover:text-white hover:underline"
+              >
+                Select all visible
+              </button>
+            )}
+            {selectedIds.size > 0 && (
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="text-slate-400 underline-offset-2 hover:text-white hover:underline"
+              >
+                Clear ({selectedIds.size})
+              </button>
+            )}
           </span>
-          <button onClick={onClose} className={menuButtonClass({ tone: "neutral", size: "sm" })}>
-            Close
-          </button>
+          <span className="flex items-center gap-2">
+            {selectedIds.size > 0 && (
+              <button
+                type="button"
+                onClick={handleImportSelected}
+                className={menuButtonClass({ tone: "indigo", size: "sm" })}
+              >
+                Import {selectedIds.size} selected
+              </button>
+            )}
+            <button onClick={onClose} className={menuButtonClass({ tone: "neutral", size: "sm" })}>
+              Close
+            </button>
+          </span>
         </div>
       </div>
     </div>
