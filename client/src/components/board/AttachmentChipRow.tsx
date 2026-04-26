@@ -25,7 +25,23 @@ export const AttachmentChipRow = memo(function AttachmentChipRow({ objectIds }: 
   const collapsed = overflow.length > 0;
 
   return (
-    <div className="absolute -top-2 left-1 right-1 z-30 flex max-w-full flex-wrap justify-center gap-0.5 overflow-visible">
+    <div
+      // Inline styles (in addition to the Tailwind classes) so the row is
+      // guaranteed to position even if the CSS layer is stale or a parent
+      // ancestor's stacking context overrides the utility classes.
+      style={{
+        position: "absolute",
+        top: "-10px",
+        left: 0,
+        right: 0,
+        zIndex: 50,
+        display: "flex",
+        flexWrap: "wrap",
+        justifyContent: "center",
+        gap: "2px",
+        pointerEvents: "none",
+      }}
+    >
       {visible.map((id) => (
         <AttachmentChip key={id} id={id} glyphOnly={collapsed} />
       ))}

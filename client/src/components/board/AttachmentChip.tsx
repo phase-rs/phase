@@ -182,13 +182,46 @@ export const AttachmentChip = memo(function AttachmentChip({ id, glyphOnly = fal
     ? "ring-2 ring-amber-400/60 shadow-[0_0_8px_2px_rgba(201,176,55,0.7)]"
     : "";
 
+  // Subtype tints chosen to track MTG card-frame conventions so a quick
+  // glance maps to the correct permanent type even before the glyph is
+  // parsed. Inline styles (alongside Tailwind classes) so the chip remains
+  // visible if a stale CSS layer or unexpected stacking context strips
+  // utility classes — this surface had several invisibility regressions
+  // and the diagnostic value of a redundant inline fallback is high.
+  const inlineBg =
+    obj.face_down ? "rgba(51, 65, 85, 0.85)"
+      : obj.card_types.subtypes.includes("Aura") ? "rgba(252, 211, 77, 0.92)"
+      : obj.card_types.subtypes.includes("Equipment") ? "rgba(212, 212, 216, 0.92)"
+      : obj.card_types.subtypes.includes("Fortification") ? "rgba(214, 211, 209, 0.92)"
+      : "rgba(203, 213, 225, 0.92)";
+  const inlineFg =
+    obj.face_down ? "#f1f5f9"
+      : "#1c1917";
+
   return (
     <button
       type="button"
       onClick={handleClick}
       title={tooltip}
       aria-label={tooltip}
-      className={`flex h-5 max-w-full items-center gap-0.5 overflow-hidden rounded border border-l-2 border-black/40 px-1 text-[11px] font-bold leading-none shadow-md pointer-events-auto ${style.className} ${borderClass} ${targetingRing}`}
+      style={{
+        background: inlineBg,
+        color: inlineFg,
+        height: "20px",
+        padding: "0 6px",
+        fontSize: "11px",
+        fontWeight: 700,
+        lineHeight: 1,
+        borderRadius: "4px",
+        border: "1px solid rgba(0, 0, 0, 0.5)",
+        boxShadow: "0 2px 4px rgba(0, 0, 0, 0.45)",
+        pointerEvents: "auto",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "2px",
+        whiteSpace: "nowrap",
+      }}
+      className={`${style.className} ${borderClass} ${targetingRing}`}
       {...handlers}
     >
       <span aria-hidden>{style.glyph}</span>
