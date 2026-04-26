@@ -37,13 +37,13 @@ const EXILE_GHOST_OFFSET_PX = 20;
 // host's right edge. Each subsequent attachment in the stack reveals a
 // further `STACK_STEP_PX` so a creature with two Auras shows both visible
 // portions cleanly without occluding either.
-// 20px = badge width (16) + right-1 padding (4). Just enough for the
+// 22px = badge size (20) + right-0.5 padding (2). Just enough for the
 // AttachmentTypeBadge to be visible past the host's right edge with no
-// extra card art revealed — the user is using the badge alone as the
-// "is this attached?" indicator. Stack step matches so each subsequent
-// attachment's badge fits in its own 20px column.
-const ATTACHMENT_PEEK_PX = 20;
-const ATTACHMENT_STACK_STEP_PX = 20;
+// extra card art revealed — the badge alone carries the "is this
+// attached?" + "what type?" signal; the actual card is hover-accessible
+// via the recursive PermanentCard's existing handlers.
+const ATTACHMENT_PEEK_PX = 22;
+const ATTACHMENT_STACK_STEP_PX = 22;
 
 // Subtype glyphs sit in the top-right of the peek (where the mana pips
 // would normally be) so the player can identify the attachment's role
@@ -458,12 +458,18 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
 });
 
 /**
- * Subtype glyph badge rendered in the top-right of an attached card's peek.
- * Sits where the mana pips would normally be, so the player gets a clear
- * "this is an Aura / Equipment / Fortification" hint at a glance without
- * needing to read the title bar. Hidden when the card has no recognized
- * attachment subtype (defensive — current MTG only attaches via the three
- * Aura/Equipment/Fortification keywords, so this branch is rarely hit).
+ * Subtype glyph badge rendered as a circular pill in the top-right of an
+ * attached card's peek. Sits where the mana pips would normally be so the
+ * player gets a clear "this is an Aura / Equipment / Fortification" hint
+ * without parsing the title bar.
+ *
+ * The badge is sized + colored to read unmistakably as a UI label rather
+ * than a sliver of card frame: bright amber on near-black with a sharp
+ * ring + drop shadow, and slightly larger than typical inline badges so
+ * the glyph is recognizable at a glance.
+ *
+ * Hidden when the card has no recognized attachment subtype (defensive —
+ * current MTG only attaches via Aura / Equipment / Fortification).
  */
 const AttachmentTypeBadge = memo(function AttachmentTypeBadge({ attachId }: { attachId: number }) {
   const subtypes = useGameStore((s) => s.gameState?.objects[attachId]?.card_types.subtypes);
@@ -473,10 +479,10 @@ const AttachmentTypeBadge = memo(function AttachmentTypeBadge({ attachId }: { at
   return (
     <span
       aria-hidden
-      // pointer-events-none so the badge doesn't intercept clicks on the
-      // underlying PermanentCard — clicks must continue to reach the card's
-      // own click handler for targeting/selection.
-      className="pointer-events-none absolute right-1 top-1 z-30 flex h-4 w-4 items-center justify-center rounded-full bg-black/75 text-[10px] font-bold leading-none text-amber-300 shadow-sm ring-1 ring-amber-300/40"
+      // pointer-events-none so the badge doesn't intercept clicks/hovers on
+      // the underlying PermanentCard — events must continue to reach the
+      // card's own handlers for targeting/selection/preview.
+      className="pointer-events-none absolute right-0.5 top-0.5 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-gradient-to-b from-amber-400 to-amber-600 text-[12px] font-bold leading-none text-amber-950 ring-2 ring-amber-200/80 shadow-[0_2px_4px_rgba(0,0,0,0.6),inset_0_1px_1px_rgba(255,255,255,0.5)]"
     >
       {glyph}
     </span>
