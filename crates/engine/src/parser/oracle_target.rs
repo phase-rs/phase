@@ -1880,75 +1880,64 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
         .parse(trimmed)
         .ok()?;
 
-    // CR 202.3: Dynamic comparisons referencing the triggering event source's mana value.
+    // CR 202.3 + CR 120.3: Dynamic comparisons referencing the triggering event.
+    // "that damage" → `EventContextAmount` (damage amount captured at trigger).
+    // "that <type>" (e.g. "that creature", "that spell") → `EventContextSourceManaValue`
+    // (mana value of the triggering source object).
     // Staged checks: first detect "less than" / "greater than", then check for "or equal to".
-    if let Ok((a, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("less than").parse(rest)
-    {
+    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    let try_dynamic = |rest: &str, is_le: bool| -> Option<(FilterProp, usize)> {
+        let kw_tag = if is_le { "less than" } else { "greater than" };
+        let (a, _) = tag::<_, _, Vbe>(kw_tag).parse(rest).ok()?;
         let a = a.trim_start();
-        let (is_equal, a) = if let Ok((a2, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or equal to").parse(a)
-        {
+        let (is_equal, a) = if let Ok((a2, _)) = tag::<_, _, Vbe>("or equal to").parse(a) {
             (true, a2.trim_start())
         } else {
             (false, a)
         };
-        if let Ok((a, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(a) {
+        let (a, _) = tag::<_, _, Vbe>("that ").parse(a).ok()?;
+        // CR 120.3: "that damage" — the damage amount captured by the trigger
+        // (DamageDone events stamp `EventContextAmount`).
+        let (qty, after) = if let Ok((a2, _)) = tag::<_, _, Vbe>("damage").parse(a) {
+            (QuantityRef::EventContextAmount, a2)
+        } else {
+            // Fall back to the type-word arm — "that <type>" where <type> is any
+            // single word terminating at punctuation/space (e.g., "creature",
+            // "spell"). Uses the source object's mana value.
             let after = a.find([',', '.', ' ']).map_or(a, |i| &a[i..]);
-            return Some((
-                if is_equal {
-                    FilterProp::CmcLE {
-                        value: QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextSourceManaValue,
-                        },
-                    }
-                } else {
-                    FilterProp::CmcLE {
-                        value: QuantityExpr::Offset {
-                            inner: Box::new(QuantityExpr::Ref {
-                                qty: QuantityRef::EventContextSourceManaValue,
-                            }),
-                            offset: -1,
-                        },
-                    }
-                },
-                text.len() - after.len(),
-            ));
-        }
+            (QuantityRef::EventContextSourceManaValue, after)
+        };
+        let make_value = |off: i32| {
+            if off == 0 {
+                QuantityExpr::Ref { qty }
+            } else {
+                QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref { qty }),
+                    offset: off,
+                }
+            }
+        };
+        let prop = match (is_le, is_equal) {
+            (true, true) => FilterProp::CmcLE {
+                value: make_value(0),
+            },
+            (true, false) => FilterProp::CmcLE {
+                value: make_value(-1),
+            },
+            (false, true) => FilterProp::CmcGE {
+                value: make_value(0),
+            },
+            (false, false) => FilterProp::CmcGE {
+                value: make_value(1),
+            },
+        };
+        Some((prop, text.len() - after.len()))
+    };
+    if let Some(found) = try_dynamic(rest, true) {
+        return Some(found);
     }
-    if let Ok((a, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("greater than").parse(rest)
-    {
-        let a = a.trim_start();
-        let (is_equal, a) = if let Ok((a2, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or equal to").parse(a)
-        {
-            (true, a2.trim_start())
-        } else {
-            (false, a)
-        };
-        if let Ok((a, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(a) {
-            let after = a.find([',', '.', ' ']).map_or(a, |i| &a[i..]);
-            return Some((
-                if is_equal {
-                    FilterProp::CmcGE {
-                        value: QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextSourceManaValue,
-                        },
-                    }
-                } else {
-                    FilterProp::CmcGE {
-                        value: QuantityExpr::Offset {
-                            inner: Box::new(QuantityExpr::Ref {
-                                qty: QuantityRef::EventContextSourceManaValue,
-                            }),
-                            offset: 1,
-                        },
-                    }
-                },
-                text.len() - after.len(),
-            ));
-        }
+    if let Some(found) = try_dynamic(rest, false) {
+        return Some(found);
     }
 
     // Static "N or less" / "N or greater" — also accepts literal X via

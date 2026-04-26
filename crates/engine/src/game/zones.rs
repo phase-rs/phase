@@ -92,6 +92,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                     p,
                     crate::types::ability::CastingPermission::AdventureCreature
                         | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
                         | crate::types::ability::CastingPermission::PlayFromExile { .. }
                         | crate::types::ability::CastingPermission::ExileWithEnergyCost
                         | crate::types::ability::CastingPermission::WarpExile { .. }

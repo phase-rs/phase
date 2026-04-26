@@ -555,6 +555,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::Variable { name } => name.clone(),
         QuantityRef::SelfPower => "self power".into(),
         QuantityRef::SelfToughness => "self toughness".into(),
+        QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
             function,
             property,
@@ -4021,6 +4022,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Variable { .. } => ("Variable", Handled),
         QuantityRef::SelfPower => ("SelfPower", Handled),
         QuantityRef::SelfToughness => ("SelfToughness", Handled),
+        QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
         QuantityRef::TargetPower => ("TargetPower", Handled),
         QuantityRef::TargetLifeTotal => ("TargetLifeTotal", Handled),

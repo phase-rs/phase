@@ -74,6 +74,7 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             CastingPermission::PlayFromExile { .. } => true,
             CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
+            | CastingPermission::ExileWithAltAbilityCost { .. }
             | CastingPermission::ExileWithEnergyCost
             | CastingPermission::WarpExile { .. }
             // CR 702.170d: Plotted persists across turns (that is the whole
@@ -97,6 +98,7 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
+            | CastingPermission::ExileWithAltAbilityCost { .. }
             | CastingPermission::ExileWithEnergyCost
             | CastingPermission::WarpExile { .. }
             // CR 702.170d: Plotted persists across turns; never pruned at the

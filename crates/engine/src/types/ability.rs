@@ -987,6 +987,26 @@ pub enum CastingPermission {
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
     ExileWithEnergyCost,
+    /// CR 118.9 + CR 119.4: Cast from exile by paying a non-mana alternative
+    /// cost in lieu of the spell's mana cost. Building block for "play it ...
+    /// pay [non-mana cost] rather than paying its mana cost" patterns
+    /// (Nashi, Moon Sage's Scion: pay life equal to the spell's mana value).
+    ///
+    /// `cost` is a full `AbilityCost` (with dynamic-quantity support via
+    /// `QuantityExpr`), distinguishing this from `ExileWithAltCost { cost:
+    /// ManaCost }` which can only carry a fixed mana cost.
+    ExileWithAltAbilityCost {
+        /// CR 117.1: the alternative cost to pay instead of the spell's mana
+        /// cost. Resolved through the standard `pay_additional_cost` pipeline,
+        /// so `AbilityCost::PayLife { amount: QuantityExpr }` and friends
+        /// (with dynamic quantity refs like `SelfManaValue`, which reads the
+        /// spell-being-cast's mana value at cost-payment time) work for free.
+        cost: AbilityCost,
+        /// CR 702.85a: optional cast-time predicate gating whether the cast
+        /// may proceed. Mirrors `ExileWithAltCost.constraint`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constraint: Option<CastPermissionConstraint>,
+    },
     /// CR 702.185a: Warp — card may be cast from exile at its normal mana cost,
     /// but only after the specified turn ends. Persists for as long as card remains exiled.
     WarpExile { castable_after_turn: u32 },
@@ -1749,6 +1769,15 @@ pub enum QuantityRef {
     SelfPower,
     /// CR 208.1: The current toughness of the source object (post-layer).
     SelfToughness,
+    /// CR 202.3: The mana value of the source object — i.e. the object passed
+    /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
+    /// is the spell-being-cast, so "pay life equal to its mana value" reads
+    /// the right value at cost-payment time. Distinct from
+    /// `EventContextSourceManaValue` (which reads the triggering source via
+    /// `current_trigger_event`); that ref returns 0 outside trigger
+    /// resolution, whereas this one is correct any time the resolver has a
+    /// `source_id` (cost payment, ability resolution, etc.).
+    SelfManaValue,
     /// CR 107.3e: Aggregate query (max/min/sum) over a property of battlefield objects.
     Aggregate {
         function: AggregateFunction,
@@ -3762,7 +3791,8 @@ pub enum Effect {
         cost: PaymentCost,
     },
     /// CR 601.2a + CR 118.9: Cast or play a card from a zone.
-    /// Grants `ExileWithAltCost` casting permission on target cards (Discover pattern).
+    /// Grants `ExileWithAltCost` casting permission on target cards (Discover pattern),
+    /// or `ExileWithAltAbilityCost` when `alt_ability_cost` is `Some(_)`.
     CastFromZone {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -3776,6 +3806,17 @@ pub enum Effect {
         /// without paying its mana cost").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cast_transformed: bool,
+        /// CR 118.9 + CR 119.4: Optional non-mana alternative cost, paid in lieu
+        /// of the spell's mana cost (e.g. Nashi's "pay life equal to its mana
+        /// value rather than paying its mana cost"). When `Some(_)`, the
+        /// resolver grants `CastingPermission::ExileWithAltAbilityCost` instead
+        /// of `ExileWithAltCost`; the casting pipeline overrides the spell's
+        /// mana cost to zero and routes this cost through the standard
+        /// `pay_additional_cost` flow. Mutually-exclusive with
+        /// `without_paying_mana_cost: true` — the spell either has no
+        /// alternative cost (free) or this one (replacement).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alt_ability_cost: Option<AbilityCost>,
     },
     /// CR 615: Prevent damage to a target.
     PreventDamage {

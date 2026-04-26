@@ -762,6 +762,34 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         );
     }
 
+    // CR 118.9 + CR 119.4: ExileWithAltAbilityCost — non-mana alternative cost
+    // (e.g. Nashi's "pay life equal to its mana value rather than paying its
+    // mana cost"). The mana cost was already overridden to zero in
+    // `casting::cast_spell` via `alt_cost_from_exile`; here we route the stored
+    // `AbilityCost` through `pay_additional_cost` so dynamic-quantity refs
+    // (`EventContextSourceManaValue`, etc.) resolve at cast time against the
+    // spell's mana value. Single-authority — `AbilityCost::PayLife` and friends
+    // are paid through the same pipeline as flashback's non-mana cost.
+    let alt_ability_cost = state.objects.get(&object_id).and_then(|obj| {
+        if obj.zone == Zone::Exile {
+            obj.casting_permissions.iter().find_map(|p| match p {
+                crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
+                    cost, ..
+                } => Some(cost.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    });
+    if let Some(alt_cost) = alt_ability_cost {
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.casting_variant = casting_variant;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        return pay_additional_cost(state, player, alt_cost, pending, events);
+    }
+
     // CR 702.138a: Escape requires exiling N other cards from graveyard.
     if casting_variant == CastingVariant::Escape {
         if let Some((_, exile_count)) = super::keywords::effective_escape_data(state, object_id) {

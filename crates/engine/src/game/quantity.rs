@@ -514,6 +514,22 @@ fn resolve_ref(
                     .and_then(|lki| lki.toughness)
             })
             .unwrap_or(0),
+        // CR 202.3 + CR 118.9: Mana value of the source object. Used by
+        // alt-cost cast permissions ("pay life equal to its mana value rather
+        // than paying its mana cost") where `source_id` is the spell being
+        // cast. Falls back to LKI for objects that have left their zone
+        // mid-resolution.
+        QuantityRef::SelfManaValue => state
+            .objects
+            .get(&source_id)
+            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+            .or_else(|| {
+                state
+                    .lki_cache
+                    .get(&source_id)
+                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
+            })
+            .unwrap_or(0),
         // CR 107.3e: Aggregate queries over game objects.
         // Uses extract_in_zone() to support non-battlefield zones (exile, graveyard, etc.),
         // same pattern as ObjectCount above.
@@ -2713,5 +2729,35 @@ mod tests {
 
         // With X=3, only CMC-1 and CMC-3 match — count is 2.
         assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 2);
+    }
+
+    /// CR 202.3 + CR 118.9: `SelfManaValue` reads the source object's printed
+    /// mana value at resolve-time. Used by alt-cost cast permissions
+    /// (`ExileWithAltAbilityCost`) where "its mana value" must resolve
+    /// against the spell-being-cast (passed as `source_id`).
+    #[test]
+    fn self_mana_value_reads_source_mana_cost() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Exile,
+        );
+        // Set mana cost = {3}{B}{B} → mana value 5.
+        let cost = crate::types::mana::ManaCost::Cost {
+            shards: vec![
+                crate::types::mana::ManaCostShard::Black,
+                crate::types::mana::ManaCostShard::Black,
+            ],
+            generic: 3,
+        };
+        state.objects.get_mut(&obj_id).unwrap().mana_cost = cost;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::SelfManaValue,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), obj_id), 5);
     }
 }

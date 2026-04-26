@@ -496,6 +496,7 @@ fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject, turn_nu
     obj.casting_permissions.iter().any(|p| match p {
         crate::types::ability::CastingPermission::AdventureCreature
         | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
         | crate::types::ability::CastingPermission::PlayFromExile { .. }
         | crate::types::ability::CastingPermission::ExileWithEnergyCost => true,
         // CR 702.185a: Warp cards only castable after the exile turn ends.
@@ -511,15 +512,18 @@ fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject, turn_nu
     })
 }
 
-/// CR 601.2a: Check if an object has an ExileWithAltCost permission specifically.
-/// Unlike `has_exile_cast_permission`, this only matches ExileWithAltCost — the
-/// permission granted by CastFromZone effects. Used to allow casting opponent's
-/// exiled cards (where ownership != caster).
+/// CR 601.2a: Check if an object has an alt-cost cast-from-exile permission
+/// (i.e., the spell may be cast by paying *something other than* its mana
+/// cost). Used to allow casting opponent's exiled cards (where ownership !=
+/// caster). Both the `ManaCost`-only `ExileWithAltCost` and the broader
+/// `ExileWithAltAbilityCost` (Nashi, "pay life equal to its mana value")
+/// satisfy this predicate.
 fn has_alt_cost_permission(obj: &crate::game::game_object::GameObject) -> bool {
     obj.casting_permissions.iter().any(|p| {
         matches!(
             p,
             crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
         )
     })
 }
@@ -854,11 +858,18 @@ fn prepare_spell_cast_with_variant_override(
     let ability_def = combined_spell_ability_def(obj);
 
     let flash_cost = restrictions::flash_timing_cost(state, player, obj);
-    // ExileWithAltCost: override mana cost when casting from exile with this permission.
+    // ExileWithAltCost / ExileWithAltAbilityCost: override mana cost when
+    // casting from exile via an alt-cost permission. The non-mana branch
+    // (ExileWithAltAbilityCost) zeroes the mana cost — its `AbilityCost` is
+    // routed through `pay_additional_cost` in `check_additional_cost_or_pay`
+    // (CR 118.9 + CR 119.4).
     let alt_cost_from_exile = if obj.zone == Zone::Exile {
         obj.casting_permissions.iter().find_map(|p| match p {
             crate::types::ability::CastingPermission::ExileWithAltCost { cost, .. } => {
                 Some(cost.clone())
+            }
+            crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
+                Some(crate::types::mana::ManaCost::zero())
             }
             _ => None,
         })

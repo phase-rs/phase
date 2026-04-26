@@ -1178,6 +1178,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                 without_paying_mana_cost: true,
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
+                alt_ability_cost: None,
             },
         )
         .optional();
@@ -1401,6 +1402,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 without_paying_mana_cost: true,
                 mode: CardPlayMode::Cast,
                 cast_transformed: true,
+                alt_ability_cost: None,
             },
         )
         .optional();
