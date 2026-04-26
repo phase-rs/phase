@@ -177,6 +177,14 @@ jobs:
       - name: Generate Scryfall data
         run: ./scripts/gen-scryfall-images.sh
 
+      - name: Upload Scryfall image lookup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scryfall-data
+          path: client/public/scryfall-data.json
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 
@@ -454,6 +462,18 @@ jobs:
         with:
           name: card-data
           path: client/public
+
+      - name: Download Scryfall image lookup data
+        uses: actions/download-artifact@v4
+        with:
+          name: scryfall-data
+          path: client/public
+
+      - name: Verify Tauri bundled data files
+        run: |
+          test -s client/public/card-data.json
+          test -s client/public/scryfall-data.json
+        shell: bash
 
       - name: Build phase-server sidecar
         run: |
