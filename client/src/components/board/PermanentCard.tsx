@@ -348,9 +348,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
 
           Card 0 (innermost) is closest to the host with the smallest peek;
           subsequent cards shift further right so each one's right edge is
-          visible past the previous one. z-index counts down so card 0 sits
-          on top and the staircase reads "the host is wearing this stack of
-          attachments" left-to-right. */}
+          visible past the previous one. z-index counts DOWN from a value
+          below the host's z-10 so attachments stay behind the host face but
+          remain pointer-event-reachable — negative z-indexes were tried
+          first and broke hover (they pushed the wrapper out of the
+          hit-testable layer). */}
       {obj.attachments.map((attachId, i) => {
         const peekPx = ATTACHMENT_PEEK_PX + i * ATTACHMENT_STACK_STEP_PX;
         return (
@@ -360,7 +362,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
             style={{
               left: "100%",
               transform: `translateX(calc(-100% + ${peekPx}px))`,
-              zIndex: -1 - i,
+              zIndex: 5 - i,
             }}
           >
             <PermanentCard objectId={attachId} />
