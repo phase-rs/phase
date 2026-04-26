@@ -1131,6 +1131,34 @@ fn apply_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 601.2b + CR 601.2h: Player selected cards to exile from hand as
+        // part of an alternative or additional casting cost (Force of Will,
+        // Force of Negation, Misdirection, Unmask, etc.).
+        (
+            WaitingFor::ExileFromHandForCost {
+                player,
+                count,
+                cards: legal_cards,
+                pending_cast,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => engine_casting::handle_exile_from_hand_for_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *count,
+            legal_cards,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::ExileFromHandForCost {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         (
             WaitingFor::CollectEvidenceChoice {
                 player,

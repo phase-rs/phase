@@ -29,6 +29,7 @@ type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
 type ReturnToHandForCost = Extract<WaitingFor, { type: "ReturnToHandForCost" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type ExileFromGraveyardForCost = Extract<WaitingFor, { type: "ExileFromGraveyardForCost" }>;
+type ExileFromHandForCost = Extract<WaitingFor, { type: "ExileFromHandForCost" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
 type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
@@ -146,6 +147,9 @@ export function CardChoiceModal() {
     case "ExileFromGraveyardForCost":
       if (!canActForWaitingState) return null;
       return <ExileFromGraveyardModal data={waitingFor.data} />;
+    case "ExileFromHandForCost":
+      if (!canActForWaitingState) return null;
+      return <ExileFromHandModal data={waitingFor.data} />;
     case "CollectEvidenceChoice":
       if (!canActForWaitingState) return null;
       return <CollectEvidenceModal data={waitingFor.data} />;
@@ -1339,7 +1343,19 @@ function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
 
 // ── Exile from Graveyard Modal (Escape cost) ────────────────────────────────
 
-function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["data"] }) {
+// ── Shared exile-for-cost modal (graveyard and hand variants share this) ─────
+
+function ExileForCostModal({
+  cards,
+  count,
+  title,
+  subtitle,
+}: {
+  cards: ObjectId[];
+  count: number;
+  title: string;
+  subtitle: string;
+}) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
@@ -1351,13 +1367,13 @@ function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["da
         const next = new Set(prev);
         if (next.has(id)) {
           next.delete(id);
-        } else if (next.size < data.count) {
+        } else if (next.size < count) {
           next.add(id);
         }
         return next;
       });
     },
-    [data.count],
+    [count],
   );
 
   const handleConfirm = useCallback(() => {
@@ -1369,16 +1385,16 @@ function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["da
 
   if (!objects) return null;
 
-  const isReady = selected.size === data.count;
+  const isReady = selected.size === count;
 
   return (
     <ChoiceOverlay
-      title="Escape"
-      subtitle={`Exile ${data.count} card${data.count > 1 ? "s" : ""} from your graveyard`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Exile (${selected.size}/${data.count})`} />}
+      title={title}
+      subtitle={subtitle}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Exile (${selected.size}/${count})`} />}
     >
       <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
+        {cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           const isSelected = selected.has(id);
@@ -1414,6 +1430,30 @@ function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["da
         })}
       </ScrollableCardStrip>
     </ChoiceOverlay>
+  );
+}
+
+function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["data"] }) {
+  return (
+    <ExileForCostModal
+      cards={data.cards}
+      count={data.count}
+      title="Escape"
+      subtitle={`Exile ${data.count} card${data.count > 1 ? "s" : ""} from your graveyard`}
+    />
+  );
+}
+
+// ── Exile from Hand Modal (pitch-spell alternative cost) ───────────────────
+
+function ExileFromHandModal({ data }: { data: ExileFromHandForCost["data"] }) {
+  return (
+    <ExileForCostModal
+      cards={data.cards}
+      count={data.count}
+      title="Alternative cost"
+      subtitle={`Exile ${data.count} card${data.count > 1 ? "s" : ""} from your hand`}
+    />
   );
 }
 

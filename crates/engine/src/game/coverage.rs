@@ -10,8 +10,8 @@ use crate::types::ability::{
     CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, PlayerFilter, PtValue,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SharedQuality, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
-    TypedFilter, ZoneRef,
+    SharedQuality, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -1957,6 +1957,17 @@ pub fn build_parse_details(
         build_additional_cost_items(additional_cost, &mut items);
     }
 
+    // Spell-casting options (alternative-cost lines such as Force of Will's
+    // pitch cost, Snapcaster-style flash, "without paying its mana cost", etc.).
+    // Each `SpellCastingOption` corresponds to its own Oracle line, so it must
+    // emit exactly one `ParsedItem` to keep `count_effective_parsed_items` in
+    // parity with `count_effective_oracle_lines`. Without this, pitch spells
+    // (Force of Will, Force of Negation, Misdirection, …) are falsely flagged
+    // by the silent-drop audit.
+    for option in &face.casting_options {
+        build_casting_option_item(option, &mut items);
+    }
+
     items
 }
 
@@ -2137,6 +2148,35 @@ fn ability_cost_has_unimplemented(cost: &AbilityCost) -> bool {
         AbilityCost::Composite { costs } => costs.iter().any(ability_cost_has_unimplemented),
         _ => false,
     }
+}
+
+/// Build a `ParsedItem` for a single `SpellCastingOption` (alternative cost,
+/// "without paying its mana cost", "as though it had flash", Adventure half).
+///
+/// Each casting option corresponds to its own Oracle line; this keeps
+/// `count_effective_parsed_items` aligned with `count_effective_oracle_lines`
+/// so pitch spells (Force of Will, Force of Negation, Misdirection, …) are
+/// not falsely flagged by the silent-drop audit. The item is unsupported only
+/// when the option carries an `Unimplemented` cost component.
+fn build_casting_option_item(option: &SpellCastingOption, items: &mut Vec<ParsedItem>) {
+    let kind_label = match option.kind {
+        SpellCastingOptionKind::AlternativeCost => "AlternativeCost",
+        SpellCastingOptionKind::CastWithoutManaCost => "CastWithoutManaCost",
+        SpellCastingOptionKind::AsThoughHadFlash => "AsThoughHadFlash",
+        SpellCastingOptionKind::CastAdventure => "CastAdventure",
+    };
+    let supported = option
+        .cost
+        .as_ref()
+        .is_none_or(|c| !ability_cost_has_unimplemented(c));
+    items.push(ParsedItem {
+        category: ParseCategory::Cost,
+        label: format!("CastingOption:{kind_label}"),
+        source_text: None,
+        supported,
+        details: vec![],
+        children: vec![],
+    });
 }
 
 /// Normalize Oracle text into a canonical pattern for clustering.

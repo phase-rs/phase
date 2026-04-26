@@ -192,6 +192,33 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 400.2: Library and hand are hidden zones — opponents cannot see the
+    // identities of cards there. The eligible-cards list for an alternative or
+    // additional exile-from-hand cost (Force of Will and the rest of the
+    // pitch-spell family) would leak hand contents to opponents (e.g.
+    // `cards.len()` reveals the count of blue cards in the caster's hand minus
+    // one). Redact `cards` to opaque placeholders for viewers who cannot see
+    // the caster's hand. `count` and `pending_cast` are public (CR 601.2 +
+    // CR 408 — the spell on the stack is public information).
+    // Note: `ExileFromGraveyardForCost` is intentionally NOT redacted because
+    // the graveyard is a public zone (CR 400.2).
+    if let WaitingFor::ExileFromHandForCost {
+        player,
+        count,
+        ref cards,
+        ref pending_cast,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::ExileFromHandForCost {
+                player,
+                count,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                pending_cast: pending_cast.clone(),
+            };
+        }
+    }
+
     if let WaitingFor::EffectZoneChoice {
         player,
         ref cards,
@@ -493,6 +520,62 @@ mod tests {
             filtered.pending_cast.is_some(),
             "non-caster must see opponent's pending cast during ModeChoice (CR 601.2 + CR 408)"
         );
+    }
+
+    /// CR 400.2: hand is a hidden zone. The eligible-cards list for an
+    /// exile-from-hand cost reveals "blue cards in caster's hand − 1" to
+    /// opponents and must be redacted, while the caster's own view is
+    /// preserved.
+    #[test]
+    fn exile_from_hand_for_cost_is_hidden_from_non_controller() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Blue Pitch Card".to_string(),
+            Zone::Hand,
+        );
+        let pending = dummy_pending_cast(ObjectId(50), CardId(99), PlayerId(1));
+        state.waiting_for = WaitingFor::ExileFromHandForCost {
+            player: PlayerId(1),
+            count: 1,
+            cards: vec![card_id],
+            pending_cast: pending,
+        };
+
+        // Caster sees the real ID.
+        let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
+        match filtered_self.waiting_for {
+            WaitingFor::ExileFromHandForCost {
+                cards,
+                count,
+                player,
+                ..
+            } => {
+                assert_eq!(cards, vec![card_id]);
+                assert_eq!(count, 1);
+                assert_eq!(player, PlayerId(1));
+            }
+            other => panic!("expected ExileFromHandForCost, got {other:?}"),
+        }
+
+        // Opponent sees a placeholder, but `count` and `pending_cast` survive.
+        let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
+        match filtered_opp.waiting_for {
+            WaitingFor::ExileFromHandForCost {
+                cards,
+                count,
+                player,
+                pending_cast,
+            } => {
+                assert_eq!(cards, vec![ObjectId(0)]);
+                assert_eq!(count, 1);
+                assert_eq!(player, PlayerId(1));
+                assert_eq!(pending_cast.object_id, ObjectId(50));
+            }
+            other => panic!("expected ExileFromHandForCost, got {other:?}"),
+        }
     }
 
     #[test]
