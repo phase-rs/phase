@@ -9589,6 +9589,43 @@ mod tests {
     }
 
     #[test]
+    fn static_parse_for_each_attached_to_self_kellan() {
+        // CR 301.5 + CR 303.4: Kellan, the Fae-Blooded — "Other creatures you
+        // control get +1/+0 for each Aura and Equipment attached to ~." The
+        // multiplier was previously dropped (boost frozen at +1/+0); now the
+        // for-each clause emits an `AddDynamicPower` over an `ObjectCount`
+        // filtered by `AttachedToSource` so the boost scales with attachments.
+        let result = parse_static_line(
+            "Other creatures you control get +1/+0 for each Aura and Equipment attached to ~.",
+        );
+        let def = result.expect("Kellan static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        let dynamic_power = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        match dynamic_power {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.properties.contains(&FilterProp::AttachedToSource),
+                        "filter must carry AttachedToSource, got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount Ref, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn static_parse_for_each_clause_other_creature() {
         // Verify parse_for_each_clause handles "other creature you control"
         let result =

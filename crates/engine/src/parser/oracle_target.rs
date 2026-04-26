@@ -97,6 +97,12 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
                 tag("that permanent or player"),
             ),
             value(TargetFilter::TriggeringSource, tag("that permanent")),
+            // CR 608.2k + CR 301.5a: "that creature" inside a trigger refers to the
+            // triggering source object (e.g. Pip-Boy 3000's "Whenever equipped
+            // creature attacks ... put a +1/+1 counter on that creature"), not to
+            // a parent target. Placed after longer "that ..." phrases so
+            // longest-match-first dispatch is preserved.
+            value(TargetFilter::TriggeringSource, tag("that creature")),
             // CR 506.3d: "defending player" — the player being attacked.
             value(TargetFilter::DefendingPlayer, tag("defending player")),
         ))
@@ -3893,6 +3899,11 @@ mod tests {
 
     #[test]
     fn parse_target_that_creature_inherits_parent_target() {
+        // CR 608.2c: Without trigger context, "that creature" defaults to the
+        // parent target (Twinflame Strive: "create a token that's a copy of that
+        // creature"). Trigger-context resolution to `TriggeringSource` is layered
+        // on top of `parse_target` by callers that thread a `ParseContext` (see
+        // `resolve_counter_placement_target` in `oracle_effect/counter.rs`).
         let (filter, rest) = parse_target("that creature");
         assert_eq!(filter, TargetFilter::ParentTarget);
         assert_eq!(rest, "");

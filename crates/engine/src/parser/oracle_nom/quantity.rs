@@ -962,9 +962,47 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_in_zone,
         parse_zone_card_count,
+        parse_for_each_attached_to_source,
         parse_for_each_controlled_type,
     ))
     .parse(input)
+}
+
+/// CR 301.5 + CR 303.4: Parse "<type> [and <type>]* attached to ~" — counts
+/// objects whose `attached_to` field references the source object. Used by
+/// "for each Aura and Equipment attached to ~" (Kellan, the Fae-Blooded) and
+/// any analogous boost that scales with attachments on the source.
+///
+/// Composes `parse_type_filter_word` for each type term, joined by " and ",
+/// then matches `" attached to ~"`. Returns a `QuantityRef::ObjectCount` over
+/// a `TypedFilter` whose type filters are the matched types and whose only
+/// property is `FilterProp::AttachedToSource`.
+fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (mut rest, first) = parse_type_filter_word(input)?;
+    let mut types = vec![first];
+    while let Ok((after_and, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>(" and ").parse(rest)
+    {
+        let (after_type, next) = parse_type_filter_word(after_and)?;
+        types.push(next);
+        rest = after_type;
+    }
+    let (rest, _) = tag(" attached to ~").parse(rest)?;
+    let type_filters = if types.len() == 1 {
+        types
+    } else {
+        vec![TypeFilter::AnyOf(types)]
+    };
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: None,
+                properties: vec![FilterProp::AttachedToSource],
+            }),
+        },
+    ))
 }
 
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -1048,6 +1086,59 @@ mod tests {
         let (rest, q) = parse_quantity("3 damage").unwrap();
         assert_eq!(q, QuantityExpr::Fixed { value: 3 });
         assert_eq!(rest, " damage");
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_source_two_kinds() {
+        // CR 301.5 + CR 303.4: Kellan, the Fae-Blooded — "for each Aura and
+        // Equipment attached to ~". Composes a typed AnyOf over Aura/Equipment
+        // subtypes with the new `AttachedToSource` filter prop.
+        let (rest, q) = parse_for_each_clause_ref("aura and equipment attached to ~").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(controller, None);
+                    assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                    assert_eq!(
+                        type_filters,
+                        vec![TypeFilter::AnyOf(vec![
+                            TypeFilter::Subtype("Aura".into()),
+                            TypeFilter::Subtype("Equipment".into())
+                        ])]
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_source_single_kind() {
+        // Single-subtype variant: "for each Aura attached to ~" — proves the
+        // combinator handles singular type lists without an outer `AnyOf`.
+        let (rest, q) = parse_for_each_clause_ref("aura attached to ~").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(controller, None);
+                    assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                    assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
     }
 
     #[test]

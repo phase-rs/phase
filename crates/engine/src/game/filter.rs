@@ -1069,6 +1069,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Owned { .. }
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
         | FilterProp::HasAttachment { .. }
         | FilterProp::Another
         | FilterProp::OtherThanTriggerObject
@@ -1349,6 +1350,13 @@ fn matches_filter_prop(
                         .is_some_and(|att| att.card_types.subtypes.iter().any(|s| s == "Equipment"))
                 })
             }
+        }
+        // CR 301.5 + CR 303.4: Inverse of `EnchantedBy`/`EquippedBy` — matches
+        // when THIS object is attached TO the source (`obj.attached_to ==
+        // Some(source.id)`). Used for "Aura and Equipment attached to ~"
+        // quantity clauses on the source object (Kellan, the Fae-Blooded).
+        FilterProp::AttachedToSource => {
+            obj.attached_to.and_then(|t| t.as_object()) == Some(source.id)
         }
         // CR 303.4 + CR 301.5: Non-source-relative attachment predicate.
         // Matches objects that have at least one attachment of the given kind whose
@@ -1695,6 +1703,7 @@ fn zone_change_record_matches_property(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
         | FilterProp::HasAttachment { .. }
         | FilterProp::FaceDown
         | FilterProp::CountersGE { .. }
@@ -2215,6 +2224,68 @@ mod tests {
         assert!(
             !matches_target_filter(&state, creature_b, &filter, aura),
             "EnchantedBy must not match creatures the aura is NOT attached to"
+        );
+    }
+
+    #[test]
+    fn attached_to_source_matches_aura_or_equipment_attached_to_source() {
+        // CR 301.5 + CR 303.4: `FilterProp::AttachedToSource` matches when the
+        // candidate object's `attached_to` references the filter source.
+        // Inverse of `EnchantedBy`/`EquippedBy`. Drives Kellan, the Fae-Blooded's
+        // "for each Aura and Equipment attached to ~" boost multiplier.
+        let mut state = setup();
+        let kellan = add_creature(&mut state, PlayerId(0), "Kellan");
+        let other_creature = add_creature(&mut state, PlayerId(0), "Other");
+
+        let aura_id = state.next_object_id;
+        let aura = create_object(
+            &mut state,
+            CardId(aura_id),
+            PlayerId(0),
+            "Rancor".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(kellan.into());
+
+        let equip_id = state.next_object_id;
+        let equip = create_object(
+            &mut state,
+            CardId(equip_id),
+            PlayerId(0),
+            "Sword".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&equip)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        state.objects.get_mut(&equip).unwrap().attached_to = Some(other_creature.into());
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent().properties(vec![FilterProp::AttachedToSource]),
+        );
+
+        assert!(
+            matches_target_filter(&state, aura, &filter, kellan),
+            "AttachedToSource must match an attachment on the source"
+        );
+        assert!(
+            !matches_target_filter(&state, equip, &filter, kellan),
+            "AttachedToSource must NOT match an attachment on a different object"
+        );
+        assert!(
+            !matches_target_filter(&state, kellan, &filter, kellan),
+            "AttachedToSource must NOT match the source itself (it is not attached)"
         );
     }
 

@@ -300,6 +300,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Owned { controller } => parts.push(fmt_controller(controller)),
             FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
+            FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::HasAttachment { kind, controller } => {
                 let kind_s = match kind {
                     crate::types::ability::AttachmentKind::Aura => "aura",

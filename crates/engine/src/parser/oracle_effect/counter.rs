@@ -151,6 +151,20 @@ fn resolve_counter_placement_target<'a>(
     if is_it_pronoun(on_rest) {
         return (resolve_it_pronoun(ctx), "", None);
     }
+    // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
+    // non-self filter (e.g. Pip-Boy 3000's "Whenever equipped creature
+    // attacks ... put a +1/+1 counter on that creature") refers to the
+    // triggering source object — not to the parent target (the modal parent
+    // here is a `GenericEffect` with no target, leaving `ParentTarget`
+    // unbound). Mirrors `resolve_it_pronoun` for the explicit "that creature"
+    // anaphor.
+    if let Some(rem) = resolve_that_creature_in_trigger(on_rest, ctx) {
+        // Map `rem` (sliced from `on_rest`) back into `text` so the returned
+        // remainder lifetime matches `text`. `on_rest` is the lowercase view;
+        // ASCII-equal-length guard above keeps byte offsets aligned.
+        let offset = text.len() - rem.len();
+        return (TargetFilter::TriggeringSource, &text[offset..], None);
+    }
     // CR 115.1d: "up to N" (and "each of up to N") modifies the target count,
     // not the counter count. Strip it and emit a MultiTargetSpec.
     let (target_text, multi) = if let Some(((), after_up_to)) =
@@ -420,11 +434,34 @@ fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
     } else if is_it_pronoun(text) {
         // CR 608.2k: Bare pronoun — context-dependent
         resolve_it_pronoun(ctx)
+    } else if resolve_that_creature_in_trigger(text, ctx).is_some() {
+        // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
+        TargetFilter::TriggeringSource
     } else {
         let (t, _rem) = parse_target(text);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);
         t
+    }
+}
+
+/// CR 608.2k + CR 301.5a: Returns `Some(remainder)` when `text` begins with
+/// "that creature" AND we are inside a trigger whose subject is a non-self,
+/// non-Any filter (e.g. an `AttachedTo` trigger's "Whenever equipped creature
+/// attacks"). The remainder is the post-phrase tail so callers can continue
+/// parsing trailing punctuation/clauses. Mirrors `resolve_it_pronoun`'s
+/// gating: a trigger whose subject is `SelfRef`/`Any` (or no subject) keeps
+/// the legacy `ParentTarget` semantics — used for spells/abilities like
+/// Twinflame Strive where "that creature" refers back to the parent target.
+fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &ParseContext) -> Option<&'a str> {
+    let (rest, _): (&'a str, &'a str) = tag::<_, _, VerboseError<&'a str>>("that creature")
+        .parse(text)
+        .ok()?;
+    match &ctx.subject {
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+            Some(rest)
+        }
+        _ => None,
     }
 }
 
