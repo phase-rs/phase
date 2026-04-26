@@ -474,15 +474,6 @@ export type TargetRef =
   | { Object: ObjectId }
   | { Player: PlayerId };
 
-// ── Attach Target ───────────────────────────────────────────────────────
-// Mirror of the Rust `AttachTarget` enum (`crates/engine/src/game/game_object.rs`).
-// Wire shape uses serde's `#[serde(tag = "type", content = "data")]` discriminator
-// — Equipment is restricted to Object hosts (CR 301.5); Auras can attach to either
-// permanents or players (CR 303.4 + CR 702.5d, "Enchant player").
-export type AttachTarget =
-  | { type: "Object"; data: ObjectId }
-  | { type: "Player"; data: PlayerId };
-
 // ── Combat ───────────────────────────────────────────────────────────────
 
 export interface AttackerInfo {
