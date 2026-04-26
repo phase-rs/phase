@@ -252,6 +252,26 @@ pub(super) fn handle_exile_from_graveyard_for_cost(
     )
 }
 
+pub(super) fn handle_exile_from_hand_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: PendingCast,
+    count: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_exile_from_hand_for_cost(
+        state,
+        player,
+        pending_cast,
+        count,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
 pub(super) fn handle_collect_evidence_cancel(
     state: &mut GameState,
     player: PlayerId,

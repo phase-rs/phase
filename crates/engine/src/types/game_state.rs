@@ -1335,6 +1335,21 @@ pub enum WaitingFor {
         /// The pending cast to resume after the exile is complete.
         pending_cast: Box<PendingCast>,
     },
+    /// CR 118.9a + CR 601.2b + CR 601.2h: Player must choose cards to exile from
+    /// hand as part of an alternative or additional casting cost (Force of Will,
+    /// Force of Negation, Force of Vigor, Misdirection, Unmask, Mindbreak Trap,
+    /// etc.). CR 118.9a authorizes alternative costs; CR 601.2b covers cost
+    /// announcement; CR 601.2h covers payment. Eligibility is pre-filtered against
+    /// the cost's `TargetFilter`; the spell being cast is excluded.
+    ExileFromHandForCost {
+        player: PlayerId,
+        /// How many cards to exile.
+        count: usize,
+        /// Eligible cards in hand — excludes the spell being cast.
+        cards: Vec<ObjectId>,
+        /// The pending cast to resume after the exile is complete.
+        pending_cast: Box<PendingCast>,
+    },
     /// CR 701.59a / CR 702.163a: Choose graveyard cards with combined mana value
     /// at least the required threshold, then resume casting or effect resolution.
     CollectEvidenceChoice {
@@ -1711,6 +1726,7 @@ impl WaitingFor {
             | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
             | WaitingFor::ExileFromGraveyardForCost { player, .. }
+            | WaitingFor::ExileFromHandForCost { player, .. }
             | WaitingFor::CollectEvidenceChoice { player, .. }
             | WaitingFor::HarmonizeTapChoice { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
@@ -1776,6 +1792,7 @@ impl WaitingFor {
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
             | WaitingFor::ExileFromGraveyardForCost { pending_cast, .. }
+            | WaitingFor::ExileFromHandForCost { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
@@ -3201,6 +3218,12 @@ mod tests {
             cards: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));
+        variants.push(Box::new(WaitingFor::ExileFromHandForCost {
+            player: PlayerId(0),
+            count: 1,
+            cards: vec![ObjectId(1)],
+            pending_cast: dummy_pending(),
+        }));
         variants.push(Box::new(WaitingFor::SacrificeForCost {
             player: PlayerId(0),
             count: 1,
@@ -3261,7 +3284,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 28);
+        assert_eq!(variants.len(), 29);
     }
 
     #[test]

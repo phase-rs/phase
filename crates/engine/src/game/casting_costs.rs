@@ -446,6 +446,67 @@ pub(crate) fn handle_exile_from_graveyard_for_cost(
     )
 }
 
+/// CR 118.9a + CR 601.2b + CR 601.2h: Complete the exile-from-hand cost after
+/// player selection (Force of Will and the rest of the pitch-spell family).
+/// CR 118.9a authorizes alternative costs; CR 601.2b covers cost announcement;
+/// CR 601.2h covers payment. Mirrors `handle_exile_from_graveyard_for_cost` —
+/// the only difference is the source zone (hand vs. graveyard), which is
+/// enforced by the eligibility re-check.
+pub(crate) fn handle_exile_from_hand_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    expected: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != expected {
+        return Err(EngineError::InvalidAction(format!(
+            "Must exile exactly {} card(s), got {}",
+            expected,
+            chosen.len()
+        )));
+    }
+    for id in chosen {
+        if !legal_cards.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card not eligible for exile".to_string(),
+            ));
+        }
+    }
+
+    // Re-validate: chosen cards must still be in hand
+    for &id in chosen {
+        let still_in_hand = state
+            .players
+            .get(player.0 as usize)
+            .is_some_and(|p| p.hand.contains(&id));
+        if !still_in_hand {
+            return Err(EngineError::InvalidAction(
+                "Selected card is no longer in hand".to_string(),
+            ));
+        }
+    }
+
+    for &id in chosen {
+        super::zones::move_to_zone(state, id, Zone::Exile, events);
+    }
+
+    pay_and_push(
+        state,
+        player,
+        pending.object_id,
+        pending.card_id,
+        pending.ability,
+        &pending.cost,
+        pending.casting_variant,
+        pending.distribute,
+        pending.origin_zone,
+        events,
+    )
+}
+
 /// Push an activated ability to the stack after costs are paid.
 /// Shared by: direct path in `handle_activate_ability`, sacrifice detour, and
 /// waterbend/ManaPayment finalization in the PassPriority handler.
@@ -1104,6 +1165,33 @@ fn pay_additional_cost(
                 ..pending
             }));
             return enter_payment_step(state, player, Some(ConvokeMode::Waterbend), events);
+        }
+        AbilityCost::Exile {
+            count,
+            zone: Some(Zone::Hand),
+            ref filter,
+        } => {
+            // CR 118.9a + CR 601.2b + CR 601.2h: Exile N cards from hand as
+            // part of an alternative or additional casting cost (Force of Will,
+            // Force of Negation, Misdirection, Unmask, etc.).
+            // Eligibility is filtered by the cost's `TargetFilter`.
+            let eligible = super::casting::find_eligible_exile_from_hand_targets(
+                state,
+                player,
+                pending.object_id,
+                filter.as_ref(),
+            );
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible cards in hand to exile".to_string(),
+                ));
+            }
+            return Ok(WaitingFor::ExileFromHandForCost {
+                player,
+                count: count as usize,
+                cards: eligible,
+                pending_cast: Box::new(pending),
+            });
         }
         AbilityCost::Exile {
             count,
@@ -3907,5 +3995,218 @@ mod tests {
                 CascadeCheck::Rejected { .. } => "Rejected",
             }
         }
+    }
+
+    /// CR 601.2b + CR 601.2h: `AbilityCost::Exile { zone: Some(Hand), filter }`
+    /// must surface as a `WaitingFor::ExileFromHandForCost` carrying only
+    /// filter-matching cards from the caster's hand, with the cast source
+    /// itself excluded. Building-block-level test — covers every pitch spell
+    /// (Force of Will, Force of Negation, Force of Vigor, Misdirection,
+    /// Unmask, Mindbreak Trap, …), not just one card.
+    #[test]
+    fn exile_from_hand_for_cost_filters_eligible_hand_cards() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        // Cast source — the spell being cast (must be excluded from eligibility).
+        let source_id = create_object(
+            &mut state,
+            CardId(900),
+            caster,
+            "Pitch Source".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Blue);
+        }
+
+        // Eligible: blue card in hand.
+        let blue_card = create_object(
+            &mut state,
+            CardId(901),
+            caster,
+            "Blue Filler".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&blue_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Blue);
+        }
+
+        // Ineligible: non-blue card in hand.
+        let red_card = create_object(
+            &mut state,
+            CardId(902),
+            caster,
+            "Red Filler".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&red_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Red);
+        }
+
+        let mut events = Vec::new();
+        let pending = PendingCast {
+            object_id: source_id,
+            card_id: CardId(900),
+            ability: ResolvedAbility::new(
+                Effect::Counter {
+                    target: TargetFilter::Any,
+                    source_static: None,
+                    unless_payment: None,
+                },
+                Vec::new(),
+                source_id,
+                caster,
+            ),
+            cost: crate::types::mana::ManaCost::NoCost,
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: Vec::new(),
+            casting_variant: CastingVariant::Normal,
+            distribute: None,
+            origin_zone: Zone::Hand,
+        };
+
+        let result = pay_additional_cost(
+            &mut state,
+            caster,
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Hand),
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                    properties: vec![FilterProp::HasColor {
+                        color: ManaColor::Blue,
+                    }],
+                })),
+            },
+            pending,
+            &mut events,
+        )
+        .expect("pitch cost should produce ExileFromHandForCost");
+
+        match result {
+            WaitingFor::ExileFromHandForCost {
+                player,
+                count,
+                cards,
+                ..
+            } => {
+                assert_eq!(player, caster);
+                assert_eq!(count, 1);
+                assert!(
+                    cards.contains(&blue_card),
+                    "blue hand card must be eligible: {cards:?}"
+                );
+                assert!(
+                    !cards.contains(&red_card),
+                    "non-blue hand card must be filtered out: {cards:?}"
+                );
+                assert!(
+                    !cards.contains(&source_id),
+                    "cast source itself must never be eligible: {cards:?}"
+                );
+            }
+            other => panic!("expected ExileFromHandForCost, got {other:?}"),
+        }
+    }
+
+    /// CR 601.2b: When the hand has fewer eligible cards than the cost
+    /// requires, the cost is unpayable and casting must fail rather than
+    /// surfacing a dead `WaitingFor`.
+    #[test]
+    fn exile_from_hand_for_cost_rejects_when_insufficient_eligible_cards() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(900),
+            caster,
+            "Pitch Source".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Blue);
+        }
+
+        // Only ineligible (non-blue) cards available.
+        let red_card = create_object(
+            &mut state,
+            CardId(902),
+            caster,
+            "Red Filler".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&red_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Red);
+        }
+
+        let pending = PendingCast {
+            object_id: source_id,
+            card_id: CardId(900),
+            ability: ResolvedAbility::new(
+                Effect::Counter {
+                    target: TargetFilter::Any,
+                    source_static: None,
+                    unless_payment: None,
+                },
+                Vec::new(),
+                source_id,
+                caster,
+            ),
+            cost: crate::types::mana::ManaCost::NoCost,
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: Vec::new(),
+            casting_variant: CastingVariant::Normal,
+            distribute: None,
+            origin_zone: Zone::Hand,
+        };
+
+        let mut events = Vec::new();
+        let result = pay_additional_cost(
+            &mut state,
+            caster,
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Hand),
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                    properties: vec![FilterProp::HasColor {
+                        color: ManaColor::Blue,
+                    }],
+                })),
+            },
+            pending,
+            &mut events,
+        );
+
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "unpayable pitch cost must fail: {result:?}"
+        );
     }
 }

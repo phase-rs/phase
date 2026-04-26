@@ -1018,6 +1018,23 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 601.2b + CR 601.2h: AI selects cards to exile from hand as part of
+        // paying an alternative or additional casting cost (pitch spells).
+        WaitingFor::ExileFromHandForCost {
+            player,
+            count,
+            cards,
+            ..
+        } => combinations(cards, *count)
+            .into_iter()
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::CollectEvidenceChoice {
             player,
             minimum_mana_value,

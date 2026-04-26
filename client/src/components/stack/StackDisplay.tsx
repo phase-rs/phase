@@ -40,6 +40,7 @@ function getPendingCastObjectId(
     case "BlightChoice":
     case "TapCreaturesForSpellCost":
     case "ExileFromGraveyardForCost":
+    case "ExileFromHandForCost":
     case "HarmonizeTapChoice":
     case "ChooseXValue":
       return waitingFor.data.pending_cast.object_id;

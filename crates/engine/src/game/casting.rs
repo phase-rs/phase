@@ -3247,7 +3247,12 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
     }
 }
 
-pub(crate) fn find_eligible_discard_targets(
+/// Shared eligibility helper for hand-card cost payments — returns every card
+/// in `player`'s hand matching `filter` (if any), excluding the cast source.
+/// Used by both discard-as-cost (CR 601.2b) and exile-from-hand-as-cost
+/// (Force of Will family). The destination zone (graveyard vs exile) is the
+/// caller's concern; the eligibility set is identical.
+fn find_eligible_hand_cost_targets(
     state: &GameState,
     player: PlayerId,
     source: ObjectId,
@@ -3271,6 +3276,28 @@ pub(crate) fn find_eligible_discard_targets(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+pub(crate) fn find_eligible_discard_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    find_eligible_hand_cost_targets(state, player, source, filter)
+}
+
+/// CR 601.2b + CR 601.2h: Eligible cards in hand for an `AbilityCost::Exile`
+/// payment whose `zone` is `Hand`. The cast source itself is never eligible
+/// (it is moved to the stack before costs are paid, but defense-in-depth
+/// keeps it out regardless).
+pub(crate) fn find_eligible_exile_from_hand_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    find_eligible_hand_cost_targets(state, player, source, filter)
 }
 
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
