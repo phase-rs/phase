@@ -74,6 +74,7 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             CastingPermission::PlayFromExile { .. } => true,
             CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
+            | CastingPermission::ExileWithAltAbilityCost { .. }
             | CastingPermission::ExileWithEnergyCost
             | CastingPermission::WarpExile { .. }
             // CR 702.170d: Plotted persists across turns (that is the whole
@@ -97,6 +98,7 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
+            | CastingPermission::ExileWithAltAbilityCost { .. }
             | CastingPermission::ExileWithEnergyCost
             | CastingPermission::WarpExile { .. }
             // CR 702.170d: Plotted persists across turns; never pruned at the
@@ -1054,6 +1056,45 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
 /// supports non-battlefield grant statics like Lorehold's "Each instant and
 /// sorcery card in your hand has miracle {2}", whose filter carries
 /// `InZone { zone: Hand }`.
+/// CR 613.4c: True when the QuantityExpr's filter tree contains
+/// `FilterProp::AttachedToRecipient` — the per-recipient pronoun "it" referent
+/// in "for each X attached to it" clauses on Aura/Equipment statics. When
+/// true, dynamic P/T resolution must run inside the per-recipient loop so
+/// the count is computed against each affected creature, not against the
+/// static's source object.
+fn quantity_expr_uses_recipient(expr: &crate::types::ability::QuantityExpr) -> bool {
+    use crate::types::ability::{QuantityExpr, QuantityRef};
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::ObjectCount { filter }
+            | QuantityRef::ObjectCountDistinctNames { filter } => filter_uses_recipient(filter),
+            _ => false,
+        },
+        QuantityExpr::HalfRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
+    }
+}
+
+/// Recursively check whether a `TargetFilter` carries
+/// `FilterProp::AttachedToRecipient` anywhere in its property tree. Mirrors
+/// `filter_contains_other_than_trigger_object` in `quantity.rs`.
+fn filter_uses_recipient(filter: &crate::types::ability::TargetFilter) -> bool {
+    use crate::types::ability::{FilterProp, TargetFilter};
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::AttachedToRecipient)),
+        TargetFilter::Not { filter: inner } => filter_uses_recipient(inner),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_uses_recipient)
+        }
+        _ => false,
+    }
+}
+
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
     let scan_zone = effect
         .affected_filter
@@ -1096,27 +1137,38 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     // case where source ≠ recipient (e.g. Switcheroo: both transient effects
     // share one source, but each slot needs the opposite controller).
 
-    // Pre-compute dynamic P/T values (avoids borrow conflict in the loop)
-    let dynamic_pt = match &effect.modification {
+    // Pre-compute dynamic P/T values (avoids borrow conflict in the loop).
+    //
+    // CR 613.4c: Most dynamic modifications resolve to a single value shared
+    // across every affected object — the static's source is the natural
+    // referent. The exception is the "<subject> gets +N/+M for each X
+    // attached to it" family (Strong Back, Mantle of the Ancients, Bruenor
+    // Battlehammer, etc.), where the pronoun "it" is anaphoric on the
+    // recipient creature, not the source. For that family we defer
+    // resolution into the per-recipient loop below.
+    let dynamic_pt_expr = match &effect.modification {
         ContinuousModification::SetDynamicPower { value }
         | ContinuousModification::SetDynamicToughness { value }
         | ContinuousModification::SetPowerDynamic { value }
         | ContinuousModification::SetToughnessDynamic { value }
         | ContinuousModification::AddDynamicPower { value }
         | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::AddDynamicKeyword { value, .. } => {
-            let controller = state
-                .objects
-                .get(&effect.source_id)
-                .map(|o| o.controller)
-                .unwrap_or(PlayerId(0));
-            Some(crate::game::quantity::resolve_quantity(
-                state,
-                value,
-                controller,
-                effect.source_id,
-            ))
-        }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
+        _ => None,
+    };
+    let effect_controller = state
+        .objects
+        .get(&effect.source_id)
+        .map(|o| o.controller)
+        .unwrap_or(PlayerId(0));
+    let dynamic_uses_recipient = dynamic_pt_expr.is_some_and(quantity_expr_uses_recipient);
+    let dynamic_pt_shared = match (dynamic_pt_expr, dynamic_uses_recipient) {
+        (Some(value), false) => Some(crate::game::quantity::resolve_quantity(
+            state,
+            value,
+            effect_controller,
+            effect.source_id,
+        )),
         _ => None,
     };
 
@@ -1138,6 +1190,24 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     };
 
     for id in affected_ids {
+        // CR 613.4c: When the dynamic modification's QuantityExpr counts
+        // attachments on the recipient, resolve here under a recipient-bound
+        // FilterContext. The immutable read finishes before the mutable
+        // borrow of `obj` below.
+        let dynamic_pt = if dynamic_uses_recipient {
+            dynamic_pt_expr.map(|value| {
+                crate::game::quantity::resolve_quantity_with_recipient(
+                    state,
+                    value,
+                    effect_controller,
+                    effect.source_id,
+                    id,
+                )
+            })
+        } else {
+            dynamic_pt_shared
+        };
+
         let obj = match state.objects.get_mut(&id) {
             Some(o) => o,
             None => continue,
@@ -1470,6 +1540,7 @@ fn inject_basic_mana_ability_for_subtype(
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap),
@@ -2017,6 +2088,261 @@ mod tests {
             !b.has_keyword(&Keyword::Trample),
             "Non-enchanted bear has no trample"
         );
+    }
+
+    /// CR 301.5 + CR 303.4 + CR 613.4c: End-to-end runtime confirmation of
+    /// the Strong Back / Mantle of the Ancients class — "Enchanted creature
+    /// gets +N/+N for each Aura and Equipment attached to it." The pronoun
+    /// "it" must resolve against each layer-evaluated *recipient* (the
+    /// enchanted creature), not against the static's source (the Aura), so a
+    /// non-Background, non-attached enchantment elsewhere on the battlefield
+    /// must not contribute to the count.
+    #[test]
+    fn strong_back_per_recipient_dynamic_boost_counts_only_attachments_on_recipient() {
+        use crate::types::ability::{
+            FilterProp, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        };
+
+        let mut state = setup();
+        // Recipient: the bear Strong Back is enchanting.
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        // Bystander: an unrelated creature elsewhere on the battlefield.
+        let other = make_creature(&mut state, "Other Bear", 2, 2, PlayerId(0));
+
+        // Strong Back itself — the Aura source of the static.
+        let strong_back = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Strong Back".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&strong_back).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+
+            // The "Enchanted creature gets +2/+2 for each Aura and Equipment
+            // attached to it" continuous static — the lowering produced by
+            // `parse_static_line`.
+            let attached_to_recipient_filter = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Subtype("Aura".into()),
+                    TypeFilter::Subtype("Equipment".into()),
+                ])],
+                controller: None,
+                properties: vec![FilterProp::AttachedToRecipient],
+            });
+            let qty = QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: attached_to_recipient_filter,
+                    },
+                }),
+            };
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::AddDynamicPower { value: qty.clone() },
+                        ContinuousModification::AddDynamicToughness { value: qty },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(strong_back);
+
+        // A second Aura attached to the recipient bear (counts).
+        let recipient_aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Bear Umbra".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&recipient_aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(recipient_aura);
+
+        // A bystander Aura (Wild Growth) attached to OTHER creature — must
+        // NOT count toward the bear's boost. This is the legacy bug class.
+        let bystander_aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Wild Growth".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&bystander_aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.attached_to = Some(other.into());
+            obj.timestamp = ts;
+        }
+        state
+            .objects
+            .get_mut(&other)
+            .unwrap()
+            .attachments
+            .push(bystander_aura);
+
+        evaluate_layers(&mut state);
+
+        // Two Auras attached to the bear (Strong Back + Bear Umbra) →
+        // +2/+2 × 2 = +4/+4 over base 2/2 → final 6/6.
+        let final_bear = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            final_bear.power,
+            Some(6),
+            "expected 2 base + (2 attachments × 2) = 6 power; got {:?}",
+            final_bear.power
+        );
+        assert_eq!(
+            final_bear.toughness,
+            Some(6),
+            "expected 2 base + (2 attachments × 2) = 6 toughness; got {:?}",
+            final_bear.toughness
+        );
+
+        // The other bear has its own attachment but is not the static's
+        // recipient (it isn't enchanted by Strong Back) — it must remain at
+        // base 2/2.
+        let final_other = state.objects.get(&other).unwrap();
+        assert_eq!(final_other.power, Some(2));
+        assert_eq!(final_other.toughness, Some(2));
+    }
+
+    /// CR 301.5 + CR 303.4: Negative regression — Wild Growth on a different
+    /// permanent must not seep into the boost count for the enchanted
+    /// creature. This is the symptom users reported (Strong Back boost
+    /// scaling with every battlefield enchantment).
+    #[test]
+    fn strong_back_unrelated_enchantment_does_not_inflate_boost() {
+        use crate::types::ability::{
+            FilterProp, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        };
+
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let land_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let strong_back = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Strong Back".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&strong_back).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+
+            let qty = QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::AnyOf(vec![
+                                TypeFilter::Subtype("Aura".into()),
+                                TypeFilter::Subtype("Equipment".into()),
+                            ])],
+                            controller: None,
+                            properties: vec![FilterProp::AttachedToRecipient],
+                        }),
+                    },
+                }),
+            };
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::AddDynamicPower { value: qty.clone() },
+                        ContinuousModification::AddDynamicToughness { value: qty },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(strong_back);
+
+        // Wild Growth on the FOREST — this enchants a land, not the bear.
+        let wild_growth = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Wild Growth".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&wild_growth).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.attached_to = Some(land_id.into());
+            obj.timestamp = ts;
+        }
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .attachments
+            .push(wild_growth);
+
+        evaluate_layers(&mut state);
+
+        // Only Strong Back itself is attached to the bear → +2/+2 once.
+        let final_bear = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            final_bear.power,
+            Some(4),
+            "Wild Growth on a land must not contribute to the bear's boost"
+        );
+        assert_eq!(final_bear.toughness, Some(4));
     }
 
     #[test]
@@ -4191,6 +4517,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -4831,5 +5158,135 @@ mod tests {
             .contains(&Keyword::Protection(ProtectionTarget::Color(
                 ManaColor::Blue
             ))));
+    }
+
+    /// CR 903.3d + CR 702.21: "Commanders you control have ward {2}." —
+    /// Codsworth, Handy Helper. The static must grant Ward to a controlled
+    /// commander on the battlefield, and must NOT grant it to a non-commander
+    /// creature you control. Verifies the FilterProp::IsCommander runtime path.
+    #[test]
+    fn codsworth_ward_grant_targets_only_commanders() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::WardCost;
+        use crate::types::mana::ManaCost;
+        let mut state = setup();
+
+        let codsworth = make_creature(&mut state, "Codsworth", 2, 3, PlayerId(0));
+        let commander = make_creature(&mut state, "MyCommander", 4, 4, PlayerId(0));
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        // A vanilla creature you control — must not receive Ward.
+        let vanilla = make_creature(&mut state, "VanillaBear", 2, 2, PlayerId(0));
+
+        let ward = Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+            generic: 2,
+            shards: vec![],
+        }));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: ward.clone(),
+            }]);
+        state
+            .objects
+            .get_mut(&codsworth)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&commander].keywords.contains(&ward),
+            "commander must receive Ward grant"
+        );
+        assert!(
+            !state.objects[&vanilla].keywords.contains(&ward),
+            "non-commander must NOT receive Ward grant"
+        );
+    }
+
+    /// CR 903.3d: When no commander is on the battlefield, a "commanders you
+    /// control" static is a no-op — it must not affect any other permanent.
+    #[test]
+    fn commanders_you_control_static_no_op_without_commander() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        let mut state = setup();
+        let codsworth = make_creature(&mut state, "Codsworth", 2, 3, PlayerId(0));
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }]);
+        state
+            .objects
+            .get_mut(&codsworth)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        assert!(!state.objects[&bear].keywords.contains(&Keyword::Hexproof));
+        assert!(!state.objects[&codsworth]
+            .keywords
+            .contains(&Keyword::Hexproof));
+    }
+
+    /// CR 903.3d: Each player's commander receives Ward only from their own
+    /// controller's Codsworth. A second Codsworth controlled by the opponent
+    /// does NOT grant Ward to your commander (filter is `controller=You`).
+    #[test]
+    fn commanders_you_control_filter_respects_per_player_scope() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::WardCost;
+        use crate::types::mana::ManaCost;
+        let mut state = setup();
+
+        let codsworth_p0 = make_creature(&mut state, "Codsworth_P0", 2, 3, PlayerId(0));
+        let cmd_p0 = make_creature(&mut state, "Cmd_P0", 4, 4, PlayerId(0));
+        state.objects.get_mut(&cmd_p0).unwrap().is_commander = true;
+        let cmd_p1 = make_creature(&mut state, "Cmd_P1", 4, 4, PlayerId(1));
+        state.objects.get_mut(&cmd_p1).unwrap().is_commander = true;
+
+        let ward = Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+            generic: 2,
+            shards: vec![],
+        }));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: ward.clone(),
+            }]);
+        state
+            .objects
+            .get_mut(&codsworth_p0)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&cmd_p0].keywords.contains(&ward),
+            "P0's commander must receive Ward from P0's Codsworth"
+        );
+        assert!(
+            !state.objects[&cmd_p1].keywords.contains(&ward),
+            "P1's commander must NOT receive Ward from P0's Codsworth"
+        );
     }
 }

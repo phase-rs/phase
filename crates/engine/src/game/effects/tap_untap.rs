@@ -14,7 +14,25 @@ pub fn resolve_tap(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    for target in &ability.targets {
+    // CR 701.26a: `Effect::Tap { target: SelfRef }` with no collected targets
+    // means tap the source itself (the "tap ~" idiom). SelfRef is a
+    // context-ref — not surfaced as a target slot and not auto-resolved by the
+    // event-context resolver — so this resolver must expand it. Mirrors the
+    // pump resolver's SelfRef shortcut.
+    let self_targets;
+    let targets: &[TargetRef] = if ability.targets.is_empty()
+        && matches!(
+            &ability.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ) {
+        self_targets = [TargetRef::Object(ability.source_id)];
+        &self_targets
+    } else {
+        &ability.targets
+    };
+    for target in targets {
         if let TargetRef::Object(obj_id) = target {
             let proposed = ProposedEvent::Tap {
                 object_id: *obj_id,
@@ -59,7 +77,27 @@ pub fn resolve_untap(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    for target in &ability.targets {
+    // CR 701.26b: `Effect::Untap { target: SelfRef }` with no collected targets
+    // means untap the source itself (the "untap ~" idiom). SelfRef is a
+    // context-ref — not surfaced as a target slot and not auto-resolved by the
+    // event-context resolver — so this resolver must expand it. This is the
+    // runtime path for trigger shapes like Ragost's "At the beginning of each
+    // end step, if you gained life this turn, untap ~" (CR 603.4
+    // intervening-if + CR 514 end step).
+    let self_targets;
+    let targets: &[TargetRef] = if ability.targets.is_empty()
+        && matches!(
+            &ability.effect,
+            Effect::Untap {
+                target: TargetFilter::SelfRef
+            }
+        ) {
+        self_targets = [TargetRef::Object(ability.source_id)];
+        &self_targets
+    } else {
+        &ability.targets
+    };
+    for target in targets {
         if let TargetRef::Object(obj_id) = target {
             let proposed = ProposedEvent::Untap {
                 object_id: *obj_id,
@@ -257,6 +295,77 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentTapped { .. })));
+    }
+
+    /// CR 701.26b: When a triggered ability has
+    /// `Effect::Untap { target: SelfRef }` and the source is the trigger's
+    /// own object (Ragost, Famished Paladin, Pristine Angel, etc.), the
+    /// resolver must untap the source even when `ability.targets` is empty.
+    /// SelfRef is a context-ref (no target slot is surfaced and the
+    /// event-context resolver does not bind it), so the resolver itself
+    /// must expand SelfRef to the source.
+    #[test]
+    fn untap_self_ref_with_empty_targets_untaps_source() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ragost".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&obj_id).unwrap().tapped = true;
+
+        let ability = ResolvedAbility::new(
+            Effect::Untap {
+                target: TargetFilter::SelfRef,
+            },
+            vec![], // empty — SelfRef must resolve via source_id
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_untap(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.objects[&obj_id].tapped,
+            "SelfRef untap must untap the source object"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })));
+    }
+
+    /// CR 701.26a: Same SelfRef expansion for tap (e.g. "tap ~" triggered
+    /// effects).
+    #[test]
+    fn tap_self_ref_with_empty_targets_taps_source() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "SomeCreature".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_tap(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.objects[&obj_id].tapped,
+            "SelfRef tap must tap the source object"
+        );
     }
 
     #[test]

@@ -116,6 +116,14 @@ pub struct Player {
     pub descended_this_turn: bool,
     #[serde(default)]
     pub cards_drawn_this_turn: u32,
+    /// CR 121.1 + CR 504.1: Number of cards this player has drawn during the
+    /// current step. Reset on every step transition (`turns.rs::advance_phase`)
+    /// and at turn start (`start_next_turn`). Used by
+    /// `ReplacementCondition::ExceptFirstDrawInDrawStep` and
+    /// `TriggerCondition::ExceptFirstDrawInDrawStep` to identify the first
+    /// card-draw of each draw step (CR 504.1's turn-based action).
+    #[serde(default)]
+    pub cards_drawn_this_step: u32,
     /// CR 702.179b: Players have no speed until a rule or effect sets it.
     /// `None` means the player currently has no speed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,6 +200,7 @@ impl Default for Player {
             life_lost_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,
+            cards_drawn_this_step: 0,
             speed: None,
             speed_trigger_used_this_turn: false,
             crimes_committed_this_turn: 0,

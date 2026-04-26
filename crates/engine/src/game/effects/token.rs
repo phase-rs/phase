@@ -7,21 +7,22 @@ use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
-    DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind, GainLifePlayer,
-    ManaContribution, ManaProduction, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
-    TargetFilter, TargetRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Comparator,
+    ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectError,
+    EffectKind, FilterProp, GainLifePlayer, ManaContribution, ManaProduction, PlayerFilter,
+    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::CardId;
-use crate::types::keywords::Keyword;
-use crate::types::mana::ManaColor;
-use crate::types::mana::ManaCost;
+use crate::types::keywords::{Keyword, WardCost};
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 // ── Token script parser ─────────────────────────────────────────────────
@@ -816,6 +817,7 @@ fn treasure_ability() -> AbilityDefinition {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         },
     )
     .cost(AbilityCost::Composite {
@@ -926,6 +928,7 @@ fn spawn_ability() -> AbilityDefinition {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         },
     )
     .cost(AbilityCost::Sacrifice {
@@ -948,6 +951,7 @@ fn powerstone_ability() -> AbilityDefinition {
             )],
             grants: vec![],
             expiry: None,
+            target: None,
         },
     )
     .cost(AbilityCost::Tap)
@@ -999,25 +1003,335 @@ fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
     }
 }
 
-/// Inject predefined token abilities based on the token's subtypes.
-/// Called after token creation to ensure Treasure/Food/Clue/etc. have their
-/// standard activated abilities.
+/// CR 303.4: `FilterProp::EnchantedBy` is source-relative when the source is
+/// an Aura — at layer-evaluation time the filter resolves to whichever
+/// creature this specific Role is attached to, so two Roles on two different
+/// creatures only modify their own enchanted creature.
+fn enchanted_creature_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]))
+}
+
+/// Build a `StaticDefinition` whose `affected` is the Role's enchanted
+/// creature (CR 303.4) with the given modifications and oracle text.
+fn role_static(modifications: Vec<ContinuousModification>, description: &str) -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(enchanted_creature_filter())
+        .modifications(modifications)
+        .description(description.to_string())
+}
+
+/// CR 111.10j: Cursed Role — "Enchanted creature has base power and
+/// toughness 1/1." `SetPower`/`SetToughness` apply at layer 7b (set base P/T,
+/// `layers.rs:1167-1172`), which is the correct layer for "base power and
+/// toughness X/Y". Modifiers in layer 7c (`AddPower` from `+N/+N` pumps,
+/// counters, etc.) still stack on top per CR 613.1, so a Cursed creature
+/// with +2/+2 ends at 3/3 — the "base" set is the *floor* of the calculation,
+/// not a final override.
+fn cursed_role_statics() -> Vec<StaticDefinition> {
+    vec![role_static(
+        vec![
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+        ],
+        "Enchanted creature has base power and toughness 1/1.",
+    )]
+}
+
+/// CR 111.10k: Monster Role — "Enchanted creature gets +1/+1 and has trample."
+fn monster_role_statics() -> Vec<StaticDefinition> {
+    vec![role_static(
+        vec![
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            },
+        ],
+        "Enchanted creature gets +1/+1 and has trample.",
+    )]
+}
+
+/// CR 111.10m: Royal Role — "Enchanted creature gets +1/+1 and has ward {1}."
+fn royal_role_statics() -> Vec<StaticDefinition> {
+    vec![role_static(
+        vec![
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(WardCost::Mana(ManaCost::generic(1))),
+            },
+        ],
+        "Enchanted creature gets +1/+1 and has ward {1}.",
+    )]
+}
+
+/// CR 111.10p: Virtuous Role — "Enchanted creature gets +1/+1 for each
+/// enchantment you control."
+///
+/// `ControllerRef::You` on the count filter binds to the *Aura's* controller
+/// at evaluation time (CR 109.5: an Aura's controller is the player who
+/// controls the Aura, not necessarily who controls the enchanted creature),
+/// which is the correct reading: "you" in a Role's text is the Role
+/// controller. `AddDynamicPower`/`AddDynamicToughness` apply at layer 7c,
+/// after `AddPower`/`AddToughness` but before switch-power/toughness.
+fn virtuous_role_statics() -> Vec<StaticDefinition> {
+    let enchantments_you_control = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Enchantment).controller(ControllerRef::You),
+            ),
+        },
+    };
+    vec![role_static(
+        vec![
+            ContinuousModification::AddDynamicPower {
+                value: enchantments_you_control.clone(),
+            },
+            ContinuousModification::AddDynamicToughness {
+                value: enchantments_you_control,
+            },
+        ],
+        "Enchanted creature gets +1/+1 for each enchantment you control.",
+    )]
+}
+
+/// CR 111.10r: Young Hero Role — "Enchanted creature has 'Whenever this
+/// creature attacks, if its toughness is 3 or less, put a +1/+1 counter on
+/// it.'"
+///
+/// `GrantTrigger` attaches the triggered ability to the enchanted creature
+/// via the layer system. Once granted, the trigger's source is the
+/// enchanted creature, so:
+/// - `valid_card = None` → matches when the source itself attacks
+///   (`trigger_matchers::matching_attack_events` defaults to `attacker == source`).
+/// - `condition: SelfToughness LE 3` → CR 603.4 intervening-if checked at
+///   trigger event time against the enchanted creature's current toughness.
+/// - `Effect::PutCounter { target: SelfRef }` → "on it" resolves to the
+///   trigger's source, the enchanted creature.
+fn young_hero_role_statics() -> Vec<StaticDefinition> {
+    let put_counter = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::PutCounter {
+            counter_type: "P1P1".to_string(),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    );
+
+    let trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .execute(put_counter)
+        // CR 603.4 intervening-if: SelfToughness ≤ 3 of the trigger source.
+        .condition(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SelfToughness,
+            },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        })
+        .description(
+            "Whenever this creature attacks, if its toughness is 3 or less, \
+             put a +1/+1 counter on it."
+                .to_string(),
+        );
+
+    vec![role_static(
+        vec![ContinuousModification::GrantTrigger {
+            trigger: Box::new(trigger),
+        }],
+        "Enchanted creature has \"Whenever this creature attacks, if its \
+         toughness is 3 or less, put a +1/+1 counter on it.\"",
+    )]
+}
+
+/// CR 111.10n: Sorcerer Role — "Enchanted creature gets +1/+1 and has
+/// 'Whenever this creature attacks, scry 1.'"
+///
+/// Same shape as Royal/Monster (additive +1/+1) plus a `GrantTrigger` for
+/// the inner attacks-scry. The granted trigger has no condition (no
+/// intervening-if) — Sorcerer's trigger is unconditional, unlike Young
+/// Hero's. `Effect::Scry { target: TargetFilter::Controller }` resolves to
+/// the granted trigger's source's controller, i.e. the controller of the
+/// enchanted creature when it attacks.
+fn sorcerer_role_statics() -> Vec<StaticDefinition> {
+    let scry_one = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .execute(scry_one)
+        .description("Whenever this creature attacks, scry 1.".to_string());
+
+    vec![role_static(
+        vec![
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::GrantTrigger {
+                trigger: Box::new(trigger),
+            },
+        ],
+        "Enchanted creature gets +1/+1 and has \"Whenever this creature \
+         attacks, scry 1.\"",
+    )]
+}
+
+/// Per-Role injection payload: continuous modifications for the enchanted
+/// creature plus triggers that fire on the *Aura itself* (not granted to
+/// the enchanted creature).
+///
+/// Most Roles have only `statics` populated. Wicked is the only Role today
+/// with a self-trigger on the Aura — its dies-trigger fires when the Role
+/// token leaves the battlefield, which is fundamentally a property of the
+/// token, not of the enchanted creature, so it cannot be expressed as a
+/// `GrantTrigger` modification on a static.
+#[derive(Default)]
+struct RoleSpec {
+    statics: Vec<StaticDefinition>,
+    triggers: Vec<TriggerDefinition>,
+}
+
+impl RoleSpec {
+    fn statics_only(statics: Vec<StaticDefinition>) -> Self {
+        Self {
+            statics,
+            triggers: Vec::new(),
+        }
+    }
+}
+
+/// CR 111.10q: Wicked Role — "Enchanted creature gets +1/+1, and 'When
+/// this token is put into a graveyard from the battlefield, each opponent
+/// loses 1 life.'"
+///
+/// The +1/+1 is a static affecting the enchanted creature; the dies-trigger
+/// is on the Aura itself (CR 111.10q's "this token" refers to the Aura, not
+/// the enchanted creature) and is therefore added directly to the token's
+/// `trigger_definitions` rather than via `GrantTrigger`.
+///
+/// `player_scope: PlayerFilter::Opponent` on the inner ability iterates the
+/// `LoseLife` once per opponent of the trigger controller, rebinding
+/// `controller` per iteration (see `effects/mod.rs:917`). With
+/// `target: None`, each iteration's loss applies to the rebound controller
+/// — the standard "each opponent loses N life" pattern.
+fn wicked_role_spec() -> RoleSpec {
+    let pump = role_static(
+        vec![
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+        ],
+        "Enchanted creature gets +1/+1.",
+    );
+
+    let opponents_lose_one = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: None,
+        },
+    )
+    .player_scope(PlayerFilter::Opponent);
+
+    let dies_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .valid_card(TargetFilter::SelfRef)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        // CR 603.6c: dies/leaves-battlefield triggers must look up the source
+        // in the LKI graveyard zone after the move; trigger_zones tells the
+        // matcher where to find the source object.
+        .trigger_zones(vec![Zone::Graveyard])
+        .execute(opponents_lose_one)
+        .description(
+            "When this token is put into a graveyard from the battlefield, \
+             each opponent loses 1 life."
+                .to_string(),
+        );
+
+    RoleSpec {
+        statics: vec![pump],
+        triggers: vec![dies_trigger],
+    }
+}
+
+/// CR 111.10j–r: Return the predefined Role token spec by display name, or
+/// `None` if `name` is not an implemented Role.
+///
+/// All Role tokens share the `Role` subtype, so dispatch must be by display
+/// name — subtype alone cannot distinguish the seven variants.
+fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
+    match name {
+        "Cursed" => Some(RoleSpec::statics_only(cursed_role_statics())),
+        "Monster" => Some(RoleSpec::statics_only(monster_role_statics())),
+        "Royal" => Some(RoleSpec::statics_only(royal_role_statics())),
+        "Sorcerer" => Some(RoleSpec::statics_only(sorcerer_role_statics())),
+        "Virtuous" => Some(RoleSpec::statics_only(virtuous_role_statics())),
+        "Wicked" => Some(wicked_role_spec()),
+        "Young Hero" => Some(RoleSpec::statics_only(young_hero_role_statics())),
+        _ => None,
+    }
+}
+
+/// Inject predefined token abilities based on the token's subtypes and name.
+///
+/// Two dispatch paths:
+/// - **Subtype** (CR 111.10a–i, s–v): Treasure, Food, Clue, Blood, Powerstone,
+///   Map, Spawn — each subtype contributes a single activated ability
+///   (`predefined_token_abilities`).
+/// - **Name** (CR 111.10j–r): Role tokens. All seven Roles share the `Role`
+///   subtype, so dispatch is by display name via `predefined_role_token_spec`.
+///   Roles contribute static abilities that modify the enchanted creature
+///   (Cursed/Monster/Royal/Sorcerer/Virtuous/Young Hero) and may also
+///   contribute self-triggers on the Aura (Wicked).
+///
+/// Written to mirror updates onto both `base_*` and live definition fields;
+/// the layer pass rebuilds live from base on each pass, but several code
+/// paths (SBAs, action enumeration) consult the live set directly between
+/// passes so keeping them in sync here avoids a one-frame lag.
 pub(super) fn inject_predefined_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let subtypes = match state.objects.get(&obj_id) {
-        Some(obj) => obj.card_types.subtypes.clone(),
+    let (subtypes, name) = match state.objects.get(&obj_id) {
+        Some(obj) => (obj.card_types.subtypes.clone(), obj.name.clone()),
         None => return,
     };
     let mut abilities_to_add = Vec::new();
     for subtype in &subtypes {
         abilities_to_add.extend(predefined_token_abilities(subtype));
     }
+    let role_spec = if subtypes.iter().any(|s| s == "Role") {
+        predefined_role_token_spec(&name)
+    } else {
+        None
+    };
+
+    if abilities_to_add.is_empty() && role_spec.is_none() {
+        return;
+    }
+
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
+        return;
+    };
+
     if !abilities_to_add.is_empty() {
-        if let Some(obj) = state.objects.get_mut(&obj_id) {
-            Arc::make_mut(&mut obj.abilities).extend(abilities_to_add.clone());
-            Arc::make_mut(&mut obj.base_abilities).extend(abilities_to_add);
+        Arc::make_mut(&mut obj.abilities).extend(abilities_to_add.clone());
+        Arc::make_mut(&mut obj.base_abilities).extend(abilities_to_add);
+    }
+
+    if let Some(spec) = role_spec {
+        let RoleSpec { statics, triggers } = spec;
+        if !statics.is_empty() {
+            Arc::make_mut(&mut obj.base_static_definitions).extend(statics.iter().cloned());
+            for s in statics {
+                obj.static_definitions.push(s);
+            }
+        }
+        if !triggers.is_empty() {
+            Arc::make_mut(&mut obj.base_trigger_definitions).extend(triggers.iter().cloned());
+            for t in triggers {
+                obj.trigger_definitions.push(t);
+            }
         }
     }
 }
@@ -1612,6 +1926,410 @@ mod tests {
     fn non_predefined_token_gets_no_abilities() {
         let abilities = predefined_token_abilities("Soldier");
         assert!(abilities.is_empty());
+    }
+
+    // ── Role token predefined statics (CR 111.10j–r) ────────────────────
+
+    /// Test helper — most Role tests only need the statics half of the spec.
+    /// Wraps the typical "fetch spec, drop triggers, assert statics" idiom
+    /// so per-Role tests stay focused on shape assertions.
+    fn predefined_role_token_spec_statics(name: &str) -> Option<Vec<StaticDefinition>> {
+        predefined_role_token_spec(name).map(|spec| spec.statics)
+    }
+
+    #[test]
+    fn predefined_royal_role_has_pump_and_ward() {
+        // CR 111.10m: Royal Role — "Enchanted creature gets +1/+1 and has ward {1}."
+        let statics = predefined_role_token_spec_statics("Royal").unwrap();
+        assert_eq!(statics.len(), 1);
+        let s = &statics[0];
+        let Some(TargetFilter::Typed(tf)) = s.affected.as_ref() else {
+            panic!("affected must be a TypedFilter");
+        };
+        assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        let ward = s.modifications.iter().find_map(|m| match m {
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(cost),
+            } => Some(cost),
+            _ => None,
+        });
+        let Some(WardCost::Mana(ManaCost::Cost { generic, .. })) = ward else {
+            panic!("Royal Role must grant ward, got {:?}", ward);
+        };
+        assert_eq!(*generic, 1);
+    }
+
+    #[test]
+    fn predefined_cursed_role_sets_base_pt_one_one() {
+        // CR 111.10j: Cursed Role — "Enchanted creature has base power and
+        // toughness 1/1." `SetPower`/`SetToughness` apply at layer 7b
+        // (set base P/T). Per CR 613.1, layer 7c modifiers (`AddPower`,
+        // counters, +N/+N pumps) still stack on top — Cursed sets the
+        // base, it does not pin the final P/T. The encoding must therefore
+        // contain SetPower/SetToughness and must NOT contain AddPower/
+        // AddToughness (those would conflate "base set" with "additive
+        // modifier" and double-count when both apply).
+        let statics = predefined_role_token_spec_statics("Cursed").unwrap();
+        assert_eq!(statics.len(), 1);
+        let s = &statics[0];
+        let Some(TargetFilter::Typed(tf)) = s.affected.as_ref() else {
+            panic!("affected must be a TypedFilter");
+        };
+        assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::SetPower { value: 1 }));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::SetToughness { value: 1 }));
+        // Cursed's encoding belongs in layer 7b only — emitting AddPower
+        // alongside SetPower would apply +1 in 7c on top of the base set,
+        // turning Cursed creatures into 2/2.
+        assert!(!s.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )));
+    }
+
+    #[test]
+    fn predefined_monster_role_pumps_and_grants_trample() {
+        // CR 111.10k: Monster Role — "Enchanted creature gets +1/+1 and has trample."
+        let statics = predefined_role_token_spec_statics("Monster").unwrap();
+        assert_eq!(statics.len(), 1);
+        let s = &statics[0];
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }));
+    }
+
+    #[test]
+    fn predefined_virtuous_role_dynamic_pump_per_enchantment() {
+        // CR 111.10p: Virtuous Role — "Enchanted creature gets +1/+1 for each
+        // enchantment you control." `ControllerRef::You` here is the Aura's
+        // controller (CR 109.5), not the enchanted creature's controller.
+        let statics = predefined_role_token_spec_statics("Virtuous").unwrap();
+        assert_eq!(statics.len(), 1);
+        let s = &statics[0];
+
+        let extract_count_filter = |modifications: &[ContinuousModification]| -> TargetFilter {
+            for m in modifications {
+                if let ContinuousModification::AddDynamicPower {
+                    value:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                } = m
+                {
+                    return filter.clone();
+                }
+            }
+            panic!("expected AddDynamicPower {{ Ref(ObjectCount) }}");
+        };
+        let count_filter = extract_count_filter(&s.modifications);
+        let TargetFilter::Typed(tf) = count_filter else {
+            panic!("count filter must be Typed (enchantments you control)");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Enchantment));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+
+        // Toughness mirror must be present — both layer-7c modifications
+        // are required for "+1/+1 for each ...".
+        assert!(s.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicToughness {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            }
+        )));
+    }
+
+    #[test]
+    fn predefined_young_hero_role_grants_attacks_trigger_with_intervening_if() {
+        // CR 111.10r: Young Hero Role — granted attacks-trigger with
+        // SelfToughness ≤ 3 intervening-if and a +1/+1 counter on self.
+        let statics = predefined_role_token_spec_statics("Young Hero").unwrap();
+        assert_eq!(statics.len(), 1);
+        let s = &statics[0];
+
+        let trigger = s
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            })
+            .expect("Young Hero must grant a trigger");
+
+        // Mode: Attacks. valid_card: None (matches when source itself attacks
+        // — granted to enchanted creature, so source = enchanted creature).
+        assert_eq!(trigger.mode, TriggerMode::Attacks);
+        assert!(
+            trigger.valid_card.is_none(),
+            "valid_card must be None so trigger fires off the granted source \
+             (enchanted creature), not via a separate filter"
+        );
+
+        // Intervening-if: source toughness ≤ 3.
+        let condition = trigger.condition.as_ref().expect("condition required");
+        let TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } = condition
+        else {
+            panic!("condition must be QuantityComparison, got {:?}", condition);
+        };
+        assert!(matches!(
+            lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::SelfToughness
+            }
+        ));
+        assert_eq!(*comparator, Comparator::LE);
+        assert!(matches!(rhs, QuantityExpr::Fixed { value: 3 }));
+
+        // Effect: PutCounter P1P1 ×1 on SelfRef.
+        let exec = trigger.execute.as_ref().expect("execute required");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*exec.effect
+        else {
+            panic!("execute effect must be PutCounter, got {:?}", exec.effect);
+        };
+        assert_eq!(counter_type, "P1P1");
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+        assert!(matches!(target, TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn predefined_sorcerer_role_grants_attacks_scry_trigger() {
+        // CR 111.10n: Sorcerer Role — +1/+1 plus a granted attacks-trigger
+        // that scries 1. Unconditional (no intervening-if).
+        let statics = predefined_role_token_spec_statics("Sorcerer").unwrap();
+        assert_eq!(statics.len(), 1);
+        let s = &statics[0];
+
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+
+        let trigger = s
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            })
+            .expect("Sorcerer must grant a trigger");
+        assert_eq!(trigger.mode, TriggerMode::Attacks);
+        assert!(
+            trigger.condition.is_none(),
+            "Sorcerer's attacks-scry is unconditional (no intervening-if)"
+        );
+
+        let exec = trigger.execute.as_ref().expect("execute required");
+        let Effect::Scry { count, target } = &*exec.effect else {
+            panic!("execute effect must be Scry, got {:?}", exec.effect);
+        };
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+        assert!(matches!(target, TargetFilter::Controller));
+    }
+
+    #[test]
+    fn predefined_wicked_role_has_pump_static_and_self_dies_trigger() {
+        // CR 111.10q: Wicked Role — pump static on the enchanted creature
+        // PLUS a self-dies trigger on the Aura that makes each opponent
+        // lose 1 life. The trigger lives on the token itself (not granted),
+        // and `player_scope: Opponent` on the inner ability iterates the
+        // life loss per opponent.
+        let spec = predefined_role_token_spec("Wicked").unwrap();
+        assert_eq!(spec.statics.len(), 1, "Wicked has one pump static");
+        assert_eq!(spec.triggers.len(), 1, "Wicked has one self-dies trigger");
+
+        // Static: +1/+1 on enchanted creature, no keyword.
+        let pump = &spec.statics[0];
+        assert!(pump
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(pump
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(
+            !pump.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword { .. }
+                    | ContinuousModification::GrantTrigger { .. }
+            )),
+            "Wicked's static is pure pump — no keyword or granted trigger"
+        );
+
+        // Trigger: ChangesZone Battlefield → Graveyard, valid_card = SelfRef.
+        let t = &spec.triggers[0];
+        assert_eq!(t.mode, TriggerMode::ChangesZone);
+        assert_eq!(t.origin, Some(Zone::Battlefield));
+        assert_eq!(t.destination, Some(Zone::Graveyard));
+        assert_eq!(
+            t.valid_card,
+            Some(TargetFilter::SelfRef),
+            "self-trigger must filter to the Aura itself"
+        );
+        assert!(
+            t.trigger_zones.contains(&Zone::Graveyard),
+            "trigger_zones must include Graveyard so the matcher can find \
+             the source after the move (CR 603.6c)"
+        );
+
+        // Execute: per-opponent LoseLife 1.
+        let exec = t.execute.as_ref().expect("execute required");
+        assert_eq!(
+            exec.player_scope,
+            Some(PlayerFilter::Opponent),
+            "per-opponent iteration must come from player_scope"
+        );
+        let Effect::LoseLife { amount, target } = &*exec.effect else {
+            panic!("execute effect must be LoseLife, got {:?}", exec.effect);
+        };
+        assert!(matches!(amount, QuantityExpr::Fixed { value: 1 }));
+        assert!(
+            target.is_none(),
+            "target must be None so each iteration's rebound controller takes the loss"
+        );
+    }
+
+    #[test]
+    fn all_seven_role_token_variants_are_implemented() {
+        // CR 111.10j–r: every named Role token must have a spec. Unknown
+        // names still return None (the dispatch is exhaustive over Roles,
+        // not a catch-all).
+        for name in [
+            "Cursed",
+            "Monster",
+            "Royal",
+            "Sorcerer",
+            "Virtuous",
+            "Wicked",
+            "Young Hero",
+        ] {
+            assert!(
+                predefined_role_token_spec(name).is_some(),
+                "{name} Role must be implemented (CR 111.10j–r)"
+            );
+        }
+        assert!(predefined_role_token_spec("Not A Role").is_none());
+    }
+
+    #[test]
+    fn inject_adds_royal_role_static_to_token() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Royal".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types
+                .subtypes
+                .extend(["Aura".to_string(), "Role".to_string()]);
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.is_token = true;
+        }
+
+        inject_predefined_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(
+            obj.static_definitions.len(),
+            1,
+            "Royal Role must contribute exactly one static"
+        );
+        assert_eq!(
+            obj.base_static_definitions.len(),
+            1,
+            "base_static_definitions must mirror live statics"
+        );
+        // Non-Role tokens with the same name must not receive Role statics.
+        // Use a Treasure subtype so dispatch reaches the Role-name guard
+        // (the early-out only triggers when both dispatch paths are empty);
+        // Treasure injects activated abilities but no statics, so a non-zero
+        // ability count + zero static count proves the Role guard rejected
+        // dispatch on subtype rather than on the early-out path.
+        let obj2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Royal".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj2).unwrap();
+            obj.card_types.subtypes.push("Treasure".to_string());
+            obj.is_token = true;
+        }
+        inject_predefined_token_abilities(&mut state, obj2);
+        assert_eq!(
+            state.objects[&obj2].static_definitions.len(),
+            0,
+            "A 'Royal'-named token without the Role subtype must not get Role statics"
+        );
+        assert!(
+            !state.objects[&obj2].abilities.is_empty(),
+            "Treasure subtype must still have injected its activated ability — \
+             this proves dispatch reached the Role-name guard rather than the early-out"
+        );
+    }
+
+    #[test]
+    fn inject_adds_cursed_role_static_to_token() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        // CR 111.10j: Cursed Role full injection path.
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Cursed".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types
+                .subtypes
+                .extend(["Aura".to_string(), "Role".to_string()]);
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.is_token = true;
+        }
+        inject_predefined_token_abilities(&mut state, obj_id);
+        let obj = &state.objects[&obj_id];
+        assert_eq!(obj.static_definitions.len(), 1);
+        assert_eq!(obj.base_static_definitions.len(), 1);
     }
 
     #[test]

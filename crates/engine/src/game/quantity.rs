@@ -38,6 +38,11 @@ pub struct QuantityContext {
     pub entering: Option<ObjectId>,
     /// The static ability source (always set).
     pub source: ObjectId,
+    /// CR 613.4c: The per-recipient binding for "<subject> gets +N/+M for
+    /// each X attached to it" Aura/Equipment statics. Set by the layer
+    /// evaluator when the dynamic modification's filter contains
+    /// `FilterProp::AttachedToRecipient`; `None` otherwise.
+    pub recipient: Option<ObjectId>,
 }
 
 impl QuantityContext {
@@ -65,6 +70,32 @@ pub fn resolve_quantity(
         QuantityContext {
             entering: None,
             source: source_id,
+            recipient: None,
+        },
+    )
+}
+
+/// CR 613.4c: Resolve a `QuantityExpr` for a layer-evaluated dynamic
+/// modification whose filter references the per-recipient pronoun "it"
+/// (`FilterProp::AttachedToRecipient`). The recipient is the affected
+/// object in the layer evaluator's loop — for "Enchanted creature gets
+/// +N/+M for each Aura and Equipment attached to it", that is the
+/// enchanted creature, not the static's source.
+pub fn resolve_quantity_with_recipient(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    recipient_id: ObjectId,
+) -> i32 {
+    resolve_quantity_with_ctx(
+        state,
+        expr,
+        controller,
+        QuantityContext {
+            entering: None,
+            source: source_id,
+            recipient: Some(recipient_id),
         },
     )
 }
@@ -213,6 +244,7 @@ pub fn resolve_quantity_with_targets(
             QuantityContext {
                 entering: None,
                 source: ability.source_id,
+                recipient: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -252,6 +284,7 @@ pub fn resolve_quantity_with_targets_slice(
             QuantityContext {
                 entering: None,
                 source: source_id,
+                recipient: None,
             },
             targets,
             None,
@@ -294,6 +327,7 @@ pub(crate) fn resolve_quantity_scoped(
             QuantityContext {
                 entering: None,
                 source: source_id,
+                recipient: None,
             },
             &[],
             None,
@@ -339,10 +373,15 @@ fn resolve_ref(
     // in nested filter thresholds) when available, falling back to the controller
     // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
     // path when no ability is in scope (X → 0).
-    let filter_ctx = match ability {
+    //
+    // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
+    // `FilterContext::recipient_id` so `FilterProp::AttachedToRecipient`
+    // resolves against the per-object recipient bound by the layer evaluator.
+    let mut filter_ctx = match ability {
         Some(a) => FilterContext::from_ability(a),
         None => FilterContext::from_source_with_controller(source_id, controller),
     };
+    filter_ctx.recipient_id = ctx.recipient;
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         QuantityRef::HandSize => player.map_or(0, |p| usize_to_i32_saturating(p.hand.len())),
@@ -512,6 +551,22 @@ fn resolve_ref(
                     .lki_cache
                     .get(&source_id)
                     .and_then(|lki| lki.toughness)
+            })
+            .unwrap_or(0),
+        // CR 202.3 + CR 118.9: Mana value of the source object. Used by
+        // alt-cost cast permissions ("pay life equal to its mana value rather
+        // than paying its mana cost") where `source_id` is the spell being
+        // cast. Falls back to LKI for objects that have left their zone
+        // mid-resolution.
+        QuantityRef::SelfManaValue => state
+            .objects
+            .get(&source_id)
+            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+            .or_else(|| {
+                state
+                    .lki_cache
+                    .get(&source_id)
+                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
             })
             .unwrap_or(0),
         // CR 107.3e: Aggregate queries over game objects.
@@ -843,6 +898,14 @@ fn resolve_ref(
                             .map(|lki| u32_to_i32_saturating(lki.mana_value))
                     })
             })
+            .unwrap_or(0),
+        // CR 117.1 + CR 202.3: Mana value of the cost-paid object (sacrificed
+        // creature, exiled creature, etc.), captured at cost-payment time on
+        // the resolving ability. Food Chain / Burnt Offering / Metamorphosis.
+        // Returns 0 when no cost-paid object snapshot is in scope.
+        QuantityRef::CostPaidObjectManaValue => ability
+            .and_then(|a| a.cost_paid_object_mana_value)
+            .map(u32_to_i32_saturating)
             .unwrap_or(0),
         // CR 107.3a + CR 601.2b + CR 603.7c: The announced value of X for the
         // triggering spell. Reads `GameObject::cost_x_paid` — populated during
@@ -2705,5 +2768,35 @@ mod tests {
 
         // With X=3, only CMC-1 and CMC-3 match — count is 2.
         assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 2);
+    }
+
+    /// CR 202.3 + CR 118.9: `SelfManaValue` reads the source object's printed
+    /// mana value at resolve-time. Used by alt-cost cast permissions
+    /// (`ExileWithAltAbilityCost`) where "its mana value" must resolve
+    /// against the spell-being-cast (passed as `source_id`).
+    #[test]
+    fn self_mana_value_reads_source_mana_cost() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Exile,
+        );
+        // Set mana cost = {3}{B}{B} → mana value 5.
+        let cost = crate::types::mana::ManaCost::Cost {
+            shards: vec![
+                crate::types::mana::ManaCostShard::Black,
+                crate::types::mana::ManaCostShard::Black,
+            ],
+            generic: 3,
+        };
+        state.objects.get_mut(&obj_id).unwrap().mana_cost = cost;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::SelfManaValue,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), obj_id), 5);
     }
 }

@@ -1605,6 +1605,27 @@ fn evaluate_replacement_condition(
             }),
             _ => false,
         },
+        // CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in
+        // each of your draw steps" — applies to every Draw EXCEPT the active
+        // player's first draw of the draw step. Returns `false` (suppress
+        // replacement) when this would be the first draw of the active player
+        // in the draw step (`cards_drawn_this_step == 0`); `true` otherwise.
+        ReplacementCondition::ExceptFirstDrawInDrawStep => match event {
+            ProposedEvent::Draw { player_id, .. } => {
+                let in_draw_step = state.phase == crate::types::phase::Phase::Draw;
+                let drawer_is_active = *player_id == state.active_player;
+                let already_drawn = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == *player_id)
+                    .map(|p| p.cards_drawn_this_step)
+                    .unwrap_or(0);
+                // Suppress when this would be the FIRST draw of the active
+                // player's draw step.
+                !(in_draw_step && drawer_is_active && already_drawn == 0)
+            }
+            _ => false,
+        },
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.
@@ -1947,6 +1968,7 @@ fn extract_etb_counters(
             let ctx = crate::game::quantity::QuantityContext {
                 entering,
                 source: source_id,
+                recipient: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
@@ -4959,6 +4981,90 @@ mod tests {
             count_subtype("Food"),
             1,
             "missing Food emitted by ensure-all"
+        );
+    }
+
+    /// CR 121.1 + CR 504.1 + CR 614.6 — Alhammarret's Archive's
+    /// `ExceptFirstDrawInDrawStep` replacement gates the "draw two cards
+    /// instead" replacement so it does NOT apply to the active player's
+    /// mandatory first draw of their draw step. Subsequent draws in the same
+    /// step (extra draws, draws outside the draw step, opponent draws, etc.)
+    /// all replace normally. The first-draw identity is read from
+    /// `Player.cards_drawn_this_step` (0 ⇒ this would be the first).
+    #[test]
+    fn except_first_draw_in_draw_step_suppresses_only_active_first_draw() {
+        let condition = ReplacementCondition::ExceptFirstDrawInDrawStep;
+        let source = ObjectId(10);
+
+        let make_state = |phase: crate::types::phase::Phase, p0_drawn: u32| {
+            let mut state = GameState::new_two_player(42);
+            state.active_player = PlayerId(0);
+            state.phase = phase;
+            state.players[0].cards_drawn_this_step = p0_drawn;
+            state
+        };
+
+        let draw_event = |player_id: PlayerId| ProposedEvent::Draw {
+            player_id,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        // Active player about to make their FIRST draw of the draw step → suppress.
+        let state = make_state(crate::types::phase::Phase::Draw, 0);
+        assert!(
+            !evaluate_replacement_condition(
+                &condition,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(0)),
+            ),
+            "the mandatory first draw of the active player's draw step must NOT replace"
+        );
+
+        // Active player making a SECOND draw during their draw step → replace.
+        let state = make_state(crate::types::phase::Phase::Draw, 1);
+        assert!(
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(0)),
+            ),
+            "any subsequent draw during the active player's draw step must replace"
+        );
+
+        // Outside the draw step — first draw of any other step still replaces.
+        let state = make_state(crate::types::phase::Phase::Upkeep, 0);
+        assert!(
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(0)),
+            ),
+            "first draw outside the draw step must replace"
+        );
+
+        // Draw step but the NON-active player is drawing — exception only
+        // excuses the active player's mandatory draw, so this still replaces.
+        let state = make_state(crate::types::phase::Phase::Draw, 0);
+        assert!(
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(1),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(1)),
+            ),
+            "draw step draws by the non-active player must replace"
         );
     }
 }

@@ -151,6 +151,20 @@ fn resolve_counter_placement_target<'a>(
     if is_it_pronoun(on_rest) {
         return (resolve_it_pronoun(ctx), "", None);
     }
+    // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
+    // non-self filter (e.g. Pip-Boy 3000's "Whenever equipped creature
+    // attacks ... put a +1/+1 counter on that creature") refers to the
+    // triggering source object — not to the parent target (the modal parent
+    // here is a `GenericEffect` with no target, leaving `ParentTarget`
+    // unbound). Mirrors `resolve_it_pronoun` for the explicit "that creature"
+    // anaphor.
+    if let Some(rem) = resolve_that_creature_in_trigger(on_rest, ctx) {
+        // Map `rem` (sliced from `on_rest`) back into `text` so the returned
+        // remainder lifetime matches `text`. `on_rest` is the lowercase view;
+        // ASCII-equal-length guard above keeps byte offsets aligned.
+        let offset = text.len() - rem.len();
+        return (TargetFilter::TriggeringSource, &text[offset..], None);
+    }
     // CR 115.1d: "up to N" (and "each of up to N") modifies the target count,
     // not the counter count. Strip it and emit a MultiTargetSpec.
     let (target_text, multi) = if let Some(((), after_up_to)) =
@@ -304,6 +318,39 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Optio
     let ((), after_remove) = nom_on_lower(lower, lower, |i| value((), tag("remove ")).parse(i))?;
     let after_remove = after_remove.trim();
 
+    // CR 608.2k + CR 122.1: Anaphoric counter reference with no "from {target}"
+    // clause refers to counters on the ability source (the antecedent
+    // established earlier in the same ability's cost or trigger condition,
+    // e.g., "if there are four or more charge counters on it, remove those
+    // counters and transform it"). Covers the full anaphor class:
+    //   - "those counters" / "its counters" / "this {creature,artifact,...}'s counters"
+    //   - bare object pronoun "them" / "all of them" (CR 608.2k pronoun anaphor)
+    // Sentinel count -1 with empty counter_type tells the runtime resolver to
+    // strip every counter on the source. Mirrors `try_parse_move_counters`'
+    // anaphor handling.
+    if let Some(((), _)) = nom_on_lower(after_remove, after_remove, |i| {
+        value(
+            (),
+            alt((
+                tag("all of them"),
+                tag("those counters"),
+                tag("its counters"),
+                tag("this creature's counters"),
+                tag("this artifact's counters"),
+                tag("this enchantment's counters"),
+                tag("this permanent's counters"),
+                tag("them"),
+            )),
+        )
+        .parse(i)
+    }) {
+        return Some(Effect::RemoveCounter {
+            counter_type: String::new(),
+            count: -1,
+            target: TargetFilter::SelfRef,
+        });
+    }
+
     // CR 122.1: "remove all" uses sentinel count -1, resolved to actual count at runtime.
     // Also handle "up to N" prefix (player may remove fewer).
     let (count, rest) = if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
@@ -387,11 +434,34 @@ fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
     } else if is_it_pronoun(text) {
         // CR 608.2k: Bare pronoun — context-dependent
         resolve_it_pronoun(ctx)
+    } else if resolve_that_creature_in_trigger(text, ctx).is_some() {
+        // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
+        TargetFilter::TriggeringSource
     } else {
         let (t, _rem) = parse_target(text);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);
         t
+    }
+}
+
+/// CR 608.2k + CR 301.5a: Returns `Some(remainder)` when `text` begins with
+/// "that creature" AND we are inside a trigger whose subject is a non-self,
+/// non-Any filter (e.g. an `AttachedTo` trigger's "Whenever equipped creature
+/// attacks"). The remainder is the post-phrase tail so callers can continue
+/// parsing trailing punctuation/clauses. Mirrors `resolve_it_pronoun`'s
+/// gating: a trigger whose subject is `SelfRef`/`Any` (or no subject) keeps
+/// the legacy `ParentTarget` semantics — used for spells/abilities like
+/// Twinflame Strive where "that creature" refers back to the parent target.
+fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &ParseContext) -> Option<&'a str> {
+    let (rest, _): (&'a str, &'a str) = tag::<_, _, VerboseError<&'a str>>("that creature")
+        .parse(text)
+        .ok()?;
+    match &ctx.subject {
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+            Some(rest)
+        }
+        _ => None,
     }
 }
 
@@ -775,6 +845,42 @@ mod tests {
         };
         assert!(counter_type.is_empty());
         assert_eq!(count, 3);
+    }
+
+    /// CR 608.2k anaphor: "remove those counters" with no "from {target}"
+    /// clause refers to counters on the ability source. Building-block coverage
+    /// for the full anaphor surface — covers the Primal Amulet class plus
+    /// every related anaphor form so the next card with the same shape
+    /// (hatchling line, Brass's Tunnel-Grinder, etc.) parses cleanly.
+    #[test]
+    fn remove_counter_anaphor_no_from_target() {
+        let cases = [
+            "remove those counters",
+            "remove its counters",
+            "remove this creature's counters",
+            "remove this artifact's counters",
+            "remove this enchantment's counters",
+            "remove this permanent's counters",
+            "remove them",
+            "remove all of them",
+        ];
+        for input in cases {
+            let result = try_parse_remove_counter(input, &default_ctx());
+            let Some(Effect::RemoveCounter {
+                counter_type,
+                count,
+                target,
+            }) = result
+            else {
+                panic!("{input}: expected RemoveCounter, got {result:?}");
+            };
+            assert!(counter_type.is_empty(), "{input}: counter_type empty");
+            assert_eq!(count, -1, "{input}: sentinel -1 = all");
+            assert!(
+                matches!(target, TargetFilter::SelfRef),
+                "{input}: target SelfRef, got {target:?}"
+            );
+        }
     }
 
     #[test]

@@ -123,7 +123,8 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
-        | Effect::DamageAll { amount, .. } => {
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. } => {
             rewrite_variable_x_to_cost_x_paid(amount);
         }
         Effect::Pump {
@@ -2830,6 +2831,17 @@ fn try_parse_event(
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
         def.valid_target = Some(subject.clone());
+        // CR 121.1 + CR 504.1 + CR 603.4: Detect Orcish Bowmasters' "except the
+        // first one [you|they] draw in each of [your|their] draw steps" clause
+        // (shape-compatible with Alhammarret's Archive's replacement variant —
+        // shared combinator in `oracle_replacement`). When present, gate the
+        // trigger so it does NOT fire on the active player's first draw of
+        // the draw step.
+        if super::oracle_replacement::has_except_first_draw_in_draw_step_clause(rest)
+            || super::oracle_replacement::has_except_first_draw_in_draw_step_clause(full_lower)
+        {
+            def.condition = Some(TriggerCondition::ExceptFirstDrawInDrawStep);
+        }
         return Some((TriggerMode::Drawn, def));
     }
 

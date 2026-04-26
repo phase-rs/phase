@@ -175,6 +175,13 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         if let Some(e) = effect_text {
             def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
         }
+        // CR 121.1 + CR 504.1 + CR 614.6: Detect Alhammarret's Archive's
+        // "except the first one [you|they] draw in each of [your|their] draw
+        // steps" exception clause and gate the replacement so it does NOT
+        // apply to the draw step's mandatory first draw.
+        if has_except_first_draw_in_draw_step_clause(&lower) {
+            def = def.condition(ReplacementCondition::ExceptFirstDrawInDrawStep);
+        }
         return Some(def);
     }
 
@@ -2438,6 +2445,39 @@ fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<Replace
             ))
             .description(text.to_string()),
     )
+}
+
+/// CR 121.1 + CR 504.1 + CR 614.6: Detect the "except the first one [you|they]
+/// draw in each of [your|their] draw steps" exception clause used by
+/// Alhammarret's Archive (and shared in shape with Orcish Bowmasters' trigger
+/// suffix; see `oracle_trigger::has_except_first_draw_in_draw_step_clause`).
+///
+/// The clause is composed from independent dimensions (subject pronoun,
+/// possessive pronoun) so we use a single nested `alt` over each dimension
+/// rather than enumerating every "you/they" × "your/their" permutation.
+/// The combinator scans the text rather than anchoring at the start, since
+/// the exception phrase appears mid-sentence after the "you would draw a card"
+/// prefix.
+pub(super) fn has_except_first_draw_in_draw_step_clause(lower: &str) -> bool {
+    fn parse_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        let (input, _) = tag("except the first one ").parse(input)?;
+        let (input, _) = alt((tag("you "), tag("they "))).parse(input)?;
+        let (input, _) = tag("draw in each of ").parse(input)?;
+        let (input, _) = alt((tag("your "), tag("their "))).parse(input)?;
+        let (input, _) = tag("draw steps").parse(input)?;
+        Ok((input, ()))
+    }
+    // Scan word-by-word so the clause can appear anywhere in the line.
+    let mut remaining = lower;
+    while !remaining.is_empty() {
+        if parse_clause(remaining).is_ok() {
+            return true;
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    false
 }
 
 /// CR 614.1a: Parse token creation replacement effects.
@@ -6214,5 +6254,33 @@ mod tests {
             def.additional_token_spec.is_none(),
             "Manufactor uses ensure_token_specs, not additional_token_spec"
         );
+    }
+
+    /// CR 121.1 + CR 504.1 + CR 614.6 — the shared exception-clause detector
+    /// must accept both `you/your` (Alhammarret's Archive) and `they/their`
+    /// (Orcish Bowmasters) phrasings, scan past leading prefix text, and
+    /// reject near-miss phrases that do not contain the exact clause.
+    #[test]
+    fn except_first_draw_in_draw_step_clause_recognizes_both_subjects() {
+        // Alhammarret's Archive
+        assert!(super::has_except_first_draw_in_draw_step_clause(
+            "if you would draw a card except the first one you draw in each of your draw steps, draw two cards instead."
+        ));
+        // Orcish Bowmasters
+        assert!(super::has_except_first_draw_in_draw_step_clause(
+            "whenever an opponent draws a card except the first one they draw in each of their draw steps, ~ deals 1 damage to any target."
+        ));
+        // Bare clause (combinator must scan, not require any prefix).
+        assert!(super::has_except_first_draw_in_draw_step_clause(
+            "except the first one you draw in each of your draw steps"
+        ));
+        // Negative — no exception clause present.
+        assert!(!super::has_except_first_draw_in_draw_step_clause(
+            "if you would draw a card, draw two cards instead."
+        ));
+        // Negative — wrong phase ("upkeeps" instead of "draw steps").
+        assert!(!super::has_except_first_draw_in_draw_step_clause(
+            "except the first one you draw in each of your upkeeps"
+        ));
     }
 }

@@ -123,6 +123,29 @@ jobs:
           cargo run --release --bin coverage-report -- data/ --write-stats data/coverage-stats.json > /dev/null
           ./scripts/gen-badge-endpoints.sh data/coverage-stats.json data/badges
 
+      - name: Run semantic audit
+        # Produces data/semantic-audit.json with structured findings for cards
+        # that parse without `Unimplemented` markers but disagree semantically
+        # with their Oracle text. Consumed by docs/AI-CONTRIBUTOR.md's pre-flight
+        # gate so autonomous LLM contributors can distinguish "actually
+        # supported" from "parses, but parses wrong."
+        # Pass data/ explicitly — the binary's default lookup is
+        # `client/public/card-data.json`, but gen-card-data.sh mirrors to data/
+        # in both workflows so this is the portable path.
+        run: cargo semantic-audit data/
+
+      - name: Stamp shared card_data_hash on coverage + audit JSONs
+        # Both files are uploaded to R2 as separate PUTs with no transactional
+        # guarantee. Embedding the same card_data_hash in both lets downstream
+        # consumers (notably AI contributors per docs/AI-CONTRIBUTOR.md) verify
+        # they're reading a consistent snapshot before trusting the gate.
+        env:
+          CARD_DATA_HASH: ${{ steps.card-data-hash.outputs.hash }}
+        run: |
+          jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' data/semantic-audit.json > client/public/semantic-audit.json
+          jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' client/public/coverage-data.json > client/public/coverage-data.json.tmp
+          mv client/public/coverage-data.json.tmp client/public/coverage-data.json
+
       - name: Upload data to R2 (staging)
         # Single source of truth: data-files.json at the repo root lists every
         # shared JSON the frontend fetches. Add a filename there and it is

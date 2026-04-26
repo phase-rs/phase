@@ -2090,6 +2090,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         );
         mana_ability.cost = Some(AbilityCost::Tap);
@@ -2180,6 +2181,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         );
         mana_ability.cost = Some(AbilityCost::Tap);

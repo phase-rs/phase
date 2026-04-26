@@ -281,6 +281,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         );
         ability.cost = Some(engine::types::ability::AbilityCost::Tap);

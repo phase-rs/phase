@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::{CardPlayMode, QuantityExpr, QuantityRef, TargetFilter};
+use super::ability::{AbilityCost, CardPlayMode, QuantityExpr, QuantityRef, TargetFilter};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
@@ -406,6 +406,37 @@ pub enum StaticMode {
         /// Play (lands+spells) vs Cast (spells only)
         play_mode: CardPlayMode,
     },
+    /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
+    /// play/cast the top card of the controller's library when it matches
+    /// `StaticDefinition.affected`. Class members: Realmwalker (creature spells
+    /// of the chosen type), Future Sight + Magus of the Future (any spell or
+    /// land), Bolas's Citadel (any, with `alt_cost = pay life equal to its mana
+    /// value`), Vivien on the Hunt static, etc.
+    ///
+    /// Distinct from `GraveyardCastPermission`: the source object is the
+    /// continually-changing top of `Player.library`, not a graveyard card.
+    /// Filter eligibility is therefore re-evaluated each priority window
+    /// because `casting::spell_objects_available_to_cast` is called fresh.
+    ///
+    /// Casting a card via this permission moves it `Library → Stack` directly
+    /// (CR 601.2a: "moves that card from where it is to the stack"); there is
+    /// NO exile step. This separates the class cleanly from the impulse-draw
+    /// class (`Effect::CastFromZone` → `CastingPermission::ExileWithAltCost`),
+    /// which exiles the card before granting a permission.
+    TopOfLibraryCastPermission {
+        /// CR 305.1: `Play` covers both lands (played as a land drop) and
+        /// non-land spells (cast as a spell). `Cast` covers only spells.
+        /// Realmwalker = `Cast`; Future Sight + Bolas's Citadel = `Play`.
+        play_mode: CardPlayMode,
+        /// CR 118.9 + CR 119.4: Optional alternative cost paid in lieu of the
+        /// spell's mana cost when cast via this permission. Bolas's Citadel
+        /// uses `Some(AbilityCost::PayLife { amount: SelfManaValue })`.
+        /// `None` for permissions that pay the normal mana cost
+        /// (Realmwalker, Future Sight). When `Some(_)`, the casting pipeline
+        /// zeros the spell's mana cost and routes this cost through
+        /// `pay_additional_cost` (mirrors the `ExileWithAltAbilityCost` flow).
+        alt_cost: Option<AbilityCost>,
+    },
     /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
     /// spells from hand without paying their mana costs. `Unlimited` = Omniscience,
     /// Tamiyo emblem. `OncePerTurn` = Zaffai and the Tempests.
@@ -620,6 +651,10 @@ impl Hash for StaticMode {
                 frequency.hash(state);
                 play_mode.hash(state);
             }
+            StaticMode::TopOfLibraryCastPermission { play_mode, .. } => {
+                // alt_cost contains AbilityCost which lacks Hash; discriminant + play_mode only.
+                play_mode.hash(state);
+            }
             StaticMode::CastFromHandFree { frequency } => {
                 frequency.hash(state);
             }
@@ -680,6 +715,16 @@ impl fmt::Display for StaticMode {
                 frequency,
                 play_mode,
             } => write!(f, "GraveyardCastPermission({play_mode},{frequency})"),
+            StaticMode::TopOfLibraryCastPermission {
+                play_mode,
+                alt_cost,
+            } => {
+                if alt_cost.is_some() {
+                    write!(f, "TopOfLibraryCastPermission({play_mode},alt_cost)")
+                } else {
+                    write!(f, "TopOfLibraryCastPermission({play_mode})")
+                }
+            }
             StaticMode::CastFromHandFree { frequency } => {
                 write!(f, "CastFromHandFree({frequency})")
             }
@@ -856,6 +901,24 @@ impl FromStr for StaticMode {
                         frequency: CastFrequency::OncePerTurn,
                         play_mode: CardPlayMode::Cast,
                     }
+                }
+            }
+            // CR 401.5 + CR 118.9: Top-of-library cast permission. The Display
+            // form omits the alt_cost payload (it's preserved through serde,
+            // not the FromStr round-trip), so FromStr defaults alt_cost to None.
+            "TopOfLibraryCastPermission" => StaticMode::TopOfLibraryCastPermission {
+                play_mode: CardPlayMode::Cast,
+                alt_cost: None,
+            },
+            s if s.starts_with("TopOfLibraryCastPermission(") => {
+                let inner = s
+                    .strip_prefix("TopOfLibraryCastPermission(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or("");
+                let pm_token = inner.split(',').next().unwrap_or("Cast");
+                StaticMode::TopOfLibraryCastPermission {
+                    play_mode: pm_token.parse().unwrap_or(CardPlayMode::Cast),
+                    alt_cost: None,
                 }
             }
             "CastFromHandFree" => StaticMode::CastFromHandFree {

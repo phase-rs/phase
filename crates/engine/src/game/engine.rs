@@ -1057,6 +1057,24 @@ fn apply_action(
             &chosen,
             &mut events,
         )?,
+        // CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Player selected battlefield
+        // permanent(s) to exile as a mana ability cost (Food Chain class).
+        (
+            WaitingFor::ExileFromBattlefieldForManaAbility {
+                count,
+                permanents,
+                pending_mana_ability,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => super::mana_abilities::handle_exile_from_battlefield_for_mana_ability(
+            state,
+            *count,
+            permanents,
+            pending_mana_ability,
+            &chosen,
+            &mut events,
+        )?,
         (
             WaitingFor::ChooseManaColor {
                 choice,
@@ -2951,6 +2969,20 @@ pub(super) fn handle_untap_land_for_mana(
     }
 
     // CR 605.3: Mana abilities resolve immediately — once consumed, irreversible.
+    // CR 605.1b: Aura/Equipment with a `TapsForMana` trigger that fired off this
+    // land's tap (Fertile Ground / Wild Growth / Utopia Sprawl / Trace of
+    // Abundance / Verdant Haven / Market Festival / Weirding Wood / Overgrowth
+    // class) added their bonus mana to the same pool with `source_id = aura_id`,
+    // not `source_id = land_id`. Refunding only the land's source would strand
+    // the aura's mana in the pool, allowing an infinite tap-untap-tap exploit
+    // (each cycle adds one bonus, refund only takes the land's mana). Walk every
+    // active TapsForMana trigger whose `valid_card` matches the land and refund
+    // mana keyed at the trigger's source object too. This preserves CR 605.3b
+    // (mana abilities resolve immediately) — the manual-untap convenience is the
+    // single irreversibility-bypass channel and must reverse all coupled mana,
+    // not just the land's own contribution.
+    let aura_sources: Vec<ObjectId> =
+        super::mana_sources::aura_taps_for_mana_sources_for_land(state, object_id, player);
     let player_data = state
         .players
         .iter_mut()
@@ -2961,6 +2993,9 @@ pub(super) fn handle_untap_land_for_mana(
         return Err(EngineError::InvalidAction(
             "Mana from this source was already spent".to_string(),
         ));
+    }
+    for aura_id in &aura_sources {
+        player_data.mana_pool.remove_from_source(*aura_id);
     }
 
     // Untap the land
@@ -3788,11 +3823,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, QuantityExpr,
-        ResolvedAbility, TargetFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+        QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::TriggerMode;
 
     /// Create a simple test ability definition.
     fn make_draw_ability(num_cards: u32) -> AbilityDefinition {
@@ -4662,6 +4698,210 @@ mod tests {
         ));
     }
 
+    /// Build a Wild Growth–style aura attached to `land_id` for tests in this
+    /// module. Single-color "{G}" `TapsForMana` trigger via
+    /// `valid_card: AttachedTo`. Returns the aura's `ObjectId`.
+    fn attach_wild_growth(state: &mut GameState, land_id: ObjectId, owner: PlayerId) -> ObjectId {
+        let aura = create_object(
+            state,
+            CardId(99),
+            owner,
+            "Wild Growth".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&aura).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.attached_to = Some(land_id.into());
+        obj.entered_battlefield_turn = Some(1);
+        obj.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::TapsForMana)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Green],
+                            contribution: ManaContribution::Additional,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                ))
+                .valid_card(TargetFilter::AttachedTo),
+        );
+        aura
+    }
+
+    #[test]
+    fn untap_land_for_mana_refunds_aura_bonus_no_infinite_mana() {
+        // CR 605.1b + CR 605.3b: Wild Growth attaches to a Forest. Tapping the
+        // Forest emits {G} (land) + {G} (aura's TapsForMana trigger). The user
+        // then invokes `UntapLandForMana` — both mana units must be refunded,
+        // otherwise repeated tap-untap-tap cycles compound aura mana into the
+        // pool indefinitely (the user-reported infinite-mana exploit).
+        let mut state = setup_game_at_main_phase();
+
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        attach_wild_growth(&mut state, forest, PlayerId(0));
+
+        // Tap the Forest. Land emits {G}; aura's trigger fires via
+        // run_post_action_pipeline and adds another {G}.
+        apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            2,
+            "tap should yield {{G}} (land) + {{G}} (Wild Growth bonus)"
+        );
+
+        // Manual untap reverses BOTH the land's and the aura's contributions.
+        apply_as_current(
+            &mut state,
+            GameAction::UntapLandForMana { object_id: forest },
+        )
+        .unwrap();
+        assert!(!state.objects[&forest].tapped, "Forest must be untapped");
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "manual untap must refund both the land's and the aura's mana — \
+             leaving aura mana would allow tap-untap-tap to compound mana"
+        );
+
+        // Re-tap and re-untap to verify no compounding across cycles.
+        for _ in 0..3 {
+            apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+            assert_eq!(state.players[0].mana_pool.total(), 2);
+            apply_as_current(
+                &mut state,
+                GameAction::UntapLandForMana { object_id: forest },
+            )
+            .unwrap();
+            assert_eq!(
+                state.players[0].mana_pool.total(),
+                0,
+                "every cycle must net to zero pool — no compounding aura mana"
+            );
+        }
+    }
+
+    #[test]
+    fn can_pay_cost_after_auto_tap_includes_aura_taps_for_mana_bonus() {
+        // CR 605.1b + CR 106.4: AI affordability simulation must surface mana
+        // contributed by `TapsForMana` triggered abilities (Wild Growth /
+        // Fertile Ground / Utopia Sprawl class). A Plains enchanted with Wild
+        // Growth produces {W} (land) + {G} (aura) and must be reported
+        // payable for a {1}{G} cost — without trigger processing in the
+        // affordability simulation, the AI would skip a turn that the player
+        // could actually pay.
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let mut state = setup_game_at_main_phase();
+
+        let plains = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&plains).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Plains".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        attach_wild_growth(&mut state, plains, PlayerId(0));
+
+        // Synthesize a hand object representing the spell being affordability-checked.
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+        assert!(
+            casting::can_pay_cost_after_auto_tap(&state, PlayerId(0), spell, &cost),
+            "Plains + Wild Growth must be reported able to pay {{1}}{{G}}: \
+             land contributes {{W}}, aura's TapsForMana trigger contributes {{G}}"
+        );
+
+        // Sanity baseline: a Plains alone cannot pay {1}{G}.
+        let mut state_no_aura = setup_game_at_main_phase();
+        let lone_plains = create_object(
+            &mut state_no_aura,
+            CardId(1),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state_no_aura.objects.get_mut(&lone_plains).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Plains".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        let lone_spell = create_object(
+            &mut state_no_aura,
+            CardId(2),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+        assert!(
+            !casting::can_pay_cost_after_auto_tap(&state_no_aura, PlayerId(0), lone_spell, &cost),
+            "lone Plains must NOT be reported able to pay {{1}}{{G}}"
+        );
+    }
+
+    #[test]
+    fn untap_land_for_mana_aura_bonus_helper_lists_attached_aura() {
+        // Sanity check on the aura-source enumerator that
+        // `handle_untap_land_for_mana` consults: it must include the Wild
+        // Growth-style aura whose `valid_card: AttachedTo` resolves to the
+        // tapped land, and exclude the land itself.
+        let mut state = setup_game_at_main_phase();
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let aura = attach_wild_growth(&mut state, forest, PlayerId(0));
+
+        let sources =
+            mana_sources::aura_taps_for_mana_sources_for_land(&state, forest, PlayerId(0));
+        assert_eq!(sources, vec![aura]);
+    }
+
     #[test]
     fn tap_land_rejects_already_tapped() {
         let mut state = setup_game_at_main_phase();
@@ -4715,6 +4955,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -4730,6 +4971,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -4773,6 +5015,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -4788,6 +5031,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -4852,6 +5096,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -4991,6 +5236,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -5025,6 +5271,7 @@ mod tests {
                             restrictions: vec![],
                             grants: vec![],
                             expiry: None,
+                            target: None,
                         },
                     ))
                     .valid_card(TargetFilter::AttachedTo),
@@ -5865,6 +6112,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -5957,6 +6205,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -6021,6 +6270,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Composite {

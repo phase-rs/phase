@@ -104,6 +104,28 @@ jobs:
             data/coverage-data.json \
             --fail-on-engine
 
+      - name: Run semantic audit
+        # Produces data/semantic-audit.json with structured findings for cards
+        # that parse cleanly but disagree semantically with their Oracle text.
+        # Mirrors the staging deploy step (deploy.yml) so PR-tracked freshness
+        # never diverges from main. Consumed by docs/AI-CONTRIBUTOR.md's
+        # pre-flight gate.
+        # Pass data/ explicitly — the binary's default lookup is
+        # `client/public/card-data.json` which doesn't exist on the ci.yml
+        # path (card-data is generated directly into data/ above).
+        run: cargo semantic-audit data/
+
+      - name: Stamp shared card_data_hash on coverage + audit JSONs
+        # Embed the same card-data hash in both files so downstream consumers
+        # can verify they're reading a consistent R2 snapshot. Mirrors the
+        # equivalent step in deploy.yml.
+        run: |
+          HASH=$(sha256sum data/card-data.json | awk '{print substr($1, 1, 16)}')
+          jq --arg h "$HASH" '. + {card_data_hash: $h}' data/semantic-audit.json > data/semantic-audit.json.tmp
+          mv data/semantic-audit.json.tmp data/semantic-audit.json
+          jq --arg h "$HASH" '. + {card_data_hash: $h}' data/coverage-data.json > data/coverage-data.json.tmp
+          mv data/coverage-data.json.tmp data/coverage-data.json
+
       - name: Upload data to R2 (preview)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -114,6 +136,7 @@ jobs:
           npx wrangler r2 object put phase-rs-data/preview/card-names.json --file data/card-names.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
 
       - name: WASM compile check
         run: cargo check --package engine-wasm --target wasm32-unknown-unknown

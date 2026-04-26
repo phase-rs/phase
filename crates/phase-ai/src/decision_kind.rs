@@ -131,6 +131,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MiracleCastOffer { .. }
         | WaitingFor::MadnessCastOffer { .. }
         | WaitingFor::DiscardForManaAbility { .. }
+        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
         | WaitingFor::PayManaAbilityMana { .. } => DecisionKind::ActivateAbility,
     }
 }

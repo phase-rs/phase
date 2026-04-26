@@ -219,7 +219,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     .parse(lower)
     .is_ok()
         && (scan_contains(lower, "from your graveyard")
-            || (scan_contains(lower, "from your hand") && scan_contains(lower, "without paying")))
+            || (scan_contains(lower, "from your hand") && scan_contains(lower, "without paying"))
+            // CR 401.5 + CR 118.9 + CR 601.2a: "you may [play|cast] X from the
+            // top of your library" — top-of-library cast permission class
+            // (Realmwalker, Future Sight, Bolas's Citadel, Magus of the Future,
+            // Vivien on the Hunt static). Routes the line to `parse_static_line`
+            // so it lowers to `StaticMode::TopOfLibraryCastPermission` instead
+            // of falling through to `try_parse_cast_effect`'s impulse-draw flow.
+            || scan_contains(lower, "from the top of your library"))
     {
         return true;
     }

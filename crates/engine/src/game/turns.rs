@@ -92,6 +92,11 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     );
     for player in &mut state.players {
         player.mana_pool.clear_step_transition(in_combat);
+        // CR 121.1 + CR 504.1: `cards_drawn_this_step` resets on every step
+        // transition so `ExceptFirstDrawInDrawStep` conditions can identify
+        // the first card drawn during the new step (most importantly, the
+        // draw step's mandatory turn-based draw).
+        player.cards_drawn_this_step = 0;
     }
 
     // CR 117.3a: Active player receives priority at the beginning of most steps and phases.
@@ -248,6 +253,12 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.life_lost_this_turn = 0;
         player.descended_this_turn = false;
         player.cards_drawn_this_turn = 0;
+        // CR 121.1 + CR 504.1: Per-step counter is also reset at turn start so
+        // a fresh turn always begins with `cards_drawn_this_step == 0` (the
+        // step-transition reset in `advance_phase` covers within-turn step
+        // boundaries; this covers the Cleanup→Untap turn boundary and
+        // mid-turn extra-turn insertions).
+        player.cards_drawn_this_step = 0;
         player.speed_trigger_used_this_turn = false;
         player.bending_types_this_turn.clear();
     }
@@ -569,15 +580,25 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
 
                 for obj_id in cards_to_draw {
                     zones::move_to_zone(state, obj_id, Zone::Hand, events);
+                    // CR 121.1 + CR 504.1: Increment counters BEFORE emitting so
+                    // `nth_in_step` (1-indexed) reflects this draw — the draw
+                    // step's mandatory draw is `nth_in_step == 1` and is the
+                    // anchor for `ExceptFirstDrawInDrawStep` exception clauses.
+                    let nth_in_step =
+                        if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
+                            p.has_drawn_this_turn = true;
+                            p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
+                            p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
+                            p.cards_drawn_this_step
+                        } else {
+                            1
+                        };
                     // CR 121.1: Emit CardDrawn so "whenever a player draws" triggers fire.
                     events.push(GameEvent::CardDrawn {
                         player_id,
                         object_id: obj_id,
+                        nth_in_step,
                     });
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        p.has_drawn_this_turn = true;
-                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                    }
                 }
             }
         }

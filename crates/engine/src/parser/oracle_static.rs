@@ -445,6 +445,17 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
+    // CR 401.5 + CR 118.9 + CR 601.2a: "You may [play|cast] [filter] from the
+    // top of your library [rider]." Top-of-library cast permission class
+    // (Realmwalker, Future Sight, Bolas's Citadel, Magus of the Future, Vivien
+    // on the Hunt static). Dispatched ahead of the graveyard helper because
+    // both anchor on "you may [play|cast]"; the library helper's anchor
+    // (" from the top of your library") is unique so there is no overlap, but
+    // ordering keeps the flow readable.
+    if let Some(result) = try_parse_top_of_library_cast_permission(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 604.3 + CR 601.2a: "Once during each of your turns, you may cast [filter] from your graveyard."
     if let Some(result) = try_parse_graveyard_cast_permission(&text, &lower) {
         return Some(result);
@@ -2112,6 +2123,15 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             .with_type(core_tf)
                             .controller(ControllerRef::You),
                     )
+                // CR 903.3d: "Commander creatures you control" — bare "Commander"
+                // descriptor on a creature subject is the commander designation,
+                // not an MTG subtype. Constrain to creatures + IsCommander.
+                } else if descriptor.eq_ignore_ascii_case("commander") {
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::IsCommander]),
+                    )
                 } else if is_capitalized_words(descriptor) {
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
@@ -2119,6 +2139,18 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                 } else {
                     return None;
                 }
+            } else if desc_remaining.eq_ignore_ascii_case("commander") {
+                // CR 903.3d: Combat-status prefix + "Commander creature" — same
+                // designation guard as the no-prefix branch above.
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties({
+                            let mut p = extra_props.clone();
+                            p.push(FilterProp::IsCommander);
+                            p
+                        }),
+                )
             } else if is_capitalized_words(desc_remaining) {
                 // Combat-status prefix found + remaining is a subtype
                 TargetFilter::Typed(
@@ -2190,6 +2222,19 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                     try_parse_core_type_descriptor(&descriptor.to_lowercase())
                 {
                     TargetFilter::Typed(TypedFilter::new(core_tf).controller(ControllerRef::You))
+                // CR 903.3d: "Commander(s) you control" — commander designation is
+                // NOT an MTG subtype (CR 903.3); route to FilterProp::IsCommander
+                // before the capitalized-subtype fallback would synthesize a
+                // bogus `Subtype("Commander")`.
+                } else if matches!(
+                    descriptor.to_lowercase().as_str(),
+                    "commander" | "commanders"
+                ) {
+                    TargetFilter::Typed(
+                        TypedFilter::permanent()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::IsCommander]),
+                    )
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
                     let subtype_name = parse_subtype(descriptor)
@@ -3455,6 +3500,14 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
+    // CR 903.3d: "commander(s) you control" / "commander(s)" subject phrase.
+    // Must run before parse_creature_subject_filter because the bare token
+    // "Commanders" otherwise falls into the capitalized-subtype fallback and
+    // emits a bogus `Subtype: "Commander"` (Commander is not an MTG subtype).
+    if let Some(filter) = parse_commander_subject_filter(trimmed) {
+        return Some(filter);
+    }
+
     if let Some(filter) = parse_creature_subject_filter(trimmed) {
         return Some(filter);
     }
@@ -3546,6 +3599,59 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
     }
 
     None
+}
+
+/// CR 903.3d: Parse "commander(s) [you control | your opponents control]"
+/// subject phrases into a `TargetFilter` carrying `FilterProp::IsCommander`.
+/// "Commander" is the deck-construction designation (CR 903.3) — it is NOT
+/// an MTG subtype, so it must not be routed through `parse_subtype` or the
+/// capitalized-subtype fallback (which would synthesize `Subtype("Commander")`
+/// and match zero objects at runtime).
+///
+/// Covers Codsworth, Falthis, Anara, Champions of Archery, Vexilus Praetor,
+/// Guardian Augmenter, The Dilu Horse, Dancer's Chakrams ("other commanders
+/// you control"), and analogous "[other] commander(s) [you control | your
+/// opponents control]" subject phrases.
+fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    let lower = subject.trim().to_lowercase();
+    let i = lower.as_str();
+
+    // Optional leading "other " — emits FilterProp::Another.
+    let (i, other) = opt(tag::<_, _, VE>("other ")).parse(i).ok()?;
+    let has_other = other.is_some();
+
+    // The bare commander token (singular or plural).
+    let (i, _) = alt((tag::<_, _, VE>("commanders"), tag::<_, _, VE>("commander")))
+        .parse(i)
+        .ok()?;
+
+    // Optional controller suffix.
+    let (i, controller) = alt((
+        value(Some(ControllerRef::You), tag::<_, _, VE>(" you control")),
+        value(
+            Some(ControllerRef::Opponent),
+            tag::<_, _, VE>(" your opponents control"),
+        ),
+        value(None, tag::<_, _, VE>("")),
+    ))
+    .parse(i)
+    .ok()?;
+
+    if !i.trim().is_empty() {
+        return None;
+    }
+
+    // CR 903.3d: a commander, when controlled, is a permanent on the battlefield.
+    let mut props = vec![FilterProp::IsCommander];
+    if has_other {
+        props.push(FilterProp::Another);
+    }
+    let mut typed = TypedFilter::permanent().properties(props);
+    if let Some(c) = controller {
+        typed = typed.controller(c);
+    }
+    Some(TargetFilter::Typed(typed))
 }
 
 fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
@@ -6216,6 +6322,118 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
         .affected(affected)
         .description(text.to_string()),
     )
+}
+
+/// CR 401.5 + CR 118.9 + CR 601.2a: Parse "you may [play|cast] [filter] from
+/// the top of your library [rider]" — top-of-library cast permission class
+/// (Realmwalker, Future Sight, Magus of the Future, Bolas's Citadel, Vivien
+/// on the Hunt static). Mirror of `try_parse_graveyard_cast_permission` but
+/// anchored on " from the top of your library" instead of " from your
+/// graveyard". Recognises the compound Bolas form "you may play lands and
+/// cast spells from the top of your library" and lowers it to a single
+/// `play_mode: Play` static with `affected: TargetFilter::Any` (per CR 305.1,
+/// `Play` covers both lands and non-land spells).
+///
+/// The optional alt-cost rider (Bolas: "If you cast a spell this way, pay
+/// life equal to its mana value rather than paying its mana cost.") is
+/// recognised via the existing `oracle_effect::try_parse_alt_cost_rider`
+/// helper and stamped into `StaticMode::TopOfLibraryCastPermission.alt_cost`.
+fn try_parse_top_of_library_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+    // Compound Bolas's Citadel form first — "you may play lands and cast
+    // spells from the top of your library". Both halves collapse to a single
+    // `Play` permission with `affected: Any`: under CR 305.1, `Play` mode
+    // already covers lands (played) and non-land spells (cast).
+    if let Some(rest) = nom_tag_lower(
+        lower,
+        lower,
+        "you may play lands and cast spells from the top of your library",
+    ) {
+        let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
+        return Some(
+            StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+                play_mode: CardPlayMode::Play,
+                alt_cost,
+            })
+            .affected(TargetFilter::Any)
+            .description(text.to_string()),
+        );
+    }
+
+    // Standard form: "you may [play|cast] [filter] from the top of your library".
+    let (rest, play_mode) = if let Some(r) = nom_tag_lower(lower, lower, "you may play ") {
+        (r, CardPlayMode::Play)
+    } else {
+        let r = nom_tag_lower(lower, lower, "you may cast ")?;
+        (r, CardPlayMode::Cast)
+    };
+
+    // Anchor on " from the top of your library". The split helper returns
+    // (consumed_so_far, after_split) — we need both halves: the filter text
+    // sits before the anchor; the optional alt-cost rider sits after.
+    let (filter_text, trailing) =
+        nom_primitives::split_once_on(rest, " from the top of your library")
+            .ok()
+            .map(|(_, pair)| pair)?;
+
+    // Strip leading article — `parse_type_phrase` expects the bare noun.
+    let filter_text = nom_tag_lower(filter_text, filter_text, "a ")
+        .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
+        .unwrap_or(filter_text);
+
+    // Drop trailing " spell"/" spells" so `parse_type_phrase` sees the bare
+    // type/subtype phrase. "lands" is already a valid type phrase.
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
+        Cow::Owned(filter_text.replacen(" spells", "", 1))
+    } else if nom_primitives::scan_contains(filter_text, "spell") {
+        Cow::Owned(filter_text.replacen(" spell", "", 1))
+    } else {
+        Cow::Borrowed(filter_text)
+    };
+
+    let (filter, _) = parse_type_phrase(&cleaned);
+
+    let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
+
+    Some(
+        StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            alt_cost,
+        })
+        .affected(filter)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 118.9 + CR 119.4: Helper to parse the optional alt-cost rider that may
+/// follow a top-of-library cast permission. Bolas's Citadel form: "If you
+/// cast a spell this way, pay life equal to its mana value rather than pay
+/// its mana cost." Scans for the rider's opening "if you cast" inside the
+/// trailing text and the full line, slicing from that index forward so the
+/// existing `try_parse_alt_cost_rider` (which expects the input to start at
+/// the rider) sees a clean prefix.
+fn parse_top_of_library_alt_cost_rider(
+    trailing: &str,
+    text: &str,
+) -> Option<crate::types::ability::AbilityCost> {
+    fn try_from(input: &str) -> Option<crate::types::ability::AbilityCost> {
+        // Scan past any leading text (the "you may play ... library."
+        // sentence) until the rider's opening anchor; pure-nom
+        // `take_until + alt` keeps this on the combinator path. Both
+        // anchors map to the same underlying rider parser.
+        let lower = input.to_lowercase();
+        type E<'a> = nom_language::error::VerboseError<&'a str>;
+        let mut anchor = nom::branch::alt((
+            nom::bytes::complete::take_until::<_, _, E>("if you cast a spell this way"),
+            nom::bytes::complete::take_until::<_, _, E>("if you cast it this way"),
+        ));
+        let (after_skip, _) = anchor.parse(lower.as_str()).ok()?;
+        // Slice the original (preserves casing) at the same offset; nom's
+        // `take_until` returned the consumed prefix, so the rider starts at
+        // `input.len() - after_skip.len()`.
+        let idx = input.len() - after_skip.len();
+        super::oracle_effect::try_parse_alt_cost_rider(&input[idx..])
+    }
+    try_from(trailing).or_else(|| try_from(text))
 }
 
 /// Parse the optional " using (its|their) <keyword> (ability|abilities)" rider on
@@ -9589,6 +9807,43 @@ mod tests {
     }
 
     #[test]
+    fn static_parse_for_each_attached_to_self_kellan() {
+        // CR 301.5 + CR 303.4: Kellan, the Fae-Blooded — "Other creatures you
+        // control get +1/+0 for each Aura and Equipment attached to ~." The
+        // multiplier was previously dropped (boost frozen at +1/+0); now the
+        // for-each clause emits an `AddDynamicPower` over an `ObjectCount`
+        // filtered by `AttachedToSource` so the boost scales with attachments.
+        let result = parse_static_line(
+            "Other creatures you control get +1/+0 for each Aura and Equipment attached to ~.",
+        );
+        let def = result.expect("Kellan static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        let dynamic_power = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        match dynamic_power {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.properties.contains(&FilterProp::AttachedToSource),
+                        "filter must carry AttachedToSource, got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount Ref, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn static_parse_for_each_clause_other_creature() {
         // Verify parse_for_each_clause handles "other creature you control"
         let result =
@@ -9728,6 +9983,82 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
             "Expected AddDynamicToughness, got {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
+    fn static_strong_back_attached_to_recipient_emits_attached_to_recipient_prop() {
+        // CR 301.5 + CR 303.4 + CR 613.4c: Strong Back's third static —
+        // "Enchanted creature gets +2/+2 for each Aura and Equipment attached
+        // to it." The pronoun "it" is anaphoric on the enchanted creature
+        // (the per-recipient affected of the boost), not on the Aura source.
+        // The static must therefore lower to a `QuantityRef::ObjectCount`
+        // whose filter carries `FilterProp::AttachedToRecipient`, NOT
+        // `FilterProp::AttachedToSource`. The legacy bug was a flat
+        // `AddPower(2) + AddToughness(2)` because the for-each clause did not
+        // recognize "attached to it" and the parser fell through to the
+        // fixed-P/T fallback.
+        let def = parse_static_line(
+            "Enchanted creature gets +2/+2 for each Aura and Equipment attached to it.",
+        )
+        .expect("Strong Back static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+
+        // Capture the dynamic-power modification's QuantityExpr for inspection.
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower for the for-each scaling");
+
+        // The factor-2 multiplier wraps an ObjectCount whose filter carries
+        // AttachedToRecipient — confirming the per-recipient referent.
+        let inner = match dyn_pow {
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(*factor, 2);
+                inner.as_ref()
+            }
+            other => panic!("expected QuantityExpr::Multiply, got {other:?}"),
+        };
+        match inner {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(TypedFilter { properties, .. }) => {
+                    assert!(
+                        properties.contains(&FilterProp::AttachedToRecipient),
+                        "filter must carry AttachedToRecipient, got {properties:?}"
+                    );
+                    assert!(
+                        !properties.contains(&FilterProp::AttachedToSource),
+                        "filter must NOT carry AttachedToSource (would point at the Aura)"
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount ref, got {other:?}"),
+        }
+
+        // Negative regression: ensure the parser is not also producing a
+        // bogus flat `AddPower(2)` alongside the dynamic version. (Layered
+        // application would otherwise grant +2 *plus* +2/attached, which is
+        // a different bug from the original 0-multiplier symptom but equally
+        // wrong.)
+        assert!(
+            !def.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddPower { .. })),
+            "must not emit a flat AddPower alongside AddDynamicPower; got {:?}",
             def.modifications
         );
     }
@@ -13086,5 +13417,223 @@ mod tests {
             }
             _ => panic!("expected TargetFilter::Typed"),
         }
+    }
+
+    // CR 903.3d: "Commanders you control have <keyword>" — Codsworth, Falthis,
+    // Vexilus Praetor class. Must produce IsCommander, NOT a bogus
+    // Subtype("Commander") (Commander is not an MTG subtype per CR 903.3).
+    #[test]
+    fn parse_commanders_you_control_have_keyword() {
+        let def = parse_static_line("Commanders you control have ward {2}.")
+            .expect("should parse Commanders-you-control");
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.properties.contains(&FilterProp::IsCommander),
+                    "must carry IsCommander, got {:?}",
+                    tf.properties
+                );
+                // Must NOT synthesize a Commander subtype.
+                assert!(
+                    !tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Commander")),
+                    "must not emit Subtype(\"Commander\") (CR 903.3 — not a subtype)"
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // CR 903.3d + CR 700.4: "Other commanders you control" — must include Another.
+    #[test]
+    fn parse_other_commanders_you_control_have_keyword() {
+        let def = parse_static_line("Other commanders you control have menace.")
+            .expect("should parse other-commanders-you-control");
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // CR 903.3d: "Commander creatures you control" — Guardian Augmenter class.
+    // The "Commander" adjective on a creature subject is the commander
+    // designation, not a subtype.
+    #[test]
+    fn parse_commander_creatures_you_control() {
+        let def = parse_static_line("Commander creatures you control get +2/+2.")
+            .expect("should parse Commander-creatures-you-control");
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(
+                    !tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Commander")),
+                    "must not emit Subtype(\"Commander\")"
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // CR 903.3d: parse_commander_subject_filter as a raw subject helper.
+    // Unblocks subject-continuous-static dispatch (the secondary path).
+    #[test]
+    fn parse_commander_subject_filter_basic_variants() {
+        let f = parse_commander_subject_filter("commanders you control")
+            .expect("commanders you control");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+            }
+            _ => panic!("expected Typed"),
+        }
+
+        let f = parse_commander_subject_filter("other commander you control")
+            .expect("other commander you control");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            _ => panic!("expected Typed"),
+        }
+
+        // Bare "commander" (no controller) — used by `parse_subject_continuous_static`
+        // when an enclosing clause supplies the controller.
+        let f = parse_commander_subject_filter("commanders").expect("bare commanders");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, None);
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+            }
+            _ => panic!("expected Typed"),
+        }
+
+        // Negative: must not match subtype-like words.
+        assert!(parse_commander_subject_filter("zombies you control").is_none());
+        assert!(parse_commander_subject_filter("commander spirits").is_none());
+    }
+
+    /// CR 401.5 + CR 118.9: Realmwalker's "You may cast creature spells of the
+    /// chosen type from the top of your library." should lower to a
+    /// `TopOfLibraryCastPermission { play_mode: Cast }` static with the
+    /// chosen-creature-type filter, NOT to an imperative `Effect::CastFromZone`
+    /// (which would exile the card via the impulse-draw resolver).
+    #[test]
+    fn top_of_library_cast_permission_realmwalker() {
+        let text = "You may cast creature spells of the chosen type from the top of your library.";
+        let lower = text.to_lowercase();
+        let def = try_parse_top_of_library_cast_permission(text, &lower)
+            .expect("Realmwalker static must parse");
+        match def.mode {
+            StaticMode::TopOfLibraryCastPermission {
+                play_mode,
+                ref alt_cost,
+            } => {
+                assert_eq!(play_mode, CardPlayMode::Cast);
+                assert!(alt_cost.is_none());
+            }
+            other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+        }
+        // The chosen-creature-type filter must be carried on `affected`.
+        let affected = def.affected.expect("affected filter set");
+        match affected {
+            TargetFilter::Typed(tf) => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::IsChosenCreatureType)));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// CR 401.5: Future Sight / Magus of the Future — compound "you may play
+    /// lands and cast spells from the top of your library" collapses to a
+    /// single `Play` permission with `affected: Any`.
+    #[test]
+    fn top_of_library_cast_permission_future_sight_compound() {
+        let text = "You may play lands and cast spells from the top of your library.";
+        let lower = text.to_lowercase();
+        let def = try_parse_top_of_library_cast_permission(text, &lower)
+            .expect("Future Sight static must parse");
+        match def.mode {
+            StaticMode::TopOfLibraryCastPermission {
+                play_mode,
+                ref alt_cost,
+            } => {
+                assert_eq!(play_mode, CardPlayMode::Play);
+                assert!(alt_cost.is_none());
+            }
+            other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+        }
+        assert!(matches!(def.affected, Some(TargetFilter::Any)));
+    }
+
+    /// CR 118.9 + CR 119.4: Bolas's Citadel — compound permission line carrying
+    /// a same-line alt-cost rider must lower with `alt_cost: Some(PayLife {
+    /// SelfManaValue })`. Verifies the rider scanner correctly slices into the
+    /// "If you cast a spell this way, ..." sentence inside the same line.
+    #[test]
+    fn top_of_library_cast_permission_bolas_alt_cost() {
+        let text = "You may play lands and cast spells from the top of your library. \
+                    If you cast a spell this way, pay life equal to its mana value rather \
+                    than pay its mana cost.";
+        let lower = text.to_lowercase();
+        let def = try_parse_top_of_library_cast_permission(text, &lower)
+            .expect("Bolas's Citadel static must parse");
+        match def.mode {
+            StaticMode::TopOfLibraryCastPermission {
+                play_mode,
+                alt_cost: Some(crate::types::ability::AbilityCost::PayLife { amount }),
+            } => {
+                assert_eq!(play_mode, CardPlayMode::Play);
+                assert_eq!(
+                    amount,
+                    crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::SelfManaValue
+                    }
+                );
+            }
+            other => panic!("expected PayLife alt_cost, got {other:?}"),
+        }
+    }
+
+    /// Negative: lines without "from the top of your library" must NOT match —
+    /// the existing impulse-draw / graveyard / hand-permission paths must
+    /// still own those lines.
+    #[test]
+    fn top_of_library_cast_permission_rejects_other_anchors() {
+        // Graveyard form — owned by `try_parse_graveyard_cast_permission`.
+        assert!(try_parse_top_of_library_cast_permission(
+            "You may cast a creature spell from your graveyard.",
+            "you may cast a creature spell from your graveyard.",
+        )
+        .is_none());
+        // Hand-free form — owned by `try_parse_cast_free_permission`.
+        assert!(try_parse_top_of_library_cast_permission(
+            "You may cast spells from your hand without paying their mana costs.",
+            "you may cast spells from your hand without paying their mana costs.",
+        )
+        .is_none());
+        // Imperative form (Discover-class) — owned by `try_parse_cast_effect`.
+        assert!(try_parse_top_of_library_cast_permission(
+            "Cast that card without paying its mana cost.",
+            "cast that card without paying its mana cost.",
+        )
+        .is_none());
     }
 }

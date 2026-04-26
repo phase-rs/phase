@@ -69,6 +69,7 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
         restrictions: vec![],
         grants: vec![],
         expiry: None,
+        target: None,
     })
 }
 
@@ -94,12 +95,13 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         None => (clause, ManaContribution::Base),
     };
 
-    if let Some(produced) = parse_mana_production_clause(clause, contribution) {
+    if let Some((produced, target)) = parse_mana_production_clause(clause, contribution) {
         return Some(Effect::Mana {
             produced,
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target,
         });
     }
 
@@ -113,6 +115,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         });
     }
 
@@ -150,6 +153,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             });
         }
 
@@ -188,6 +192,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             });
         }
 
@@ -250,6 +255,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             });
         }
 
@@ -264,6 +270,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             });
         }
 
@@ -282,6 +289,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             });
         }
 
@@ -300,6 +308,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     });
                 }
             }
@@ -318,6 +327,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 });
             }
         }
@@ -337,6 +347,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         restrictions: vec![],
         grants: vec![],
         expiry: None,
+        target: None,
     })
 }
 
@@ -377,27 +388,60 @@ pub(super) fn try_parse_activate_only_condition(text: &str) -> Option<Effect> {
     })
 }
 
+/// CR 115.1 + CR 115.7: Detect a player target filter inside a for-each clause.
+///
+/// When the for-each tail mentions "target opponent" or "target player", surface
+/// the corresponding `TargetFilter` so the wrapping ability can attach a player
+/// target slot. The actual count is resolved separately via `TargetZoneCardCount`
+/// or `TargetLifeTotal` against `ability.targets` at resolution time.
+///
+/// Returns `None` when the clause refers to a non-target subject (e.g. "Swamp
+/// you control" — Cabal Coffers' `ObjectCount`-class), in which case the parent
+/// `Effect::Mana` keeps `target: None`.
+fn for_each_clause_target_filter(for_each_rest: &str) -> Option<TargetFilter> {
+    use crate::types::ability::{ControllerRef, TypedFilter};
+    let lower = for_each_rest.to_lowercase();
+    if nom_primitives::scan_contains(&lower, "target opponent") {
+        // CR 115.1: "target opponent" — same encoding as `parse_target` uses
+        // (TypedFilter with `ControllerRef::Opponent`) so target legality and
+        // multiplayer filtering reuse the existing opponent-only path.
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ))
+    } else if nom_primitives::scan_contains(&lower, "target player") {
+        Some(TargetFilter::Player)
+    } else {
+        None
+    }
+}
+
 pub(super) fn parse_mana_production_clause(
     text: &str,
     contribution: ManaContribution,
-) -> Option<ManaProduction> {
+) -> Option<(ManaProduction, Option<TargetFilter>)> {
     if let Some(color_options) = parse_mana_color_set(text) {
         if color_options.len() > 1 {
-            return Some(ManaProduction::AnyOneColor {
-                count: QuantityExpr::Fixed { value: 1 },
-                color_options,
-                contribution,
-            });
+            return Some((
+                ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options,
+                    contribution,
+                },
+                None,
+            ));
         }
     }
 
     if let Some((colors, remainder)) = parse_mana_production(text) {
         let remainder = remainder.trim().trim_end_matches(['.', '"']).trim();
         if remainder.is_empty() {
-            return Some(ManaProduction::Fixed {
-                colors,
-                contribution,
-            });
+            return Some((
+                ManaProduction::Fixed {
+                    colors,
+                    contribution,
+                },
+                None,
+            ));
         }
         // CR 106.1: "{color} for each [filter]" -> dynamic mana count
         let remainder_lower = remainder.to_lowercase();
@@ -405,11 +449,20 @@ pub(super) fn parse_mana_production_clause(
             value((), tag("for each ")).parse(i)
         }) {
             let qty = super::super::oracle_quantity::parse_for_each_clause(for_each_rest)?;
-            return Some(ManaProduction::AnyOneColor {
-                count: QuantityExpr::Ref { qty },
-                color_options: colors,
-                contribution,
-            });
+            // CR 115.1 + CR 115.7: Surface a player target filter when the
+            // for-each clause references a target player/opponent (Jeska's Will
+            // mode 1: "Add {R} for each card in target opponent's hand"). The
+            // count itself is `TargetZoneCardCount` / `TargetLifeTotal`, which
+            // resolves against `ability.targets` at resolution time.
+            let target = for_each_clause_target_filter(for_each_rest);
+            return Some((
+                ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref { qty },
+                    color_options: colors,
+                    contribution,
+                },
+                target,
+            ));
         }
         // Unknown trailing text -- don't silently discard it
         return None;
@@ -418,9 +471,12 @@ pub(super) fn parse_mana_production_clause(
     if let Some((colorless_count, remainder)) = parse_colorless_mana_production(text) {
         let remainder = remainder.trim().trim_end_matches(['.', '"']).trim();
         if remainder.is_empty() {
-            return Some(ManaProduction::Colorless {
-                count: colorless_count,
-            });
+            return Some((
+                ManaProduction::Colorless {
+                    count: colorless_count,
+                },
+                None,
+            ));
         }
         // CR 106.1: "{C} for each [filter]" -> dynamic colorless mana count
         let remainder_lower = remainder.to_lowercase();
@@ -428,9 +484,13 @@ pub(super) fn parse_mana_production_clause(
             value((), tag("for each ")).parse(i)
         }) {
             let qty = super::super::oracle_quantity::parse_for_each_clause(for_each_rest)?;
-            return Some(ManaProduction::Colorless {
-                count: QuantityExpr::Ref { qty },
-            });
+            let target = for_each_clause_target_filter(for_each_rest);
+            return Some((
+                ManaProduction::Colorless {
+                    count: QuantityExpr::Ref { qty },
+                },
+                target,
+            ));
         }
         // CR 106.1: Mixed colorless + colored: {C}{W}, {C}{C}{R}, etc.
         // (e.g. Karoo, Azorius Chancery, Grinning Ignus)
@@ -438,10 +498,13 @@ pub(super) fn parse_mana_production_clause(
             let after_colors = after_colors.trim().trim_end_matches(['.', '"']).trim();
             if after_colors.is_empty() {
                 if let QuantityExpr::Fixed { value: n } = colorless_count {
-                    return Some(ManaProduction::Mixed {
-                        colorless_count: n as u32,
-                        colors,
-                    });
+                    return Some((
+                        ManaProduction::Mixed {
+                            colorless_count: n as u32,
+                            colors,
+                        },
+                        None,
+                    ));
                 }
             }
         }
@@ -1023,6 +1086,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         });
     }
 
@@ -1053,6 +1117,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
         restrictions: vec![],
         grants: vec![],
         expiry: None,
+        target: None,
     })
 }
 
@@ -1246,5 +1311,102 @@ mod tests {
             }
             other => panic!("expected Colorless mana production, got {other:?}"),
         }
+    }
+
+    /// CR 106.1 + CR 115.1 + CR 115.7: Jeska's Will mode 1 — "Add {R} for each
+    /// card in target opponent's hand". The for-each clause references a
+    /// player target, so the resulting `Effect::Mana` carries:
+    /// 1. `produced: AnyOneColor { count: TargetZoneCardCount{Hand}, [Red] }`,
+    /// 2. `target: Some(TypedFilter::default().controller(Opponent))` so
+    ///    `collect_target_slots` surfaces a player target slot at cast time.
+    #[test]
+    fn jeskas_will_for_each_card_in_target_opponents_hand() {
+        use crate::types::ability::{ControllerRef, TargetFilter, ZoneRef};
+        let effect = try_parse_add_mana_effect("Add {R} for each card in target opponent's hand.")
+            .expect("Jeska's Will mode 1 must parse");
+        let Effect::Mana {
+            produced, target, ..
+        } = effect
+        else {
+            panic!("expected Effect::Mana");
+        };
+        match produced {
+            ManaProduction::AnyOneColor {
+                count,
+                color_options,
+                ..
+            } => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TargetZoneCardCount {
+                            zone: ZoneRef::Hand
+                        }
+                    },
+                );
+                assert_eq!(color_options, vec![ManaColor::Red]);
+            }
+            other => panic!("expected AnyOneColor, got {other:?}"),
+        }
+        let target = target.expect("target opponent should surface a player target filter");
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected Typed filter for target opponent, got {target:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+    }
+
+    /// CR 106.1 + CR 115.1: "Add {U} for each card in target player's hand"
+    /// — generalized printing variant. Routes to `TargetFilter::Player`.
+    #[test]
+    fn add_mana_for_each_card_in_target_players_hand() {
+        use crate::types::ability::{TargetFilter, ZoneRef};
+        let effect = try_parse_add_mana_effect("Add {U} for each card in target player's hand.")
+            .expect("target-player variant must parse");
+        let Effect::Mana {
+            produced, target, ..
+        } = effect
+        else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::AnyOneColor { count, .. } = produced else {
+            panic!("expected AnyOneColor");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand
+                }
+            },
+        );
+        assert_eq!(target, Some(TargetFilter::Player));
+    }
+
+    /// Cabal Coffers — "Add {B} for each Swamp you control" — must continue to
+    /// route through `ObjectCount` (no target field). Regression for the
+    /// non-target arm of `parse_mana_production_clause`.
+    #[test]
+    fn cabal_coffers_for_each_controlled_swamp_no_target() {
+        let effect = try_parse_add_mana_effect("Add {B} for each Swamp you control.")
+            .expect("Cabal Coffers must parse");
+        let Effect::Mana {
+            produced, target, ..
+        } = effect
+        else {
+            panic!("expected Effect::Mana");
+        };
+        match produced {
+            ManaProduction::AnyOneColor { count, .. } => match count {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. },
+                } => {}
+                other => panic!("expected ObjectCount, got {other:?}"),
+            },
+            other => panic!("expected AnyOneColor, got {other:?}"),
+        }
+        assert!(
+            target.is_none(),
+            "Cabal Coffers does not target a player; target must be None",
+        );
     }
 }

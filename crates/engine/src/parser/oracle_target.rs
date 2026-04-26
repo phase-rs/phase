@@ -6,8 +6,8 @@ use nom::combinator::{opt, value};
 use nom::Parser;
 
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter,
-    TypedFilter,
+    AttachmentKind, ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::identifiers::TrackedSetId;
@@ -97,6 +97,12 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
                 tag("that permanent or player"),
             ),
             value(TargetFilter::TriggeringSource, tag("that permanent")),
+            // CR 608.2k + CR 301.5a: "that creature" inside a trigger refers to the
+            // triggering source object (e.g. Pip-Boy 3000's "Whenever equipped
+            // creature attacks ... put a +1/+1 counter on that creature"), not to
+            // a parent target. Placed after longer "that ..." phrases so
+            // longest-match-first dispatch is preserved.
+            value(TargetFilter::TriggeringSource, tag("that creature")),
             // CR 506.3d: "defending player" — the player being attacked.
             value(TargetFilter::DefendingPlayer, tag("defending player")),
         ))
@@ -1880,75 +1886,64 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
         .parse(trimmed)
         .ok()?;
 
-    // CR 202.3: Dynamic comparisons referencing the triggering event source's mana value.
+    // CR 202.3 + CR 120.3: Dynamic comparisons referencing the triggering event.
+    // "that damage" → `EventContextAmount` (damage amount captured at trigger).
+    // "that <type>" (e.g. "that creature", "that spell") → `EventContextSourceManaValue`
+    // (mana value of the triggering source object).
     // Staged checks: first detect "less than" / "greater than", then check for "or equal to".
-    if let Ok((a, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("less than").parse(rest)
-    {
+    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    let try_dynamic = |rest: &str, is_le: bool| -> Option<(FilterProp, usize)> {
+        let kw_tag = if is_le { "less than" } else { "greater than" };
+        let (a, _) = tag::<_, _, Vbe>(kw_tag).parse(rest).ok()?;
         let a = a.trim_start();
-        let (is_equal, a) = if let Ok((a2, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or equal to").parse(a)
-        {
+        let (is_equal, a) = if let Ok((a2, _)) = tag::<_, _, Vbe>("or equal to").parse(a) {
             (true, a2.trim_start())
         } else {
             (false, a)
         };
-        if let Ok((a, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(a) {
+        let (a, _) = tag::<_, _, Vbe>("that ").parse(a).ok()?;
+        // CR 120.3: "that damage" — the damage amount captured by the trigger
+        // (DamageDone events stamp `EventContextAmount`).
+        let (qty, after) = if let Ok((a2, _)) = tag::<_, _, Vbe>("damage").parse(a) {
+            (QuantityRef::EventContextAmount, a2)
+        } else {
+            // Fall back to the type-word arm — "that <type>" where <type> is any
+            // single word terminating at punctuation/space (e.g., "creature",
+            // "spell"). Uses the source object's mana value.
             let after = a.find([',', '.', ' ']).map_or(a, |i| &a[i..]);
-            return Some((
-                if is_equal {
-                    FilterProp::CmcLE {
-                        value: QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextSourceManaValue,
-                        },
-                    }
-                } else {
-                    FilterProp::CmcLE {
-                        value: QuantityExpr::Offset {
-                            inner: Box::new(QuantityExpr::Ref {
-                                qty: QuantityRef::EventContextSourceManaValue,
-                            }),
-                            offset: -1,
-                        },
-                    }
-                },
-                text.len() - after.len(),
-            ));
-        }
+            (QuantityRef::EventContextSourceManaValue, after)
+        };
+        let make_value = |off: i32| {
+            if off == 0 {
+                QuantityExpr::Ref { qty }
+            } else {
+                QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref { qty }),
+                    offset: off,
+                }
+            }
+        };
+        let prop = match (is_le, is_equal) {
+            (true, true) => FilterProp::CmcLE {
+                value: make_value(0),
+            },
+            (true, false) => FilterProp::CmcLE {
+                value: make_value(-1),
+            },
+            (false, true) => FilterProp::CmcGE {
+                value: make_value(0),
+            },
+            (false, false) => FilterProp::CmcGE {
+                value: make_value(1),
+            },
+        };
+        Some((prop, text.len() - after.len()))
+    };
+    if let Some(found) = try_dynamic(rest, true) {
+        return Some(found);
     }
-    if let Ok((a, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("greater than").parse(rest)
-    {
-        let a = a.trim_start();
-        let (is_equal, a) = if let Ok((a2, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or equal to").parse(a)
-        {
-            (true, a2.trim_start())
-        } else {
-            (false, a)
-        };
-        if let Ok((a, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(a) {
-            let after = a.find([',', '.', ' ']).map_or(a, |i| &a[i..]);
-            return Some((
-                if is_equal {
-                    FilterProp::CmcGE {
-                        value: QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextSourceManaValue,
-                        },
-                    }
-                } else {
-                    FilterProp::CmcGE {
-                        value: QuantityExpr::Offset {
-                            inner: Box::new(QuantityExpr::Ref {
-                                qty: QuantityRef::EventContextSourceManaValue,
-                            }),
-                            offset: 1,
-                        },
-                    }
-                },
-                text.len() - after.len(),
-            ));
-        }
+    if let Some(found) = try_dynamic(rest, false) {
+        return Some(found);
     }
 
     // Static "N or less" / "N or greater" — also accepts literal X via
@@ -2262,6 +2257,61 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
 fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
+
+    // CR 303.4 + CR 301.5: "that's enchanted or equipped" / "that's enchanted" /
+    // "that's equipped" — relative clause attaching an attachment-presence
+    // predicate to the enclosing type phrase. Covers the compound-subject grant
+    // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
+    // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
+    if let Ok((after_contraction, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that's ").parse(trimmed)
+    {
+        // Note: `parse_that_isnt_subtype_suffix` runs first in `parse_type_phrase`
+        // and consumes "that's not …", so this branch only sees positive forms.
+        fn parse_attachment_disjunction(
+            input: &str,
+        ) -> nom::IResult<&str, Vec<AttachmentKind>, nom_language::error::VerboseError<&str>>
+        {
+            // Longest-match-first: handle compound forms before single-kind forms.
+            alt((
+                value(
+                    vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                    tag("enchanted or equipped"),
+                ),
+                value(
+                    vec![AttachmentKind::Equipment, AttachmentKind::Aura],
+                    tag("equipped or enchanted"),
+                ),
+                value(vec![AttachmentKind::Aura], tag("enchanted")),
+                value(vec![AttachmentKind::Equipment], tag("equipped")),
+            ))
+            .parse(input)
+        }
+        if let Ok((rest, kinds)) = parse_attachment_disjunction(after_contraction) {
+            // Word-boundary check: the next char must terminate the adjective so
+            // we don't false-match e.g. "that's enchanted by something else".
+            // Accept end-of-string or any non-alphanumeric terminator.
+            let next_char_is_boundary = rest
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            if next_char_is_boundary {
+                let consumed = trimmed.len() - rest.len();
+                let prop = if kinds.len() == 1 {
+                    FilterProp::HasAttachment {
+                        kind: kinds.into_iter().next().expect("len == 1"),
+                        controller: None,
+                    }
+                } else {
+                    FilterProp::HasAnyAttachmentOf {
+                        kinds,
+                        controller: None,
+                    }
+                };
+                return Some((vec![prop], leading_ws + consumed));
+            }
+        }
+    }
 
     let (after_that, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ")
         .parse(trimmed)
@@ -3904,6 +3954,11 @@ mod tests {
 
     #[test]
     fn parse_target_that_creature_inherits_parent_target() {
+        // CR 608.2c: Without trigger context, "that creature" defaults to the
+        // parent target (Twinflame Strive: "create a token that's a copy of that
+        // creature"). Trigger-context resolution to `TriggeringSource` is layered
+        // on top of `parse_target` by callers that thread a `ParseContext` (see
+        // `resolve_counter_placement_target` in `oracle_effect/counter.rs`).
         let (filter, rest) = parse_target("that creature");
         assert_eq!(filter, TargetFilter::ParentTarget);
         assert_eq!(rest, "");
@@ -5251,6 +5306,84 @@ mod tests {
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"
         );
+    }
+
+    // --- CR 303.4 + CR 301.5: "that's enchanted or equipped" relative-clause tests ---
+    // Compound-subject grant class (Reyav, Master Smith; Dogmeat, Ever Loyal).
+
+    #[test]
+    fn that_s_enchanted_or_equipped_emits_disjunction() {
+        let result = parse_that_clause_suffix(" that's enchanted or equipped");
+        let (props, _consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        match &props[0] {
+            FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+                assert_eq!(
+                    kinds,
+                    &vec![AttachmentKind::Aura, AttachmentKind::Equipment]
+                );
+                assert_eq!(controller, &None);
+            }
+            other => panic!("expected HasAnyAttachmentOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn that_s_equipped_or_enchanted_emits_disjunction() {
+        let result = parse_that_clause_suffix(" that's equipped or enchanted");
+        let (props, _consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::HasAnyAttachmentOf { kinds, .. }
+                if kinds.len() == 2 && kinds.contains(&AttachmentKind::Aura)
+                    && kinds.contains(&AttachmentKind::Equipment)
+        ));
+    }
+
+    #[test]
+    fn that_s_enchanted_only_emits_single_kind() {
+        let result = parse_that_clause_suffix(" that's enchanted");
+        let (props, _consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn that_s_equipped_only_emits_single_kind() {
+        let result = parse_that_clause_suffix(" that's equipped");
+        let (props, _consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::HasAttachment {
+                kind: AttachmentKind::Equipment,
+                controller: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn that_s_enchanted_or_equipped_in_full_target() {
+        // Reyav / Dogmeat trigger subject form.
+        let (filter, _rest) = parse_target("a creature you control that's enchanted or equipped");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasAnyAttachmentOf { kinds, .. } if kinds.len() == 2
+                )));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
     }
 
     // --- CR 115.9c: "that targets only [X]" tests ---

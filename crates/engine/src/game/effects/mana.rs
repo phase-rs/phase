@@ -22,6 +22,12 @@ pub fn resolve(
             restrictions,
             grants,
             expiry,
+            // CR 115.1 + CR 115.7: `target` is the spell-level player target
+            // (e.g. Jeska's Will mode 1). The actual count quantity inside
+            // `produced` references it via `TargetZoneCardCount`; we don't
+            // need it again here since `resolve_quantity_with_targets` reads
+            // `ability.targets` directly.
+            target: _,
         } => (produced, restrictions, grants, *expiry),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
@@ -120,10 +126,12 @@ pub(crate) fn resolve_restrictions(
 /// Resolve a typed mana production descriptor into concrete mana units.
 ///
 /// CR 605.3a: Mana abilities don't use the stack, so they have no `ResolvedAbility`
-/// and thus no `chosen_x` — this entry point is used by `mana_abilities::resolve_mana_ability`
-/// for that path. Effects that resolve from the stack (e.g., `Add {G}{G}` as part
-/// of a triggered-ability effect) should use `resolve_mana_types_with_ability` so
-/// `QuantityRef::Variable { name: "X" }` can resolve from the ability's chosen X.
+/// and thus no `chosen_x` — this entry point used to be the legacy path for
+/// `mana_abilities::resolve_mana_ability`. The inline mana-ability resolver now
+/// always routes through `resolve_mana_types_for_ability` so the cost-paid
+/// object snapshot (Food Chain class) and `chosen_x` are visible. Kept as a
+/// minimal building block for callers that have neither.
+#[allow(dead_code)]
 pub(crate) fn resolve_mana_types(
     produced: &ManaProduction,
     state: &GameState,
@@ -148,6 +156,18 @@ fn resolve_mana_types_with_ability(
         ability.controller,
         ability.source_id,
     )
+}
+
+/// CR 117.1 + CR 202.3: Public-crate wrapper for `resolve_mana_types_with_ability`.
+/// Used by the inline mana-ability resolver in `mana_abilities.rs` to thread a
+/// `ResolvedAbility` carrying `cost_paid_object_mana_value` (Food Chain class)
+/// and `chosen_x` into the production-count resolution.
+pub(crate) fn resolve_mana_types_for_ability(
+    produced: &ManaProduction,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<ManaType> {
+    resolve_mana_types_with_ability(produced, state, ability)
 }
 
 fn resolve_count(
@@ -437,6 +457,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(100),
@@ -749,6 +770,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -819,6 +841,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -854,6 +877,7 @@ mod tests {
                 restrictions: vec![ManaSpendRestriction::SpellType("Creature".to_string())],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(100),
@@ -900,6 +924,7 @@ mod tests {
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             obj_id,
@@ -930,6 +955,7 @@ mod tests {
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(999),
@@ -960,6 +986,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![ManaSpellGrant::CantBeCountered],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(100),
@@ -1014,6 +1041,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -1117,6 +1145,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -1171,6 +1200,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -1228,6 +1258,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -1256,6 +1287,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),

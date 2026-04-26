@@ -388,6 +388,7 @@ fn abigale_strips_non_keyword_abilities_from_target() {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         },
     )
     .cost(AbilityCost::Tap);

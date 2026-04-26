@@ -2532,4 +2532,93 @@ mod tests {
         assert_eq!(state.objects[&opp_a_pw].loyalty, Some(2));
         assert_eq!(state.objects[&opp_b_pw].loyalty, Some(2));
     }
+
+    /// CR 120.3 + CR 119.3a: Pyrohemia / Pestilence runtime behavior — when
+    /// `DamageAll { player_filter: Some(PlayerFilter::All) }` resolves, every
+    /// creature on the battlefield (including the controller's own) takes
+    /// damage AND every player (including the controller) loses life. This
+    /// verifies the parser's new compound shape is honored end-to-end.
+    #[test]
+    fn damage_all_each_creature_and_each_player_hits_controller_too() {
+        use crate::types::ability::{PlayerFilter, TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Pyrohemia".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Controller's creature — must take damage (no controller restriction).
+        let own_creature = create_object(
+            &mut state,
+            CardId(2),
+            controller,
+            "Own Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&own_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Opponent's creature — must also take damage.
+        let opp_creature = create_object(
+            &mut state,
+            CardId(3),
+            opponent,
+            "Opp Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                player_filter: Some(PlayerFilter::All),
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+
+        let life_controller_before = state.players[controller.0 as usize].life;
+        let life_opponent_before = state.players[opponent.0 as usize].life;
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).expect("DamageAll resolves");
+
+        // CR 120.3a: BOTH players lost 1 life.
+        assert_eq!(
+            state.players[controller.0 as usize].life,
+            life_controller_before - 1,
+            "controller must take damage from PlayerFilter::All"
+        );
+        assert_eq!(
+            state.players[opponent.0 as usize].life,
+            life_opponent_before - 1
+        );
+        // CR 120.3e: BOTH creatures marked 1 (controller=None means no exclusion).
+        assert_eq!(state.objects[&own_creature].damage_marked, 1);
+        assert_eq!(state.objects[&opp_creature].damage_marked, 1);
+    }
 }

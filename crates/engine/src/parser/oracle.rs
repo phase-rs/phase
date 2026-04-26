@@ -1734,10 +1734,29 @@ pub fn parse_oracle_text(
 
 /// Try to parse "Equip {cost}" or "Equip — {cost}" lines.
 /// Caller must verify the line starts with "equip" (case-insensitive) before calling.
+///
+/// CR 702.6a: Equip is the keyword. Distinct from "equipment" (a subtype noun)
+/// and "equipped" (the static-grant subject) — both of which begin with the
+/// same five letters. The caller's `lower_starts_with("equip")` check matches
+/// all three; this function defends with a word-boundary guard so
+/// "Equipment you control have equip {0}" (Puresteel Paladin granted-equip
+/// pattern) does not slice off the first 5 bytes of "Equipment" and parse the
+/// remainder ("ment you control...") as a malformed activated ability cost.
 fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
     // "equip" is always ASCII so byte length == char length.
-    let rest = line.get("equip".len()..)?.trim();
+    let rest = line.get("equip".len()..)?;
+    // Word-boundary guard: the keyword "equip" must terminate before a
+    // non-keyword character. Permitted continuations: whitespace, em-dash,
+    // hyphen, `{` (mana cost), or end-of-string. Anything else (e.g. 'm' from
+    // "equipment", 'p' from "equipped" — though that's filtered earlier, 'a'
+    // from a hypothetical "equipa") is a different word and must not match.
+    if let Some(next) = rest.chars().next() {
+        if !matches!(next, ' ' | '\t' | '\u{2014}' | '-' | '{' | '.') {
+            return None;
+        }
+    }
+    let rest = rest.trim();
     // Strip leading "—" or "- "
     let cost_text = rest
         .strip_prefix('—')
@@ -7525,5 +7544,129 @@ mod tests {
             }
             other => panic!("expected CopyTokenOf at trigger.execute.effect, got {other:?}"),
         }
+    }
+
+    /// Regression: pin Puresteel Paladin's Metalcraft static-grant-of-equip line
+    /// so a future refactor of `try_parse_equip` / Priority 3 dispatch cannot
+    /// resurface the `cost: Unimplemented("ment you control...")` misparse.
+    ///
+    /// CR 207.2c (Metalcraft ability word) + CR 113.3 (granted ability) +
+    /// CR 613.1 (continuous effect): "Equipment you control have equip {0}"
+    /// must parse as a static (`AddKeyword(Equip {0})` continuous modification),
+    /// not as a malformed activated ability whose cost text begins mid-word
+    /// inside "Equipment". The defect was a missing word-boundary guard in
+    /// `try_parse_equip`: the keyword "equip" must terminate at a recognized
+    /// boundary char, not slice off the first 5 bytes of "Equipment".
+    #[test]
+    fn puresteel_paladin_metalcraft_grant_parses_as_static_not_activated() {
+        let r = parse(
+            "Whenever an Equipment you control enters, you may draw a card.\n\
+             Metalcraft — Equipment you control have equip {0} as long as you \
+             control three or more artifacts.",
+            "Puresteel Paladin",
+            &[],
+            &["Creature"],
+            &["Human", "Knight"],
+        );
+        // No malformed activated ability — the granted-equip line is a static.
+        assert!(
+            r.abilities.is_empty(),
+            "expected zero activated abilities (the granted-equip line is a \
+             static, not an activation on Puresteel itself); got: {:?}",
+            r.abilities
+                .iter()
+                .map(|a| a.description.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        // Exactly one static — the AddKeyword(Equip{0}) Metalcraft grant.
+        assert_eq!(
+            r.statics.len(),
+            1,
+            "expected one static (Metalcraft grant); got {}: {:?}",
+            r.statics.len(),
+            r.statics
+                .iter()
+                .map(|s| s.description.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        let s = &r.statics[0];
+        assert!(
+            s.condition.is_some(),
+            "Metalcraft grant must carry the ability-word condition"
+        );
+    }
+
+    /// Regression: defensive coverage for `try_parse_equip`'s word-boundary
+    /// guard. "Equipment ..." (a sentence opening with the noun, no keyword
+    /// "equip") and "Equipped ..." (the static-grant subject) must both
+    /// fall through Priority 3 without producing an Activated/Attach ability.
+    #[test]
+    fn try_parse_equip_word_boundary_rejects_equipment_and_equipped() {
+        // "equip" → matches (cost follows)
+        assert!(super::try_parse_equip("Equip {2}").is_some());
+        assert!(super::try_parse_equip("Equip — {3}").is_some());
+        // "equipment" → must NOT match (different word)
+        assert!(super::try_parse_equip("Equipment you control have equip {0}.").is_none());
+        // "equipped" → caller's separate guard handles this, but defending
+        // try_parse_equip itself is fail-safe.
+        assert!(super::try_parse_equip("Equipped creature gets +2/+0.").is_none());
+    }
+
+    /// Regression: pin the broader "Equipment you control have equip {N}"
+    /// class — Astor (no ability-word prefix, no em-dash on the line) and
+    /// Syr Gwyn (Knight-restricted equip {0}) were silently affected by the
+    /// same `try_parse_equip` boundary defect. Both must parse cleanly as
+    /// statics without producing a malformed activated ability on the source.
+    /// CR 113.3 + CR 613.1.
+    #[test]
+    fn equipment_have_equip_grant_class_parses_as_static() {
+        // Astor — bare "Equipment you control have equip {1}." with no
+        // ability-word prefix. lower_starts_with("equip") fires here too
+        // because "equipment" begins with the same five letters.
+        let r = parse(
+            "Equipment you control have equip {1}.\nVehicles you control have crew 1.",
+            "Astor, Bearer of Blades",
+            &[],
+            &["Creature"],
+            &["Human", "Warrior"],
+        );
+        assert!(
+            r.abilities.is_empty(),
+            "Astor: no malformed activated ability expected; got {:?}",
+            r.abilities
+                .iter()
+                .map(|a| a.description.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            r.statics.len(),
+            2,
+            "Astor: expected two statics (equip + crew grants); got {}",
+            r.statics.len()
+        );
+
+        // Syr Gwyn — "Equipment you control have equip Knight {0}." (Knight
+        // sub-restriction on the granted equip ability).
+        let r = parse(
+            "Equipment you control have equip Knight {0}.",
+            "Syr Gwyn, Hero of Ashvale",
+            &[],
+            &["Creature"],
+            &["Human", "Knight"],
+        );
+        assert!(
+            r.abilities.is_empty(),
+            "Syr Gwyn: no malformed activated ability expected; got {:?}",
+            r.abilities
+                .iter()
+                .map(|a| a.description.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            r.statics.len(),
+            1,
+            "Syr Gwyn: expected one static (equip Knight grant); got {}",
+            r.statics.len()
+        );
     }
 }

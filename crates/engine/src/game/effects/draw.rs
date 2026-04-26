@@ -152,14 +152,24 @@ pub fn apply_draw_after_replacement(
 
     for obj_id in cards_to_draw {
         zones::move_to_zone(state, obj_id, Zone::Hand, events);
+        // CR 121.1 + CR 504.1: Increment per-step + per-turn counters BEFORE
+        // emitting the event so the ordinal embedded in `CardDrawn` reflects
+        // this draw (1-indexed). Triggers/replacements that gate on "first
+        // draw of the draw step" read this ordinal.
+        let nth_in_step = if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id)
+        {
+            player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
+            player.cards_drawn_this_step = player.cards_drawn_this_step.saturating_add(1);
+            player.cards_drawn_this_step
+        } else {
+            1
+        };
         events.push(GameEvent::CardDrawn {
             player_id,
             object_id: obj_id,
+            nth_in_step,
         });
         record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
-        if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-            player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
-        }
     }
 }
 

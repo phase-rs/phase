@@ -127,19 +127,33 @@ impl AbilityCost {
                     .count()
                     >= resolved
             }
-            // CR 601.2b: Exile requires a choice of card from the specified zone
-            // (defaulting to hand per parser convention). Self-ref exile (e.g.,
-            // Scavenge: "Exile this card from your graveyard") is payable iff
-            // the source is currently in the specified zone.
+            // CR 601.2b: Exile requires a choice of card from the specified zone.
+            // Self-ref exile (e.g., Scavenge: "Exile this card from your
+            // graveyard") is payable iff the source is currently in the
+            // specified zone. For non-self exile costs, when the parser emits
+            // `zone: None` because the filter implies battlefield permanents
+            // (CR 117.1: "Exile a creature you control" — Food Chain class),
+            // default to `Battlefield`. Otherwise default to `Hand` per the
+            // legacy parser convention for non-typed-permanent exile costs.
             AbilityCost::Exile {
                 count,
                 zone,
                 filter,
             } => {
-                let zone = zone.unwrap_or(Zone::Hand);
                 if matches!(filter, Some(TargetFilter::SelfRef)) {
+                    let zone = zone.unwrap_or(Zone::Hand);
                     return state.objects.get(&source).is_some_and(|o| o.zone == zone);
                 }
+                let zone = zone.unwrap_or_else(|| {
+                    if filter
+                        .as_ref()
+                        .is_some_and(filter_implies_battlefield_permanent)
+                    {
+                        Zone::Battlefield
+                    } else {
+                        Zone::Hand
+                    }
+                });
                 eligible_in_zone_count(state, player, source, zone, filter.as_ref())
                     >= *count as usize
             }
@@ -331,6 +345,39 @@ fn eligible_in_zone_count(
 }
 
 /// Count counters of the given kind on an object.
+/// CR 117.1 + CR 400.6: Decide whether a `TargetFilter` for an `AbilityCost::Exile`
+/// without an explicit `zone` implies the battlefield. True when the filter has
+/// any `CoreType` typed predicate that names a permanent type (Creature, Artifact,
+/// Enchantment, Planeswalker, Land, Battle, Tribal). False for plain "card",
+/// "spell", or zone-explicit filters — those keep the legacy hand default.
+///
+/// Used by Food Chain's "Exile a creature you control: ..." (`zone: None`,
+/// `filter: Typed{Creature, You}`) and the broader exile-permanent-cost class.
+fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> bool {
+    use crate::types::ability::TypeFilter;
+    fn type_implies_battlefield(t: &TypeFilter) -> bool {
+        match t {
+            TypeFilter::Creature
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Planeswalker
+            | TypeFilter::Land
+            | TypeFilter::Battle
+            | TypeFilter::Permanent => true,
+            TypeFilter::Non(inner) => type_implies_battlefield(inner),
+            TypeFilter::AnyOf(inners) => inners.iter().any(type_implies_battlefield),
+            _ => false,
+        }
+    }
+    match filter {
+        TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_implies_battlefield),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_implies_battlefield_permanent)
+        }
+        _ => false,
+    }
+}
+
 fn counter_on_object(
     state: &GameState,
     id: ObjectId,

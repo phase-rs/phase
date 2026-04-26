@@ -77,15 +77,23 @@ pub fn resolve(
 
                 for obj_id in cards_to_draw {
                     zones::move_to_zone(state, obj_id, Zone::Hand, events);
+                    // CR 121.1 + CR 504.1: Increment counters first; embed the
+                    // resulting per-step ordinal into the event.
+                    let nth_in_step =
+                        if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
+                            p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
+                            p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
+                            p.cards_drawn_this_step
+                        } else {
+                            1
+                        };
                     events.push(GameEvent::CardDrawn {
                         player_id,
                         object_id: obj_id,
+                        nth_in_step,
                     });
                     // CR 702.94a: Connive draws count as draws for miracle tracking.
                     super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                    }
                 }
             }
         }

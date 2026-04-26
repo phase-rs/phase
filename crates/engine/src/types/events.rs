@@ -10,6 +10,14 @@ use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
+/// CR 121.1: Default `nth_in_step` for `CardDrawn` events deserialized from
+/// older serialized state that predates the field. `1` means "first draw" —
+/// the most permissive default for `ExceptFirstDrawInDrawStep` evaluators
+/// (mirrors the natural draw-step behavior).
+fn default_nth_in_step() -> u32 {
+    1
+}
+
 /// Avatar crossover: The four elemental bending types, tracked per-turn on each player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BendingType {
@@ -114,6 +122,13 @@ pub enum GameEvent {
     CardDrawn {
         player_id: PlayerId,
         object_id: ObjectId,
+        /// CR 121.1 + CR 504.1: Ordinal of this draw within the current step
+        /// (1-indexed). Set by the emitter to `player.cards_drawn_this_step`
+        /// AFTER incrementing for this draw, so the first card drawn in a step
+        /// has `nth_in_step == 1`. Used by `TriggerCondition::ExceptFirstDrawInDrawStep`
+        /// to suppress the trigger on the draw step's mandatory first draw.
+        #[serde(default = "default_nth_in_step")]
+        nth_in_step: u32,
     },
     PermanentUntapped {
         object_id: ObjectId,

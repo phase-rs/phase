@@ -11,7 +11,7 @@ use crate::types::mana::{ManaCost, ManaPool, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::effects::mana::{resolve_mana_types, resolve_restrictions};
+use super::effects::mana::resolve_restrictions;
 use super::engine::EngineError;
 use super::filter::{matches_target_filter, FilterContext};
 use super::life_costs::{self, PayLifeCostResult};
@@ -28,12 +28,16 @@ use super::sacrifice;
 /// implies targeting, so this check is defensive — if future variants introduce
 /// targeting on mana-producing abilities, this guard ensures correctness.
 pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
-    if !matches!(*ability_def.effect, Effect::Mana { .. }) {
-        return false;
-    }
+    let target_attached = match &*ability_def.effect {
+        Effect::Mana { target, .. } => target.as_ref(),
+        _ => return false,
+    };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
-    // multi_target is the explicit targeting mechanism on AbilityDefinition.
-    ability_def.multi_target.is_none()
+    // Reject both the explicit `multi_target` mechanism and the embedded
+    // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
+    // card in target opponent's hand" — the spell targets, so it must use the
+    // stack and is not a mana ability under CR 605).
+    ability_def.multi_target.is_none() && target_attached.is_none()
 }
 
 /// CR 605.1b: A triggered ability is a mana ability iff all three hold:
@@ -176,6 +180,10 @@ pub fn resolve_mana_ability(
     // Pay the full ability cost (tap, sacrifice, etc.)
     pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
 
+    // CR 117.1 + CR 202.3: This non-interactive entry point is reachable only
+    // when no cost-paid-object snapshot is needed (no battlefield exile
+    // selection); pass `None`. The interactive Food Chain path threads its
+    // captured value through `produce_mana_from_ability` directly.
     produce_mana_from_ability(
         state,
         source_id,
@@ -183,6 +191,7 @@ pub fn resolve_mana_ability(
         ability_def,
         events,
         color_override,
+        None,
     );
     Ok(())
 }
@@ -190,6 +199,12 @@ pub fn resolve_mana_ability(
 /// Produce mana from a resolved mana ability without paying costs.
 /// Shared by `resolve_mana_ability` (cost paid inline) and `handle_choose_mana_color`
 /// (cost already paid during the `TapCreaturesForManaAbility` phase).
+///
+/// `cost_paid_object_mana_value` carries the captured mana value
+/// (CR 117.1 + CR 202.3) of any object exiled or sacrificed as part of cost
+/// payment so the production count can resolve
+/// `QuantityRef::CostPaidObjectManaValue` (Food Chain, Burnt Offering,
+/// Metamorphosis class).
 fn produce_mana_from_ability(
     state: &mut GameState,
     source_id: ObjectId,
@@ -197,7 +212,18 @@ fn produce_mana_from_ability(
     ability_def: &AbilityDefinition,
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
+    cost_paid_object_mana_value: Option<u32>,
 ) {
+    // CR 117.1 + CR 202.3: Build a transient `ResolvedAbility` carrying the
+    // cost-paid object snapshot so quantity resolution sees it. Reused for
+    // both production-count and sub-chain resolution paths so the same
+    // snapshot is visible end-to-end.
+    let mut resolved_for_quantity =
+        super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
+    if let Some(mv) = cost_paid_object_mana_value {
+        resolved_for_quantity.set_cost_paid_object_mana_value_recursive(mv);
+    }
+
     // CR 106.6: Resolve spend-restriction templates, grants, and expiry so they
     // attach to each produced `ManaUnit`. Dropping these here is the bug that
     // made Flamebraider's Elemental-only mana behave as unrestricted mana.
@@ -207,16 +233,25 @@ fn produce_mana_from_ability(
             restrictions,
             grants,
             expiry,
+            target: None,
         } => {
             let mana = match color_override {
                 // `Combination` is pre-chosen — skip `resolve_mana_types` entirely
                 // so the exact sequence lands in the pool (CR 605.3b).
                 Some(ProductionOverride::Combination(types)) => types,
                 Some(ProductionOverride::SingleColor(color)) => {
-                    let resolved = resolve_mana_types(produced, state, player, source_id);
+                    let resolved = super::effects::mana::resolve_mana_types_for_ability(
+                        produced,
+                        state,
+                        &resolved_for_quantity,
+                    );
                     vec![color; resolved.len()]
                 }
-                None => resolve_mana_types(produced, state, player, source_id),
+                None => super::effects::mana::resolve_mana_types_for_ability(
+                    produced,
+                    state,
+                    &resolved_for_quantity,
+                ),
             };
             let concrete = resolve_restrictions(restrictions, state, source_id);
             (mana, concrete, grants.clone(), *expiry)
@@ -269,6 +304,8 @@ pub fn activate_mana_ability(
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
         },
         events,
     )
@@ -399,6 +436,7 @@ pub fn handle_choose_mana_color(
         &ability_def,
         events,
         Some(override_value),
+        pending.cost_paid_object_mana_value,
     );
 
     Ok(resume_waiting_for(pending.player, pending.resume.clone()))
@@ -430,6 +468,49 @@ pub fn handle_tap_creatures_for_mana_ability(
 
     let mut updated = pending.clone();
     updated.chosen_tappers = chosen.to_vec();
+    advance_mana_ability_activation(state, updated, events)
+}
+
+/// CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Complete the
+/// exile-from-battlefield mana-ability cost selection (Food Chain class).
+/// Captures the cost-paid object's mana value snapshot from the live
+/// battlefield before the cost is paid, then resumes the activation flow.
+pub fn handle_exile_from_battlefield_for_mana_ability(
+    state: &mut GameState,
+    count: usize,
+    legal_permanents: &[ObjectId],
+    pending: &PendingManaAbility,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Must exile exactly {} permanent(s), got {}",
+            count,
+            chosen.len()
+        )));
+    }
+    for id in chosen {
+        if !legal_permanents.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected permanent not eligible for mana ability exile cost".to_string(),
+            ));
+        }
+    }
+
+    // CR 117.1 + CR 202.3: Capture the cost-paid object's mana value before
+    // it leaves the battlefield. Uses the first chosen permanent — the class
+    // only ever exiles one cost-tracked object (Food Chain). Multi-exile
+    // costs are unusual but if they ever appear the resolver reads the first
+    // entry; downstream design can extend to a Vec snapshot if a card needs
+    // per-object mana values.
+    let captured_mv = chosen
+        .first()
+        .and_then(|id| state.objects.get(id).map(|obj| obj.mana_cost.mana_value()));
+
+    let mut updated = pending.clone();
+    updated.chosen_exiled_battlefield = chosen.to_vec();
+    updated.cost_paid_object_mana_value = captured_mv;
     advance_mana_ability_activation(state, updated, events)
 }
 
@@ -549,6 +630,31 @@ fn advance_mana_ability_activation(
         }
     }
 
+    // CR 117.1 + CR 118.3: Non-self exile-from-battlefield as a mana ability cost
+    // (Food Chain class). Surface the player choice before producing mana so the
+    // cost-paid object's mana value can be captured at cost-payment time
+    // (CR 202.3).
+    if pending.chosen_exiled_battlefield.is_empty() {
+        if let Some((count, permanents)) = exile_from_battlefield_cost_choice(
+            state,
+            pending.player,
+            pending.source_id,
+            &ability_def.cost,
+        ) {
+            if permanents.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible permanents to exile for mana ability cost".to_string(),
+                ));
+            }
+            return Ok(WaitingFor::ExileFromBattlefieldForManaAbility {
+                player: pending.player,
+                count,
+                permanents,
+                pending_mana_ability: Box::new(pending),
+            });
+        }
+    }
+
     // CR 605.3a + CR 601.2h + CR 107.4e: Resolve the mana sub-cost payment before
     // producing any mana or prompting for output choices. If the cost has hybrid
     // shards (CR 107.4e) with more than one legal color assignment given the
@@ -582,6 +688,7 @@ fn advance_mana_ability_activation(
 
     if pending.color_override.is_none() {
         if let Some(choice) = mana_choice_prompt(&ability_def.effect, state, pending.source_id) {
+            let events_before = events.len();
             pay_mana_ability_cost_with_choices(
                 state,
                 pending.source_id,
@@ -590,8 +697,27 @@ fn advance_mana_ability_activation(
                 events,
                 &mut pending.chosen_tappers.iter().copied(),
                 &mut pending.chosen_discards.iter().copied(),
+                &mut pending.chosen_exiled_battlefield.iter().copied(),
                 pending.chosen_mana_payment.as_deref(),
             )?;
+            // CR 603.2a + CR 603.2g + CR 605.3b: Cost-payment events (Tap,
+            // Sacrifice, etc.) generated during a mana ability's cost step
+            // trigger external abilities normally — CR 603.2a allows triggers
+            // to fire even when cost payment is in flight, and CR 603.2g
+            // demands that any event that actually occurs trigger its
+            // observers. Mana abilities (CR 605.3b) resolve in two halves
+            // around an interactive `WaitingFor::ChooseManaColor` prompt:
+            // this branch pays the cost and returns the prompt without
+            // flowing back through `run_post_action_pipeline`, which is the
+            // engine's normal trigger scan site. Scan inline here so
+            // cost-payment triggers register before the prompt; otherwise
+            // the events are stranded and never fire any observers (Crime
+            // Novelist, Mayhem Devil, Cruel Celebrant, Korvold, Syr Ginger,
+            // …).
+            if events.len() > events_before {
+                let cost_events: Vec<_> = events[events_before..].to_vec();
+                super::triggers::process_triggers(state, &cost_events);
+            }
             return Ok(WaitingFor::ChooseManaColor {
                 player: pending.player,
                 choice,
@@ -609,7 +735,9 @@ fn advance_mana_ability_activation(
         pending.color_override.clone(),
         &pending.chosen_tappers,
         &pending.chosen_discards,
+        &pending.chosen_exiled_battlefield,
         pending.chosen_mana_payment.as_deref(),
+        pending.cost_paid_object_mana_value,
     )?;
     Ok(resume_waiting_for(pending.player, pending.resume))
 }
@@ -632,6 +760,7 @@ fn pay_mana_ability_cost(
         events,
         &mut std::iter::empty(),
         &mut std::iter::empty(),
+        &mut std::iter::empty(),
         None,
     )
 }
@@ -646,10 +775,13 @@ fn resolve_mana_ability_with_selected_choices(
     color_override: Option<ProductionOverride>,
     tapped_creatures: &[ObjectId],
     discarded_cards: &[ObjectId],
+    exiled_battlefield: &[ObjectId],
     chosen_hybrid_payment: Option<&[ManaType]>,
+    cost_paid_object_mana_value: Option<u32>,
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
     let mut discarded = discarded_cards.iter().copied();
+    let mut exiled = exiled_battlefield.iter().copied();
     pay_mana_ability_cost_with_choices(
         state,
         source_id,
@@ -658,6 +790,7 @@ fn resolve_mana_ability_with_selected_choices(
         events,
         &mut chosen,
         &mut discarded,
+        &mut exiled,
         chosen_hybrid_payment,
     )?;
     if chosen.next().is_some() {
@@ -665,10 +798,24 @@ fn resolve_mana_ability_with_selected_choices(
             "Too many creatures selected for mana ability cost".to_string(),
         ));
     }
+    if exiled.next().is_some() {
+        return Err(EngineError::InvalidAction(
+            "Too many permanents selected for mana ability exile cost".to_string(),
+        ));
+    }
     if discarded.next().is_some() {
         return Err(EngineError::InvalidAction(
             "Too many cards selected for mana ability cost".to_string(),
         ));
+    }
+
+    // CR 117.1 + CR 202.3: Build a transient `ResolvedAbility` carrying the
+    // cost-paid object snapshot so production-count resolution sees it
+    // (Food Chain class).
+    let mut resolved_for_quantity =
+        super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
+    if let Some(mv) = cost_paid_object_mana_value {
+        resolved_for_quantity.set_cost_paid_object_mana_value_recursive(mv);
     }
 
     // CR 106.6: Thread restrictions, grants, and expiry through the
@@ -680,14 +827,23 @@ fn resolve_mana_ability_with_selected_choices(
             restrictions,
             grants,
             expiry,
+            target: None,
         } => {
             let mana = match color_override {
                 Some(ProductionOverride::Combination(types)) => types,
                 Some(ProductionOverride::SingleColor(color)) => {
-                    let resolved = resolve_mana_types(produced, &*state, player, source_id);
+                    let resolved = super::effects::mana::resolve_mana_types_for_ability(
+                        produced,
+                        &*state,
+                        &resolved_for_quantity,
+                    );
                     vec![color; resolved.len()]
                 }
-                None => resolve_mana_types(produced, &*state, player, source_id),
+                None => super::effects::mana::resolve_mana_types_for_ability(
+                    produced,
+                    &*state,
+                    &resolved_for_quantity,
+                ),
             };
             let concrete = resolve_restrictions(restrictions, &*state, source_id);
             (mana, concrete, grants.clone(), *expiry)
@@ -740,7 +896,7 @@ fn resolve_mana_ability_sub_chain(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pay_mana_ability_cost_with_choices<I, J>(
+fn pay_mana_ability_cost_with_choices<I, J, K>(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
@@ -748,11 +904,13 @@ fn pay_mana_ability_cost_with_choices<I, J>(
     events: &mut Vec<GameEvent>,
     chosen_tappers: &mut I,
     chosen_discards: &mut J,
+    chosen_exiled_battlefield: &mut K,
     chosen_hybrid_payment: Option<&[ManaType]>,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
     J: Iterator<Item = ObjectId>,
+    K: Iterator<Item = ObjectId>,
 {
     match cost {
         Some(AbilityCost::Tap) => tap_source(state, source_id, events)?,
@@ -829,6 +987,49 @@ where
                         events,
                     )?;
                 }
+            }
+        }
+        // CR 117.1 + CR 118.3 + CR 605.3b: Non-self exile-from-battlefield as a
+        // mana ability cost (Food Chain class). The interactive flow has already
+        // captured the chosen permanents in `chosen_exiled_battlefield`; here we
+        // verify each is still legal and move it to exile. The cost-paid object's
+        // mana value is captured by the resume handler before this fn runs.
+        Some(AbilityCost::Exile {
+            count,
+            zone,
+            filter: Some(filter),
+        }) if matches!(zone, None | Some(Zone::Battlefield))
+            && !matches!(filter, TargetFilter::SelfRef) =>
+        {
+            let ctx = FilterContext::from_source(state, source_id);
+            for _ in 0..*count {
+                let chosen_id = chosen_exiled_battlefield.next().ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Missing exiled permanent selection for mana ability".to_string(),
+                    )
+                })?;
+                if chosen_id == source_id {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Source cannot satisfy its own exile cost".to_string(),
+                    ));
+                }
+                let obj = state.objects.get(&chosen_id).ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Selected permanent for exile cost not found".to_string(),
+                    )
+                })?;
+                if obj.zone != Zone::Battlefield || obj.controller != player {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Selected permanent is not on the battlefield under your control"
+                            .to_string(),
+                    ));
+                }
+                if !matches_target_filter(state, chosen_id, filter, &ctx) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Selected permanent does not match the exile cost filter".to_string(),
+                    ));
+                }
+                super::zones::move_to_zone(state, chosen_id, Zone::Exile, events);
             }
         }
         Some(AbilityCost::Composite { costs }) => {
@@ -1268,6 +1469,58 @@ fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     }
 }
 
+/// CR 117.1 + CR 118.3: Match `AbilityCost::Exile` shapes that target a
+/// non-self battlefield permanent. Returns `(count, filter)` if found, else
+/// `None`. Both `zone: None` (parser convention when the filter implies
+/// battlefield) and `zone: Some(Battlefield)` are accepted.
+fn find_exile_from_battlefield_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+    match cost {
+        AbilityCost::Exile {
+            count,
+            zone,
+            filter: Some(filter),
+        } if matches!(zone, None | Some(Zone::Battlefield))
+            && !matches!(filter, TargetFilter::SelfRef) =>
+        {
+            Some((*count, filter))
+        }
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_exile_from_battlefield_cost),
+        _ => None,
+    }
+}
+
+/// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible battlefield permanents
+/// for an `AbilityCost::Exile { zone: None|Battlefield, filter: !SelfRef }`
+/// mana ability cost (Food Chain class). Excludes the source object so
+/// abilities cannot exile themselves to satisfy their own cost.
+fn exile_from_battlefield_cost_choice(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &Option<AbilityCost>,
+) -> Option<(usize, Vec<ObjectId>)> {
+    let (count, filter) = find_exile_from_battlefield_cost(cost.as_ref()?)?;
+    let ctx = FilterContext::from_source(state, source_id);
+    let permanents = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            if id == source_id {
+                return false;
+            }
+            let Some(obj) = state.objects.get(&id) else {
+                return false;
+            };
+            if obj.zone != Zone::Battlefield || obj.controller != player {
+                return false;
+            }
+            matches_target_filter(state, id, filter, &ctx)
+        })
+        .collect();
+    Some((count as usize, permanents))
+}
+
 fn find_non_self_discard_cost(
     cost: &AbilityCost,
 ) -> Option<(&crate::types::ability::QuantityExpr, Option<&TargetFilter>)> {
@@ -1403,7 +1656,7 @@ mod tests {
     };
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
-    use crate::types::mana::{ManaColor, ManaType};
+    use crate::types::mana::{ManaColor, ManaCostShard, ManaType};
     use crate::types::zones::Zone;
 
     fn make_mana_ability(produced: ManaProduction) -> AbilityDefinition {
@@ -1414,6 +1667,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap)
@@ -1549,6 +1803,7 @@ mod tests {
                 )],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -1671,6 +1926,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -1728,6 +1984,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -1779,6 +2036,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -1861,6 +2119,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -1994,6 +2253,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -2043,6 +2303,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -2124,6 +2385,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -2202,6 +2464,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -2283,6 +2546,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -2422,6 +2686,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(1),
@@ -2629,6 +2894,8 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
         };
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Red, ManaType::Green],
@@ -2686,6 +2953,8 @@ mod tests {
                 chosen_tappers: Vec::new(),
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
+                chosen_exiled_battlefield: Vec::new(),
+                cost_paid_object_mana_value: None,
             };
             let prompt = ManaChoicePrompt::SingleColor {
                 options: vec![ManaType::Green, ManaType::White],
@@ -2808,6 +3077,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -2908,6 +3178,8 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -3004,6 +3276,8 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -3298,6 +3572,8 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
         };
         let options = vec![vec![ManaType::Blue], vec![ManaType::Black]];
         let mut events = Vec::new();
@@ -3364,6 +3640,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -3501,6 +3778,8 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
         };
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Green, ManaType::White],
@@ -3554,6 +3833,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap)
@@ -3629,6 +3909,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -3706,5 +3987,324 @@ mod tests {
             1,
             "Mana production must still occur"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 117.1 + CR 202.3: Cost-paid object mana value (Food Chain class)
+    // ---------------------------------------------------------------------
+
+    /// Build a Food Chain mana ability:
+    /// "Exile a creature you control: Add X mana of any one color, where
+    ///  X is 1 plus the exiled creature's mana value. Spend this mana only
+    ///  to cast creature spells."
+    fn make_food_chain_ability() -> AbilityDefinition {
+        use crate::types::ability::{
+            ManaSpendRestriction, QuantityRef, TargetFilter as TF, TypedFilter,
+        };
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::CostPaidObjectManaValue,
+                        }),
+                        offset: 1,
+                    },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![ManaSpendRestriction::SpellType("Creature".to_string())],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Exile {
+            count: 1,
+            zone: None,
+            filter: Some(TF::Typed(
+                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
+            )),
+        })
+    }
+
+    /// Helper: spawn `name` on the battlefield with a printed mana cost
+    /// and the Creature core type.
+    fn spawn_creature_with_cost(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        cost: ManaCost,
+    ) -> ObjectId {
+        use crate::types::card_type::{CardType, CoreType};
+        let id = create_object(state, CardId(0), owner, name.to_string(), Zone::Battlefield);
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.mana_cost = cost;
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+        }
+        id
+    }
+
+    /// (a) Sacrificing a 3-mana-value creature gives 4 mana from Food Chain.
+    #[test]
+    fn food_chain_exiles_three_mana_value_creature_produces_four_mana() {
+        let mut state = GameState::new_two_player(42);
+        let chain = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Food Chain".to_string(),
+            Zone::Battlefield,
+        );
+        // Stash the food-chain ability so the dispatch can find it by index.
+        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities)
+            .push(make_food_chain_ability());
+
+        // 3-MV creature: cost {2}{G}.
+        let three_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        };
+        let creature =
+            spawn_creature_with_cost(&mut state, PlayerId(0), "Grizzly Bears", three_cost);
+
+        // Player picks the creature to exile via the resume handler.
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: chain,
+            ability_index: 0,
+            color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
+        };
+        let mut events = Vec::new();
+        let _ = handle_exile_from_battlefield_for_mana_ability(
+            &mut state,
+            1,
+            &[creature],
+            &pending,
+            &[creature],
+            &mut events,
+        )
+        .expect("food chain exile handler must accept the chosen creature");
+
+        // 1 plus mana value of {2}{G} = 4 mana.
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            4,
+            "Food Chain must produce 4 green mana for a 3-MV exiled creature"
+        );
+        // Creature is now in exile.
+        assert_eq!(
+            state.objects.get(&creature).unwrap().zone,
+            Zone::Exile,
+            "Exiled creature must be in the exile zone after cost is paid"
+        );
+    }
+
+    /// (b) Exiling a 0-mana-value creature gives 1 mana (offset = 1).
+    #[test]
+    fn food_chain_exiles_zero_mana_value_creature_produces_one_mana() {
+        let mut state = GameState::new_two_player(42);
+        let chain = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Food Chain".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities)
+            .push(make_food_chain_ability());
+
+        // 0-MV creature (Memnite-style): no shards, no generic.
+        let zero_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        };
+        let creature = spawn_creature_with_cost(&mut state, PlayerId(0), "Memnite", zero_cost);
+
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: chain,
+            ability_index: 0,
+            color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
+        };
+        let mut events = Vec::new();
+        let _ = handle_exile_from_battlefield_for_mana_ability(
+            &mut state,
+            1,
+            &[creature],
+            &pending,
+            &[creature],
+            &mut events,
+        )
+        .expect("food chain exile handler must accept the 0-MV creature");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            1,
+            "Food Chain must produce 1 red mana for a 0-MV exiled creature"
+        );
+    }
+
+    /// (c) Burnt-Offering / Metamorphosis class — an `AbilityResolution`
+    /// stamped with a captured mana value resolves
+    /// `QuantityRef::CostPaidObjectManaValue` to that value at production time.
+    #[test]
+    fn cost_paid_object_mana_value_resolves_via_resolved_ability_field() {
+        use crate::game::quantity::resolve_quantity_with_targets;
+        use crate::types::ability::QuantityRef;
+
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyCombination {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::CostPaidObjectManaValue,
+                    },
+                    color_options: vec![ManaColor::Black, ManaColor::Red],
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // Simulate a 5-MV creature being sacrificed as cost.
+        ability.set_cost_paid_object_mana_value_recursive(5);
+
+        let resolved = resolve_quantity_with_targets(
+            &state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::CostPaidObjectManaValue,
+            },
+            &ability,
+        );
+        assert_eq!(
+            resolved, 5,
+            "CostPaidObjectManaValue must resolve to the captured mana value"
+        );
+    }
+
+    /// Resolver returns 0 when no cost-paid object snapshot is in scope —
+    /// regression guard that avoids spurious mana production for unrelated
+    /// abilities.
+    #[test]
+    fn cost_paid_object_mana_value_returns_zero_without_snapshot() {
+        use crate::game::quantity::resolve_quantity_with_targets;
+        use crate::types::ability::QuantityRef;
+
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // No `set_cost_paid_object_mana_value_recursive` — field stays None.
+
+        let resolved = resolve_quantity_with_targets(
+            &state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::CostPaidObjectManaValue,
+            },
+            &ability,
+        );
+        assert_eq!(
+            resolved, 0,
+            "CostPaidObjectManaValue must return 0 when no snapshot was captured"
+        );
+    }
+
+    /// Food Chain mana carries `ManaSpendRestriction::SpellType("Creature")`
+    /// so the produced mana cannot pay non-creature spell costs.
+    #[test]
+    fn food_chain_mana_is_creature_spell_only() {
+        let mut state = GameState::new_two_player(42);
+        let chain = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Food Chain".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&chain).unwrap().abilities)
+            .push(make_food_chain_ability());
+
+        let three_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        };
+        let creature =
+            spawn_creature_with_cost(&mut state, PlayerId(0), "Grizzly Bears", three_cost);
+
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: chain,
+            ability_index: 0,
+            color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            cost_paid_object_mana_value: None,
+        };
+        let mut events = Vec::new();
+        let _ = handle_exile_from_battlefield_for_mana_ability(
+            &mut state,
+            1,
+            &[creature],
+            &pending,
+            &[creature],
+            &mut events,
+        )
+        .expect("food chain exile handler must accept the chosen creature");
+
+        // Every produced unit must carry the SpellType("Creature") restriction.
+        let pool = &state.players[0].mana_pool;
+        assert_eq!(pool.total(), 4);
+        for unit in &pool.mana {
+            assert_eq!(
+                unit.restrictions,
+                vec![crate::types::mana::ManaRestriction::OnlyForSpellType(
+                    "Creature".to_string()
+                )],
+                "Food Chain mana must carry the Creature spell-type restriction"
+            );
+        }
     }
 }
