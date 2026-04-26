@@ -129,7 +129,10 @@ jobs:
         # with their Oracle text. Consumed by docs/AI-CONTRIBUTOR.md's pre-flight
         # gate so autonomous LLM contributors can distinguish "actually
         # supported" from "parses, but parses wrong."
-        run: cargo semantic-audit
+        # Pass data/ explicitly — the binary's default lookup is
+        # `client/public/card-data.json`, but gen-card-data.sh mirrors to data/
+        # in both workflows so this is the portable path.
+        run: cargo semantic-audit data/
 
       - name: Stamp shared card_data_hash on coverage + audit JSONs
         # Both files are uploaded to R2 as separate PUTs with no transactional

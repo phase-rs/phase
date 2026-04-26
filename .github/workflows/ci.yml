@@ -110,7 +110,10 @@ jobs:
         # Mirrors the staging deploy step (deploy.yml) so PR-tracked freshness
         # never diverges from main. Consumed by docs/AI-CONTRIBUTOR.md's
         # pre-flight gate.
-        run: cargo semantic-audit
+        # Pass data/ explicitly — the binary's default lookup is
+        # `client/public/card-data.json` which doesn't exist on the ci.yml
+        # path (card-data is generated directly into data/ above).
+        run: cargo semantic-audit data/
 
       - name: Stamp shared card_data_hash on coverage + audit JSONs
         # Embed the same card-data hash in both files so downstream consumers
