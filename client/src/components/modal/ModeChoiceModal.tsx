@@ -1,9 +1,9 @@
-import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useMemo, useState } from "react";
 
 import type { ModalChoice } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { DialogShell } from "./DialogShell.tsx";
 
 export function ModeChoiceModal() {
   const canActForWaitingState = useCanActForWaitingState();
@@ -71,109 +71,92 @@ export function ModeChoiceModal() {
       ? `Choose ${numberWord(modal.min_choices)}`
       : `Choose ${numberWord(modal.min_choices)} to ${numberWord(modal.max_choices)}`;
 
-  return (
-    <AnimatePresence>
-      <motion.div
-        className="fixed inset-0 z-50 flex items-center justify-center px-2 py-2 lg:px-4 lg:py-6"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.2 }}
-      >
-        <div className="absolute inset-0 bg-black/60" />
-
-        <motion.div
-          className="relative z-10 max-h-[calc(100vh_-_1rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-md overflow-y-auto rounded-[16px] lg:rounded-[24px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md"
-          initial={{ scale: 0.95, opacity: 0, y: 10 }}
-          animate={{ scale: 1, opacity: 1, y: 0 }}
-          exit={{ scale: 0.95, opacity: 0, y: 10 }}
-          transition={{ duration: 0.2, ease: "easeOut" }}
+  const showFooter = !isSingleChoice || !isAbilityMode;
+  const footer = showFooter ? (
+    <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+      {!isSingleChoice && (
+        <button
+          onClick={handleConfirm}
+          disabled={!canConfirm}
+          className={`min-h-11 rounded-[16px] px-6 py-2 font-semibold transition ${
+            canConfirm
+              ? "bg-cyan-500 text-slate-950 shadow-[0_14px_34px_rgba(6,182,212,0.28)] hover:bg-cyan-400"
+              : "cursor-not-allowed border border-white/8 bg-white/5 text-slate-500"
+          }`}
         >
-          <div className="border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5">
-            <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
-              {isAbilityMode ? "Ability Modes" : "Spell Modes"}
-            </div>
-            <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">{chooseLabel}</h2>
-            <p className="mt-1 text-xs text-slate-400 lg:text-sm">
-              Select the mode or modes to apply.
-            </p>
-          </div>
-          <div className="px-3 py-3 lg:px-5 lg:py-5">
-            <div className="flex flex-col gap-2">
-              {modal.mode_descriptions.map((desc, index) => {
-                const count = selected.filter((value) => value === index).length;
-                const isSelected = count > 0;
-                const isUnavailable = unavailableModes.includes(index);
-                return (
-                  <button
-                    key={index}
-                    disabled={isUnavailable}
-                    onClick={() => {
-                      if (isUnavailable) return;
-                      if (isSingleChoice) {
-                        dispatch({ type: "SelectModes", data: { indices: [index] } });
-                        setSelected([]);
-                      } else {
-                        toggleMode(index);
-                      }
-                    }}
-                    className={`rounded-[16px] border px-4 py-3 text-left transition ${
-                      isUnavailable
-                        ? "cursor-not-allowed border-white/5 bg-white/3 opacity-40"
-                        : isSelected
-                          ? "border-cyan-300/60 bg-cyan-500/12 ring-1 ring-cyan-400/40"
-                          : "border-white/8 bg-white/5 hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
-                    }`}
-                  >
-                    <span className={`font-semibold ${isUnavailable ? "text-slate-500" : "text-white"}`}>{desc}</span>
-                    {isUnavailable && (
-                      <span className="ml-2 text-xs text-slate-500">(already chosen)</span>
-                    )}
-                    {count > 0 && (
-                      <span className="ml-2 inline-flex min-w-6 items-center justify-center rounded-full bg-cyan-300/20 px-2 py-0.5 text-xs font-semibold text-cyan-100">
-                        {count}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+          Confirm ({selected.length}/{modal.max_choices})
+        </button>
+      )}
+      {!isSingleChoice && selected.length > 0 && (
+        <button
+          onClick={() => setSelected([])}
+          className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
+        >
+          Clear
+        </button>
+      )}
+      {!isAbilityMode && (
+        <button
+          onClick={handleCancel}
+          className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+  ) : undefined;
 
-            <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-end">
-              {!isSingleChoice && (
-                <button
-                  onClick={handleConfirm}
-                  disabled={!canConfirm}
-                  className={`min-h-11 rounded-[16px] px-6 py-2 font-semibold transition ${
-                    canConfirm
-                      ? "bg-cyan-500 text-slate-950 shadow-[0_14px_34px_rgba(6,182,212,0.28)] hover:bg-cyan-400"
-                      : "cursor-not-allowed border border-white/8 bg-white/5 text-slate-500"
-                  }`}
-                >
-                  Confirm ({selected.length}/{modal.max_choices})
-                </button>
-              )}
-              {!isSingleChoice && selected.length > 0 && (
-                <button
-                  onClick={() => setSelected([])}
-                  className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
-                >
-                  Clear
-                </button>
-              )}
-              {!isAbilityMode && (
-                <button
-                  onClick={handleCancel}
-                  className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-          </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>
+  return (
+    <DialogShell
+      eyebrow={isAbilityMode ? "Ability Modes" : "Spell Modes"}
+      title={chooseLabel}
+      subtitle="Select the mode or modes to apply."
+      size="md"
+      scrollable
+      footer={footer}
+    >
+      <div className="px-3 py-3 lg:px-5 lg:py-5">
+        <div className="flex flex-col gap-2">
+          {modal.mode_descriptions.map((desc, index) => {
+            const count = selected.filter((value) => value === index).length;
+            const isSelected = count > 0;
+            const isUnavailable = unavailableModes.includes(index);
+            return (
+              <button
+                key={index}
+                disabled={isUnavailable}
+                onClick={() => {
+                  if (isUnavailable) return;
+                  if (isSingleChoice) {
+                    dispatch({ type: "SelectModes", data: { indices: [index] } });
+                    setSelected([]);
+                  } else {
+                    toggleMode(index);
+                  }
+                }}
+                className={`rounded-[16px] border px-4 py-3 text-left transition ${
+                  isUnavailable
+                    ? "cursor-not-allowed border-white/5 bg-white/3 opacity-40"
+                    : isSelected
+                      ? "border-cyan-300/60 bg-cyan-500/12 ring-1 ring-cyan-400/40"
+                      : "border-white/8 bg-white/5 hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
+                }`}
+              >
+                <span className={`font-semibold ${isUnavailable ? "text-slate-500" : "text-white"}`}>{desc}</span>
+                {isUnavailable && (
+                  <span className="ml-2 text-xs text-slate-500">(already chosen)</span>
+                )}
+                {count > 0 && (
+                  <span className="ml-2 inline-flex min-w-6 items-center justify-center rounded-full bg-cyan-300/20 px-2 py-0.5 text-xs font-semibold text-cyan-100">
+                    {count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </DialogShell>
   );
 }
 

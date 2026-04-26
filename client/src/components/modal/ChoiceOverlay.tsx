@@ -3,6 +3,8 @@ import { AnimatePresence, motion } from "framer-motion";
 
 import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { useHorizontalScroll } from "../../hooks/useHorizontalScroll.ts";
+import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
+import { PeekButton } from "./DialogShell.tsx";
 
 export function ChoiceOverlay({
   title,
@@ -20,38 +22,42 @@ export function ChoiceOverlay({
   maxWidthClassName?: string;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
+  const peek = useOptionalDialogPeek();
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
-      <motion.div
-        className={`card-scale-reset relative flex h-full flex-col overflow-hidden border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md lg:h-auto lg:max-h-[calc(100vh_-_3rem)] lg:rounded-[28px] lg:border ${widthClassName} ${maxWidthClassName}`}
-        initial={{ opacity: 0, y: 18, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.24, ease: "easeOut" }}
-      >
-        <div className="modal-header-compact relative shrink-0 border-b border-white/10">
-          <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500 lg:absolute lg:right-4 lg:top-3">
-            Game Choice
+      <div className={`relative flex h-full flex-col lg:h-auto lg:max-h-[calc(100vh_-_3rem)] ${widthClassName} ${maxWidthClassName}`}>
+        <motion.div
+          className="card-scale-reset relative flex h-full min-h-0 flex-col overflow-hidden border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md lg:h-auto lg:rounded-[28px] lg:border"
+          initial={{ opacity: 0, y: 18, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.24, ease: "easeOut" }}
+        >
+          <div className="modal-header-compact relative shrink-0 border-b border-white/10">
+            <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500 lg:absolute lg:right-4 lg:top-3">
+              Game Choice
+            </div>
+            <div className="lg:flex lg:items-baseline lg:gap-3">
+              <h2 className="shrink-0 font-semibold text-white">
+                {title}
+              </h2>
+              <p className="modal-subtitle text-slate-400 lg:mt-0">
+                {subtitle}
+              </p>
+            </div>
           </div>
-          <div className="lg:flex lg:items-baseline lg:gap-3">
-            <h2 className="shrink-0 font-semibold text-white">
-              {title}
-            </h2>
-            <p className="modal-subtitle text-slate-400 lg:mt-0">
-              {subtitle}
-            </p>
+          <div ref={contentRef} className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 pt-3 pb-2 lg:px-5 lg:pt-5 lg:pb-5">
+            {children}
           </div>
-        </div>
-        <div ref={contentRef} className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 pt-3 pb-2 lg:px-5 lg:pt-5 lg:pb-5">
-          {children}
-        </div>
-        {footer && (
-          <div className="shrink-0 border-t border-white/5 px-2 pb-3 pt-1 lg:px-5 lg:pb-5 lg:pt-2">
-            {footer}
-          </div>
-        )}
-      </motion.div>
+          {footer && (
+            <div className="shrink-0 border-t border-white/5 px-2 pb-3 pt-1 lg:px-5 lg:pb-5 lg:pt-2">
+              {footer}
+            </div>
+          )}
+        </motion.div>
+        {peek ? <PeekButton onClick={peek.togglePeek} /> : null}
+      </div>
     </div>
   );
 }
@@ -61,7 +67,7 @@ export function ScrollableCardStrip({
   children,
   className = "",
   stripClassName = "card-choice-strip",
-  innerClassName = "mx-auto flex min-h-0 flex-1 items-center gap-2 px-1 pb-2 lg:gap-3",
+  innerClassName = "mx-auto flex min-h-0 flex-1 items-center gap-2 px-1 pt-2 pb-2 lg:gap-3",
 }: {
   children: React.ReactNode;
   className?: string;

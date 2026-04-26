@@ -44,6 +44,7 @@ import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
+import { DialogHost } from "../components/modal/DialogHost.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
@@ -1123,55 +1124,60 @@ function GamePageContent({
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />
 
-      {/* WaitingFor-driven prompt overlays (only for human player) */}
-      {waitingFor != null &&
-        (["TargetSelection", "TriggerTargetSelection", "CopyTargetChoice", "ExploreChoice", "TapCreaturesForManaAbility", "TapCreaturesForSpellCost"] as const).includes(waitingFor.type as never) &&
-        canActForWaitingState && <TargetingOverlay />}
-      {waitingFor?.type === "ManaPayment" &&
-        canActForWaitingState && <ManaPaymentUI />}
-      {waitingFor?.type === "ChooseXValue" &&
-        canActForWaitingState && <ChooseXValueUI />}
-      {waitingFor?.type === "ReplacementChoice" &&
-        canActForWaitingState && <ReplacementModal />}
-      <BattleProtectorModal />
-      <TributeModal />
-      <CombatTaxModal />
-      <ModeChoiceModal />
-      <AdventureCastModal />
-      <CascadeChoiceModal />
-      <ModalFaceModal />
-      <WarpCostModal />
-      <MiracleRevealModal />
+      {/* WaitingFor-driven prompt overlays (only for human player).
+          Wrapped in DialogHost so any active dialog can be peeked away to
+          reveal the battlefield underneath; peek state resets on every
+          new WaitingFor so a fresh prompt is always visible. */}
+      <DialogHost>
+        {waitingFor != null &&
+          (["TargetSelection", "TriggerTargetSelection", "CopyTargetChoice", "ExploreChoice", "TapCreaturesForManaAbility", "TapCreaturesForSpellCost"] as const).includes(waitingFor.type as never) &&
+          canActForWaitingState && <TargetingOverlay />}
+        {waitingFor?.type === "ManaPayment" &&
+          canActForWaitingState && <ManaPaymentUI />}
+        {waitingFor?.type === "ChooseXValue" &&
+          canActForWaitingState && <ChooseXValueUI />}
+        {waitingFor?.type === "ReplacementChoice" &&
+          canActForWaitingState && <ReplacementModal />}
+        <BattleProtectorModal />
+        <TributeModal />
+        <CombatTaxModal />
+        <ModeChoiceModal />
+        <AdventureCastModal />
+        <CascadeChoiceModal />
+        <ModalFaceModal />
+        <WarpCostModal />
+        <MiracleRevealModal />
 
-      {/* Scry/Dig/Surveil card choice modal */}
-      <CardChoiceModal />
+        {/* Scry/Dig/Surveil card choice modal */}
+        <CardChoiceModal />
 
-      {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
-      <AbilityChoiceModal />
+        {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
+        <AbilityChoiceModal />
 
-      {/* Optional additional cost choice (kicker, blight, "or pay") */}
-      {waitingFor?.type === "OptionalCostChoice" &&
-        canActForWaitingState && (
-          <OptionalCostModal />
-        )}
+        {/* Optional additional cost choice (kicker, blight, "or pay") */}
+        {waitingFor?.type === "OptionalCostChoice" &&
+          canActForWaitingState && (
+            <OptionalCostModal />
+          )}
 
-      {/* Defiler cycle — optional life payment for mana reduction */}
-      {waitingFor?.type === "DefilerPayment" &&
-        canActForWaitingState && (
-          <DefilerPaymentModal />
-        )}
+        {/* Defiler cycle — optional life payment for mana reduction */}
+        {waitingFor?.type === "DefilerPayment" &&
+          canActForWaitingState && (
+            <DefilerPaymentModal />
+          )}
 
-      {/* Optional effect choice ("You may X") / Opponent may choice */}
-      {(waitingFor?.type === "OptionalEffectChoice" || waitingFor?.type === "OpponentMayChoice") &&
-        canActForWaitingState && (
-          <OptionalEffectModal />
-        )}
+        {/* Optional effect choice ("You may X") / Opponent may choice */}
+        {(waitingFor?.type === "OptionalEffectChoice" || waitingFor?.type === "OpponentMayChoice") &&
+          canActForWaitingState && (
+            <OptionalEffectModal />
+          )}
 
-      {/* Unless payment choice ("Counter unless you pay {X}") */}
-      {waitingFor?.type === "UnlessPayment" &&
-        canActForWaitingState && (
-          <UnlessPaymentModal />
-        )}
+        {/* Unless payment choice ("Counter unless you pay {X}") */}
+        {waitingFor?.type === "UnlessPayment" &&
+          canActForWaitingState && (
+            <UnlessPaymentModal />
+          )}
+      </DialogHost>
 
       {waitingFor?.type === "CompanionReveal" &&
         waitingFor.data.player === playerId && (
