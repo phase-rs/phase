@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject } from "../../../adapter/types.ts";
+import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
+import { dispatchAction } from "../../../game/dispatch.ts";
 import { useCardHover } from "../../../hooks/useCardHover.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -16,7 +17,26 @@ vi.mock("../../../hooks/useCardHover.ts", () => ({
   })),
 }));
 
+vi.mock("../../../game/dispatch.ts", () => ({
+  dispatchAction: vi.fn(() => Promise.resolve()),
+}));
+
 const mockedUseCardHover = vi.mocked(useCardHover);
+const mockedDispatchAction = vi.mocked(dispatchAction);
+
+function targetingState(legalIds: number[], player = 0): WaitingFor {
+  return {
+    type: "TargetSelection",
+    data: {
+      player,
+      pending_cast: {} as never,
+      target_slots: [],
+      selection: {
+        current_legal_targets: legalIds.map((id) => ({ Object: id })),
+      } as never,
+    },
+  } as WaitingFor;
+}
 
 function makeAttachment(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -66,7 +86,9 @@ describe("AttachmentChip", () => {
   beforeEach(() => {
     firedRef.current = false;
     mockedUseCardHover.mockClear();
+    mockedDispatchAction.mockClear();
     useUiStore.setState({ selectedObjectId: null });
+    useGameStore.setState({ waitingFor: null });
   });
 
   afterEach(() => {
@@ -210,6 +232,60 @@ describe("AttachmentChip", () => {
     fireEvent.click(screen.getByRole("button"));
 
     expect(hostClick).not.toHaveBeenCalled();
+    expect(useUiStore.getState().selectedObjectId).toBe(50);
+  });
+
+  it("dispatches ChooseTarget when the chip is a legal target during TargetSelection", () => {
+    injectObject(makeAttachment());
+    useGameStore.setState({ waitingFor: targetingState([50]) });
+
+    render(<AttachmentChip id={50} />);
+    fireEvent.click(screen.getByRole("button"));
+
+    expect(mockedDispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 50 } },
+    });
+    // Selection must NOT happen — targeting takes precedence.
+    expect(useUiStore.getState().selectedObjectId).toBeNull();
+  });
+
+  it("renders the targeting glow ring when the chip is a legal target", () => {
+    injectObject(makeAttachment());
+    useGameStore.setState({ waitingFor: targetingState([50]) });
+
+    render(<AttachmentChip id={50} />);
+
+    expect(screen.getByRole("button").className).toContain("ring-amber-400/60");
+  });
+
+  it("falls through to selectObject when no targeting prompt matches the chip", () => {
+    injectObject(makeAttachment());
+    // Targeting is active but a different object is the legal target.
+    useGameStore.setState({ waitingFor: targetingState([99]) });
+
+    render(<AttachmentChip id={50} />);
+    fireEvent.click(screen.getByRole("button"));
+
+    expect(mockedDispatchAction).not.toHaveBeenCalled();
+    expect(useUiStore.getState().selectedObjectId).toBe(50);
+  });
+
+  it("does not glow or dispatch when the opponent is the prompted player (multiplayer gate)", () => {
+    injectObject(makeAttachment());
+    // The opponent (player 1) is choosing targets. Even though id=50 is in
+    // their legal-targets set, the local player (PLAYER_ID=0) must not be
+    // able to fire a ChooseTarget on their behalf.
+    useGameStore.setState({ waitingFor: targetingState([50], 1) });
+
+    render(<AttachmentChip id={50} />);
+    const button = screen.getByRole("button");
+
+    expect(button.className).not.toContain("ring-amber-400/60");
+
+    fireEvent.click(button);
+
+    expect(mockedDispatchAction).not.toHaveBeenCalled();
     expect(useUiStore.getState().selectedObjectId).toBe(50);
   });
 });

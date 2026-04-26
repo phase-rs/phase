@@ -2,7 +2,9 @@ import type { MouseEvent } from "react";
 import { memo } from "react";
 
 import type { ManaCost, ObjectId } from "../../adapter/types.ts";
+import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { useIsValidObjectTarget } from "../../hooks/useIsValidTarget.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
@@ -123,6 +125,7 @@ export const AttachmentChip = memo(function AttachmentChip({ id, glyphOnly = fal
   const obj = useGameStore((s) => s.gameState?.objects[id]);
   const selectObject = useUiStore((s) => s.selectObject);
   const { handlers, firedRef } = useCardHover(id);
+  const isValidTarget = useIsValidObjectTarget(id);
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
@@ -157,8 +160,21 @@ export const AttachmentChip = memo(function AttachmentChip({ id, glyphOnly = fal
       firedRef.current = false;
       return;
     }
+    // Targeting takes precedence over selection so an attached Aura/Equipment
+    // can be picked as a spell target without first promoting it back to a
+    // full card. Mirrors StackEntry.tsx:87-94.
+    if (isValidTarget) {
+      dispatchAction({ type: "ChooseTarget", data: { target: { Object: id } } });
+      return;
+    }
     selectObject(id);
   };
+
+  // Targeting glow — same `ring-2 ring-amber-400/60` shape as StackEntry so
+  // every targetable surface reads identically to the player.
+  const targetingRing = isValidTarget
+    ? "ring-2 ring-amber-400/60 shadow-[0_0_8px_2px_rgba(201,176,55,0.7)]"
+    : "";
 
   return (
     <button
@@ -166,7 +182,7 @@ export const AttachmentChip = memo(function AttachmentChip({ id, glyphOnly = fal
       onClick={handleClick}
       title={tooltip}
       aria-label={tooltip}
-      className={`flex h-4 max-w-full items-center gap-0.5 overflow-hidden rounded border border-l-2 px-1 text-[10px] font-semibold leading-none shadow-sm pointer-events-auto ${style.className} ${borderClass}`}
+      className={`flex h-4 max-w-full items-center gap-0.5 overflow-hidden rounded border border-l-2 px-1 text-[10px] font-semibold leading-none shadow-sm pointer-events-auto ${style.className} ${borderClass} ${targetingRing}`}
       {...handlers}
     >
       <span aria-hidden>{style.glyph}</span>
