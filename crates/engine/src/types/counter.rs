@@ -120,7 +120,10 @@ pub fn parse_counter_type(text: &str) -> CounterType {
             if let Some((_, kind)) = KEYWORD_COUNTERS.iter().find(|(name, _)| *name == lower) {
                 CounterType::Keyword(*kind)
             } else {
-                CounterType::Generic(other.to_string())
+                // Normalize generic counter names to lowercase so that sources that
+                // emit different cases (e.g. replacement parser emits "MINING", cost
+                // parser emits "mining") resolve to the same HashMap key at runtime.
+                CounterType::Generic(lower)
             }
         }
     }

@@ -1277,7 +1277,7 @@ fn parse_enters_with_counters(
     let counter_type = match counter_type_raw {
         "+1/+1" => "P1P1".to_string(),
         "-1/-1" => "M1M1".to_string(),
-        other => other.to_uppercase(),
+        other => crate::parser::oracle_effect::counter::normalize_counter_type(other),
     };
     // CR 122.6: For "a number of counters equal to [quantity]", parse the dynamic expression
     if dynamic_remainder.is_some() {
@@ -4138,7 +4138,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "CHARGE");
+                assert_eq!(counter_type, "charge");
                 assert!(
                     matches!(
                         count,
