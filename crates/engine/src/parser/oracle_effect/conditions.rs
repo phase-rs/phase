@@ -20,6 +20,7 @@ use crate::types::ability::{
     TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
+use crate::types::counter::CounterMatch;
 use crate::types::zones::Zone;
 
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
@@ -930,6 +931,59 @@ fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityConditi
     })
 }
 
+/// CR 122.1 + CR 608.2c: Build an `AbilityCondition` from a counter-threshold
+/// `(minimum, maximum)` pair against a counter-quantity expression. Shared by
+/// the typed (`CountersOnSelf`) and any-type (`AnyCountersOnSelf`) arms of
+/// `static_condition_to_ability_condition` so both round-trip identically.
+fn counter_threshold_to_condition(
+    qty: QuantityExpr,
+    minimum: u32,
+    maximum: Option<u32>,
+) -> AbilityCondition {
+    match (minimum, maximum) {
+        // "no counters on ~" — exactly zero.
+        (0, Some(0)) => AbilityCondition::QuantityCheck {
+            lhs: qty,
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+        // "exactly N counters on ~"
+        (n, Some(m)) if n == m => AbilityCondition::QuantityCheck {
+            lhs: qty,
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+        // "N or fewer counters on ~"
+        (0, Some(n)) => AbilityCondition::QuantityCheck {
+            lhs: qty,
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+        // "N or more counters on ~" / "a counter on ~" (1+)
+        (n, None) => AbilityCondition::QuantityCheck {
+            lhs: qty,
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+        // Bounded range "between N and M counters" — express as compound
+        // via `And` so each side stays a single QuantityCheck.
+        (n, Some(m)) => AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::QuantityCheck {
+                    lhs: qty.clone(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: n as i32 },
+                },
+                AbilityCondition::QuantityCheck {
+                    lhs: qty,
+                    comparator: Comparator::LE,
+                    rhs: QuantityExpr::Fixed { value: m as i32 },
+                },
+            ],
+        },
+    }
+}
+
 fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<AbilityCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(AbilityCondition::IsYourTurn { negated: false }),
@@ -1004,10 +1058,30 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         StaticCondition::SourceIsTapped => {
             Some(AbilityCondition::SourceIsTapped { negated: false })
         }
+        // CR 122.1 + CR 608.2c: Counter-threshold gate on the source object.
+        // Maps to `QuantityCheck { CountersOn(Self|AnyCountersOnSelf), Comparator, Fixed }`
+        // so the existing sub-ability condition evaluator handles it without
+        // new runtime support. `CounterMatch::OfType(ct)` reads a single typed
+        // counter via `CountersOnSelf`; `CounterMatch::Any` ("no counters on
+        // it" / "a counter on it") sums every type via `AnyCountersOnSelf`.
+        StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        } => {
+            let qty = QuantityExpr::Ref {
+                qty: match counters {
+                    CounterMatch::OfType(ct) => QuantityRef::CountersOnSelf {
+                        counter_type: ct.as_str().to_string(),
+                    },
+                    CounterMatch::Any => QuantityRef::AnyCountersOnSelf,
+                },
+            };
+            Some(counter_threshold_to_condition(qty, *minimum, *maximum))
+        }
         StaticCondition::DevotionGE { .. }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::SpeedGE { .. }
-        | StaticCondition::HasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::SourceInZone { .. }
@@ -1300,5 +1374,89 @@ fn parse_nth_resolution_condition(lower: &str) -> Option<u32> {
         Some(n)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::oracle_nom::condition::parse_inner_condition;
+    use crate::types::counter::{CounterMatch, CounterType};
+
+    /// CR 122.1 + CR 608.2c: "there are no counters on ~" round-trips through
+    /// the bridge to a `QuantityCheck` against `AnyCountersOnSelf`. Previously
+    /// the bridge returned `None` for `CounterMatch::Any`, which silently
+    /// dropped the gate and caused effects (Gemstone Mine, depletion lands)
+    /// to fire unconditionally.
+    #[test]
+    fn bridge_has_counters_any_no_counters_yields_any_counters_on_self_eq_zero() {
+        let (rest, sc) = parse_inner_condition("there are no counters on ~").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            sc,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::Any,
+                minimum: 0,
+                maximum: Some(0),
+            }
+        );
+        let bridged = static_condition_to_ability_condition(&sc).expect(
+            "CounterMatch::Any must round-trip — None here is the silent-failure regression",
+        );
+        match bridged {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::AnyCountersOnSelf,
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {}
+            other => panic!("unexpected bridged condition: {other:?}"),
+        }
+    }
+
+    /// `"~ has a counter on it"` (Demon Wall): minimum=1, maximum=None →
+    /// `AnyCountersOnSelf >= 1`.
+    #[test]
+    fn bridge_has_counters_any_at_least_one_yields_any_counters_on_self_ge_one() {
+        let (rest, sc) = parse_inner_condition("~ has a counter on it").unwrap();
+        assert_eq!(rest, "");
+        let bridged = static_condition_to_ability_condition(&sc).expect("must bridge");
+        match bridged {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::AnyCountersOnSelf,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("unexpected bridged condition: {other:?}"),
+        }
+    }
+
+    /// Typed-counter case still routes to `CountersOnSelf { counter_type }` —
+    /// confirms the shared `counter_threshold_to_condition` helper preserves the
+    /// existing behavior for the OfType branch.
+    #[test]
+    fn bridge_has_counters_typed_yields_counters_on_self() {
+        let sc = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 2,
+            maximum: None,
+        };
+        let bridged = static_condition_to_ability_condition(&sc).expect("must bridge");
+        match bridged {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOnSelf { counter_type },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => assert_eq!(counter_type, "P1P1"),
+            other => panic!("unexpected bridged condition: {other:?}"),
+        }
     }
 }

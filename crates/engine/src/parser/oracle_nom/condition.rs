@@ -46,6 +46,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_opponent_comparison_conditions,
         parse_life_conditions,
         parse_zone_conditions,
+        parse_there_are_counters_on_source,
         parse_there_are_conditions,
         parse_there_exists_condition,
         parse_entered_this_turn,
@@ -1426,6 +1427,63 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
             n,
         ),
     ))
+}
+
+/// CR 122.1 + CR 608.2c: Parse "there are <quantity> [<type>] counter[s] on <source>".
+///
+/// Sister combinator to `parse_source_has_counters` ("<source> has [no] [type]
+/// counter[s] on it"). Same semantic shape, different syntactic form: the
+/// existential there-construction places the counter clause first and the
+/// source last. Used by depletion lands ("If there are no depletion counters
+/// on this land, sacrifice it"), counter-threshold flip cards (Budoka Pupil,
+/// Callow Jushi: "if there are two or more ki counters on this creature"),
+/// and many "Then if there are N or more counters on it" continuations
+/// (Brass's Tunnel-Grinder, Charitable Levy, etc.).
+///
+/// Composes the same axes as `parse_source_has_counters`:
+/// - Quantity axis (`parse_has_counters_quantity`): "no" / "a" / "N or more"
+///   / "N or fewer" / "exactly N" / "one or more".
+/// - Counter type axis (`parse_typed_counter_noun` then `Any` fallback).
+/// - Source subject: any pronoun / `~` form accepted by
+///   `parse_counter_on_source_subject`.
+fn parse_there_are_counters_on_source(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("there are ").parse(input)?;
+    let (rest, (minimum, maximum)) = parse_has_counters_quantity(rest)?;
+    let (rest, counters) = alt((
+        parse_typed_counter_noun,
+        value(CounterMatch::Any, alt((tag("counters"), tag("counter")))),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" on ").parse(rest)?;
+    let (rest, _) = parse_counter_on_source_subject(rest)?;
+    Ok((
+        rest,
+        StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        },
+    ))
+}
+
+/// Trailing source subject for `parse_there_are_counters_on_source`. Mirrors the
+/// SELF_REF normalization set: `~` plus the long-form noun phrases that survive
+/// normalization in some Oracle prints. Bare `"it"` is included for the
+/// continuation form ("Then if there are N or more counters on it") used by
+/// Brass's Tunnel-Grinder and similar.
+fn parse_counter_on_source_subject(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("~"),
+        tag("this creature"),
+        tag("this permanent"),
+        tag("this land"),
+        tag("this artifact"),
+        tag("this enchantment"),
+        tag("this aura"),
+        tag("this card"),
+        tag("it"),
+    ))
+    .parse(input)
 }
 
 /// Parse "there's a X in your Y" / "there is a X in your Y" — singular existence.
@@ -3560,5 +3618,144 @@ mod tests {
     fn test_zone_changed_this_way_rejects_unrecognized_type() {
         // "a thing" — type_phrase returns Any → combinator must error.
         assert!(parse_zone_changed_this_way_clause("a thing was destroyed this way").is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 122.1 + CR 608.2c: parse_there_are_counters_on_source
+    // ---------------------------------------------------------------------
+
+    /// Gemstone Mine and the depletion-land cycle: "if there are no <type>
+    /// counters on ~" — the canonical motivating case.
+    #[test]
+    fn test_there_are_no_typed_counters_on_self() {
+        let (rest, c) = parse_condition("if there are no mining counters on ~, sacrifice").unwrap();
+        assert_eq!(rest, ", sacrifice");
+        match c {
+            StaticCondition::HasCounters {
+                counters,
+                minimum,
+                maximum,
+            } => {
+                assert_eq!(minimum, 0);
+                assert_eq!(maximum, Some(0));
+                match counters {
+                    CounterMatch::OfType(ct) => assert_eq!(ct.as_str(), "mining"),
+                    other => panic!("expected OfType(mining), got {other:?}"),
+                }
+            }
+            other => panic!("expected HasCounters, got {other:?}"),
+        }
+    }
+
+    /// Budoka Pupil / Callow Jushi: "if there are two or more ki counters on
+    /// this creature, you may flip it." Source subject is the long form.
+    #[test]
+    fn test_there_are_n_or_more_counters_on_this_creature() {
+        let (rest, c) =
+            parse_condition("if there are two or more ki counters on this creature, flip").unwrap();
+        assert_eq!(rest, ", flip");
+        match c {
+            StaticCondition::HasCounters {
+                counters,
+                minimum,
+                maximum,
+            } => {
+                assert_eq!(minimum, 2);
+                assert_eq!(maximum, None);
+                match counters {
+                    CounterMatch::OfType(ct) => assert_eq!(ct.as_str(), "ki"),
+                    other => panic!("expected OfType(ki), got {other:?}"),
+                }
+            }
+            other => panic!("expected HasCounters, got {other:?}"),
+        }
+    }
+
+    /// Brass's Tunnel-Grinder: "Then if there are three or more bore counters
+    /// on it" — bare "it" continuation form.
+    #[test]
+    fn test_there_are_n_or_more_counters_on_it() {
+        let (rest, c) =
+            parse_condition("if there are three or more bore counters on it, transform").unwrap();
+        assert_eq!(rest, ", transform");
+        match c {
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(ct),
+                minimum,
+                maximum,
+            } => {
+                assert_eq!(minimum, 3);
+                assert_eq!(maximum, None);
+                assert_eq!(ct.as_str(), "bore");
+            }
+            other => panic!("expected HasCounters OfType, got {other:?}"),
+        }
+    }
+
+    /// "this aura" subject (Tourach's Gate): "if there are no time counters
+    /// on this Aura". Lowercased before parsing.
+    #[test]
+    fn test_there_are_no_counters_on_this_aura() {
+        let (rest, c) =
+            parse_condition("if there are no time counters on this aura, sacrifice").unwrap();
+        assert_eq!(rest, ", sacrifice");
+        assert!(matches!(
+            c,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(_),
+                minimum: 0,
+                maximum: Some(0),
+            }
+        ));
+    }
+
+    /// "this enchantment" subject (Celestial Convergence).
+    #[test]
+    fn test_there_are_no_counters_on_this_enchantment() {
+        let (rest, c) =
+            parse_condition("if there are no omen counters on this enchantment, win the game")
+                .unwrap();
+        assert_eq!(rest, ", win the game");
+        assert!(matches!(
+            c,
+            StaticCondition::HasCounters {
+                minimum: 0,
+                maximum: Some(0),
+                ..
+            }
+        ));
+    }
+
+    /// "as long as" prefix should also flow through the same combinator.
+    #[test]
+    fn test_as_long_as_there_are_counters() {
+        let (rest, c) =
+            parse_condition("as long as there are five or more growth counters on ~, pump")
+                .unwrap();
+        assert_eq!(rest, ", pump");
+        match c {
+            StaticCondition::HasCounters {
+                minimum, maximum, ..
+            } => {
+                assert_eq!(minimum, 5);
+                assert_eq!(maximum, None);
+            }
+            other => panic!("expected HasCounters, got {other:?}"),
+        }
+    }
+
+    /// Bare "counter[s]" (no type token) → CounterMatch::Any.
+    #[test]
+    fn test_there_are_no_counters_any_type() {
+        let (rest, c) = parse_condition("if there are no counters on ~, sacrifice").unwrap();
+        assert_eq!(rest, ", sacrifice");
+        assert!(matches!(
+            c,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::Any,
+                minimum: 0,
+                maximum: Some(0),
+            }
+        ));
     }
 }

@@ -561,6 +561,15 @@ fn resolve_ref(
                 .map(|obj| u32_to_i32_saturating(obj.counters.get(&ct).copied().unwrap_or(0)))
                 .unwrap_or(0)
         }
+        // CR 122.1: Sum counters of every type on the source object.
+        // Used by bare "counter on it" / "counters on ~" phrasings where no
+        // specific counter type is named (Gemstone Mine, depletion lands).
+        // Mirrors `AnyCountersOnTarget` but resolves against `source_id`.
+        QuantityRef::AnyCountersOnSelf => state
+            .objects
+            .get(&source_id)
+            .map(|obj| u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()))
+            .unwrap_or(0),
         // CR 122.1: Sum counters of every type on the first targeted object.
         // Used by Nils-class attack-tax scaling — per the official ruling, ALL
         // counters on the attacker (not just +1/+1 counters) count toward X.
@@ -2060,6 +2069,53 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 4);
+    }
+
+    /// CR 122.1: `AnyCountersOnSelf` sums every counter type on the source
+    /// object — used by Gemstone Mine's "no counters on it" sacrifice trigger
+    /// and the depletion-land cycle. Mirrors the `AnyCountersOnTarget` resolver
+    /// but reads from `source_id` instead of the target list.
+    #[test]
+    fn resolve_quantity_any_counters_on_self_sums_all_types() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        // Sum across distinct counter types — Gemstone Mine prints "mining",
+        // depletion-land cycle prints "depletion", etc. The any-type resolver
+        // must aggregate every present type, not just one canonical kind.
+        obj.counters
+            .insert(CounterType::Generic("mining".to_string()), 2);
+        obj.counters
+            .insert(CounterType::Generic("charge".to_string()), 3);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::AnyCountersOnSelf,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
+    }
+
+    /// Bare source with no counters → 0 (the Gemstone Mine sacrifice gate
+    /// composed against `EQ 0` then fires).
+    #[test]
+    fn resolve_quantity_any_counters_on_self_empty_is_zero() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::AnyCountersOnSelf,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
     }
 
     #[test]
