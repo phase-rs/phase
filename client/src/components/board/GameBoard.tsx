@@ -158,10 +158,6 @@ export function GameBoard() {
       for (const objectId of gameState.battlefield) {
         const object = gameState.objects[objectId];
         if (!object || object.controller !== myId || object.tapped) continue;
-        if (object.card_types.core_types.includes("Land")) {
-          manaTappableObjectIds.add(objectId);
-          continue;
-        }
         if (object.has_mana_ability && !object.has_summoning_sickness) {
           manaTappableObjectIds.add(objectId);
         }
