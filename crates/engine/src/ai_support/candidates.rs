@@ -384,6 +384,14 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             creatures,
             ..
         } => select_cards_variants(*player, creatures, Some(*count)),
+        // CR 117.1 + CR 118.3 + CR 605.3b: Food Chain class — pick which
+        // permanent(s) to exile to pay the mana ability cost.
+        WaitingFor::ExileFromBattlefieldForManaAbility {
+            player,
+            count,
+            permanents,
+            ..
+        } => select_cards_variants(*player, permanents, Some(*count)),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
         } => options
@@ -2977,6 +2985,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -2992,6 +3001,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap)

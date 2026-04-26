@@ -281,6 +281,27 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         objects.extend(permission_ids);
     }
 
+    // CR 401.5 + CR 118.9 + CR 601.2a: Top card of library castable via a
+    // `TopOfLibraryCastPermission` static (Realmwalker, Future Sight, Bolas's
+    // Citadel, Magus of the Future, etc.). Filter is re-evaluated each call
+    // because the top changes between priority windows. The card itself stays
+    // in `Zone::Library` until `finalize_cast` performs the standard zone-
+    // change to `Zone::Stack` — there is NO exile step (CR 601.2a:
+    // "moves that card from where it is to the stack").
+    if let Some((top_id, _src, _alt)) =
+        top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
+    {
+        // Only non-land cards reach the cast path; lands flow through the
+        // play-land action (`top_of_library_lands_playable_by_permission`).
+        if state.objects.get(&top_id).is_some_and(|o| {
+            !o.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+        }) {
+            objects.push(top_id);
+        }
+    }
+
     // CR 101.2: If a CantCastSpells restriction blocks this player, no spells are available.
     if is_blocked_by_cant_cast_spells(state, player) {
         return vec![];
@@ -496,6 +517,7 @@ fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject, turn_nu
     obj.casting_permissions.iter().any(|p| match p {
         crate::types::ability::CastingPermission::AdventureCreature
         | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
         | crate::types::ability::CastingPermission::PlayFromExile { .. }
         | crate::types::ability::CastingPermission::ExileWithEnergyCost => true,
         // CR 702.185a: Warp cards only castable after the exile turn ends.
@@ -511,15 +533,18 @@ fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject, turn_nu
     })
 }
 
-/// CR 601.2a: Check if an object has an ExileWithAltCost permission specifically.
-/// Unlike `has_exile_cast_permission`, this only matches ExileWithAltCost — the
-/// permission granted by CastFromZone effects. Used to allow casting opponent's
-/// exiled cards (where ownership != caster).
+/// CR 601.2a: Check if an object has an alt-cost cast-from-exile permission
+/// (i.e., the spell may be cast by paying *something other than* its mana
+/// cost). Used to allow casting opponent's exiled cards (where ownership !=
+/// caster). Both the `ManaCost`-only `ExileWithAltCost` and the broader
+/// `ExileWithAltAbilityCost` (Nashi, "pay life equal to its mana value")
+/// satisfy this predicate.
 fn has_alt_cost_permission(obj: &crate::game::game_object::GameObject) -> bool {
     obj.casting_permissions.iter().any(|p| {
         matches!(
             p,
             crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
         )
     })
 }
@@ -606,6 +631,67 @@ fn graveyard_permission_source(
             &super::filter::FilterContext::from_source_with_controller(src_id, player),
         ) {
             Some((src_id, frequency))
+        } else {
+            None
+        }
+    })
+}
+
+/// CR 401.5 + CR 118.9 + CR 601.2a: Find the (single) top card of `player`'s
+/// library if a battlefield static grants `TopOfLibraryCastPermission` whose
+/// `affected` filter matches it. Returns `(top_card_id, source_id, alt_cost)`.
+///
+/// Filter eligibility is re-evaluated each call because the top of library
+/// changes between priority windows; callers (`spell_objects_available_to_cast`,
+/// `prepare_spell_cast`) invoke this fresh each lookup. `play_mode_filter`
+/// gates which permissions count: `Some(CardPlayMode::Cast)` for the spell-
+/// availability path, `Some(CardPlayMode::Play)` for land plays. `None` lets
+/// any mode through.
+pub(crate) fn top_of_library_permission_source(
+    state: &GameState,
+    player: PlayerId,
+    play_mode_filter: Option<CardPlayMode>,
+) -> Option<(
+    ObjectId,
+    ObjectId,
+    Option<crate::types::ability::AbilityCost>,
+)> {
+    let player_data = state.players.iter().find(|p| p.id == player)?;
+    let &top_id = player_data.library.front()?;
+    state.battlefield.iter().find_map(|&src_id| {
+        let obj = state.objects.get(&src_id)?;
+        if obj.controller != player {
+            return None;
+        }
+        let (filter, alt_cost) =
+            active_static_definitions(state, obj).find_map(|s| match &s.mode {
+                StaticMode::TopOfLibraryCastPermission {
+                    play_mode,
+                    alt_cost,
+                } => {
+                    // Gate by play_mode: Cast permissions cover only spells;
+                    // Play permissions cover both lands and non-land spells
+                    // (CR 305.1). When the caller specifies a mode, only
+                    // permissions matching that mode (or wider) qualify.
+                    let mode_matches = match play_mode_filter {
+                        None => true,
+                        Some(CardPlayMode::Play) => *play_mode == CardPlayMode::Play,
+                        Some(CardPlayMode::Cast) => true,
+                    };
+                    if !mode_matches {
+                        return None;
+                    }
+                    s.affected.as_ref().map(|f| (f, alt_cost.clone()))
+                }
+                _ => None,
+            })?;
+        if super::filter::matches_target_filter(
+            state,
+            top_id,
+            filter,
+            &super::filter::FilterContext::from_source_with_controller(src_id, player),
+        ) {
+            Some((top_id, src_id, alt_cost))
         } else {
             None
         }
@@ -772,6 +858,19 @@ fn prepare_spell_cast_with_variant_override(
     };
     let has_graveyard_permission = graveyard_permission_src.is_some();
 
+    // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static permission
+    // (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card must be the
+    // current top of `player`'s library AND match the static's `affected`
+    // filter. The optional `alt_cost` flows through to `prepare_spell_cast`'s
+    // alt-cost branch below, mirroring `ExileWithAltAbilityCost` semantics.
+    let top_of_library_permission_src = if obj.zone == Zone::Library && obj.owner == player {
+        top_of_library_permission_source(state, player, Some(CardPlayMode::Cast))
+            .filter(|(top_id, _, _)| *top_id == object_id)
+    } else {
+        None
+    };
+    let has_top_of_library_permission = top_of_library_permission_src.is_some();
+
     // CR 601.2a: CastFromZone effects grant ExileWithAltCost on opponent's cards,
     // so ExileWithAltCost permits casting regardless of ownership.
     let has_unowned_exile_permission =
@@ -785,7 +884,8 @@ fn prepare_spell_cast_with_variant_override(
                 || has_madness
                 || has_exile_permission
                 || has_graveyard_cast_keyword
-                || has_graveyard_permission));
+                || has_graveyard_permission
+                || has_top_of_library_permission));
     if !castable_zone {
         return Err(EngineError::InvalidAction(
             "Card is not in a castable zone".to_string(),
@@ -854,14 +954,30 @@ fn prepare_spell_cast_with_variant_override(
     let ability_def = combined_spell_ability_def(obj);
 
     let flash_cost = restrictions::flash_timing_cost(state, player, obj);
-    // ExileWithAltCost: override mana cost when casting from exile with this permission.
+    // ExileWithAltCost / ExileWithAltAbilityCost: override mana cost when
+    // casting from exile via an alt-cost permission. The non-mana branch
+    // (ExileWithAltAbilityCost) zeroes the mana cost — its `AbilityCost` is
+    // routed through `pay_additional_cost` in `check_additional_cost_or_pay`
+    // (CR 118.9 + CR 119.4).
     let alt_cost_from_exile = if obj.zone == Zone::Exile {
         obj.casting_permissions.iter().find_map(|p| match p {
             crate::types::ability::CastingPermission::ExileWithAltCost { cost, .. } => {
                 Some(cost.clone())
             }
+            crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
+                Some(crate::types::mana::ManaCost::zero())
+            }
             _ => None,
         })
+    } else if obj.zone == Zone::Library
+        && top_of_library_permission_src
+            .as_ref()
+            .is_some_and(|(_, _, alt)| alt.is_some())
+    {
+        // CR 401.5 + CR 118.9: Bolas's Citadel — alt-cost rider on the static
+        // grant zeros the spell's mana cost; the `AbilityCost` body is paid
+        // by `check_additional_cost_or_pay`'s top-of-library branch.
+        Some(crate::types::mana::ManaCost::zero())
     } else {
         None
     };
@@ -2691,13 +2807,27 @@ pub fn can_pay_cost_after_auto_tap(
     }
     let spell_meta = build_spell_meta(&simulated, player, source_id);
 
+    let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     super::casting_costs::auto_tap_mana_sources(
         &mut simulated,
         player,
         cost,
-        &mut Vec::new(),
+        &mut tap_events,
         Some(source_id),
     );
+
+    // CR 605.1b: A `TapsForMana` triggered mana ability (Fertile Ground / Wild
+    // Growth / Utopia Sprawl class) resolves inline and adds bonus mana to the
+    // pool when the enchanted land is tapped for mana. The auto-tap helper
+    // emits the `ManaAdded` events but does not run the trigger pipeline; in
+    // the production action flow `run_post_action_pipeline` later processes
+    // them, but this affordability simulation is a one-shot clone — without an
+    // explicit pipeline run the aura's bonus mana would never reach the
+    // simulated pool, causing AI legal-actions to skip a cast that the player
+    // would actually be able to pay (e.g. Plains + Wild Growth → cost {1}{G}).
+    if !tap_events.is_empty() {
+        super::triggers::process_triggers(&mut simulated, &tap_events);
+    }
 
     let any_color = super::static_abilities::player_can_spend_as_any_color(&simulated, player);
     // CR 107.4f + CR 118.3 + CR 119.8: Include the caster's Phyrexian life
@@ -4391,6 +4521,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -4406,6 +4537,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -4620,6 +4752,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap),
@@ -4635,6 +4768,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap)
@@ -4669,6 +4803,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -4685,6 +4820,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -8169,6 +8305,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap),
@@ -8337,6 +8474,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -8458,6 +8596,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -9865,6 +10004,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(crate::types::ability::AbilityCost::Tap)
@@ -11767,6 +11907,143 @@ mod tests {
                 can_activate_ability_now(&state, PlayerId(0), pw2, 1),
                 "CR 606.3 is per-permanent: PW2 ability 1 must remain activatable"
             );
+        }
+    }
+
+    /// CR 401.5 + CR 118.9: Realmwalker grants `TopOfLibraryCastPermission`
+    /// keyed on the chosen creature type. The top card of library is castable
+    /// only when its type matches the static's `affected` filter; cards on
+    /// the battlefield/elsewhere never enter `spell_objects_available_to_cast`
+    /// via this path. The card must NOT be exiled — it stays in the library
+    /// until `finalize_cast` performs the standard library → stack move.
+    mod top_of_library_cast_permission_runtime {
+        use super::*;
+        use crate::types::ability::{
+            CardPlayMode, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::statics::StaticMode;
+
+        fn put_creature_on_top_of_library(
+            state: &mut GameState,
+            owner: PlayerId,
+            card_id: CardId,
+        ) -> ObjectId {
+            // Create the object and place it explicitly at the front of the
+            // library — `create_object(... Zone::Library)` does not guarantee
+            // top-of-library positioning across runtime helpers, so we set
+            // it ourselves to keep the test scope narrow.
+            let obj_id =
+                create_object(state, card_id, owner, "Top Card".to_string(), Zone::Library);
+            // Stamp it as a creature so the filter check evaluates against
+            // realistic characteristics.
+            {
+                let obj = state.objects.get_mut(&obj_id).unwrap();
+                obj.card_types.core_types = vec![CoreType::Creature];
+                obj.card_types.subtypes = vec!["Elf".to_string()];
+            }
+            // Move it to the front of the library.
+            let player = state.players.iter_mut().find(|p| p.id == owner).unwrap();
+            player.library.retain(|id| *id != obj_id);
+            player.library.push_front(obj_id);
+            obj_id
+        }
+
+        fn install_realmwalker_static(state: &mut GameState, controller: PlayerId, subtype: &str) {
+            // Synthesize a Realmwalker permanent on the battlefield carrying
+            // the `TopOfLibraryCastPermission` static; affected filter is
+            // creature spells of the chosen creature type (modeled via a
+            // bare subtype for the test rather than the full chosen-type
+            // mechanism, which would require Choose plumbing).
+            let src = create_object(
+                state,
+                CardId(8801),
+                controller,
+                "Realmwalker (test)".to_string(),
+                Zone::Battlefield,
+            );
+            let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+                play_mode: CardPlayMode::Cast,
+                alt_cost: None,
+            })
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype(subtype.to_string()),
+                ],
+                controller: None,
+                properties: vec![],
+            }));
+            state
+                .objects
+                .get_mut(&src)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        #[test]
+        fn realmwalker_grants_cast_permission_when_top_matches_filter() {
+            let mut state = setup_game_at_main_phase();
+            install_realmwalker_static(&mut state, PlayerId(0), "Elf");
+            let top = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(900));
+
+            let available = spell_objects_available_to_cast(&state, PlayerId(0));
+            assert!(
+                available.contains(&top),
+                "Realmwalker must surface a matching top-of-library creature for cast"
+            );
+
+            // The card must remain in the library — no exile step.
+            assert_eq!(
+                state.objects.get(&top).unwrap().zone,
+                Zone::Library,
+                "permission grant must not exile the card (impulse-draw regression check)"
+            );
+        }
+
+        #[test]
+        fn realmwalker_rejects_top_when_filter_misses() {
+            let mut state = setup_game_at_main_phase();
+            install_realmwalker_static(&mut state, PlayerId(0), "Goblin");
+            // Top of library is an Elf — fails the chosen-type filter.
+            let top = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(901));
+
+            let available = spell_objects_available_to_cast(&state, PlayerId(0));
+            assert!(
+                !available.contains(&top),
+                "filter mismatch must NOT surface the top card as castable"
+            );
+        }
+
+        /// Filter is re-evaluated each call: changing the top card to a non-
+        /// matching one revokes availability without any state mutation on
+        /// the static itself.
+        #[test]
+        fn realmwalker_filter_reevaluates_per_priority_window() {
+            let mut state = setup_game_at_main_phase();
+            install_realmwalker_static(&mut state, PlayerId(0), "Elf");
+            let top_elf = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(902));
+            assert!(spell_objects_available_to_cast(&state, PlayerId(0)).contains(&top_elf));
+
+            // Mutate the object's subtypes so it no longer matches.
+            state.objects.get_mut(&top_elf).unwrap().card_types.subtypes =
+                vec!["Goblin".to_string()];
+            assert!(
+                !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&top_elf),
+                "stale filter result must not be cached"
+            );
+        }
+
+        /// Negative regression — a battlefield card with no
+        /// `TopOfLibraryCastPermission` static must not surface the top of
+        /// library as castable.
+        #[test]
+        fn no_static_means_no_top_of_library_cast() {
+            let mut state = setup_game_at_main_phase();
+            let top = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(903));
+            let available = spell_objects_available_to_cast(&state, PlayerId(0));
+            assert!(!available.contains(&top));
         }
     }
 }

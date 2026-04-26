@@ -817,6 +817,7 @@ fn treasure_ability() -> AbilityDefinition {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         },
     )
     .cost(AbilityCost::Composite {
@@ -927,6 +928,7 @@ fn spawn_ability() -> AbilityDefinition {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         },
     )
     .cost(AbilityCost::Sacrifice {
@@ -949,6 +951,7 @@ fn powerstone_ability() -> AbilityDefinition {
             )],
             grants: vec![],
             expiry: None,
+            target: None,
         },
     )
     .cost(AbilityCost::Tap)

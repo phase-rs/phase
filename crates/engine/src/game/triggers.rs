@@ -319,6 +319,17 @@ fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) 
 /// Process events and place triggered abilities on the stack in APNAP order.
 /// CR 603.3b: Process triggered abilities waiting to be put on the stack.
 pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
+    // CR 603.6a + CR 611.2e: Continuous effects (including statics that grant
+    // triggered abilities to a class — sliver-lord pattern) apply the moment
+    // the affected permanent is on the battlefield. The newcomers must be
+    // checked for ETB triggers including any granted by their own static
+    // abilities (Harmonic Sliver) and by other lords already on the
+    // battlefield. Flushing pending layer evaluation here guarantees
+    // `obj.trigger_definitions` and `obj.keywords` reflect all active
+    // continuous effects before this pass scans for matching triggers.
+    if state.layers_dirty {
+        super::layers::evaluate_layers(state);
+    }
     let mut pending: Vec<PendingTrigger> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
@@ -466,6 +477,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             restrictions: vec![],
                             grants: vec![],
                             expiry: Some(crate::types::mana::ManaExpiry::EndOfCombat),
+                            target: None,
                         };
                         let fb_ability =
                             ResolvedAbility::new(fb_effect, Vec::new(), obj_id, controller);
@@ -5462,6 +5474,7 @@ pub mod tests {
                             restrictions: vec![],
                             grants: vec![],
                             expiry: None,
+                            target: None,
                         },
                     ))
                     .valid_card(TargetFilter::AttachedTo),
@@ -5559,6 +5572,7 @@ pub mod tests {
                             restrictions: vec![],
                             grants: vec![],
                             expiry: None,
+                            target: None,
                         },
                     ))
                     .valid_card(TargetFilter::AttachedTo),
@@ -6581,6 +6595,293 @@ pub mod tests {
         assert!(
             check_trigger_condition(&state, &condition, controller, None, Some(&opponent_draw)),
             "draw step draws by the non-active player must fire"
+        );
+    }
+
+    // === L9-23: Sliver-lord self-static keyword/trigger grant ===
+    // CR 603.6a + CR 611.2e: Static abilities that grant abilities/keywords to
+    // a class of permanents apply the moment a newcomer enters the battlefield.
+    // ETB-trigger gathering MUST see the granted-trigger on the entering object
+    // itself (Harmonic Sliver) and the granted keyword on the entering source
+    // (Venom Sliver / sliver-lord pattern). The fix flushes pending layer
+    // evaluation at the top of `process_triggers`.
+
+    /// Helper: create a battlefield Sliver creature owned by `controller` with
+    /// a `Sliver` subtype tag, ready for layer evaluation.
+    fn make_sliver(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0xB1A1),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Sliver".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        id
+    }
+
+    #[test]
+    fn harmonic_sliver_self_etb_trigger_via_own_static_grant() {
+        // CR 603.6a: Each time an event puts one or more permanents onto the
+        // battlefield, all permanents on the battlefield (INCLUDING the
+        // newcomers) are checked for any ETB triggers that match the event.
+        // Harmonic Sliver's printed static "All Slivers have 'When this
+        // permanent enters, destroy target ...'" grants its own ETB trigger
+        // back to itself. The granted trigger MUST fire on Harmonic Sliver's
+        // own ETB.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let harmonic = make_sliver(&mut state, PlayerId(0), "Harmonic Sliver");
+
+        // Static: "Creature & Sliver" => GrantTrigger(ChangesZone -> Battlefield, SelfRef, Draw 1).
+        // We use Draw rather than Destroy to keep the test free of target prompts.
+        let granted_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Sliver".to_string()),
+                ],
+                controller: None,
+                properties: Vec::new(),
+            }))
+            .modifications(vec![
+                crate::types::ability::ContinuousModification::GrantTrigger {
+                    trigger: Box::new(granted_trigger),
+                },
+            ]);
+        let obj = state.objects.get_mut(&harmonic).unwrap();
+        obj.static_definitions.push(static_def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(static_def);
+
+        // Layers haven't run yet — granted trigger is NOT on obj.trigger_definitions
+        // until we evaluate. The fix in process_triggers must flush layers first.
+        state.layers_dirty = true;
+
+        let events = vec![zone_changed_event(
+            harmonic,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec!["Sliver"],
+        )];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Harmonic Sliver's own ETB must trigger the granted ability per CR 603.6a"
+        );
+    }
+
+    #[test]
+    fn other_sliver_etb_triggers_via_lord_grant() {
+        // Two slivers on the battlefield: Lord (with the static) is already in
+        // play; a new Sliver enters. The lord's grant must apply to the
+        // newcomer so that the newcomer's own ETB fires the granted trigger.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let lord = make_sliver(&mut state, PlayerId(0), "Lord Sliver");
+        let granted_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Sliver".to_string()),
+                ],
+                controller: None,
+                properties: Vec::new(),
+            }))
+            .modifications(vec![
+                crate::types::ability::ContinuousModification::GrantTrigger {
+                    trigger: Box::new(granted_trigger),
+                },
+            ]);
+        let lord_obj = state.objects.get_mut(&lord).unwrap();
+        lord_obj.static_definitions.push(static_def.clone());
+        std::sync::Arc::make_mut(&mut lord_obj.base_static_definitions).push(static_def);
+
+        // Newcomer Sliver enters — both lord and newcomer should get the grant
+        // applied via layers, and the newcomer's ETB must fire the granted
+        // trigger from the newcomer (not from the lord, which already ETB'd).
+        let newcomer = make_sliver(&mut state, PlayerId(0), "Other Sliver");
+        state.layers_dirty = true;
+
+        let events = vec![zone_changed_event(
+            newcomer,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec!["Sliver"],
+        )];
+        process_triggers(&mut state, &events);
+
+        // Both slivers (lord + newcomer) have the granted trigger via layers.
+        // Per CR 603.6a only the newcomer matches the ETB event with
+        // valid_card=SelfRef, so exactly one trigger fires.
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "newcomer Sliver's own ETB must fire the granted self-ETB trigger exactly once"
+        );
+    }
+
+    #[test]
+    fn non_sliver_etb_does_not_fire_lord_grant() {
+        // Negative regression: the lord's grant must not extend to a
+        // non-Sliver creature. Layers correctly filter the affected set; this
+        // test pins that behaviour after the layer-flush change.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let lord = make_sliver(&mut state, PlayerId(0), "Lord Sliver");
+        let granted_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Sliver".to_string()),
+                ],
+                controller: None,
+                properties: Vec::new(),
+            }))
+            .modifications(vec![
+                crate::types::ability::ContinuousModification::GrantTrigger {
+                    trigger: Box::new(granted_trigger),
+                },
+            ]);
+        let lord_obj = state.objects.get_mut(&lord).unwrap();
+        lord_obj.static_definitions.push(static_def.clone());
+        std::sync::Arc::make_mut(&mut lord_obj.base_static_definitions).push(static_def);
+
+        // Non-Sliver creature enters.
+        let bear = create_object(
+            &mut state,
+            CardId(0xBEA1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Bear".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.entered_battlefield_turn = Some(0);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        state.layers_dirty = true;
+
+        let events = vec![zone_changed_event(
+            bear,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec!["Bear"],
+        )];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "non-Sliver creature must not fire the lord's grant"
+        );
+    }
+
+    #[test]
+    fn venom_sliver_self_grants_deathtouch_via_layer_flush_in_process_triggers() {
+        // CR 611.2e: Venom Sliver pattern — a printed static "Sliver creatures
+        // you control have deathtouch" must apply to the source itself once
+        // layers are evaluated. Pins that calling `process_triggers` (which
+        // happens immediately after a zone change in the post-action pipeline)
+        // flushes pending layer evaluation so the granted keyword is on
+        // `obj.keywords` for any subsequent combat-damage or trigger check
+        // that reads it.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let venom = make_sliver(&mut state, PlayerId(0), "Venom Sliver");
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Sliver".to_string()),
+                ],
+                controller: Some(ControllerRef::You),
+                properties: Vec::new(),
+            }))
+            .modifications(vec![
+                crate::types::ability::ContinuousModification::AddKeyword {
+                    keyword: Keyword::Deathtouch,
+                },
+            ]);
+        let obj = state.objects.get_mut(&venom).unwrap();
+        obj.static_definitions.push(static_def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(static_def);
+
+        // Before any layer evaluation, the keyword is NOT on obj.keywords.
+        assert!(
+            !state
+                .objects
+                .get(&venom)
+                .unwrap()
+                .has_keyword(&Keyword::Deathtouch),
+            "precondition: keyword absent until layers run"
+        );
+
+        // Drive the post-action trigger scan: process_triggers must flush
+        // layers before scanning so granted keywords are visible.
+        state.layers_dirty = true;
+        process_triggers(&mut state, &[]);
+
+        assert!(
+            state
+                .objects
+                .get(&venom)
+                .unwrap()
+                .has_keyword(&Keyword::Deathtouch),
+            "Venom Sliver self-grants deathtouch once layers run via process_triggers"
         );
     }
 }

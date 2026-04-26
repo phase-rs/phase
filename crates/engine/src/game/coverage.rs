@@ -40,6 +40,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
+            | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::MaximumHandSize { .. }
@@ -300,6 +301,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Owned { controller } => parts.push(fmt_controller(controller)),
             FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
+            FilterProp::AttachedToSource => parts.push("attached to self".into()),
+            FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
             FilterProp::HasAttachment { kind, controller } => {
                 let kind_s = match kind {
                     crate::types::ability::AttachmentKind::Aura => "aura",
@@ -308,6 +311,20 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 match controller {
                     None => parts.push(format!("attached by {kind_s}")),
                     Some(c) => parts.push(format!("attached by {kind_s} ({})", fmt_controller(c))),
+                }
+            }
+            FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+                let kinds_s = kinds
+                    .iter()
+                    .map(|k| match k {
+                        crate::types::ability::AttachmentKind::Aura => "aura",
+                        crate::types::ability::AttachmentKind::Equipment => "equipment",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                match controller {
+                    None => parts.push(format!("attached by {kinds_s}")),
+                    Some(c) => parts.push(format!("attached by {kinds_s} ({})", fmt_controller(c))),
                 }
             }
             FilterProp::Another => parts.push("another".into()),
@@ -332,6 +349,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
             FilterProp::Historic => parts.push("historic".into()),
+            // CR 903.3d
+            FilterProp::IsCommander => parts.push("commander".into()),
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
             FilterProp::DifferentNameFrom { .. } => parts.push("different name".into()),
             FilterProp::Other { value } => parts.push(value.clone()),
@@ -555,6 +574,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::Variable { name } => name.clone(),
         QuantityRef::SelfPower => "self power".into(),
         QuantityRef::SelfToughness => "self toughness".into(),
+        QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
             function,
             property,
@@ -622,6 +642,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::EventContextSourcePower => "source's power".into(),
         QuantityRef::EventContextSourceToughness => "source's toughness".into(),
         QuantityRef::EventContextSourceManaValue => "source's mana value".into(),
+        QuantityRef::CostPaidObjectManaValue => "cost-paid object's mana value".into(),
         QuantityRef::SpellsCastThisTurn { filter } => match filter {
             Some(filter) => format!("{} spells cast this turn", fmt_target(filter)),
             None => "spells cast this turn".into(),
@@ -4020,6 +4041,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Variable { .. } => ("Variable", Handled),
         QuantityRef::SelfPower => ("SelfPower", Handled),
         QuantityRef::SelfToughness => ("SelfToughness", Handled),
+        QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
         QuantityRef::TargetPower => ("TargetPower", Handled),
         QuantityRef::TargetLifeTotal => ("TargetLifeTotal", Handled),
@@ -4042,6 +4064,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EventContextSourcePower => ("EventContextSourcePower", Handled),
         QuantityRef::EventContextSourceToughness => ("EventContextSourceToughness", Handled),
         QuantityRef::EventContextSourceManaValue => ("EventContextSourceManaValue", Handled),
+        QuantityRef::CostPaidObjectManaValue => ("CostPaidObjectManaValue", Handled),
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
@@ -5109,6 +5132,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // "can't cast spells during" (CantCastDuring/PerTurnCastLimit) lines.
         let covered_by_static_mode = face.static_abilities.iter().any(|s| match &s.mode {
             StaticMode::GraveyardCastPermission { .. } => {
+                effective_lower.contains("you may cast") || effective_lower.contains("you may play")
+            }
+            // CR 401.5 + CR 118.9: top-of-library cast permission descriptions
+            // match the same "you may cast/play" surface phrasing as graveyard
+            // grants. The discriminator ("from the top of your library") is
+            // already enforced by the parser; coverage just needs a phrase
+            // that the static description will contain.
+            StaticMode::TopOfLibraryCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
             }
             StaticMode::CantCastDuring { .. } => {

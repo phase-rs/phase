@@ -9,9 +9,10 @@ use crate::types::ability::{
 };
 
 use super::oracle::find_activated_colon;
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
+use crate::types::ability::TargetFilter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OracleBlockAst {
@@ -296,7 +297,20 @@ pub(crate) fn lower_oracle_block(
             modes,
         } => {
             let mut triggers = parse_trigger_lines(&trigger_line, card_name);
-            let modal_execute = Box::new(build_modal_ability(AbilityKind::Spell, &header, &modes));
+            // CR 608.2k + CR 301.5a: Derive the trigger subject from the parsed
+            // trigger so modal-mode pronoun anaphora ("that creature") binds to
+            // `TriggeringSource` instead of an unbound `ParentTarget`. Pip-Boy
+            // 3000's "Whenever equipped creature attacks ... put a +1/+1 counter
+            // on that creature" is the canonical case; the modal parent is a
+            // `GenericEffect` with no target, so without this threading the
+            // "Pick a Perk" mode emits an unresolvable `ParentTarget`.
+            let modal_subject = derive_modal_subject(&triggers);
+            let modal_execute = Box::new(build_modal_ability_with_subject(
+                AbilityKind::Spell,
+                &header,
+                &modes,
+                modal_subject,
+            ));
             for trigger in &mut triggers {
                 trigger.execute = Some(modal_execute.clone());
             }
@@ -314,6 +328,38 @@ pub(crate) fn build_modal_ability(
         build_modal_choice(header, modes),
         lower_mode_abilities(modes, kind),
     )
+}
+
+/// Build a modal ability with a trigger-context subject so mode-body pronoun
+/// anaphora resolve against the triggering object (CR 608.2k + CR 301.5a).
+fn build_modal_ability_with_subject(
+    kind: AbilityKind,
+    header: &ModalHeaderAst,
+    modes: &[ModeAst],
+    subject: Option<TargetFilter>,
+) -> AbilityDefinition {
+    AbilityDefinition::new(kind, modal_marker_effect(header)).with_modal(
+        build_modal_choice(header, modes),
+        lower_mode_abilities_with_subject(modes, kind, subject),
+    )
+}
+
+/// CR 608.2k: Pick the trigger subject used to thread anaphoric pronoun
+/// resolution into modal mode bodies. Returns `None` when the trigger has no
+/// `valid_card` filter, when the filter is `SelfRef`/`Any`, or when there are
+/// no triggers (defensive — the parser always emits at least one). Mirrors
+/// `resolve_it_pronoun`'s gating: only non-self, non-Any subjects route mode-
+/// body "that creature" to `TriggeringSource`; self-triggers (like Saga
+/// chapters that name themselves) keep the legacy `ParentTarget` semantics.
+fn derive_modal_subject(
+    triggers: &[crate::types::ability::TriggerDefinition],
+) -> Option<TargetFilter> {
+    let trigger = triggers.first()?;
+    let subject = trigger.valid_card.as_ref()?;
+    match subject {
+        TargetFilter::SelfRef | TargetFilter::Any => None,
+        other => Some(other.clone()),
+    }
 }
 
 fn modal_marker_effect(_header: &ModalHeaderAst) -> Effect {
@@ -342,6 +388,28 @@ fn lower_mode_abilities(modes: &[ModeAst], kind: AbilityKind) -> Vec<AbilityDefi
         .iter()
         .map(|mode| {
             let parsed = parse_effect_chain(&mode.body, kind);
+            guard_unsupported_mode_qualifiers(&mode.body, parsed, kind)
+        })
+        .collect()
+}
+
+/// Variant of `lower_mode_abilities` that threads a trigger subject through
+/// mode-body parsing so anaphoric pronouns ("that creature") resolve against
+/// the triggering object (CR 608.2k + CR 301.5a). When `subject` is `None`,
+/// behavior is identical to `lower_mode_abilities`.
+fn lower_mode_abilities_with_subject(
+    modes: &[ModeAst],
+    kind: AbilityKind,
+    subject: Option<TargetFilter>,
+) -> Vec<AbilityDefinition> {
+    let ctx = ParseContext {
+        subject,
+        ..Default::default()
+    };
+    modes
+        .iter()
+        .map(|mode| {
+            let parsed = parse_effect_chain_with_context(&mode.body, kind, &ctx);
             guard_unsupported_mode_qualifiers(&mode.body, parsed, kind)
         })
         .collect()
@@ -879,6 +947,32 @@ mod tests {
             "mode 5 should parse as LoseAllPlayerCounters, got {:?}",
             parsed.abilities[4].effect
         );
+    }
+
+    #[test]
+    fn pip_boy_modal_that_creature_resolves_to_triggering_source() {
+        // CR 608.2k + CR 301.5a: Pip-Boy 3000's "Whenever equipped creature
+        // attacks ... • Pick a Perk — Put a +1/+1 counter on that creature."
+        // The modal parent is a `GenericEffect` with no target, so binding
+        // "that creature" to `ParentTarget` would leave the counter unbound.
+        // The trigger subject (`AttachedTo`) must thread through modal mode
+        // parsing so anaphora resolve to `TriggeringSource`.
+        const PIP_BOY: &str = "Whenever equipped creature attacks, choose one —\n\
+• Sort Inventory — Draw a card, then discard a card.\n\
+• Pick a Perk — Put a +1/+1 counter on that creature.\n\
+• Check Map — Untap up to two target lands.\nEquip {2}";
+        let parsed = parse_oracle_text(PIP_BOY, "Pip-Boy 3000", &[], &[], &[]);
+        let trigger = parsed.triggers.first().expect("attacks trigger");
+        let execute = trigger.execute.as_deref().expect("modal execute");
+        let mode2 = &execute.mode_abilities[1];
+        match &*mode2.effect {
+            Effect::PutCounter { target, .. } => assert_eq!(
+                target,
+                &TargetFilter::TriggeringSource,
+                "mode 2 'that creature' must bind to TriggeringSource, not ParentTarget"
+            ),
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
     }
 
     #[test]

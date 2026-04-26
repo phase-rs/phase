@@ -123,7 +123,8 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
-        | Effect::DamageAll { amount, .. } => {
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. } => {
             rewrite_variable_x_to_cost_x_paid(amount);
         }
         Effect::Pump {

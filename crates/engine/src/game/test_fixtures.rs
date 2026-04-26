@@ -27,6 +27,7 @@ pub(crate) fn brushland_colored_ability() -> AbilityDefinition {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         },
     )
     .cost(AbilityCost::Tap)

@@ -87,6 +87,12 @@ pub struct FilterContext<'a> {
     pub source_id: ObjectId,
     pub source_controller: Option<PlayerId>,
     pub ability: Option<&'a ResolvedAbility>,
+    /// CR 613.4c: Per-recipient binding for "<subject> gets +N/+M for each X
+    /// attached to it" statics. The pronoun "it" in an Aura/Equipment continuous
+    /// modification refers to the *affected* object (the per-id recipient in
+    /// `apply_continuous_effect`'s loop), NOT the static's source. When set,
+    /// `FilterProp::AttachedToRecipient` evaluates against this id.
+    pub recipient_id: Option<ObjectId>,
 }
 
 impl<'a> FilterContext<'a> {
@@ -99,6 +105,7 @@ impl<'a> FilterContext<'a> {
             source_id,
             source_controller,
             ability: None,
+            recipient_id: None,
         }
     }
 
@@ -110,6 +117,27 @@ impl<'a> FilterContext<'a> {
             source_id,
             source_controller: Some(controller),
             ability: None,
+            recipient_id: None,
+        }
+    }
+
+    /// CR 613.4c: Builder used by layer evaluation when an additive dynamic
+    /// modification's filter contains `FilterProp::AttachedToRecipient`. The
+    /// recipient is the per-object `id` in the affected loop (the creature
+    /// being modified), allowing "for each Aura and Equipment attached to it"
+    /// to count attachments on the affected object rather than on the static's
+    /// source (which would be the Aura/Equipment itself).
+    pub fn from_source_with_recipient(
+        state: &GameState,
+        source_id: ObjectId,
+        recipient_id: ObjectId,
+    ) -> Self {
+        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+        Self {
+            source_id,
+            source_controller,
+            ability: None,
+            recipient_id: Some(recipient_id),
         }
     }
 
@@ -121,6 +149,7 @@ impl<'a> FilterContext<'a> {
             source_id: ability.source_id,
             source_controller: Some(ability.controller),
             ability: Some(ability),
+            recipient_id: None,
         }
     }
 
@@ -137,6 +166,7 @@ impl<'a> FilterContext<'a> {
             source_id: ability.source_id,
             source_controller: Some(controller),
             ability: Some(ability),
+            recipient_id: None,
         }
     }
 }
@@ -158,6 +188,7 @@ pub fn matches_target_filter(
         ctx.source_id,
         ctx.source_controller,
         ctx.ability,
+        ctx.recipient_id,
     )
 }
 
@@ -186,6 +217,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.source_id,
                 ctx.source_controller,
                 ctx.ability,
+                ctx.recipient_id,
             )
         }
         _ => false,
@@ -222,6 +254,7 @@ fn filter_inner(
     source_id: ObjectId,
     source_controller: Option<PlayerId>,
     ability: Option<&ResolvedAbility>,
+    recipient_id: Option<ObjectId>,
 ) -> bool {
     // CR 702.26b: a phased-out permanent is treated as though it does not
     // exist. The only exception the rules allow — "rules and effects that
@@ -242,9 +275,11 @@ fn filter_inner(
         source_id,
         source_controller,
         ability,
+        recipient_id,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn filter_inner_for_object(
     state: &GameState,
     obj: &GameObject,
@@ -253,6 +288,7 @@ fn filter_inner_for_object(
     source_id: ObjectId,
     source_controller: Option<PlayerId>,
     ability: Option<&ResolvedAbility>,
+    recipient_id: Option<ObjectId>,
 ) -> bool {
     match filter {
         TargetFilter::None => false,
@@ -320,6 +356,7 @@ fn filter_inner_for_object(
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
                 ability,
+                recipient_id,
             };
             properties
                 .iter()
@@ -333,6 +370,7 @@ fn filter_inner_for_object(
             source_id,
             source_controller,
             ability,
+            recipient_id,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
             filter_inner_for_object(
@@ -343,6 +381,7 @@ fn filter_inner_for_object(
                 source_id,
                 source_controller,
                 ability,
+                recipient_id,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|f| {
@@ -354,6 +393,7 @@ fn filter_inner_for_object(
                 source_id,
                 source_controller,
                 ability,
+                recipient_id,
             )
         }),
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
@@ -395,6 +435,7 @@ fn filter_inner_for_object(
                     source_id,
                     source_controller,
                     ability,
+                    recipient_id,
                 )
         }
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
@@ -540,6 +581,7 @@ fn zone_change_filter_inner(
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
                 ability,
+                recipient_id: None,
             };
 
             properties
@@ -1069,7 +1111,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Owned { .. }
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
         | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
         | FilterProp::OtherThanTriggerObject
         | FilterProp::PowerLE { .. }
@@ -1101,6 +1146,11 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::NameMatchesAnyPermanent { .. }
+        // CR 903.3d: Commander designation is meaningful for permanents on the
+        // battlefield. The spell-cast record path is not currently plumbed with
+        // commander identity — fail closed until a "cast a commander" use-case
+        // requires it (CR 903.8 commander-tax tracking lives elsewhere).
+        | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
     }
 }
@@ -1122,6 +1172,12 @@ struct SourceContext<'a> {
     /// without a resolving ability (combat restrictions, layer predicates); in that
     /// case, per CR 107.2, any `Variable("X")` fallback resolves to 0.
     ability: Option<&'a ResolvedAbility>,
+    /// CR 613.4c: The per-object recipient of an ongoing layer evaluation, when
+    /// one is bound. Used by `FilterProp::AttachedToRecipient` so "for each X
+    /// attached to it" resolves against the affected creature instead of the
+    /// static's source. `None` outside per-recipient contexts (e.g., target
+    /// validation, spell-record matching, single-shot quantity resolution).
+    recipient_id: Option<ObjectId>,
 }
 
 /// CR 201.2 + CR 400.7: Resolve the printed name of the first
@@ -1350,6 +1406,36 @@ fn matches_filter_prop(
                 })
             }
         }
+        // CR 301.5 + CR 303.4: Inverse of `EnchantedBy`/`EquippedBy` — matches
+        // when THIS object is attached TO the source (`obj.attached_to ==
+        // Some(source.id)`). Used for "Aura and Equipment attached to ~"
+        // quantity clauses on the source object (Kellan, the Fae-Blooded).
+        FilterProp::AttachedToSource => {
+            obj.attached_to.and_then(|t| t.as_object()) == Some(source.id)
+        }
+        // CR 301.5 + CR 303.4 + CR 613.4c + CR 109.3: Anaphoric "it" referent
+        // in "for each X attached to it". Two contextual referents share the
+        // same parser-emitted prop:
+        //
+        // 1. Aura/Equipment statics ("Enchanted creature gets +N/+M for each
+        //    Aura and Equipment attached to it") — "it" is the per-recipient
+        //    enchanted creature, supplied via `FilterContext::recipient_id`
+        //    by the layer evaluator.
+        // 2. Self-source triggers ("Whenever ~ attacks, put a +1/+1 counter
+        //    on it for each Equipment attached to it" — Catti-brie, Wyleth)
+        //    — "it" is the trigger's source object, the same as
+        //    `FilterContext::source_id`. No per-recipient binding exists at
+        //    trigger resolution; the source is the only sensible referent.
+        //
+        // The combined rule: when a recipient is bound, use it; otherwise
+        // fall back to source. This is the same semantic the parser already
+        // assumed: emit `AttachedToRecipient` whenever "it" appears, and
+        // resolve against whichever object is the effective subject of the
+        // surrounding effect.
+        FilterProp::AttachedToRecipient => {
+            let referent = source.recipient_id.unwrap_or(source.id);
+            obj.attached_to.and_then(|t| t.as_object()) == Some(referent)
+        }
         // CR 303.4 + CR 301.5: Non-source-relative attachment predicate.
         // Matches objects that have at least one attachment of the given kind whose
         // controller satisfies the optional `ControllerRef`.
@@ -1385,6 +1471,44 @@ fn matches_filter_prop(
                     .is_some_and(|pid| pid == att.controller),
             }
         }),
+        // CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches when the
+        // object has at least one attachment whose subtype is in `kinds` and whose
+        // controller satisfies the optional `ControllerRef`. Generalization of
+        // `HasAttachment` to the "enchanted or equipped" compound-subject class.
+        FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+            obj.attachments.iter().any(|att_id| {
+                let Some(att) = state.objects.get(att_id) else {
+                    return false;
+                };
+                let kind_matches = kinds.iter().any(|kind| match kind {
+                    crate::types::ability::AttachmentKind::Aura => {
+                        att.card_types.subtypes.iter().any(|s| s == "Aura")
+                    }
+                    crate::types::ability::AttachmentKind::Equipment => {
+                        att.card_types.subtypes.iter().any(|s| s == "Equipment")
+                    }
+                });
+                if !kind_matches {
+                    return false;
+                }
+                match controller {
+                    None => true,
+                    Some(ControllerRef::You) => source.controller == Some(att.controller),
+                    Some(ControllerRef::Opponent) => {
+                        source.controller.is_some_and(|c| c != att.controller)
+                    }
+                    Some(ControllerRef::TargetPlayer) => source
+                        .ability
+                        .and_then(|a| {
+                            a.targets.iter().find_map(|t| match t {
+                                crate::types::ability::TargetRef::Player(pid) => Some(*pid),
+                                crate::types::ability::TargetRef::Object(_) => None,
+                            })
+                        })
+                        .is_some_and(|pid| pid == att.controller),
+                }
+            })
+        }
         FilterProp::Another => object_id != source.id,
         // CR 603.4 + CR 109.3: `OtherThanTriggerObject` is a typed marker that
         // signals "exclude the triggering object" for count semantics. The
@@ -1541,6 +1665,10 @@ fn matches_filter_prop(
         // CR 115.9b: Permissive at per-object level; validated by trigger matchers against
         // the stack entry's actual targets.
         FilterProp::Targets { .. } => true,
+        // CR 903.3d: "If an effect refers to controlling a commander, it refers
+        // to a permanent on the battlefield that is a commander." `is_commander`
+        // is the deck-construction designation per CR 903.3.
+        FilterProp::IsCommander => obj.is_commander,
         FilterProp::Other { .. } => false, // Fail-closed for unrecognized properties
     }
 }
@@ -1695,7 +1823,10 @@ fn zone_change_record_matches_property(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
         | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::FaceDown
         | FilterProp::CountersGE { .. }
         | FilterProp::HasAnyCounter
@@ -1730,6 +1861,11 @@ fn zone_change_record_matches_property(
         // meaning for a zone-change record (the object has already left the stack
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
+        // CR 903.3d + CR 903.3: Commander designation is preserved across zones,
+        // but zone-change records do not carry it. Fail closed — zone-change
+        // triggers that need to filter by commander status will require record
+        // plumbing (no current consumer).
+        | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
     }
 }
@@ -2215,6 +2351,178 @@ mod tests {
         assert!(
             !matches_target_filter(&state, creature_b, &filter, aura),
             "EnchantedBy must not match creatures the aura is NOT attached to"
+        );
+    }
+
+    #[test]
+    fn attached_to_source_matches_aura_or_equipment_attached_to_source() {
+        // CR 301.5 + CR 303.4: `FilterProp::AttachedToSource` matches when the
+        // candidate object's `attached_to` references the filter source.
+        // Inverse of `EnchantedBy`/`EquippedBy`. Drives Kellan, the Fae-Blooded's
+        // "for each Aura and Equipment attached to ~" boost multiplier.
+        let mut state = setup();
+        let kellan = add_creature(&mut state, PlayerId(0), "Kellan");
+        let other_creature = add_creature(&mut state, PlayerId(0), "Other");
+
+        let aura_id = state.next_object_id;
+        let aura = create_object(
+            &mut state,
+            CardId(aura_id),
+            PlayerId(0),
+            "Rancor".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(kellan.into());
+
+        let equip_id = state.next_object_id;
+        let equip = create_object(
+            &mut state,
+            CardId(equip_id),
+            PlayerId(0),
+            "Sword".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&equip)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        state.objects.get_mut(&equip).unwrap().attached_to = Some(other_creature.into());
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent().properties(vec![FilterProp::AttachedToSource]),
+        );
+
+        assert!(
+            matches_target_filter(&state, aura, &filter, kellan),
+            "AttachedToSource must match an attachment on the source"
+        );
+        assert!(
+            !matches_target_filter(&state, equip, &filter, kellan),
+            "AttachedToSource must NOT match an attachment on a different object"
+        );
+        assert!(
+            !matches_target_filter(&state, kellan, &filter, kellan),
+            "AttachedToSource must NOT match the source itself (it is not attached)"
+        );
+    }
+
+    #[test]
+    fn attached_to_recipient_matches_attachments_on_layer_recipient() {
+        // CR 301.5 + CR 303.4 + CR 613.4c: `FilterProp::AttachedToRecipient`
+        // matches when the candidate object's `attached_to` references the
+        // *recipient* of the resolving continuous modification — used by
+        // Aura/Equipment statics whose Oracle text says "for each X attached
+        // to it" (Strong Back, Bruenor Battlehammer, Mantle of the Ancients).
+        // Crucially, the predicate is FALSE when the matching is performed
+        // against attachments on the source rather than the recipient: that's
+        // exactly the bug that produced flat +0/+0 boosts for Strong Back.
+        let mut state = setup();
+        let strong_back = add_creature(&mut state, PlayerId(0), "Strong Back"); // playing source role
+        let enchanted_creature = add_creature(&mut state, PlayerId(0), "Equipped Bear");
+        let unrelated_creature = add_creature(&mut state, PlayerId(0), "Other Bear");
+
+        // Two attachments on the enchanted creature — the recipient.
+        let aura_id = state.next_object_id;
+        let aura = create_object(
+            &mut state,
+            CardId(aura_id),
+            PlayerId(0),
+            "Rancor".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(enchanted_creature.into());
+
+        let equip_id = state.next_object_id;
+        let equip = create_object(
+            &mut state,
+            CardId(equip_id),
+            PlayerId(0),
+            "Sword".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&equip)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        state.objects.get_mut(&equip).unwrap().attached_to = Some(enchanted_creature.into());
+
+        // One unrelated attachment — on a different creature, must not count.
+        let bystander_id = state.next_object_id;
+        let bystander = create_object(
+            &mut state,
+            CardId(bystander_id),
+            PlayerId(0),
+            "Wild Growth".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bystander)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state.objects.get_mut(&bystander).unwrap().attached_to = Some(unrelated_creature.into());
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent().properties(vec![FilterProp::AttachedToRecipient]),
+        );
+
+        // Recipient bound to enchanted_creature: aura and equip match,
+        // bystander does not.
+        let ctx =
+            FilterContext::from_source_with_recipient(&state, strong_back, enchanted_creature);
+        assert!(
+            super::matches_target_filter(&state, aura, &filter, &ctx),
+            "AttachedToRecipient must match an attachment on the recipient"
+        );
+        assert!(
+            super::matches_target_filter(&state, equip, &filter, &ctx),
+            "AttachedToRecipient must match every attachment on the recipient"
+        );
+        assert!(
+            !super::matches_target_filter(&state, bystander, &filter, &ctx),
+            "AttachedToRecipient must NOT match attachments on a different creature"
+        );
+
+        // CR 109.3: When no recipient is bound (e.g., trigger-time
+        // resolution where "it" refers to the trigger's source — Catti-brie,
+        // Wyleth), AttachedToRecipient falls back to source-attachment
+        // semantics. With strong_back as the source, attachments-on-source
+        // is empty, so neither aura nor equip match.
+        let ctx_source_only = FilterContext::from_source(&state, strong_back);
+        assert!(
+            !super::matches_target_filter(&state, aura, &filter, &ctx_source_only),
+            "Without recipient, must check attachments on source — strong_back has none"
+        );
+
+        // But with the source itself = the bear, attachments-on-source IS
+        // the right answer — confirms the trigger-self-source case.
+        let ctx_source_is_recipient = FilterContext::from_source(&state, enchanted_creature);
+        assert!(
+            super::matches_target_filter(&state, aura, &filter, &ctx_source_is_recipient),
+            "When source = the affected creature (trigger-self pattern), \
+             AttachedToRecipient must match attachments on the source"
         );
     }
 
@@ -3094,6 +3402,128 @@ mod tests {
         );
     }
 
+    // CR 303.4 + CR 301.5: `FilterProp::HasAnyAttachmentOf { [Aura, Equipment] }`
+    // matches creatures with at least one Aura OR Equipment attached. Compound-
+    // subject grant class (Reyav, Master Smith; Dogmeat, Ever Loyal).
+    #[test]
+    fn has_any_attachment_of_aura_or_equipment_matches_either() {
+        use crate::types::ability::{AttachmentKind, TypeFilter, TypedFilter};
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Reyav".into(),
+            Zone::Battlefield,
+        );
+
+        // Creature A: enchanted (has an Aura) → should match.
+        let cre_a = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Bear".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cre_a)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let aura = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "An Aura".into(),
+            Zone::Battlefield,
+        );
+        {
+            let a = state.objects.get_mut(&aura).unwrap();
+            a.card_types.core_types.push(CoreType::Enchantment);
+            a.card_types.subtypes.push("Aura".into());
+            a.attached_to = Some(cre_a.into());
+        }
+        state
+            .objects
+            .get_mut(&cre_a)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        // Creature B: equipped (has an Equipment) → should match.
+        let cre_b = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Ox".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cre_b)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let equip = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "An Equipment".into(),
+            Zone::Battlefield,
+        );
+        {
+            let e = state.objects.get_mut(&equip).unwrap();
+            e.card_types.core_types.push(CoreType::Artifact);
+            e.card_types.subtypes.push("Equipment".into());
+            e.attached_to = Some(cre_b.into());
+        }
+        state
+            .objects
+            .get_mut(&cre_b)
+            .unwrap()
+            .attachments
+            .push(equip);
+
+        // Creature C: no attachments → should NOT match.
+        let cre_c = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Wolf".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cre_c)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+            FilterProp::HasAnyAttachmentOf {
+                kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                controller: None,
+            },
+        ]));
+        assert!(
+            matches_target_filter(&state, cre_a, &filter, source),
+            "enchanted creature should match"
+        );
+        assert!(
+            matches_target_filter(&state, cre_b, &filter, source),
+            "equipped creature should match"
+        );
+        assert!(
+            !matches_target_filter(&state, cre_c, &filter, source),
+            "creature with no attachments should NOT match"
+        );
+    }
+
     // CR 303.4: `FilterProp::EnchantedBy` degrades to "has any Aura attached"
     // when the source is not itself an Aura (Hateful Eidolon).
     #[test]
@@ -3557,6 +3987,7 @@ mod tests {
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
+            recipient_id: None,
         };
 
         // Leg 1: legendary creature (Arbaaz Mir, In Garruk's Wake-style ETB).
@@ -3683,6 +4114,7 @@ mod tests {
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
+            recipient_id: None,
         };
 
         let token_record = ZoneChangeRecord {

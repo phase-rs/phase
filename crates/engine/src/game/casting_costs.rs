@@ -90,7 +90,7 @@ pub(crate) fn handle_decide_additional_cost(
 pub(crate) fn handle_discard_for_cost(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     expected: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
@@ -108,6 +108,22 @@ pub(crate) fn handle_discard_for_cost(
             return Err(EngineError::InvalidAction(
                 "Selected card not in hand".to_string(),
             ));
+        }
+    }
+
+    // CR 117.1 + CR 202.3: Capture the discarded card's mana value BEFORE
+    // it leaves the hand, so `QuantityRef::CostPaidObjectManaValue` can
+    // resolve at ability resolution. Volrath the Fallen ("Volrath gets
+    // +X/+X until end of turn, where X is the discarded card's mana value").
+    if let Some(&first) = chosen.first() {
+        if let Some(mv) = state
+            .objects
+            .get(&first)
+            .map(|obj| obj.mana_cost.mana_value())
+        {
+            pending
+                .ability
+                .set_cost_paid_object_mana_value_recursive(mv);
         }
     }
 
@@ -155,7 +171,7 @@ pub(crate) fn handle_discard_for_cost(
 pub(crate) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     count: usize,
     legal_permanents: &[ObjectId],
     chosen: &[ObjectId],
@@ -173,6 +189,23 @@ pub(crate) fn handle_sacrifice_for_cost(
             return Err(EngineError::InvalidAction(
                 "Selected permanent not eligible for sacrifice".to_string(),
             ));
+        }
+    }
+
+    // CR 117.1 + CR 202.3: Capture the sacrificed object's mana value BEFORE
+    // it leaves the battlefield, stamping it onto the resolving ability for
+    // later read by `QuantityRef::CostPaidObjectManaValue` (Food Chain,
+    // Burnt Offering, Metamorphosis). Uses the first chosen permanent — the
+    // class only ever sacrifices one cost-tracked object.
+    if let Some(&first) = chosen.first() {
+        if let Some(mv) = state
+            .objects
+            .get(&first)
+            .map(|obj| obj.mana_cost.mana_value())
+        {
+            pending
+                .ability
+                .set_cost_paid_object_mana_value_recursive(mv);
         }
     }
 
@@ -727,6 +760,46 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending,
             events,
         );
+    }
+
+    // CR 118.9 + CR 119.4: ExileWithAltAbilityCost — non-mana alternative cost
+    // (e.g. Nashi's "pay life equal to its mana value rather than paying its
+    // mana cost"). The mana cost was already overridden to zero in
+    // `casting::cast_spell` via `alt_cost_from_exile`; here we route the stored
+    // `AbilityCost` through `pay_additional_cost` so dynamic-quantity refs
+    // (`EventContextSourceManaValue`, etc.) resolve at cast time against the
+    // spell's mana value. Single-authority — `AbilityCost::PayLife` and friends
+    // are paid through the same pipeline as flashback's non-mana cost.
+    let alt_ability_cost = state.objects.get(&object_id).and_then(|obj| {
+        if obj.zone == Zone::Exile {
+            obj.casting_permissions.iter().find_map(|p| match p {
+                crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
+                    cost, ..
+                } => Some(cost.clone()),
+                _ => None,
+            })
+        } else if obj.zone == Zone::Library && obj.owner == player {
+            // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
+            // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
+            // value rather than paying its mana cost"). The static lives on
+            // the granting permanent on the battlefield, not on the spell;
+            // resolve through `top_of_library_permission_source` to fetch it.
+            super::casting::top_of_library_permission_source(
+                state,
+                player,
+                Some(crate::types::ability::CardPlayMode::Cast),
+            )
+            .and_then(|(top_id, _src, alt)| if top_id == object_id { alt } else { None })
+        } else {
+            None
+        }
+    });
+    if let Some(alt_cost) = alt_ability_cost {
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.casting_variant = casting_variant;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        return pay_additional_cost(state, player, alt_cost, pending, events);
     }
 
     // CR 702.138a: Escape requires exiling N other cards from graveyard.
@@ -2680,6 +2753,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -2696,6 +2770,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -2738,6 +2813,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -2753,6 +2829,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -3252,6 +3329,514 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// CR 603.6c + CR 118.3: Sacrificing a permanent as part of a cost is a
+    /// game event that triggers other abilities (e.g., Crime Novelist's
+    /// "whenever you sacrifice an artifact"). Regression: cost-payment
+    /// sacrifices must emit `PermanentSacrificed` so observer triggers fire,
+    /// just like spell-effect sacrifices do.
+    ///
+    /// Covers the broader "sacrifice-cost-trigger" class — Crime Novelist,
+    /// Syr Ginger, Mayhem Devil, Cruel Celebrant, Korvold etc.
+    #[test]
+    fn sacrifice_as_cost_emits_event_for_observer_trigger() {
+        use crate::game::triggers::process_triggers;
+        use crate::types::ability::TriggerDefinition;
+        use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Source: an artifact with an activated ability whose cost sacrifices
+        // a Treasure (an artifact). Effect doesn't matter — we just need the
+        // sacrifice cost to fire.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().abilities =
+            Arc::new(vec![crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )]);
+
+        // Treasure-like artifact controlled by player 0 — sacrificed as cost.
+        let treasure = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+
+        // Observer: Crime-Novelist-style trigger.
+        // "Whenever you sacrifice an artifact, ..." => valid_card = Typed{Artifact, controller: You}.
+        let observer = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Crime Novelist".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let mut trig = TriggerDefinition::new(TriggerMode::Sacrificed);
+            trig.valid_card = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }));
+            // Trigger executes a draw so we can detect it on the stack.
+            trig.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )));
+            obj.trigger_definitions.push(trig);
+        }
+
+        // Pay the cost via the cost-payment helper directly — same path
+        // taken when an activated ability's sacrifice subcost resumes after
+        // `WaitingFor::SacrificeForCost`.
+        let pending = make_pending(source);
+        let mut events = Vec::new();
+        handle_sacrifice_for_cost(
+            &mut state,
+            PlayerId(0),
+            pending,
+            1,
+            &[treasure],
+            &[treasure],
+            &mut events,
+        )
+        .expect("cost-payment sacrifice succeeds");
+
+        // The cost-payment path must emit `PermanentSacrificed` — same event
+        // the spell-effect sacrifice path emits — so observer triggers can fire.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::PermanentSacrificed { object_id, .. } if *object_id == treasure
+            )),
+            "cost-payment sacrifice must emit PermanentSacrificed (got: {:?})",
+            events
+                .iter()
+                .filter(|e| !matches!(e, GameEvent::ZoneChanged { .. }))
+                .collect::<Vec<_>>()
+        );
+
+        // Run the trigger pass over the cost-payment events. Observer's
+        // Sacrificed-mode trigger must register on the stack.
+        let stack_before = state.stack.len();
+        process_triggers(&mut state, &events);
+        assert!(
+            state.stack.len() > stack_before,
+            "observer's `whenever you sacrifice an artifact` trigger must fire \
+             when an artifact is sacrificed as part of an activated-ability cost"
+        );
+    }
+
+    /// CR 603.6c + CR 603.10a: Sacrificing an artifact TOKEN as a cost must
+    /// fire `whenever <artifact> is put into a graveyard from the battlefield`
+    /// triggers (Syr Ginger). The token does cease to exist after SBAs (CR
+    /// 704.5d), but the leaves-battlefield event still fires per CR 603.10a
+    /// (last-known information). Cost-payment must emit the same `ZoneChanged`
+    /// event that effect-sacrifice emits.
+    #[test]
+    fn sacrifice_token_as_cost_fires_dies_zone_trigger() {
+        use crate::game::triggers::process_triggers;
+        use crate::types::ability::TriggerDefinition;
+        use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().abilities =
+            Arc::new(vec![crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )]);
+
+        // Artifact TOKEN (e.g., Treasure / Food) controlled by player 0.
+        let token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Treasure Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.is_token = true;
+        }
+
+        // Syr-Ginger-style observer: ChangesZone Battlefield → Graveyard,
+        // valid_card = Artifact controller=You. Note: `Another` is not
+        // exercised here — the sacrificed token is a different object.
+        let observer = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Syr Ginger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let mut trig = TriggerDefinition::new(TriggerMode::ChangesZone);
+            trig.origin = Some(Zone::Battlefield);
+            trig.destination = Some(Zone::Graveyard);
+            trig.valid_card = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }));
+            trig.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )));
+            obj.trigger_definitions.push(trig);
+        }
+
+        let pending = make_pending(source);
+        let mut events = Vec::new();
+        handle_sacrifice_for_cost(
+            &mut state,
+            PlayerId(0),
+            pending,
+            1,
+            &[token],
+            &[token],
+            &mut events,
+        )
+        .expect("cost-payment sacrifice succeeds");
+
+        // Cost-payment must emit ZoneChanged (battlefield → graveyard) for the
+        // sacrificed token — Dies / leaves-battlefield triggers depend on it.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == token
+            )),
+            "cost-payment sacrifice must emit ZoneChanged battlefield→graveyard"
+        );
+
+        let stack_before = state.stack.len();
+        process_triggers(&mut state, &events);
+        assert!(
+            state.stack.len() > stack_before,
+            "observer's `whenever an artifact is put into a graveyard from the battlefield` \
+             trigger must fire when an artifact token is sacrificed as activation cost"
+        );
+    }
+
+    /// End-to-end repro for L9-9: activate a Treasure-style mana ability
+    /// (`{T}, Sacrifice this artifact: Add one mana of any color`). After
+    /// `GameAction::ActivateAbility` resolves, Crime Novelist's sacrifice
+    /// trigger must land on the stack via `run_post_action_pipeline`.
+    #[test]
+    fn mana_ability_sacrifice_cost_fires_observer_trigger_end_to_end() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::TriggerDefinition;
+        use crate::types::ability::{
+            AbilityCost, ControllerRef, ManaContribution, ManaProduction, TargetFilter, TypeFilter,
+            TypedFilter,
+        };
+        use crate::types::mana::ManaColor;
+        use crate::types::phase::Phase;
+        use crate::types::triggers::TriggerMode;
+        use crate::types::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Treasure token: `{T}, Sacrifice: Add one mana of any color`.
+        let treasure = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+            obj.is_token = true;
+            obj.entered_battlefield_turn = Some(1); // CR 302.1: avoid summoning sickness for {T}
+            Arc::make_mut(&mut obj.abilities).push(
+                crate::types::ability::AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                ManaColor::White,
+                                ManaColor::Blue,
+                                ManaColor::Black,
+                                ManaColor::Red,
+                                ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::Sacrifice {
+                            target: TargetFilter::SelfRef,
+                            count: 1,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        // Crime-Novelist-style observer: Sacrificed-mode trigger on Artifact
+        // controlled by `You`. Trigger executes a draw so it's detectable on
+        // the stack (mana abilities don't use the stack — but the *triggered*
+        // ability fired by the sacrifice does).
+        let observer = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Crime Novelist".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let mut trig = TriggerDefinition::new(TriggerMode::Sacrificed);
+            trig.valid_card = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }));
+            trig.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )));
+            obj.trigger_definitions.push(trig);
+        }
+
+        // Activate the Treasure's mana ability — this is a "any color" choice,
+        // so we expect a ChooseManaColor prompt before resolution.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: treasure,
+                ability_index: 0,
+            },
+        )
+        .expect("activation succeeds");
+
+        // If the engine prompts for a mana color, pick one.
+        if matches!(state.waiting_for, WaitingFor::ChooseManaColor { .. }) {
+            apply_as_current(
+                &mut state,
+                GameAction::ChooseManaColor {
+                    choice: crate::types::game_state::ManaChoice::SingleColor(
+                        crate::types::mana::ManaType::Red,
+                    ),
+                },
+            )
+            .expect("color choice succeeds");
+        }
+
+        // Crime Novelist's Sacrificed trigger must have fired and landed
+        // on the stack — even though the source mana ability did not.
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == observer),
+            "Crime Novelist's sacrifice trigger must land on the stack \
+             when a Treasure is sacrificed as part of an activated mana \
+             ability cost (got stack: {:?}, treasure zone: {:?})",
+            state.stack.iter().map(|e| e.source_id).collect::<Vec<_>>(),
+            state.objects.get(&treasure).map(|o| o.zone),
+        );
+    }
+
+    /// End-to-end repro for L9-9 (Syr Ginger class): activate a Treasure
+    /// mana ability whose cost sacrifices the Treasure. Syr Ginger's
+    /// ChangesZone (Battlefield → Graveyard) trigger must fire — same fix
+    /// path as Crime Novelist, since `process_triggers` scans both
+    /// `PermanentSacrificed` and `ZoneChanged` events emitted by the
+    /// sacrifice cost step.
+    #[test]
+    fn mana_ability_sacrifice_cost_fires_dies_zone_trigger_end_to_end() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::TriggerDefinition;
+        use crate::types::ability::{
+            AbilityCost, ControllerRef, ManaContribution, ManaProduction, TargetFilter, TypeFilter,
+            TypedFilter,
+        };
+        use crate::types::mana::ManaColor;
+        use crate::types::phase::Phase;
+        use crate::types::triggers::TriggerMode;
+        use crate::types::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let treasure = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+            obj.is_token = true;
+            obj.entered_battlefield_turn = Some(1);
+            Arc::make_mut(&mut obj.abilities).push(
+                crate::types::ability::AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                ManaColor::White,
+                                ManaColor::Blue,
+                                ManaColor::Black,
+                                ManaColor::Red,
+                                ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::Sacrifice {
+                            target: TargetFilter::SelfRef,
+                            count: 1,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        // Syr Ginger-style observer: ChangesZone Battlefield → Graveyard,
+        // valid_card = Artifact controller=You.
+        let observer = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Syr Ginger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let mut trig = TriggerDefinition::new(TriggerMode::ChangesZone);
+            trig.origin = Some(Zone::Battlefield);
+            trig.destination = Some(Zone::Graveyard);
+            trig.valid_card = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }));
+            trig.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )));
+            obj.trigger_definitions.push(trig);
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: treasure,
+                ability_index: 0,
+            },
+        )
+        .expect("activation succeeds");
+
+        if matches!(state.waiting_for, WaitingFor::ChooseManaColor { .. }) {
+            apply_as_current(
+                &mut state,
+                GameAction::ChooseManaColor {
+                    choice: crate::types::game_state::ManaChoice::SingleColor(
+                        crate::types::mana::ManaType::Red,
+                    ),
+                },
+            )
+            .expect("color choice succeeds");
+        }
+
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == observer),
+            "Syr Ginger's `whenever an artifact is put into a graveyard from \
+             the battlefield` trigger must land on the stack when a Treasure \
+             token is sacrificed as part of an activated mana ability cost"
+        );
+    }
+
     // -- Strive cost calculation tests ------------------------------------------
 
     #[test]
@@ -3621,6 +4206,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -3646,6 +4232,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -3661,6 +4248,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -3686,6 +4274,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),

@@ -111,6 +111,12 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // CR 704.5n: If an Equipment is attached to an illegal permanent, it becomes unattached.
         check_unattached_equipment(state, &mut any_performed);
 
+        // CR 704.5y + CR 303.7a: If a permanent has more than one Role controlled
+        // by the same player attached to it, all but the newest go to the
+        // graveyard. Runs after unattached_auras so dead-host Roles are already
+        // gone — only attached Roles compete for the per-(host, controller) slot.
+        check_role_uniqueness(state, events, &mut any_performed);
+
         // CR 704.5i + CR 306.9: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
         check_zero_loyalty(state, events, &mut any_performed);
 
@@ -641,6 +647,62 @@ fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
             equipment.attached_to = None;
         }
         *any_performed = true;
+    }
+}
+
+/// CR 704.5y + CR 303.7a: If a permanent has more than one Role controlled
+/// by the same player attached to it, each of those Roles except the one
+/// with the most recent timestamp is put into its owner's graveyard.
+///
+/// Grouping is per-(host, role-controller) — NOT per-name. Two same-controller
+/// Roles with different names (Cursed + Royal) on one creature collapse to
+/// one. Two different-controller Roles on one creature both stay.
+///
+/// CR 702.26b: Phased-out Roles are skipped via `battlefield_phased_in_ids`.
+fn check_role_uniqueness(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
+    use crate::game::game_object::AttachTarget;
+    use crate::types::identifiers::ObjectId;
+    use std::collections::HashMap;
+
+    // (host_creature, role_controller) → Vec<(role_id, timestamp)>
+    let mut groups: HashMap<(ObjectId, PlayerId), Vec<(ObjectId, u64)>> = HashMap::new();
+    for id in state.battlefield_phased_in_ids() {
+        let Some(obj) = state.objects.get(&id) else {
+            continue;
+        };
+        if !obj.card_types.subtypes.iter().any(|s| s == "Role") {
+            continue;
+        }
+        // CR 303.7: Roles are Auras and only attach to permanents (Object hosts).
+        let Some(AttachTarget::Object(host)) = obj.attached_to else {
+            continue;
+        };
+        groups
+            .entry((host, obj.controller))
+            .or_default()
+            .push((id, obj.timestamp));
+    }
+
+    // Iterate in deterministic order so test/log output is stable.
+    let mut keys: Vec<_> = groups.keys().copied().collect();
+    keys.sort_by_key(|(host, ctrl)| (host.0, ctrl.0));
+
+    for key in keys {
+        let mut roles = groups.remove(&key).unwrap();
+        if roles.len() < 2 {
+            continue;
+        }
+        // CR 613.7 timestamp ordering — newest survives, older ones go to graveyard.
+        // Tie-break by ObjectId so behavior is deterministic when timestamps collide.
+        roles.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0 .0.cmp(&a.0 .0)));
+        for (id, _) in roles.into_iter().skip(1) {
+            zones::move_to_zone(state, id, Zone::Graveyard, events);
+            *any_performed = true;
+        }
     }
 }
 
@@ -2157,5 +2219,180 @@ mod tests {
         // CR 702.131d: continuous effects reapply after grant — layers must re-evaluate.
         assert!(state.layers_dirty || state.city_blessing.contains(&PlayerId(0)));
         assert!(state.city_blessing.contains(&PlayerId(0)));
+    }
+
+    // --- CR 704.5y: Role uniqueness SBA ---
+
+    fn create_role_token(
+        state: &mut GameState,
+        card_id: CardId,
+        controller: PlayerId,
+        owner: PlayerId,
+        name: &str,
+        host: ObjectId,
+        timestamp: u64,
+    ) -> ObjectId {
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.controller = controller;
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.card_types.subtypes.push("Role".to_string());
+        obj.attached_to = Some(host.into());
+        obj.timestamp = timestamp;
+        // Mirror the host's attachments list so dependent SBAs (lethal damage,
+        // unattached aura cleanup) see a consistent attachment graph.
+        if let Some(h) = state.objects.get_mut(&host) {
+            h.attachments.push(id);
+        }
+        id
+    }
+
+    #[test]
+    fn sba_role_uniqueness_keeps_newest_same_controller() {
+        // CR 704.5y: same player puts two Roles on the same creature → newest survives.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let older = create_role_token(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            PlayerId(0),
+            "Royal",
+            creature,
+            10,
+        );
+        let newer = create_role_token(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            PlayerId(0),
+            "Cursed",
+            creature,
+            20,
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&older),
+            "older Role must leave the battlefield"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&older),
+            "older Role must go to its owner's graveyard"
+        );
+        assert!(
+            state.battlefield.contains(&newer),
+            "newest Role must survive — name does not matter for grouping"
+        );
+    }
+
+    #[test]
+    fn sba_role_uniqueness_per_controller_not_per_creature() {
+        // CR 303.7a: grouping is per Role-controller. Two Roles on one
+        // creature controlled by different players are both legal.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let role_p0 = create_role_token(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            PlayerId(0),
+            "Royal",
+            creature,
+            10,
+        );
+        let role_p1 = create_role_token(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            PlayerId(1),
+            "Wicked",
+            creature,
+            20,
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&role_p0),
+            "P0's Role survives — P1's Role is in a different group"
+        );
+        assert!(
+            state.battlefield.contains(&role_p1),
+            "P1's Role survives — different controller from P0's Role"
+        );
+    }
+
+    #[test]
+    fn sba_role_uniqueness_three_roles_keep_newest_only() {
+        // CR 704.5y: with N>2, only the most-recent timestamp survives.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let r1 = create_role_token(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            PlayerId(0),
+            "Royal",
+            creature,
+            10,
+        );
+        let r2 = create_role_token(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            PlayerId(0),
+            "Cursed",
+            creature,
+            20,
+        );
+        let r3 = create_role_token(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            PlayerId(0),
+            "Monster",
+            creature,
+            30,
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&r1) && state.players[0].graveyard.contains(&r1),
+            "oldest Role goes to graveyard"
+        );
+        assert!(
+            !state.battlefield.contains(&r2) && state.players[0].graveyard.contains(&r2),
+            "middle Role goes to graveyard"
+        );
+        assert!(state.battlefield.contains(&r3), "newest Role survives");
+    }
+
+    #[test]
+    fn sba_role_uniqueness_single_role_unaffected() {
+        // CR 704.5y: with only one Role on the host, the SBA does nothing.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let role = create_role_token(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            PlayerId(0),
+            "Royal",
+            creature,
+            10,
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.battlefield.contains(&role));
+        assert!(state.players[0].graveyard.is_empty());
     }
 }

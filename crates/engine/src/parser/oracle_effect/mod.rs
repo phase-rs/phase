@@ -3768,6 +3768,134 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
     })
 }
 
+/// CR 120.3 + CR 119.3a: Compound object+player damage — type-first variant.
+/// Detects "deals N damage to each [type-phrase] and each player" and emits a
+/// single `Effect::DamageAll` carrying both the object filter and a
+/// `player_filter: Some(PlayerFilter::All)` so the resolver damages every
+/// matching creature AND every player from one batch (preserving simultaneous
+/// damage event semantics for replacement/prevention shields).
+///
+/// Mirrors `try_parse_compound_player_object_damage` but with the conjunction
+/// reversed: the first half names the object filter (with optional property
+/// suffix like "with flying" / "without flying" / "with horsemanship"), the
+/// second half is the player scope ("each player"). Without this gate the
+/// general compound splitter parses "each [type]" and silently drops the
+/// "and each player" continuation.
+///
+/// Cards: Pyrohemia, Pestilence, Earthquake, Hurricane, Inferno, Famine,
+/// Fire Tempest, Cave-In, Crypt Rats, Cloudthresher, Flamebreak, Devastate,
+/// Dakmor Plague, Dry Spell, Festering Evil, etc. (~30 cards).
+fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectClause> {
+    // Reuse the same verb+amount entry logic as the player-first variant.
+    let pos = lower.find("deals ").or_else(|| lower.find("deal "))?; // allow-noncombinator: positional verb search inside a variable-length subject prefix; tag("deals ") below is the actual dispatch.
+    let verb_len = if tag::<_, _, VerboseError<&str>>("deals ")
+        .parse(&lower[pos..])
+        .is_ok()
+    {
+        6
+    } else {
+        5
+    };
+    let after_lower = &lower[pos + verb_len..];
+
+    // Parse amount: "N damage to "
+    let (qty, after_amount) =
+        super::oracle_util::parse_count_expr(after_lower).and_then(|(qty, rest)| {
+            let (rest, _) = tag::<_, _, VerboseError<&str>>("damage").parse(rest).ok()?;
+            let rest = rest.trim_start();
+            let (rest, _) = tag::<_, _, VerboseError<&str>>("to ").parse(rest).ok()?;
+            Some((qty, rest))
+        })?;
+
+    // Must start with "each " (the object half of the conjunction).
+    let (after_each, _) = tag::<_, _, VerboseError<&str>>("each ")
+        .parse(after_amount)
+        .ok()?;
+
+    // Locate the " and each player" connector. take_until isolates the type-phrase
+    // prefix; the player suffix gates the compound shape and may carry a trailing
+    // period, comma, or independent continuation clause (e.g., Flamebreak:
+    // "and each player. Creatures dealt damage this way..."). After consuming the
+    // tag, the next char must be a clause boundary — anything else (e.g.,
+    // " who controls a white creature" on Disorder, " equal to ..." on Pompeii)
+    // means "each player" is a QUALIFIED player set, not the universal scope.
+    let (after_player, type_phrase) = take_until::<_, _, VerboseError<&str>>(" and each player")
+        .parse(after_each)
+        .ok()?;
+    let (after_player_tag, _) = tag::<_, _, VerboseError<&str>>(" and each player")
+        .parse(after_player)
+        .ok()?;
+
+    // CR 109.5: Reject qualified player phrases. Only accept clause-boundary
+    // characters (whitespace + punctuation) or end-of-string after "each player".
+    // " who", " equal", " that", " whose", and similar word continuations indicate
+    // a relative clause that restricts the player set — those cards are not part
+    // of this class.
+    if let Some(c) = after_player_tag.chars().next() {
+        if !(c.is_ascii_punctuation() || c == ' ') {
+            return None;
+        }
+        // Whitespace alone isn't enough — peek at the next word.
+        if c == ' ' {
+            let next = after_player_tag.trim_start();
+            // A bare trailing space + period/comma is fine (already covered by punctuation
+            // peek above), but " who/equal/that/whose/with..." is a qualifier.
+            // The only acceptable post-space content is another sentence (capitalized,
+            // started by punctuation), or the empty tail. We approximate with a tag
+            // probe over the known qualifier words.
+            let mut qualifier = alt((
+                tag::<_, _, VerboseError<&str>>("who "),
+                tag("whose "),
+                tag("that "),
+                tag("equal "),
+                tag("with "),
+                tag("without "),
+            ));
+            if qualifier.parse(next).is_ok() {
+                return None;
+            }
+        }
+    }
+
+    if type_phrase.is_empty() {
+        return None;
+    }
+
+    // Reject if the type-phrase itself contains a stray "and each " — that
+    // suggests a more complex N-way conjunction we don't yet handle.
+    if scan_contains_phrase(type_phrase, "and each") {
+        return None;
+    }
+
+    // Hand the "each [type-phrase]" slice to parse_target so property suffixes
+    // ("with flying", "without flying", "with horsemanship") are consumed
+    // natively. The full lower-case slice is fine because parse_target is
+    // case-insensitive and we only use the resulting filter, not the remainder.
+    let target_text = format!("each {type_phrase}");
+    let (object_filter, _rem) = parse_target(&target_text);
+
+    // Sanity: the parsed filter must reference at least one object type.
+    // If parse_target returned an empty filter, bail out so the general
+    // compound splitter gets a chance.
+    if matches!(&object_filter, TargetFilter::None) {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::DamageAll {
+            amount: qty,
+            target: object_filter,
+            player_filter: Some(PlayerFilter::All),
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+    })
+}
+
 fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     if !scan_contains_phrase(&lower, "and") {
@@ -3778,6 +3906,13 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
     // must be detected before the general compound splitter, because the "and" here connects
     // two damage targets (not two independent effects).
     if let Some(clause) = try_parse_compound_player_object_damage(&lower) {
+        return Some(clause);
+    }
+
+    // CR 120.3 + CR 119.3a: Same shape, type-first ordering — "each creature
+    // [with X | without X] and each player" (Pyrohemia / Earthquake / Hurricane
+    // class). Must run before the general split so the player half isn't dropped.
+    if let Some(clause) = try_parse_compound_object_player_damage(&lower) {
         return Some(clause);
     }
 
@@ -4701,6 +4836,14 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
 }
 
 /// CR 601.2a + CR 118.9: Parse "cast it/that card [without paying its mana cost]".
+///
+/// Three branches:
+/// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
+///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
+/// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
+///    without paying its mana cost" — target is built from `parse_type_phrase` +
+///    origin-zone inference. CR 118.9 + CR 601.2a + CR 120.3.
+/// 3. Bare — fallback `TargetFilter::Any`.
 fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     type E<'a> = VerboseError<&'a str>;
 
@@ -4712,33 +4855,203 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     .parse(lower)
     .ok()?;
 
+    // CR 401.5 + CR 118.9 + CR 601.2a: Static-shaped "you may [play|cast] X
+    // from the top of your library" lines (Realmwalker, Future Sight, Bolas's
+    // Citadel) are routed to `parse_static_line` →
+    // `StaticMode::TopOfLibraryCastPermission` by `is_static_compound_pattern`
+    // before the imperative dispatcher runs, so this path does not see them.
+    // Trigger sub-effects (Ziatora's Envoy combat-damage trigger, The
+    // Belligerent attack trigger granting "until end of turn, you may play
+    // lands and cast spells from the top of your library") are NOT classified
+    // — they parse through the imperative path here and lower to
+    // `Effect::CastFromZone`, the same shape the engine has long supported for
+    // these cards. A blanket guard against the "from the top of your library"
+    // anchor would silently regress those triggers to `Unimplemented`.
+
     let without_paying = scan_contains_phrase(rest, "without paying its mana cost")
         || scan_contains_phrase(rest, "without paying their mana cost");
 
-    let target = if alt((
-        tag::<_, _, E>("it"),
+    // Branch 1: anaphoric forms. Order longer-first ("one of those cards"
+    // before "those cards") so the prefix-match doesn't shadow the longer
+    // anaphor.
+    if alt((
+        tag::<_, _, E>("one of those cards"),
+        tag("the exiled card"),
+        tag("those cards"),
+        tag("cards exiled"),
         tag("that card"),
         tag("that spell"),
         tag("the copy"),
-        tag("the exiled card"),
         tag("them"),
-        tag("those cards"),
-        tag("cards exiled"),
+        tag("it"),
     ))
     .parse(rest)
     .is_ok()
     {
-        TargetFilter::ParentTarget
-    } else {
-        TargetFilter::Any
-    };
+        return Some(Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+        });
+    }
 
+    // Branch 2: constrained-filter form (Buster Sword, FIN equipment cycle).
+    // CR 118.9 + CR 601.2a: "cast a <filter> spell [from <zone>] [with mana
+    // value <bound>] without paying its mana cost" — extract the constraint
+    // by composing `parse_type_phrase` (handles "a [type-phrase]") with
+    // origin-zone inference and a `with mana value` suffix scan over the
+    // remainder. The suffix scan is necessary because `parse_type_phrase`'s
+    // own internal `parse_mana_value_suffix` call runs before `parse_zone_suffix`,
+    // so for inputs of the form "spell from your hand with mana value ..."
+    // the mana-value clause is past the type-phrase pos when reached.
+    let (filter, _after) = super::oracle_target::parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Typed(_)) {
+        let mut filter = filter;
+        if let Some(zone) = infer_origin_zone(rest) {
+            // Fold "from your hand" into the filter as a zone constraint so
+            // downstream target legality (CR 601.2c) restricts the choice to
+            // the right zone.
+            if let TargetFilter::Typed(ref mut tf) = filter {
+                if !tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::InZone { .. }))
+                {
+                    tf.properties.push(FilterProp::InZone { zone });
+                }
+            }
+        }
+        // CR 202.3 + CR 120.3: Scan for "with mana value <bound>" anywhere
+        // in the remainder via nom `take_until` + delegated parse, and fold
+        // the resulting `CmcLE`/`CmcGE`/`CmcEQ` prop onto the typed filter.
+        // `parse_mana_value_suffix` is a pure-nom combinator that emits the
+        // right `QuantityRef` (EventContextAmount for "that damage",
+        // EventContextSourceManaValue for "that <type>", literal/X otherwise).
+        // The scan is needed because `parse_type_phrase` runs its internal
+        // `parse_mana_value_suffix` call before `parse_zone_suffix`, so for
+        // inputs of the form "spell from <zone> with mana value ..." the
+        // suffix clause is past the type-phrase scan position.
+        if let Ok((after_take, _)) = take_until::<_, _, E>("with mana value ").parse(rest) {
+            if let Some((prop, _)) = super::oracle_target::parse_mana_value_suffix(after_take) {
+                if let TargetFilter::Typed(ref mut tf) = filter {
+                    if !tf.properties.iter().any(|p| {
+                        matches!(
+                            p,
+                            FilterProp::CmcLE { .. }
+                                | FilterProp::CmcGE { .. }
+                                | FilterProp::CmcEQ { .. }
+                        )
+                    }) {
+                        tf.properties.push(prop);
+                    }
+                }
+            }
+        }
+        return Some(Effect::CastFromZone {
+            target: filter,
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+        });
+    }
+
+    // Branch 3: bare fallback.
     Some(Effect::CastFromZone {
-        target,
+        target: TargetFilter::Any,
         without_paying_mana_cost: without_paying,
         mode,
         cast_transformed: false,
+        alt_ability_cost: None,
     })
+}
+
+/// CR 118.9 + CR 119.4: Recognise an "alternative-cost rider" — text of the
+/// form "[If you cast a spell this way,] pay <ability-cost> rather than
+/// paying its mana cost". The body parses to an `AbilityCost` that the
+/// runtime pays in lieu of the spell's mana cost when casting via a granted
+/// `ExileWithAltAbilityCost` permission. Returns `Some(cost)` when the rider
+/// shape is recognised; `None` otherwise. Currently handles the "pay life
+/// equal to its mana value" form (Nashi, Moon Sage's Scion); the cost
+/// parser will accept other `AbilityCost` shapes naturally as they are
+/// added.
+pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::ability::AbilityCost> {
+    type Vbe<'a> = VerboseError<&'a str>;
+    let lower = text.to_lowercase();
+    let trimmed_lower = lower.trim_end_matches('.').trim();
+    // Accept the rider with or without an "if you cast a spell this way,"
+    // conditional prefix (the conditional is folded into the runtime check
+    // by the casting pipeline — the permission only fires for spells cast
+    // through this grant). Both forms map to the same `AbilityCost`.
+    let after_prefix = if let Ok((rest, _)) = alt((
+        tag::<_, _, Vbe>("if you cast a spell this way, "),
+        tag::<_, _, Vbe>("if you cast it this way, "),
+    ))
+    .parse(trimmed_lower)
+    {
+        rest
+    } else {
+        trimmed_lower
+    };
+    // Confirm the rider's tail. Without this guard, "pay life equal to its
+    // mana value" alone (without the "rather than" clause) would also match —
+    // but that form is a normal payment effect, not an alt-cost grant.
+    if !nom_primitives::scan_contains(after_prefix, "rather than paying its mana cost")
+        && !nom_primitives::scan_contains(after_prefix, "rather than pay its mana cost")
+    {
+        return None;
+    }
+    // CR 119.4: "pay life equal to its mana value" — the only currently-
+    // supported rider body. Detect via nom prefix match; emit
+    // `AbilityCost::PayLife { amount: SelfManaValue }` (CR 202.3 — "its mana
+    // value" resolves against the spell-being-cast at cost-payment time).
+    if let Ok((_, _)) = tag::<_, _, Vbe>("pay life equal to its mana value").parse(after_prefix) {
+        return Some(crate::types::ability::AbilityCost::PayLife {
+            amount: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::SelfManaValue,
+            },
+        });
+    }
+    None
+}
+
+/// CR 118.9: Walk `defs` from the back, descending into `sub_ability`
+/// chains, and stamp `alt_ability_cost` onto the most recent `CastFromZone`
+/// effect that does not already carry one. Returns `true` when a target
+/// was found and stamped; `false` when no `CastFromZone` is in scope (the
+/// caller should fall back to emitting the rider as an Unimplemented effect
+/// to preserve coverage signal).
+fn attach_alt_cost_to_prior_cast_from_zone(
+    defs: &mut [AbilityDefinition],
+    cost: crate::types::ability::AbilityCost,
+) -> bool {
+    fn walk(def: &mut AbilityDefinition, cost: &crate::types::ability::AbilityCost) -> bool {
+        // Recurse into sub_ability first so we stamp the *most recent*
+        // (deepest) CastFromZone in the chain — the rider attaches to the
+        // immediately-preceding cast clause.
+        if let Some(sub) = def.sub_ability.as_mut() {
+            if walk(sub, cost) {
+                return true;
+            }
+        }
+        if let Effect::CastFromZone {
+            alt_ability_cost: alt @ None,
+            ..
+        } = &mut *def.effect
+        {
+            *alt = Some(cost.clone());
+            return true;
+        }
+        false
+    }
+    for def in defs.iter_mut().rev() {
+        if walk(def, &cost) {
+            return true;
+        }
+    }
+    false
 }
 
 #[tracing::instrument(level = "debug")]
@@ -5557,6 +5870,20 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             })
             .map_or(normalized_text, |((), rest)| rest)
         };
+
+        // CR 118.9 + CR 119.4: Alternative-cost rider — "[If you cast a spell
+        // this way,] pay <ability-cost> rather than paying its mana cost."
+        // This is a *modifier* on the previous chain entry's `CastFromZone`
+        // grant rather than its own effect. Fold the cost onto the most
+        // recent `CastFromZone` def (walking sub_ability descendants) and
+        // skip emitting a sibling Unimplemented chunk. Used by Nashi, Moon
+        // Sage's Scion: the granted card is cast by paying life equal to its
+        // mana value instead of paying its mana cost.
+        if let Some(cost) = try_parse_alt_cost_rider(normalized_text) {
+            if attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost) {
+                continue;
+            }
+        }
 
         // CR 608.2c: "Otherwise, [effect]" — attach as else_ability on the
         // most recent conditional def in the chain.
@@ -7981,11 +8308,29 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
         .strip_prefix("to ")
         .unwrap_or(after_target)
         .trim();
+    // CR 107.3i + CR 120.3: Trim a trailing "where X is <expr>" binding from
+    // the recipient phrase before classification. The binding has already been
+    // captured at chunk-build time and re-applied via
+    // `apply_where_x_ability_expression`; leaving it in the recipient phrase
+    // would cause `parse_damage_each_player_scope`'s exact-match check to
+    // reject "each player, where X is the number of descent counters on ~",
+    // forcing a fall-through to `DamageAll{Typed{empty}}`. Repro: Descent into
+    // Avernus. The strip is local to classification — it doesn't disturb the
+    // outer chunk-level where-X handling (Token P/T, Pump, SkipNextTurn).
+    let after_to_lower_full = after_to.to_lowercase();
+    let after_to_for_classification = {
+        let tp = TextPair::new(after_to, &after_to_lower_full);
+        let (stripped, _) = strip_trailing_where_x(tp);
+        // `stripped.original` is a prefix slice of `after_to` (TextPair::new
+        // requires byte-length equality, preserved for ASCII). Re-slice
+        // `after_to` by the stripped length to keep the outer lifetime.
+        &after_to[..stripped.original.len()]
+    };
     if tag::<_, _, VerboseError<&str>>("each ")
-        .parse(after_to)
+        .parse(after_to_for_classification)
         .is_ok()
     {
-        if let Some(player_filter) = parse_damage_each_player_scope(after_to) {
+        if let Some(player_filter) = parse_damage_each_player_scope(after_to_for_classification) {
             return Some((
                 Effect::DamageEachPlayer {
                     amount,
@@ -7994,7 +8339,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
                 "",
             ));
         }
-        let (target, rem) = parse_target(after_to);
+        let (target, rem) = parse_target(after_to_for_classification);
         return Some((
             Effect::DamageAll {
                 amount,
@@ -8303,6 +8648,8 @@ fn apply_where_x_quantity_expression(
 fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Option<&str>) {
     match effect {
         Effect::DealDamage { amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
         | Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
         | Effect::IncreaseSpeed { amount, .. }
@@ -9062,6 +9409,36 @@ mod tests {
         );
     }
 
+    /// CR 107.3i + CR 120.3: Descent into Avernus chains
+    /// "each player creates X Treasure tokens AND ~ deals X damage to each player,
+    /// where X is the number of descent counters on ~."
+    /// The damage classifier in `try_parse_damage_with_remainder` must strip the
+    /// trailing "where X is <expr>" binding from the recipient phrase before
+    /// invoking `parse_damage_each_player_scope`; otherwise its exact-match
+    /// check on "each player" would reject the trailing clause and fall through
+    /// to `DamageAll{Typed{empty}}`. The where-X expression itself is captured
+    /// at chunk-build time and re-applied by `apply_where_x_ability_expression`,
+    /// so the local strip does not perturb Token P/T, Pump, or SkipNextTurn
+    /// where-X handling.
+    #[test]
+    fn descent_into_avernus_sentence_chain() {
+        let chain = parse_effect_chain(
+            "Then each player creates X Treasure tokens and ~ deals X damage to each player, where X is the number of descent counters on ~",
+            AbilityKind::Spell,
+        );
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("expected damage sub_ability");
+        match &*sub.effect {
+            Effect::DamageEachPlayer {
+                player_filter: PlayerFilter::All,
+                ..
+            } => {}
+            other => panic!("expected DamageEachPlayer{{All}} for second clause, got {other:?}"),
+        }
+    }
+
     #[test]
     fn effect_damage_to_each_player_uses_player_scope() {
         let e = parse_effect("~ deals 1 damage to each player");
@@ -9203,6 +9580,100 @@ mod tests {
             other => {
                 panic!("expected DamageAll Or{{...}} with player_filter Opponent, got {other:?}")
             }
+        }
+    }
+
+    /// CR 120.3 + CR 119.3a: Pyrohemia / Pestilence class — "each creature and
+    /// each player" must emit a unified `DamageAll` carrying both the creature
+    /// filter and `player_filter: Some(PlayerFilter::All)`. Previously the
+    /// "and each player" half was silently dropped.
+    #[test]
+    fn effect_damage_compound_each_creature_and_each_player() {
+        let e = parse_effect("~ deals 1 damage to each creature and each player");
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(tf),
+                player_filter: Some(PlayerFilter::All),
+            } => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(tf.properties.is_empty());
+            }
+            other => panic!("expected DamageAll{{Creature, player_filter=All}}, got {other:?}"),
+        }
+    }
+
+    /// Hurricane class — "each creature with flying and each player". The
+    /// property suffix on the type half must be preserved, and the player
+    /// filter must still be populated.
+    #[test]
+    fn effect_damage_compound_each_creature_with_flying_and_each_player() {
+        let e = parse_effect("~ deals X damage to each creature with flying and each player");
+        match e {
+            Effect::DamageAll {
+                amount: _,
+                target: TargetFilter::Typed(tf),
+                player_filter: Some(PlayerFilter::All),
+            } => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(!tf.properties.is_empty(), "expected flying property");
+            }
+            other => {
+                panic!("expected DamageAll{{Creature w/ flying, player_filter=All}}, got {other:?}")
+            }
+        }
+    }
+
+    /// Earthquake / Flamebreak class — "each creature without flying and each player".
+    #[test]
+    fn effect_damage_compound_each_creature_without_flying_and_each_player() {
+        let e = parse_effect("~ deals X damage to each creature without flying and each player");
+        match e {
+            Effect::DamageAll {
+                amount: _,
+                target: TargetFilter::Typed(tf),
+                player_filter: Some(PlayerFilter::All),
+            } => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(
+                    !tf.properties.is_empty(),
+                    "expected without-flying property"
+                );
+            }
+            other => panic!(
+                "expected DamageAll{{Creature w/o flying, player_filter=All}}, got {other:?}"
+            ),
+        }
+    }
+
+    /// Negative case: Disorder ("each white creature and each player who controls
+    /// a white creature") must NOT route through the compound parser, because
+    /// the player half is qualified by a relative clause. Falling through to the
+    /// general path is acceptable here — the queue's L9-13 fix targets the
+    /// universal "each player" form only.
+    #[test]
+    fn effect_damage_compound_qualified_player_rejected() {
+        let e = parse_effect(
+            "~ deals 2 damage to each white creature and each player who controls a white creature",
+        );
+        // The compound helper must bail; the result must NOT have player_filter
+        // set to PlayerFilter::All (which would damage every player including
+        // those without a white creature — wrong rules).
+        if let Effect::DamageAll {
+            player_filter: Some(PlayerFilter::All),
+            ..
+        } = &e
+        {
+            panic!("compound helper must bail on qualified 'each player who...': {e:?}");
         }
     }
 
@@ -11619,6 +12090,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
     }
@@ -11636,6 +12108,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
     }
@@ -11657,6 +12130,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
         // Plural possessive variant (partner commanders).
@@ -11671,6 +12145,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
     }
@@ -18068,6 +18543,142 @@ mod tests {
         assert!(
             !any_forward_result(&def),
             "ChangeZone-only (no Attach sub) must not be marked forward_result"
+        );
+    }
+
+    // ── L9-20 + L8-1: cast-from-zone constraints + alt-ability-cost rider ──
+
+    /// CR 118.9 + CR 120.3: Buster Sword's "cast a spell from your hand with
+    /// mana value less than or equal to that damage without paying its mana
+    /// cost" must produce a `CastFromZone` whose target is constrained to a
+    /// `Card` filter with `InZone { Hand }` + `CmcLE { EventContextAmount }`.
+    /// Building-block test: covers the entire FIN equipment-cycle class
+    /// (~10–15 cards) by exercising the type-phrase + origin-zone +
+    /// mana-value-suffix composition in `try_parse_cast_effect`.
+    #[test]
+    fn cast_from_zone_with_filter_and_damage_bound() {
+        let effect = super::parse_effect(
+            "cast a spell from your hand with mana value less than or equal to that damage without paying its mana cost",
+        );
+        match &effect {
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(tf),
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                alt_ability_cost: None,
+                ..
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Card]);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                // structural: not dispatch — Vec membership assertion in test
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::InZone { zone: Zone::Hand }));
+                let has_cmc_le_damage = tf.properties.iter().any(|p| {
+                    matches!(
+                        p,
+                        FilterProp::CmcLE {
+                            value: crate::types::ability::QuantityExpr::Ref {
+                                qty: crate::types::ability::QuantityRef::EventContextAmount,
+                            },
+                        }
+                    )
+                });
+                assert!(
+                    has_cmc_le_damage,
+                    "expected CmcLE bound on EventContextAmount, got {:?}",
+                    tf.properties
+                );
+            }
+            _ => panic!("expected constrained CastFromZone, got {effect:?}"),
+        }
+    }
+
+    /// CR 202.3: "with mana value less than or equal to that creature" —
+    /// preserves the legacy `EventContextSourceManaValue` semantic for the
+    /// type-word arm; only "that damage" routes to `EventContextAmount`.
+    /// Regression test for the `try_dynamic` factoring in
+    /// `parse_mana_value_suffix`.
+    #[test]
+    fn cast_from_zone_mana_value_that_creature_keeps_source_mv() {
+        let effect = super::parse_effect(
+            "cast a spell from your hand with mana value less than or equal to that creature without paying its mana cost",
+        );
+        let target = match &effect {
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(tf),
+                ..
+            } => tf,
+            _ => panic!("expected CastFromZone, got {effect:?}"),
+        };
+        let has_source_mv = target.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::CmcLE {
+                    value: crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextSourceManaValue,
+                    },
+                }
+            )
+        });
+        assert!(
+            has_source_mv,
+            "expected EventContextSourceManaValue for type-word arm, got {:?}",
+            target.properties
+        );
+    }
+
+    /// CR 118.9 + CR 119.4: Nashi's "If you cast a spell this way, pay life
+    /// equal to its mana value rather than paying its mana cost" must fold
+    /// onto the previous `CastFromZone` clause as `alt_ability_cost`, NOT
+    /// emit as a sibling `Unimplemented{name:"pay"}`. Building-block test:
+    /// exercises both `try_parse_alt_cost_rider` (rider recognition) and
+    /// `attach_alt_cost_to_prior_cast_from_zone` (chain folding).
+    #[test]
+    fn alt_cost_rider_folds_onto_prior_cast_from_zone() {
+        let def = super::parse_effect_chain(
+            "exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
+            AbilityKind::Spell,
+        );
+        // Walk the chain looking for the CastFromZone with alt_ability_cost set.
+        fn find_cast(d: &AbilityDefinition) -> Option<&Effect> {
+            if matches!(*d.effect, Effect::CastFromZone { .. }) {
+                return Some(&d.effect);
+            }
+            d.sub_ability.as_ref().and_then(|s| find_cast(s))
+        }
+        let cast = find_cast(&def).expect("CastFromZone should be in chain");
+        let Effect::CastFromZone {
+            alt_ability_cost: Some(alt),
+            ..
+        } = cast
+        else {
+            panic!("expected CastFromZone with alt_ability_cost, got {cast:?}");
+        };
+        assert!(
+            matches!(
+                alt,
+                crate::types::ability::AbilityCost::PayLife {
+                    amount: crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::SelfManaValue,
+                    },
+                }
+            ),
+            "expected PayLife {{ SelfManaValue }}, got {alt:?}",
+        );
+        // Verify the rider didn't leak a sibling Unimplemented{name:"pay"} effect.
+        fn has_pay_unimpl(d: &AbilityDefinition) -> bool {
+            if matches!(
+                &*d.effect,
+                Effect::Unimplemented { name, .. } if name == "pay"
+            ) {
+                return true;
+            }
+            d.sub_ability.as_ref().is_some_and(|s| has_pay_unimpl(s))
+        }
+        assert!(
+            !has_pay_unimpl(&def),
+            "rider must NOT leak as Unimplemented{{name:'pay'}} sibling"
         );
     }
 }

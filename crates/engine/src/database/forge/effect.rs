@@ -425,6 +425,7 @@ fn translate_mana(
         produced,
         restrictions: Vec::new(),
         expiry: None,
+        target: None,
     })
 }
 

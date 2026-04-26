@@ -263,6 +263,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         );
         ability.cost = Some(AbilityCost::Tap);

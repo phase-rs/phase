@@ -23,12 +23,17 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (without_paying, cast_transformed) = match &ability.effect {
+    let (without_paying, cast_transformed, alt_ability_cost) = match &ability.effect {
         Effect::CastFromZone {
             without_paying_mana_cost,
             cast_transformed,
+            alt_ability_cost,
             ..
-        } => (*without_paying_mana_cost, *cast_transformed),
+        } => (
+            *without_paying_mana_cost,
+            *cast_transformed,
+            alt_ability_cost.clone(),
+        ),
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
 
@@ -63,20 +68,33 @@ pub fn resolve(
             zones::move_to_zone(state, obj_id, Zone::Exile, events);
         }
 
-        // CR 118.9: Grant casting permission — zero cost when "without paying
-        // its mana cost", otherwise the card's own mana cost.
+        // CR 118.9: Grant casting permission. Three cases:
+        //   - `alt_ability_cost: Some(_)` → `ExileWithAltAbilityCost` (Nashi:
+        //     "pay life equal to its mana value rather than paying its mana
+        //     cost" — non-mana alt cost replaces the mana cost).
+        //   - `without_paying_mana_cost: true` → `ExileWithAltCost { zero }`
+        //     (Discover, Suspend, "without paying its mana cost").
+        //   - otherwise → `ExileWithAltCost { mana_cost }` (Nashi-style "you
+        //     may play one of those cards" with normal mana payment).
         if let Some(obj) = state.objects.get_mut(&obj_id) {
-            let cost = if without_paying {
-                ManaCost::zero()
+            let permission = if let Some(cost) = alt_ability_cost.clone() {
+                CastingPermission::ExileWithAltAbilityCost {
+                    cost,
+                    constraint: None,
+                }
             } else {
-                obj.mana_cost.clone()
-            };
-            obj.casting_permissions
-                .push(CastingPermission::ExileWithAltCost {
+                let cost = if without_paying {
+                    ManaCost::zero()
+                } else {
+                    obj.mana_cost.clone()
+                };
+                CastingPermission::ExileWithAltCost {
                     cost,
                     cast_transformed,
                     constraint: None,
-                });
+                }
+            };
+            obj.casting_permissions.push(permission);
         }
     }
 
@@ -123,6 +141,7 @@ mod tests {
                 without_paying_mana_cost: true,
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
+                alt_ability_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -155,6 +174,7 @@ mod tests {
                 without_paying_mana_cost: true,
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
+                alt_ability_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -184,6 +204,7 @@ mod tests {
                 without_paying_mana_cost: false,
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
+                alt_ability_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -211,6 +232,7 @@ mod tests {
                 without_paying_mana_cost: true,
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
+                alt_ability_cost: None,
             },
             vec![],
             ObjectId(999),

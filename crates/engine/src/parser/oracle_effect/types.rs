@@ -732,6 +732,10 @@ pub(super) enum CostResourceImperativeAst {
     Mana {
         produced: ManaProduction,
         restrictions: Vec<ManaSpendRestriction>,
+        /// CR 115.1 + CR 115.7: Player target for mana effects whose count
+        /// references a target player (e.g. Jeska's Will mode 1 — "Add {R} for
+        /// each card in target opponent's hand"). `None` for the common case.
+        target: Option<TargetFilter>,
     },
     Damage {
         amount: QuantityExpr,

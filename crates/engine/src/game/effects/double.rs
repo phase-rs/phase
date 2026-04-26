@@ -293,6 +293,7 @@ mod tests {
             context: SpellContext::default(),
             player_scope: None,
             chosen_x: None,
+            cost_paid_object_mana_value: None,
             ability_index: None,
             optional_targeting: false,
             optional: false,

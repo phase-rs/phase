@@ -168,6 +168,7 @@ pub fn resolve_tally(
             distribution: None,
             player_scope: None,
             chosen_x: None,
+            cost_paid_object_mana_value: None,
             ability_index: None,
         };
         resolve_ability_chain(state, &chain, events, 0)?;
@@ -212,6 +213,7 @@ fn resolved_from_def(
         distribution: None,
         player_scope: None,
         chosen_x: None,
+        cost_paid_object_mana_value: None,
         ability_index: None,
     }
 }
@@ -339,6 +341,7 @@ mod tests {
             distribution: None,
             player_scope: None,
             chosen_x: None,
+            cost_paid_object_mana_value: None,
             ability_index: None,
         };
 

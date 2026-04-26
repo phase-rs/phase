@@ -22,6 +22,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaPip, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+use crate::types::TriggerMode;
 
 use super::combat;
 use super::mana_abilities;
@@ -978,6 +979,64 @@ pub(crate) fn opponent_land_color_options(
     options
 }
 
+/// CR 605.1b + CR 605.3b: Enumerate object ids on the battlefield whose
+/// `TapsForMana` triggered ability would fire when `land_id` is tapped for
+/// mana by `controller`. Returns the trigger-source object ids (the auras /
+/// equipment / static permanents whose trigger contributed mana to the pool
+/// keyed at `source_id = aura_id`).
+///
+/// Used by `handle_untap_land_for_mana` to refund coupled bonus mana when the
+/// player invokes the manual untap convenience: refunding only the land's
+/// mana would strand the aura's contribution and allow an infinite
+/// tap-untap-tap exploit (Fertile Ground, Wild Growth, Utopia Sprawl, Trace
+/// of Abundance, Verdant Haven, Market Festival, Weirding Wood, Overgrowth).
+///
+/// Reuses `match_taps_for_mana`'s `valid_card_matches` predicate — the same
+/// single-authority match used at trigger-firing time — so the refund and
+/// firing paths cannot drift.
+pub(crate) fn aura_taps_for_mana_sources_for_land(
+    state: &GameState,
+    land_id: ObjectId,
+    controller: PlayerId,
+) -> Vec<ObjectId> {
+    let mut sources = Vec::new();
+    for (&object_id, obj) in state.objects.iter() {
+        if obj.zone != Zone::Battlefield {
+            continue;
+        }
+        if obj.controller != controller {
+            continue;
+        }
+        for trigger in obj.trigger_definitions.iter_all() {
+            if trigger.mode != TriggerMode::TapsForMana {
+                continue;
+            }
+            // CR 605.1b: A `TapsForMana` trigger fires when its `valid_card`
+            // resolves to the land that produced mana. `AttachedTo` is the
+            // canonical aura-on-land shape; `SelfRef` covers the
+            // self-tapping land case (already refunded by the land's own
+            // `source_id`, but kept here for completeness).
+            let synthetic_event = crate::types::events::GameEvent::ManaAdded {
+                player_id: controller,
+                mana_type: ManaType::Colorless,
+                source_id: land_id,
+                tapped_for_mana: true,
+            };
+            if super::trigger_matchers::match_taps_for_mana(
+                &synthetic_event,
+                trigger,
+                object_id,
+                state,
+            ) && object_id != land_id
+                && !sources.contains(&object_id)
+            {
+                sources.push(object_id);
+            }
+        }
+    }
+    sources
+}
+
 /// CR 106.7 + CR 106.1b: Compute the mana types (W/U/B/R/G/C) that lands
 /// matching `land_filter` could produce, surveyed from the perspective of
 /// `controller`. Used by `ManaProduction::AnyTypeProduceableBy` (Reflecting
@@ -1110,6 +1169,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap)
@@ -1170,6 +1230,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -1488,6 +1549,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -1540,6 +1602,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -1634,6 +1697,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap)
@@ -1686,6 +1750,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap)
@@ -1903,6 +1968,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap)

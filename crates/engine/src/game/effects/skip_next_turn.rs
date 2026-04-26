@@ -90,6 +90,7 @@ mod tests {
             description: None,
             player_scope: None,
             chosen_x: None,
+            cost_paid_object_mana_value: None,
             ability_index: None,
             repeat_for: None,
             forward_result: false,

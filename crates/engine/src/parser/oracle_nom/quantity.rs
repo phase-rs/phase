@@ -327,6 +327,11 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_life_lost_ref,
         parse_life_gained_ref,
         parse_starting_life_ref,
+        // CR 117.1 + CR 202.3: cost-paid object's mana value — must precede
+        // `parse_event_context_refs` so the cost-paid resolver wins over the
+        // generic event-source resolver for sacrificed/exiled possessives
+        // (Food Chain, Burnt Offering, Metamorphosis).
+        parse_cost_paid_object_mana_value_ref,
         parse_event_context_refs,
     ))
     .or(alt((
@@ -489,6 +494,17 @@ fn parse_number_of_cards_in_target_zone(input: &str) -> OracleResult<'_, Quantit
     .parse(rest)
 }
 
+/// CR 115.1 + CR 115.7: Parse "target opponent's <zone>" / "target player's <zone>"
+/// possessive into a `TargetZoneCardCount`. Used as a target-bound branch of
+/// `parse_zone_card_count` for "card in target opponent's hand" expressions
+/// (Jeska's Will mode 1). Does not consume the leading "card in " — the caller
+/// has already stripped that prefix and is positioned at the possessive.
+fn parse_target_player_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("target opponent's "), tag("target player's "))).parse(input)?;
+    let (rest, zone) = parse_zone_ref_singular(rest)?;
+    Ok((rest, QuantityRef::TargetZoneCardCount { zone }))
+}
+
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, card_types) = if let Ok((typed_rest, typed_filters)) = parse_type_filter_list(input)
     {
@@ -503,6 +519,18 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
         (rest, Vec::new())
     };
     let (rest, _) = tag(" in ").parse(rest)?;
+    // CR 115.1 + CR 115.7: "card in target opponent's <zone>" / "card in target
+    // player's <zone>" — possessive references the spell's player target. Only
+    // applies when no card-type filters were captured (target-bound counts are
+    // type-agnostic over the targeted zone). Resolves dynamically via
+    // `ability.targets`. Tried before `parse_scoped_zone_ref`, which has no
+    // `target opponent's` arm and would otherwise fall through to the bare
+    // singular zone (`CountScope::All`) and silently misroute the count.
+    if card_types.is_empty() {
+        if let Ok((after_zone, q)) = parse_target_player_possessive_zone(rest) {
+            return Ok((after_zone, q));
+        }
+    }
     let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
     Ok((
         rest,
@@ -785,6 +813,35 @@ fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
+/// CR 117.1 + CR 202.3: Cost-paid object's mana value.
+///
+/// Composes the prefix grammar
+/// `[the] (sacrificed|exiled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
+/// into a single typed combinator. Each axis is a single `alt()` over
+/// independent variants — adding a new participle (e.g. "discarded"), a new
+/// noun, or the British spelling of "mana value" extends one alt branch
+/// rather than adding a new top-level arm.
+///
+/// Used by Food Chain ("1 plus the exiled creature's mana value"),
+/// Burnt Offering / Metamorphosis ("the sacrificed creature's mana value"),
+/// and the broader cost-paid-by-property class.
+fn parse_cost_paid_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = alt((tag("sacrificed "), tag("exiled "), tag("discarded "))).parse(rest)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = alt((tag("'s mana value"), tag("'s converted mana cost"))).parse(rest)?;
+    Ok((rest, QuantityRef::CostPaidObjectManaValue))
+}
+
 /// Parse event-context quantity references.
 ///
 /// CR 603.7c: "that {noun}" in a triggered ability refers to the object or
@@ -905,9 +962,62 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_in_zone,
         parse_zone_card_count,
+        parse_for_each_attached_to_source,
         parse_for_each_controlled_type,
     ))
     .parse(input)
+}
+
+/// CR 301.5 + CR 303.4: Parse "<type> [and <type>]* attached to ~" — counts
+/// objects whose `attached_to` field references the source object. Used by
+/// "for each Aura and Equipment attached to ~" (Kellan, the Fae-Blooded) and
+/// any analogous boost that scales with attachments on the source.
+///
+/// Composes `parse_type_filter_word` for each type term, joined by " and ",
+/// then matches `" attached to ~"`. Returns a `QuantityRef::ObjectCount` over
+/// a `TypedFilter` whose type filters are the matched types and whose only
+/// property is `FilterProp::AttachedToSource`.
+fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (mut rest, first) = parse_type_filter_word(input)?;
+    let mut types = vec![first];
+    while let Ok((after_and, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>(" and ").parse(rest)
+    {
+        let (after_type, next) = parse_type_filter_word(after_and)?;
+        types.push(next);
+        rest = after_type;
+    }
+    // CR 301.5 + CR 303.4 + CR 613.4c: Two referents share the "<type>
+    // [and <type>]* attached to <referent>" shape. The static parser already
+    // normalizes the source's printed name to `~`, so a literal `~` referent
+    // means "attached to the static's source object" (Kellan, the
+    // Fae-Blooded — `AttachedToSource`). The pronoun `it` is anaphoric on the
+    // affected subject of the surrounding continuous modification — for
+    // "Enchanted creature gets +N/+M for each Aura and Equipment attached to
+    // it", "it" refers to the enchanted creature, the per-recipient host of
+    // the layer-evaluated boost (`AttachedToRecipient`). Both literals are
+    // single-token leaves of the same combinator, so we dispatch with `alt`
+    // and select the matching `FilterProp` from a typed pair.
+    let (rest, prop) = alt((
+        value(FilterProp::AttachedToSource, tag(" attached to ~")),
+        value(FilterProp::AttachedToRecipient, tag(" attached to it")),
+    ))
+    .parse(rest)?;
+    let type_filters = if types.len() == 1 {
+        types
+    } else {
+        vec![TypeFilter::AnyOf(types)]
+    };
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: None,
+                properties: vec![prop],
+            }),
+        },
+    ))
 }
 
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -991,6 +1101,117 @@ mod tests {
         let (rest, q) = parse_quantity("3 damage").unwrap();
         assert_eq!(q, QuantityExpr::Fixed { value: 3 });
         assert_eq!(rest, " damage");
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_source_two_kinds() {
+        // CR 301.5 + CR 303.4: Kellan, the Fae-Blooded — "for each Aura and
+        // Equipment attached to ~". Composes a typed AnyOf over Aura/Equipment
+        // subtypes with the new `AttachedToSource` filter prop.
+        let (rest, q) = parse_for_each_clause_ref("aura and equipment attached to ~").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(controller, None);
+                    assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                    assert_eq!(
+                        type_filters,
+                        vec![TypeFilter::AnyOf(vec![
+                            TypeFilter::Subtype("Aura".into()),
+                            TypeFilter::Subtype("Equipment".into())
+                        ])]
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_source_single_kind() {
+        // Single-subtype variant: "for each Aura attached to ~" — proves the
+        // combinator handles singular type lists without an outer `AnyOf`.
+        let (rest, q) = parse_for_each_clause_ref("aura attached to ~").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(controller, None);
+                    assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                    assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_recipient_two_kinds_strong_back() {
+        // CR 301.5 + CR 303.4 + CR 613.4c: Strong Back's "Enchanted creature
+        // gets +2/+2 for each Aura and Equipment attached to it." The pronoun
+        // "it" refers to the *enchanted creature* (the per-recipient host of
+        // the Aura's continuous boost), not to the static's source. The
+        // combinator must emit `AttachedToRecipient`, distinct from Kellan's
+        // self-relative `AttachedToSource`.
+        let (rest, q) = parse_for_each_clause_ref("aura and equipment attached to it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(controller, None);
+                    assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                    assert_eq!(
+                        type_filters,
+                        vec![TypeFilter::AnyOf(vec![
+                            TypeFilter::Subtype("Aura".into()),
+                            TypeFilter::Subtype("Equipment".into())
+                        ])]
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_recipient_single_kind() {
+        // CR 303.4 + CR 613.4c: Single-subtype variant ("for each Aura
+        // attached to it" — Auramancer's Guise / Gatherer of Graces /
+        // Graceblade Artisan family). Confirms the singular path also emits
+        // `AttachedToRecipient`.
+        let (rest, q) = parse_for_each_clause_ref("aura attached to it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(controller, None);
+                    assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                    assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1295,6 +1516,34 @@ mod tests {
     fn test_parse_that_spells_mana_value() {
         let (rest, q) = parse_quantity_ref("that spell's mana value").unwrap();
         assert_eq!(q, QuantityRef::EventContextSourceManaValue);
+        assert_eq!(rest, "");
+    }
+
+    /// CR 117.1 + CR 202.3: Food Chain — "the exiled creature's mana value"
+    /// resolves to the cost-paid object snapshot (NOT the trigger-event
+    /// source), so the parser must emit `CostPaidObjectManaValue`.
+    #[test]
+    fn test_parse_exiled_creatures_mana_value() {
+        let (rest, q) = parse_quantity_ref("the exiled creature's mana value").unwrap();
+        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
+        assert_eq!(rest, "");
+    }
+
+    /// CR 117.1 + CR 202.3: Burnt Offering / Metamorphosis — additional
+    /// sacrifice cost referenced as "the sacrificed creature's mana value".
+    #[test]
+    fn test_parse_sacrificed_creatures_mana_value() {
+        let (rest, q) = parse_quantity_ref("the sacrificed creature's mana value").unwrap();
+        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
+        assert_eq!(rest, "");
+    }
+
+    /// Parser must accept the legacy "converted mana cost" phrasing.
+    #[test]
+    fn test_parse_sacrificed_creatures_converted_mana_cost() {
+        let (rest, q) =
+            parse_quantity_ref("the sacrificed creature's converted mana cost").unwrap();
+        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
         assert_eq!(rest, "");
     }
 

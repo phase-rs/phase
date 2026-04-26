@@ -987,6 +987,26 @@ pub enum CastingPermission {
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
     ExileWithEnergyCost,
+    /// CR 118.9 + CR 119.4: Cast from exile by paying a non-mana alternative
+    /// cost in lieu of the spell's mana cost. Building block for "play it ...
+    /// pay [non-mana cost] rather than paying its mana cost" patterns
+    /// (Nashi, Moon Sage's Scion: pay life equal to the spell's mana value).
+    ///
+    /// `cost` is a full `AbilityCost` (with dynamic-quantity support via
+    /// `QuantityExpr`), distinguishing this from `ExileWithAltCost { cost:
+    /// ManaCost }` which can only carry a fixed mana cost.
+    ExileWithAltAbilityCost {
+        /// CR 117.1: the alternative cost to pay instead of the spell's mana
+        /// cost. Resolved through the standard `pay_additional_cost` pipeline,
+        /// so `AbilityCost::PayLife { amount: QuantityExpr }` and friends
+        /// (with dynamic quantity refs like `SelfManaValue`, which reads the
+        /// spell-being-cast's mana value at cost-payment time) work for free.
+        cost: AbilityCost,
+        /// CR 702.85a: optional cast-time predicate gating whether the cast
+        /// may proceed. Mirrors `ExileWithAltCost.constraint`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constraint: Option<CastPermissionConstraint>,
+    },
     /// CR 702.185a: Warp — card may be cast from exile at its normal mana cost,
     /// but only after the specified turn ends. Persists for as long as card remains exiled.
     WarpExile { castable_after_turn: u32 },
@@ -1235,6 +1255,26 @@ pub enum FilterProp {
     },
     EnchantedBy,
     EquippedBy,
+    /// CR 301.5 + CR 303.4: True when the matched object's `attached_to` field
+    /// equals the filter source's object ID. Inverse of `EnchantedBy`/`EquippedBy`,
+    /// which check whether the source has an attachment. Used for "Aura and
+    /// Equipment attached to ~" quantity clauses (Kellan, the Fae-Blooded) and
+    /// for any compound filter whose subject is "attached to <self>".
+    AttachedToSource,
+    /// CR 301.5 + CR 303.4 + CR 613.4c: True when the matched object's
+    /// `attached_to` field equals the *recipient* of the resolving effect (the
+    /// per-object `id` in a layer's affected list). Distinct from
+    /// `AttachedToSource` — for an Aura/Equipment static "Enchanted/Equipped
+    /// creature gets +N/+M for each X attached to it", the pronoun "it" refers
+    /// to the affected creature, not to the static's source object. The
+    /// recipient is supplied through `FilterContext::recipient_id`; when
+    /// recipient is unknown (no per-recipient context), this prop evaluates to
+    /// false. Covers ~25 cards: Strong Back, Mantle of the Ancients,
+    /// Auramancer's Guise, Champion of the Flame, Bruenor Battlehammer's
+    /// "Each creature you control gets +2/+0 for each Equipment attached to
+    /// it", and the broader "<subject> gets +N/+M for each Aura/Equipment
+    /// attached to it" family.
+    AttachedToRecipient,
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
     /// (which are source-relative — match when THIS source is attached to the object),
@@ -1248,6 +1288,17 @@ pub enum FilterProp {
     /// - "creature equipped by an Equipment you control" (future).
     HasAttachment {
         kind: AttachmentKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<ControllerRef>,
+    },
+    /// CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches objects that
+    /// have at least one attachment whose subtype is in `kinds` and whose controller
+    /// satisfies the optional `ControllerRef`. Generalizes `HasAttachment` to the
+    /// "enchanted or equipped" compound subject class (Reyav, Master Smith;
+    /// Dogmeat, Ever Loyal). Single-kind use is also valid (kinds.len() == 1) but
+    /// `HasAttachment` is preferred for that case.
+    HasAnyAttachmentOf {
+        kinds: Vec<AttachmentKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
     },
@@ -1449,6 +1500,13 @@ pub enum FilterProp {
     /// filter's source controller ("creatures attacking you"). Distinct from
     /// `Attacking`, which matches any attacker regardless of defender.
     AttackingController,
+    /// CR 903.3 + CR 903.3d: Matches permanents on the battlefield that are a
+    /// commander. Reads `GameObject::is_commander`, set during deck construction
+    /// per CR 903.3 (the legendary card designated as that deck's commander).
+    /// Used for "commander(s) you control", "your commander" subject phrases
+    /// and for "target commander" in commander-format effects (Codsworth, Falthis,
+    /// Anara, Champions of Archery, etc.).
+    IsCommander,
     Other {
         value: String,
     },
@@ -1749,6 +1807,15 @@ pub enum QuantityRef {
     SelfPower,
     /// CR 208.1: The current toughness of the source object (post-layer).
     SelfToughness,
+    /// CR 202.3: The mana value of the source object — i.e. the object passed
+    /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
+    /// is the spell-being-cast, so "pay life equal to its mana value" reads
+    /// the right value at cost-payment time. Distinct from
+    /// `EventContextSourceManaValue` (which reads the triggering source via
+    /// `current_trigger_event`); that ref returns 0 outside trigger
+    /// resolution, whereas this one is correct any time the resolver has a
+    /// `source_id` (cost payment, ability resolution, etc.).
+    SelfManaValue,
     /// CR 107.3e: Aggregate query (max/min/sum) over a property of battlefield objects.
     Aggregate {
         function: AggregateFunction,
@@ -1817,6 +1884,22 @@ pub enum QuantityRef {
     EventContextSourceToughness,
     /// CR 603.7c: Mana value of the source object from the triggering event.
     EventContextSourceManaValue,
+    /// CR 202.3 + CR 118.8 + CR 701.21: Mana value of the object that was
+    /// sacrificed, exiled, or otherwise paid as part of the cost of the
+    /// resolving spell or ability. The mana value is captured at cost-payment
+    /// time (CR 117.1) — before the object leaves the battlefield — and stored
+    /// on `ResolvedAbility.cost_paid_object_mana_value`.
+    ///
+    /// Covers the "sac-for-mana-by-property" / "exile-for-mana-by-property"
+    /// class: Food Chain ("1 plus the exiled creature's mana value"),
+    /// Burnt Offering, Metamorphosis ("the sacrificed creature's mana value"),
+    /// and any future cards that read the cost-paid object's mana value.
+    ///
+    /// Distinct from `EventContextSourceManaValue` (which reads the triggering
+    /// event's source). A cost-paid object is not a triggering-event source —
+    /// activation/spell-cast announcements (CR 117.1, CR 601.2) are not events
+    /// in the triggered-ability sense.
+    CostPaidObjectManaValue,
     /// CR 603.10a + CR 603.6e: Count of attachments of a given kind that were attached
     /// to the leaving-battlefield object at the moment it left, optionally filtered by
     /// attachment controller. Resolved via the triggering `ZoneChangeRecord`'s
@@ -3506,6 +3589,15 @@ pub enum Effect {
         /// until the specified expiry condition is met (e.g., EndOfCombat for firebending).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expiry: Option<crate::types::mana::ManaExpiry>,
+        /// CR 115.1 + CR 115.7: Spell-level player target for mana abilities whose
+        /// produced amount references a player target (e.g., Jeska's Will mode 1
+        /// "Add {R} for each card in target opponent's hand"). When set, the
+        /// player target is surfaced as a target slot at cast time and
+        /// `TargetZoneCardCount`/`TargetLifeTotal` quantities resolve against it.
+        /// `None` for the common case of mana abilities with no player target
+        /// (Cabal Coffers, Reflecting Pool, fixed mana, etc.).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetFilter>,
     },
     Discard {
         #[serde(default = "default_quantity_one")]
@@ -3746,7 +3838,8 @@ pub enum Effect {
         cost: PaymentCost,
     },
     /// CR 601.2a + CR 118.9: Cast or play a card from a zone.
-    /// Grants `ExileWithAltCost` casting permission on target cards (Discover pattern).
+    /// Grants `ExileWithAltCost` casting permission on target cards (Discover pattern),
+    /// or `ExileWithAltAbilityCost` when `alt_ability_cost` is `Some(_)`.
     CastFromZone {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -3760,6 +3853,17 @@ pub enum Effect {
         /// without paying its mana cost").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cast_transformed: bool,
+        /// CR 118.9 + CR 119.4: Optional non-mana alternative cost, paid in lieu
+        /// of the spell's mana cost (e.g. Nashi's "pay life equal to its mana
+        /// value rather than paying its mana cost"). When `Some(_)`, the
+        /// resolver grants `CastingPermission::ExileWithAltAbilityCost` instead
+        /// of `ExileWithAltCost`; the casting pipeline overrides the spell's
+        /// mana cost to zero and routes this cost through the standard
+        /// `pay_additional_cost` flow. Mutually-exclusive with
+        /// `without_paying_mana_cost: true` — the spell either has no
+        /// alternative cost (free) or this one (replacement).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alt_ability_cost: Option<AbilityCost>,
     },
     /// CR 615: Prevent damage to a target.
     PreventDamage {
@@ -4458,6 +4562,14 @@ impl Effect {
                 target.as_ref()
             }
 
+            // CR 115.1 + CR 115.7: Mana abilities normally don't target, but a
+            // few spell-only mana effects (Jeska's Will mode 1: "Add {R} for
+            // each card in target opponent's hand") declare a player target so
+            // the `TargetZoneCardCount` quantity in `produced` can resolve
+            // against `ability.targets`. The optional `target` is `None` for
+            // every classic mana ability (Cabal Coffers, Reflecting Pool, etc.).
+            Effect::Mana { target, .. } => target.as_ref(),
+
             // --- Effects with no player-selectable target field ---
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
@@ -4484,7 +4596,6 @@ impl Effect {
             | Effect::Clash
             | Effect::Vote { .. }
             | Effect::Cleanup { .. }
-            | Effect::Mana { .. }
             | Effect::RevealTop { .. }
             | Effect::Choose { .. }
             | Effect::SolveCase
@@ -6826,6 +6937,14 @@ pub struct ResolvedAbility {
     /// Read during resolution by `QuantityRef::Variable { name: "X" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_x: Option<u32>,
+    /// CR 117.1 + CR 202.3: Mana value of the object paid as part of this
+    /// resolving ability's cost (sacrificed creature, exiled creature, etc.),
+    /// captured at cost-payment time before the object leaves the battlefield.
+    /// Read by `QuantityRef::CostPaidObjectManaValue` during resolution.
+    /// `None` for abilities whose cost did not include a non-self
+    /// sacrifice/exile of a permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_paid_object_mana_value: Option<u32>,
     /// CR 603.4: Index of the printed ability this resolution came from on the
     /// source object's ability list. Identifies "this ability" for per-turn
     /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
@@ -6865,6 +6984,7 @@ impl ResolvedAbility {
             distribution: None,
             player_scope: None,
             chosen_x: None,
+            cost_paid_object_mana_value: None,
             ability_index: None,
         }
     }
@@ -6878,6 +6998,20 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_chosen_x_recursive(value);
+        }
+    }
+
+    /// CR 117.1 + CR 202.3: Stamp the cost-paid object's mana value across this
+    /// ability and every sub/else branch. Captured at cost-payment time (before
+    /// the object leaves the battlefield) and read by
+    /// `QuantityRef::CostPaidObjectManaValue` during resolution.
+    pub fn set_cost_paid_object_mana_value_recursive(&mut self, value: u32) {
+        self.cost_paid_object_mana_value = Some(value);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_cost_paid_object_mana_value_recursive(value);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_cost_paid_object_mana_value_recursive(value);
         }
     }
 
@@ -7315,6 +7449,7 @@ mod tests {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
@@ -7336,6 +7471,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
     }

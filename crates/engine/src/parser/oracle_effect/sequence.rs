@@ -1486,10 +1486,19 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::GrantExtraTurnAfterControlledTurn)
         }
-        // CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
-        // or "It enters with X +1/+1 counters on it, where X is ..."
-        // Absorbs into the preceding Token effect's `enter_with_counters` field.
-        Effect::Token { .. } => try_parse_token_enters_with_counters(&lower),
+        // CR 122.6a + CR 614.1c: Token enters-with-counters continuation. Two forms:
+        //   * Declarative: "The token enters with X +1/+1 counters on it[, where X is ...]"
+        //     or "It enters with X +1/+1 counters on it[, where X is ...]"
+        //   * Imperative followup: "and put N [type] counter(s) on it"
+        //     after a `create a [token]` clause (G'raha Tia, Fractal Anomaly,
+        //     Fractal Tender, Berta — class of "create token ... and put
+        //     counter on it" where "it" is the just-created token).
+        // Both lift onto the preceding Token effect's `enter_with_counters`
+        // so counters apply as the token enters (CR 614.1c replacement)
+        // rather than as a post-ETB PutCounter effect that would mistakenly
+        // target the source ability via `SelfRef`/`ParentTarget`.
+        Effect::Token { .. } => try_parse_token_enters_with_counters(&lower)
+            .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
         _ => None,
     }
 }
@@ -1565,6 +1574,98 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
         QuantityExpr::Fixed { value: n as i32 }
     } else {
         // X without "where X is" — variable resolved from spell payment at runtime
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    };
+
+    Some(ContinuationAst::TokenEntersWithCounters {
+        counter_type,
+        count,
+    })
+}
+
+/// CR 122.6a + CR 614.1c: Parse the imperative followup form
+/// "put N [counter type] counter(s) on it[, where X is ...]" that follows a
+/// `create a [token]` clause. "It" refers to the just-created token; the
+/// counters must be lifted onto `Token.enter_with_counters` so they apply as
+/// the token enters the battlefield (CR 122.6a) rather than as a post-ETB
+/// PutCounter effect targeting the ability source.
+///
+/// Mirrors `try_parse_token_enters_with_counters` but matches the imperative
+/// "put ..." prefix produced by clause-splitting on " and ". Returns
+/// `TokenEntersWithCounters` so it shares the same continuation absorption.
+fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
+    // Optional leading "and " (rare — usually consumed by the splitter),
+    // then the imperative "put " verb.
+    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("and "))
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("put ").parse(rest).ok()?;
+
+    // Parse count: "x ", "a ", "an ", "a number of ", or a literal number.
+    // Word "a"/"an" is a singular article (count = 1).
+    let (rest, count_prefix) = alt((
+        // "x " — variable resolved later via "where X is" or by caller payment
+        value(None, tag::<_, _, VerboseError<&str>>("x ")),
+        value(None, tag("a number of ")),
+        value(Some(1u32), tag("a ")),
+        value(Some(1u32), tag("an ")),
+    ))
+    .parse(rest)
+    .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
+        if let Ok((r, n)) = nom_primitives::parse_number(rest) {
+            (r.trim_start(), Some(n))
+        } else {
+            (rest, None)
+        }
+    });
+
+    // Parse counter type: only +1/+1 and -1/-1 are common in token contexts
+    // (matches the AST scope of the existing enters-with-counters helper).
+    let (rest, counter_type) = alt((
+        value(
+            "P1P1".to_string(),
+            tag::<_, _, VerboseError<&str>>("+1/+1 "),
+        ),
+        value("M1M1".to_string(), tag("-1/-1 ")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // Consume "counter(s) on it" — the "on it" anaphor pinning the counters
+    // to the just-created token.
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("counters on it"),
+        tag("counter on it"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // Optional ", where x is [quantity]" suffix (Fractal Anomaly). The
+    // followup clause is already trimmed by the splitter, so no leading
+    // punctuation cleanup is needed before the comma.
+    let quantity =
+        if let Ok((rest_where, _)) = tag::<_, _, VerboseError<&str>>(", where x is ").parse(rest) {
+            // allow-noncombinator: trailing-period cleanup on a pre-tokenized
+            // suffix; not parsing dispatch.
+            let qty_text = rest_where.trim().trim_end_matches('.');
+            parse_cda_quantity(qty_text)
+                .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+        } else {
+            None
+        };
+
+    let count = if let Some(qty) = quantity {
+        qty
+    } else if let Some(n) = count_prefix {
+        QuantityExpr::Fixed { value: n as i32 }
+    } else {
+        // Bare X with no "where X is" — variable resolved from the enclosing
+        // ability's payment (e.g., G'raha Tia: X is the spell's mana value
+        // paid as life via the parent PayCost).
         QuantityExpr::Ref {
             qty: QuantityRef::Variable {
                 name: "X".to_string(),
@@ -2170,6 +2271,109 @@ mod tests {
     fn token_enters_with_counters_no_match() {
         // Should not match non-counter enters-with text
         let result = try_parse_token_enters_with_counters("the token enters tapped and attacking");
+        assert!(result.is_none());
+    }
+
+    // --- "and put N counter(s) on it" imperative followup form ---
+
+    #[test]
+    fn put_counters_on_it_followup_x_variable() {
+        // G'raha Tia: "create a 1/1 ... token and put X +1/+1 counters on it"
+        // After clause splitting, the followup clause is "put x +1/+1 counters on it".
+        let result = try_parse_put_counters_on_token_followup("put x +1/+1 counters on it");
+        assert!(result.is_some());
+        if let Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        }) = result
+        {
+            assert_eq!(counter_type, "P1P1");
+            // Bare X without "where X is" — resolved from parent payment at runtime.
+            assert!(matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { .. }
+                }
+            ));
+        } else {
+            panic!("expected TokenEntersWithCounters");
+        }
+    }
+
+    #[test]
+    fn put_counters_on_it_followup_fixed_word() {
+        // Fractal Tender: "... and put three +1/+1 counters on it"
+        let result = try_parse_put_counters_on_token_followup("put three +1/+1 counters on it");
+        assert!(result.is_some());
+        if let Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        }) = result
+        {
+            assert_eq!(counter_type, "P1P1");
+            assert_eq!(count, QuantityExpr::Fixed { value: 3 });
+        } else {
+            panic!("expected TokenEntersWithCounters");
+        }
+    }
+
+    #[test]
+    fn put_counters_on_it_followup_singular_article() {
+        // "and put a +1/+1 counter on it" — singular article form.
+        let result = try_parse_put_counters_on_token_followup("put a +1/+1 counter on it");
+        assert!(result.is_some());
+        if let Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        }) = result
+        {
+            assert_eq!(counter_type, "P1P1");
+            assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        } else {
+            panic!("expected TokenEntersWithCounters");
+        }
+    }
+
+    #[test]
+    fn put_counters_on_it_followup_where_x_is() {
+        // Fractal Anomaly: "... put X +1/+1 counters on it, where X is the
+        // number of cards you've drawn this turn"
+        let result = try_parse_put_counters_on_token_followup(
+            "put x +1/+1 counters on it, where x is the number of cards you've drawn this turn",
+        );
+        assert!(result.is_some());
+        if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
+            assert_eq!(counter_type, "P1P1");
+        } else {
+            panic!("expected TokenEntersWithCounters");
+        }
+    }
+
+    #[test]
+    fn put_counters_on_it_followup_minus_counters() {
+        // -1/-1 counter form (uncommon for tokens, but the helper supports it).
+        let result = try_parse_put_counters_on_token_followup("put a -1/-1 counter on it");
+        assert!(result.is_some());
+        if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
+            assert_eq!(counter_type, "M1M1");
+        } else {
+            panic!("expected TokenEntersWithCounters");
+        }
+    }
+
+    #[test]
+    fn put_counters_on_it_followup_rejects_named_target() {
+        // Rat King, Verminister: "... and put a +1/+1 counter on Rat King"
+        // — "on Rat King" is NOT "on it"; must NOT match (the named target is
+        // SelfRef = source card, not the just-created token).
+        let result = try_parse_put_counters_on_token_followup("put a +1/+1 counter on rat king");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn put_counters_on_it_followup_rejects_non_put_verb() {
+        // Other verbs that happen to mention counters must not match.
+        let result = try_parse_put_counters_on_token_followup("remove a +1/+1 counter on it");
         assert!(result.is_none());
     }
 }

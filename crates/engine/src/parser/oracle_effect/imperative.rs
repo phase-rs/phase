@@ -2931,10 +2931,12 @@ pub(super) fn parse_cost_resource_ast(
             Some(Effect::Mana {
                 produced,
                 restrictions,
+                target,
                 ..
             }) => Some(CostResourceImperativeAst::Mana {
                 produced,
                 restrictions,
+                target,
             }),
             _ => None,
         };
@@ -2977,11 +2979,13 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
         CostResourceImperativeAst::Mana {
             produced,
             restrictions,
+            target,
         } => Effect::Mana {
             produced,
             restrictions,
             grants: vec![],
             expiry: None,
+            target,
         },
         CostResourceImperativeAst::Damage {
             amount,
