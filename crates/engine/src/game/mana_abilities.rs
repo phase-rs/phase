@@ -892,6 +892,25 @@ where
                     } => {
                         let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
                     }
+                    // CR 122.1 + CR 601.2b: RemoveCounter-on-self as part of a
+                    // composite mana-ability cost (e.g. Gemstone Mine: `{T}, Remove
+                    // a mining counter from this land: Add one mana of any color`).
+                    // Delegates to the same replacement-aware helper used by
+                    // casting.rs so replacement effects on counter removal apply.
+                    AbilityCost::RemoveCounter {
+                        count,
+                        counter_type,
+                        target: None,
+                    } => {
+                        let counter_kind = crate::types::counter::parse_counter_type(counter_type);
+                        super::effects::counters::remove_counter_with_replacement(
+                            state,
+                            source_id,
+                            counter_kind,
+                            *count,
+                            events,
+                        );
+                    }
                     // CR 605.3a + CR 601.2h + CR 107.4e: Mana sub-cost inside a
                     // Composite mana-ability cost (filter lands' `{W/U}, {T}`).
                     // The caller (via `chosen_mana_payment`) has already resolved
@@ -3272,6 +3291,166 @@ mod tests {
             &mut events,
         );
         assert!(result.is_err());
+    }
+
+    // Regression: Gemstone Mine's `{T}, Remove a mining counter` ability could
+    // not activate because the replacement parser emitted "MINING" (uppercase)
+    // while the cost parser emitted "mining" (lowercase), and
+    // `CounterType::Generic` used the raw string as the HashMap key, so the
+    // payability check found 0 counters and blocked activation.
+    //
+    // This fixture exercises the full depletion-land pattern — composite
+    // Tap+RemoveCounter cost — so that any regression in counter-type
+    // normalisation surfaces immediately. The negative test below
+    // (`gemstone_mine_unpayable_without_counters`) locks in the *other*
+    // direction: the payability gate must remain coupled to the canonical
+    // key, so that counters going to zero correctly blocks activation
+    // rather than the gate silently passing on a stale uppercase key.
+    fn make_gemstone_mine(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let land = create_object(
+            state,
+            CardId(8000),
+            player,
+            "Gemstone Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        // Seed with three mining counters via `parse_counter_type` to mirror
+        // the actual effect pipeline (the ETB replacement emits "MINING" in
+        // uppercase; `parse_counter_type` must normalise it to the same key
+        // that the cost-payability check uses, which parses "mining" lowercase).
+        // Using the uppercase spelling here exercises the normalisation fix
+        // end-to-end: if the fix were reverted, the HashMap key would be
+        // `Generic("MINING")` while the lookup key would be `Generic("mining")`
+        // and the payability check would return false.
+        let mining_key = crate::types::counter::parse_counter_type("MINING");
+        obj.counters.insert(mining_key, 3);
+
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::RemoveCounter {
+                    count: 1,
+                    counter_type: "mining".to_string(),
+                    target: None,
+                },
+            ],
+        });
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        land
+    }
+
+    #[test]
+    fn gemstone_mine_activates_and_consumes_counter() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_gemstone_mine(&mut state, player);
+
+        // Sanity: payability gate must pass while counters are present.
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+        assert!(
+            can_activate_mana_ability_now(&state, player, land, 0, &def),
+            "Gemstone Mine must be activatable while it has mining counters"
+        );
+
+        // Activate: produce green mana with the single-color override.
+        let mut events = Vec::new();
+        resolve_mana_ability(
+            &mut state,
+            land,
+            player,
+            &def,
+            &mut events,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        )
+        .expect("Gemstone Mine activation must not fail with counters present");
+
+        // One green mana must land in the pool.
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Green),
+            1,
+            "Gemstone Mine must add one green mana on activation"
+        );
+        // The land must be tapped.
+        assert!(
+            state.objects.get(&land).unwrap().tapped,
+            "Gemstone Mine must be tapped after activation"
+        );
+        // One mining counter must have been removed (3 → 2).
+        let remaining = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .counters
+            .get(&CounterType::Generic("mining".to_string()))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            remaining, 2,
+            "Gemstone Mine must lose one mining counter per activation"
+        );
+    }
+
+    #[test]
+    fn gemstone_mine_unpayable_without_counters() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_gemstone_mine(&mut state, player);
+
+        // Drain all counters so the cost cannot be paid.
+        let mining_key = crate::types::counter::parse_counter_type("MINING");
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .counters
+            .insert(mining_key, 0);
+
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+        assert!(
+            !can_activate_mana_ability_now(&state, player, land, 0, &def),
+            "Gemstone Mine must not be activatable when it has no mining counters"
+        );
     }
 
     /// CR 602.2a + CR 605.1a: An activated ability's controller is the

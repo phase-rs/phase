@@ -2258,6 +2258,16 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     Some(parsed_clause(Effect::SkipNextTurn { target, count }))
 }
 
+/// Verb discriminant for `try_parse_equal_to_quantity_effect`. Using a typed
+/// enum instead of a matched `&str` keeps all dispatch inside the nom `alt()`
+/// combinator — the match arms below are exhaustive Rust enum arms, not
+/// string-literal dispatch (CLAUDE.md nom-combinator mandate).
+#[derive(Clone, Copy)]
+enum EqualToQtyVerb {
+    Mill,
+    Draw,
+}
+
 /// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.1 + CR 701.17a).
 ///
 /// Handles verbs whose count field is `QuantityExpr` (mill, draw).
@@ -2265,8 +2275,8 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
     // Try matching "mill cards equal to " or "draw cards equal to " using nom.
     let (verb, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
         alt((
-            value("mill", tag("mill cards equal to ")),
-            value("draw", tag("draw cards equal to ")),
+            value(EqualToQtyVerb::Mill, tag("mill cards equal to ")),
+            value(EqualToQtyVerb::Draw, tag("draw cards equal to ")),
         ))
         .parse(input)
     })?;
@@ -2275,7 +2285,7 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
     // CR 603.7c: Prefer event context quantity for triggered effects.
     let qty = super::oracle_quantity::parse_event_context_quantity(rest)?;
     match verb {
-        "mill" => Some(parsed_clause(Effect::Mill {
+        EqualToQtyVerb::Mill => Some(parsed_clause(Effect::Mill {
             count: qty,
             // CR 701.17a: No subject → controller mills.
             target: TargetFilter::Controller,
@@ -2283,11 +2293,10 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
         })),
         // CR 121.1 + CR 601.2c: Default Controller target — `inject_subject_target`
         // upgrades to `TargetFilter::Player` for "target player draws ..." subjects.
-        "draw" => Some(parsed_clause(Effect::Draw {
+        EqualToQtyVerb::Draw => Some(parsed_clause(Effect::Draw {
             count: qty,
             target: TargetFilter::Controller,
         })),
-        _ => None,
     }
 }
 
