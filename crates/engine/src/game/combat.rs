@@ -3691,6 +3691,67 @@ mod tests {
         assert!(compute_attack_tax(&state, &attacks).is_none());
     }
 
+    /// CR 508.1d + CR 702.36 + CR 117.5: Norn's Annex — Phyrexian-cost combat tax.
+    /// Regression for L9-52: the AST is structurally identical to Ghostly Prison
+    /// except the cost contains `{W/P}` shards rather than generic mana. The tax
+    /// must compute and the per-creature cost must report `mana_value() == 1` per
+    /// `{W/P}` shard (CR 202.3g).
+    #[test]
+    fn compute_attack_tax_norns_annex_phyrexian_cost() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        // Defender (PlayerId(1)) controls Norn's Annex.
+        let next_card_id = CardId(state.next_object_id);
+        let annex = create_object(
+            &mut state,
+            next_card_id,
+            PlayerId(1),
+            "Norn's Annex".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let annex_obj = state.objects.get_mut(&annex).unwrap();
+        annex_obj.card_types.core_types.push(CoreType::Artifact);
+        let mut def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .description("Norn's Annex".to_string());
+        def.condition = Some(StaticCondition::UnlessPay {
+            // CR 202.3g: {W/P} — Phyrexian white shard.
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianWhite],
+                generic: 0,
+            },
+            scaling: UnlessPayScaling::PerAffectedCreature,
+        });
+        annex_obj.static_definitions.push(def);
+
+        // Active player declares two attackers.
+        let a1 = create_creature(&mut state, PlayerId(0), "A1", 2, 2);
+        let a2 = create_creature(&mut state, PlayerId(0), "A2", 2, 2);
+        let attacks = vec![
+            (a1, AttackTarget::Player(PlayerId(1))),
+            (a2, AttackTarget::Player(PlayerId(1))),
+        ];
+        let (total, per_creature) =
+            compute_attack_tax(&state, &attacks).expect("Norn's Annex tax applies");
+        // CR 202.3g: each {W/P} contributes mana_value 1; two attackers ⇒ total 2.
+        assert_eq!(total.mana_value(), 2, "two attackers × {{W/P}} ⇒ total 2");
+        assert_eq!(per_creature.len(), 2);
+        assert!(
+            per_creature.iter().all(|(_, c)| c.mana_value() == 1),
+            "each attacker pays one {{W/P}}"
+        );
+    }
+
     /// CR 508.1b + CR 702.16j: A player with protection from everything is
     /// not a legal attack target. `get_valid_attack_targets` must exclude
     /// them from the list opposing creatures can declare as their attack

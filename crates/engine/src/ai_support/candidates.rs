@@ -511,8 +511,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             // legality filter. Player-driven SearchChoice flows through the
             // engine's submission guard regardless of what this list contains.
             const ENGINE_CANDIDATE_CAP: usize = 12;
-            let beam_cards =
-                cap_search_choice_pool(state, cards, constraint, ENGINE_CANDIDATE_CAP);
+            let beam_cards = cap_search_choice_pool(state, cards, constraint, ENGINE_CANDIDATE_CAP);
             sizes
                 .into_iter()
                 .flat_map(|size| combinations(&beam_cards, size))

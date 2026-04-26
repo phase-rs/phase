@@ -504,3 +504,179 @@ fn two_prisons_stack_tax() {
         other => panic!("expected CombatTaxPayment, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// CR 508.1d + CR 702.36 + CR 117.5: Norn's Annex regression (L9-52).
+// User-reported deadlock when Norn's Annex is in play. Class covers ~5
+// Phyrexian-cost combat-tax statics (Norn's Annex specifically). The end-to-end
+// flow MUST yield WaitingFor::CombatTaxPayment, accept the {W/P} cost via the
+// shared mana-payment pipeline (auto-deciding mana-vs-life), and complete the
+// attack without entering an infinite loop or returning a non-progress state.
+// ---------------------------------------------------------------------------
+
+fn add_norns_annex(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    // Norn's Annex is an Artifact (no P/T). Mirrors `add_ghostly_prison` —
+    // use a 2/2 creature shell so SBAs (CR 704.5f) don't kill it. Test asserts
+    // only on the Annex's static-driven Phyrexian tax, not on its card type.
+    let def = parse_static_line(
+        "Creatures can't attack you or planeswalkers you control unless their controller pays {W/P} for each of those creatures.",
+    )
+    .expect("Norn's Annex should parse");
+    let mut builder = scenario.add_creature(player, "Norn's Annex", 2, 2);
+    builder.with_static_definition(def);
+    builder.id()
+}
+
+/// CR 508.1d + CR 702.36: Norn's Annex with one attacker — engine pauses with a
+/// {W/P}-cost CombatTaxPayment. Accepting auto-pays a Plains (CR 107.4f auto-
+/// decide path: prefer mana). The attack proceeds and the engine yields a
+/// non-deadlock waiting state.
+#[test]
+fn norns_annex_accept_pays_phyrexian_with_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Defender (P1) controls Norn's Annex.
+    let _annex = add_norns_annex(&mut scenario, P1);
+    // Active player has one attacker plus a Plains for the {W/P}-as-mana payment.
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    scenario.add_basic_land(P0, ManaColor::White);
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    runner
+        .act(GameAction::DeclareAttackers { attacks })
+        .expect("DeclareAttackers should pause with CombatTaxPayment");
+
+    // Verify the engine paused with the right Phyrexian-cost tax (mana_value 1).
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment {
+            player,
+            context,
+            total_cost,
+            per_creature,
+            ..
+        } => {
+            assert_eq!(*player, P0, "active player owes the tax");
+            assert!(matches!(context, CombatTaxContext::Attacking));
+            // CR 202.3g: {W/P} contributes mana_value 1.
+            assert_eq!(total_cost.mana_value(), 1);
+            assert_eq!(per_creature.len(), 1);
+        }
+        other => panic!("expected CombatTaxPayment, got {other:?}"),
+    }
+
+    // Tap the Plains so the auto-decide path prefers mana (CR 107.4f).
+    let plains: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|&&id| {
+            let obj = runner.state().objects.get(&id).unwrap();
+            obj.controller == P0 && obj.card_types.core_types.contains(&Core::Land)
+        })
+        .copied()
+        .collect();
+    for land in plains {
+        runner
+            .act(GameAction::TapLandForMana { object_id: land })
+            .ok();
+    }
+
+    runner
+        .act(GameAction::PayCombatTax { accept: true })
+        .expect("PayCombatTax accept must succeed (engine must not deadlock)");
+
+    // CR 508.1f: After tax is paid, the attack is finalized.
+    let state = runner.state();
+    assert!(
+        state.combat.is_some(),
+        "Combat state must be populated after Norn's Annex tax paid"
+    );
+    let combat = state.combat.as_ref().unwrap();
+    assert_eq!(combat.attackers.len(), 1);
+    // CR 117.5: Engine must yield a progress-capable WaitingFor (not a deadlock).
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::CombatTaxPayment { .. }),
+        "engine must advance past CombatTaxPayment after acceptance, got {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 508.1d + CR 702.36 + CR 118.3: Norn's Annex accept path with no white
+/// mana — the auto-decide path falls back to paying 2 life per Phyrexian shard
+/// (CR 107.4f). Engine must not deadlock; life is deducted; attack finalizes.
+#[test]
+fn norns_annex_accept_pays_phyrexian_with_life_when_no_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let _annex = add_norns_annex(&mut scenario, P1);
+    // Single attacker, no Plains — life-payment fallback path.
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+
+    let life_before = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .life;
+
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    runner
+        .act(GameAction::DeclareAttackers { attacks })
+        .expect("DeclareAttackers should pause with CombatTaxPayment");
+
+    runner
+        .act(GameAction::PayCombatTax { accept: true })
+        .expect("PayCombatTax accept must succeed via life payment (no deadlock)");
+
+    let state = runner.state();
+    let life_after = state.players.iter().find(|p| p.id == P0).unwrap().life;
+    // CR 107.4f + CR 118.3b: One {W/P} paid as life ⇒ 2 life lost.
+    assert_eq!(
+        life_after,
+        life_before - 2,
+        "Phyrexian shard auto-pays 2 life when mana unavailable"
+    );
+    assert!(state.combat.is_some());
+    assert_eq!(state.combat.as_ref().unwrap().attackers.len(), 1);
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::CombatTaxPayment { .. }),
+        "engine must advance past CombatTaxPayment after acceptance, got {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 508.1d + CR 702.36: Norn's Annex decline path — drop the taxed attacker.
+/// Mirrors `ghostly_prison_decline_removes_taxed_attackers` for Phyrexian costs.
+#[test]
+fn norns_annex_decline_drops_taxed_attackers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let _annex = add_norns_annex(&mut scenario, P1);
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    runner
+        .act(GameAction::DeclareAttackers { attacks })
+        .expect("DeclareAttackers should pause with CombatTaxPayment");
+
+    runner
+        .act(GameAction::PayCombatTax { accept: false })
+        .expect("PayCombatTax decline must succeed");
+
+    let state = runner.state();
+    assert!(
+        state.combat.is_none() || state.combat.as_ref().unwrap().attackers.is_empty(),
+        "After declining the Norn's Annex tax, no attackers should remain"
+    );
+    assert!(
+        !state.objects[&attacker].tapped,
+        "declined attacker stays untapped"
+    );
+}
