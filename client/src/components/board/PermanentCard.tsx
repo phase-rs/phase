@@ -26,11 +26,24 @@ interface PermanentCardProps {
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
-// 30px peek shows the title bar plus a sliver of art — enough to read the
-// attached card's name and a hint of its frame. The pre-df51a144e value
-// of 15 only revealed the bevel, which made attachments hard to identify
-// at a glance.
-const ATTACHMENT_OFFSET_PX = 30;
+// Attachments stagger to the RIGHT of the host instead of above so the host
+// row's vertical layout is unchanged — adding marginTop to reserve peek
+// space made hosts uneven against their neighbors. The right side of a
+// card naturally includes the mana-cost zone at top, which is where the
+// subtype badge lives, so a rightward peek surfaces the type indicator
+// without eating any of the host's frame.
+//
+// `BASE_PEEK_PX` is how much of the closest attachment sticks out past the
+// host's right edge. Each subsequent attachment in the stack reveals a
+// further `STACK_STEP_PX` so a creature with two Auras shows both visible
+// portions cleanly without occluding either.
+// 20px = badge width (16) + right-1 padding (4). Just enough for the
+// AttachmentTypeBadge to be visible past the host's right edge with no
+// extra card art revealed — the user is using the badge alone as the
+// "is this attached?" indicator. Stack step matches so each subsequent
+// attachment's badge fits in its own 20px column.
+const ATTACHMENT_PEEK_PX = 20;
+const ATTACHMENT_STACK_STEP_PX = 20;
 
 // Subtype glyphs sit in the top-right of the peek (where the mana pips
 // would normally be) so the player can identify the attachment's role
@@ -310,12 +323,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
         transformOrigin: "center center",
-        // Reserve space above for tucked attachments so the host's row
-        // layout accounts for the peek without overlapping the row above.
-        marginTop:
-          obj.attachments.length > 0
-            ? `${obj.attachments.length * ATTACHMENT_OFFSET_PX}px`
-            : undefined,
         // Reserve space below for exile ghost cards
         marginBottom:
           exileLinks.length > 0
@@ -333,23 +340,34 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       onMouseLeave={handleMouseLeave}
       {...longPressHandlers}
     >
-      {/* Attachments rendered behind the host with their top edge peeking
-          out — the original (pre-df51a144e) tucked-card design. The recursive
-          PermanentCard render gives each attachment full click/hover/target
-          handling for free, mirroring how an Aura/Equipment behaves anywhere
-          else on the battlefield. */}
-      {obj.attachments.map((attachId, i) => (
-        <div
-          key={attachId}
-          className="absolute left-0 z-0"
-          style={{
-            top: `${-(i + 1) * ATTACHMENT_OFFSET_PX}px`,
-          }}
-        >
-          <PermanentCard objectId={attachId} />
-          <AttachmentTypeBadge attachId={attachId} />
-        </div>
-      ))}
+      {/* Attachments stagger out to the right of the host with their right
+          edge peeking past the host's right edge. The recursive PermanentCard
+          render gives each attachment full click/hover/target handling for
+          free, mirroring how an Aura/Equipment behaves anywhere else on the
+          battlefield.
+
+          Card 0 (innermost) is closest to the host with the smallest peek;
+          subsequent cards shift further right so each one's right edge is
+          visible past the previous one. z-index counts down so card 0 sits
+          on top and the staircase reads "the host is wearing this stack of
+          attachments" left-to-right. */}
+      {obj.attachments.map((attachId, i) => {
+        const peekPx = ATTACHMENT_PEEK_PX + i * ATTACHMENT_STACK_STEP_PX;
+        return (
+          <div
+            key={attachId}
+            className="absolute top-0"
+            style={{
+              left: "100%",
+              transform: `translateX(calc(-100% + ${peekPx}px))`,
+              zIndex: -1 - i,
+            }}
+          >
+            <PermanentCard objectId={attachId} />
+            <AttachmentTypeBadge attachId={attachId} />
+          </div>
+        );
+      })}
 
       {/* Exile ghosts — cards held in exile by this permanent, peeking from below */}
       {exileLinks.map((link, i) => (
