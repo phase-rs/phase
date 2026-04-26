@@ -311,6 +311,20 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     Some(c) => parts.push(format!("attached by {kind_s} ({})", fmt_controller(c))),
                 }
             }
+            FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+                let kinds_s = kinds
+                    .iter()
+                    .map(|k| match k {
+                        crate::types::ability::AttachmentKind::Aura => "aura",
+                        crate::types::ability::AttachmentKind::Equipment => "equipment",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                match controller {
+                    None => parts.push(format!("attached by {kinds_s}")),
+                    Some(c) => parts.push(format!("attached by {kinds_s} ({})", fmt_controller(c))),
+                }
+            }
             FilterProp::Another => parts.push("another".into()),
             FilterProp::OtherThanTriggerObject => parts.push("other".into()),
             FilterProp::HasColor { color } => parts.push(format!("{color:?}").to_lowercase()),

@@ -1277,6 +1277,17 @@ pub enum FilterProp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
     },
+    /// CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches objects that
+    /// have at least one attachment whose subtype is in `kinds` and whose controller
+    /// satisfies the optional `ControllerRef`. Generalizes `HasAttachment` to the
+    /// "enchanted or equipped" compound subject class (Reyav, Master Smith;
+    /// Dogmeat, Ever Loyal). Single-kind use is also valid (kinds.len() == 1) but
+    /// `HasAttachment` is preferred for that case.
+    HasAnyAttachmentOf {
+        kinds: Vec<AttachmentKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<ControllerRef>,
+    },
     /// Matches any object that is NOT the trigger source (for "another creature" triggers).
     Another,
     /// CR 603.4 + CR 109.3: Matches any object that is NOT the object that caused

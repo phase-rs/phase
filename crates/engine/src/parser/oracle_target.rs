@@ -6,8 +6,8 @@ use nom::combinator::{opt, value};
 use nom::Parser;
 
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter,
-    TypedFilter,
+    AttachmentKind, ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::identifiers::TrackedSetId;
@@ -2257,6 +2257,61 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
 fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
+
+    // CR 303.4 + CR 301.5: "that's enchanted or equipped" / "that's enchanted" /
+    // "that's equipped" — relative clause attaching an attachment-presence
+    // predicate to the enclosing type phrase. Covers the compound-subject grant
+    // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
+    // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
+    if let Ok((after_contraction, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that's ").parse(trimmed)
+    {
+        // Note: `parse_that_isnt_subtype_suffix` runs first in `parse_type_phrase`
+        // and consumes "that's not …", so this branch only sees positive forms.
+        fn parse_attachment_disjunction(
+            input: &str,
+        ) -> nom::IResult<&str, Vec<AttachmentKind>, nom_language::error::VerboseError<&str>>
+        {
+            // Longest-match-first: handle compound forms before single-kind forms.
+            alt((
+                value(
+                    vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                    tag("enchanted or equipped"),
+                ),
+                value(
+                    vec![AttachmentKind::Equipment, AttachmentKind::Aura],
+                    tag("equipped or enchanted"),
+                ),
+                value(vec![AttachmentKind::Aura], tag("enchanted")),
+                value(vec![AttachmentKind::Equipment], tag("equipped")),
+            ))
+            .parse(input)
+        }
+        if let Ok((rest, kinds)) = parse_attachment_disjunction(after_contraction) {
+            // Word-boundary check: the next char must terminate the adjective so
+            // we don't false-match e.g. "that's enchanted by something else".
+            // Accept end-of-string or any non-alphanumeric terminator.
+            let next_char_is_boundary = rest
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            if next_char_is_boundary {
+                let consumed = trimmed.len() - rest.len();
+                let prop = if kinds.len() == 1 {
+                    FilterProp::HasAttachment {
+                        kind: kinds.into_iter().next().expect("len == 1"),
+                        controller: None,
+                    }
+                } else {
+                    FilterProp::HasAnyAttachmentOf {
+                        kinds,
+                        controller: None,
+                    }
+                };
+                return Some((vec![prop], leading_ws + consumed));
+            }
+        }
+    }
 
     let (after_that, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ")
         .parse(trimmed)
@@ -5251,6 +5306,84 @@ mod tests {
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"
         );
+    }
+
+    // --- CR 303.4 + CR 301.5: "that's enchanted or equipped" relative-clause tests ---
+    // Compound-subject grant class (Reyav, Master Smith; Dogmeat, Ever Loyal).
+
+    #[test]
+    fn that_s_enchanted_or_equipped_emits_disjunction() {
+        let result = parse_that_clause_suffix(" that's enchanted or equipped");
+        let (props, _consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        match &props[0] {
+            FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+                assert_eq!(
+                    kinds,
+                    &vec![AttachmentKind::Aura, AttachmentKind::Equipment]
+                );
+                assert_eq!(controller, &None);
+            }
+            other => panic!("expected HasAnyAttachmentOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn that_s_equipped_or_enchanted_emits_disjunction() {
+        let result = parse_that_clause_suffix(" that's equipped or enchanted");
+        let (props, _consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::HasAnyAttachmentOf { kinds, .. }
+                if kinds.len() == 2 && kinds.contains(&AttachmentKind::Aura)
+                    && kinds.contains(&AttachmentKind::Equipment)
+        ));
+    }
+
+    #[test]
+    fn that_s_enchanted_only_emits_single_kind() {
+        let result = parse_that_clause_suffix(" that's enchanted");
+        let (props, _consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn that_s_equipped_only_emits_single_kind() {
+        let result = parse_that_clause_suffix(" that's equipped");
+        let (props, _consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::HasAttachment {
+                kind: AttachmentKind::Equipment,
+                controller: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn that_s_enchanted_or_equipped_in_full_target() {
+        // Reyav / Dogmeat trigger subject form.
+        let (filter, _rest) = parse_target("a creature you control that's enchanted or equipped");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasAnyAttachmentOf { kinds, .. } if kinds.len() == 2
+                )));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
     }
 
     // --- CR 115.9c: "that targets only [X]" tests ---

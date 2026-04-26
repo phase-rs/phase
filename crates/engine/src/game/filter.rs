@@ -1071,6 +1071,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
         | FilterProp::OtherThanTriggerObject
         | FilterProp::PowerLE { .. }
@@ -1393,6 +1394,44 @@ fn matches_filter_prop(
                     .is_some_and(|pid| pid == att.controller),
             }
         }),
+        // CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches when the
+        // object has at least one attachment whose subtype is in `kinds` and whose
+        // controller satisfies the optional `ControllerRef`. Generalization of
+        // `HasAttachment` to the "enchanted or equipped" compound-subject class.
+        FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+            obj.attachments.iter().any(|att_id| {
+                let Some(att) = state.objects.get(att_id) else {
+                    return false;
+                };
+                let kind_matches = kinds.iter().any(|kind| match kind {
+                    crate::types::ability::AttachmentKind::Aura => {
+                        att.card_types.subtypes.iter().any(|s| s == "Aura")
+                    }
+                    crate::types::ability::AttachmentKind::Equipment => {
+                        att.card_types.subtypes.iter().any(|s| s == "Equipment")
+                    }
+                });
+                if !kind_matches {
+                    return false;
+                }
+                match controller {
+                    None => true,
+                    Some(ControllerRef::You) => source.controller == Some(att.controller),
+                    Some(ControllerRef::Opponent) => {
+                        source.controller.is_some_and(|c| c != att.controller)
+                    }
+                    Some(ControllerRef::TargetPlayer) => source
+                        .ability
+                        .and_then(|a| {
+                            a.targets.iter().find_map(|t| match t {
+                                crate::types::ability::TargetRef::Player(pid) => Some(*pid),
+                                crate::types::ability::TargetRef::Object(_) => None,
+                            })
+                        })
+                        .is_some_and(|pid| pid == att.controller),
+                }
+            })
+        }
         FilterProp::Another => object_id != source.id,
         // CR 603.4 + CR 109.3: `OtherThanTriggerObject` is a typed marker that
         // signals "exclude the triggering object" for count semantics. The
@@ -1705,6 +1744,7 @@ fn zone_change_record_matches_property(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::FaceDown
         | FilterProp::CountersGE { .. }
         | FilterProp::HasAnyCounter
@@ -3162,6 +3202,128 @@ mod tests {
         assert!(
             !matches_target_filter(&state, cre_c, &filter, source),
             "creature without any aura should NOT match"
+        );
+    }
+
+    // CR 303.4 + CR 301.5: `FilterProp::HasAnyAttachmentOf { [Aura, Equipment] }`
+    // matches creatures with at least one Aura OR Equipment attached. Compound-
+    // subject grant class (Reyav, Master Smith; Dogmeat, Ever Loyal).
+    #[test]
+    fn has_any_attachment_of_aura_or_equipment_matches_either() {
+        use crate::types::ability::{AttachmentKind, TypeFilter, TypedFilter};
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Reyav".into(),
+            Zone::Battlefield,
+        );
+
+        // Creature A: enchanted (has an Aura) → should match.
+        let cre_a = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Bear".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cre_a)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let aura = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "An Aura".into(),
+            Zone::Battlefield,
+        );
+        {
+            let a = state.objects.get_mut(&aura).unwrap();
+            a.card_types.core_types.push(CoreType::Enchantment);
+            a.card_types.subtypes.push("Aura".into());
+            a.attached_to = Some(cre_a.into());
+        }
+        state
+            .objects
+            .get_mut(&cre_a)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        // Creature B: equipped (has an Equipment) → should match.
+        let cre_b = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Ox".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cre_b)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let equip = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "An Equipment".into(),
+            Zone::Battlefield,
+        );
+        {
+            let e = state.objects.get_mut(&equip).unwrap();
+            e.card_types.core_types.push(CoreType::Artifact);
+            e.card_types.subtypes.push("Equipment".into());
+            e.attached_to = Some(cre_b.into());
+        }
+        state
+            .objects
+            .get_mut(&cre_b)
+            .unwrap()
+            .attachments
+            .push(equip);
+
+        // Creature C: no attachments → should NOT match.
+        let cre_c = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Wolf".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cre_c)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+            FilterProp::HasAnyAttachmentOf {
+                kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                controller: None,
+            },
+        ]));
+        assert!(
+            matches_target_filter(&state, cre_a, &filter, source),
+            "enchanted creature should match"
+        );
+        assert!(
+            matches_target_filter(&state, cre_b, &filter, source),
+            "equipped creature should match"
+        );
+        assert!(
+            !matches_target_filter(&state, cre_c, &filter, source),
+            "creature with no attachments should NOT match"
         );
     }
 
