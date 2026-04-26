@@ -215,6 +215,28 @@ fn resolve_mana_types_impl(
             };
             vec![first; amount]
         }
+        // CR 106.7 + CR 106.1b: Reflecting Pool class — produce N mana of any
+        // type (W/U/B/R/G/C) that a land matching `land_filter` could produce.
+        // Without an explicit choice override (auto-tap during cost payment, or
+        // direct activation without prompt), the first listed type is produced
+        // mirroring the `OpponentLandColors` / `AnyOneColor` precedent. The
+        // per-type choice prompt is surfaced by `mana_choice_prompt` when the
+        // option set has more than one type. CR 106.5: an empty option set
+        // (no matching lands, or only mutually-recursive producers) produces
+        // no mana.
+        ManaProduction::AnyTypeProduceableBy { count, land_filter } => {
+            let amount = resolve_count(count, state, ability, controller, source_id);
+            let type_options = mana_sources::produceable_mana_types_by_filter(
+                state,
+                land_filter,
+                controller,
+                source_id,
+            );
+            let Some(first) = type_options.first().copied() else {
+                return Vec::new();
+            };
+            vec![first; amount]
+        }
         // CR 605.1a + CR 406.1 + CR 610.3: One mana of any of the colors among the
         // cards exiled-with this source (Pit of Offerings). Reads `state.exile_links`
         // for the relation; the per-color choice is selected by the caller via
@@ -948,5 +970,222 @@ mod tests {
 
         let unit = &state.players[0].mana_pool.mana[0];
         assert_eq!(unit.grants, vec![ManaSpellGrant::CantBeCountered]);
+    }
+
+    /// CR 106.7 + CR 106.1b: Reflecting Pool — produces one mana of any type
+    /// that a land you control could produce. With a Plains and a Swamp on the
+    /// battlefield, the type union is {W, B}; the resolver picks the first
+    /// listed type when no choice override is supplied (mirrors `AnyOneColor`).
+    #[test]
+    fn any_type_produceable_by_you_control_unions_types() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, TargetFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Player 0 controls a Plains and a Swamp.
+        for (card_id, name, color, subtype) in [
+            (CardId(401), "Plains", ManaColor::White, "Plains"),
+            (CardId(402), "Swamp", ManaColor::Black, "Swamp"),
+        ] {
+            let id = create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push(subtype.to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![color],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let land_filter = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &make_mana_ability(ManaProduction::AnyTypeProduceableBy {
+                count: QuantityExpr::Fixed { value: 1 },
+                land_filter,
+            }),
+            &mut events,
+        )
+        .unwrap();
+
+        // CR 106.7: Per-unit `first()` selection out of the type union — the
+        // union is order-dependent on object iteration, so we assert that the
+        // produced mana is one of the two valid contributing types (W or B)
+        // rather than pinning to a single iteration order.
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+        let white = state.players[0].mana_pool.count_color(ManaType::White);
+        let black = state.players[0].mana_pool.count_color(ManaType::Black);
+        assert_eq!(
+            white + black,
+            1,
+            "produced mana must come from the {{W,B}} type union (got W={white}, B={black})"
+        );
+
+        // The full type union (helper-level) must include both colors.
+        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+            &state,
+            &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            PlayerId(0),
+            ObjectId(100),
+        );
+        assert!(options.contains(&ManaType::White), "union must include W");
+        assert!(options.contains(&ManaType::Black), "union must include B");
+    }
+
+    /// CR 106.5 + CR 106.7: When no land matches the filter, the type union is
+    /// empty, so the ability produces no mana.
+    #[test]
+    fn any_type_produceable_by_empty_union_produces_nothing() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let land_filter = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
+        let mut events = Vec::new();
+
+        resolve(
+            &mut state,
+            &make_mana_ability(ManaProduction::AnyTypeProduceableBy {
+                count: QuantityExpr::Fixed { value: 1 },
+                land_filter,
+            }),
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    /// CR 106.7: Two Reflecting Pools facing each other (no other lands) — the
+    /// recursive `AnyTypeProduceableBy` skip prevents infinite recursion and
+    /// the union collapses to empty (CR 106.5 — no mana).
+    #[test]
+    fn any_type_produceable_by_recursive_yields_empty() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, TargetFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let recursive_filter =
+            TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
+
+        // Player 0 has a Reflecting Pool already on the battlefield.
+        let pool = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(0),
+            "Reflecting Pool".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&pool).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyTypeProduceableBy {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        land_filter: recursive_filter.clone(),
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &make_mana_ability(ManaProduction::AnyTypeProduceableBy {
+                count: QuantityExpr::Fixed { value: 1 },
+                land_filter: recursive_filter,
+            }),
+            &mut events,
+        )
+        .unwrap();
+
+        // Both producers are recursive; no other lands → empty union → no mana.
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    /// CR 106.1b: Reflecting Pool reads "any **type**" — a Wastes you control
+    /// (which produces colorless) must contribute `Colorless` to the union.
+    #[test]
+    fn any_type_produceable_by_includes_colorless() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, TargetFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Player 0 controls a Wastes (produces {C}).
+        let wastes = create_object(
+            &mut state,
+            CardId(601),
+            PlayerId(0),
+            "Wastes".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&wastes).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        let land_filter = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
+        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+            &state,
+            &land_filter,
+            PlayerId(0),
+            ObjectId(9999),
+        );
+        assert!(
+            options.contains(&ManaType::Colorless),
+            "type union must include Colorless when a Wastes is controlled (CR 106.1b)"
+        );
     }
 }

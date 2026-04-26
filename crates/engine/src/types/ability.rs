@@ -599,6 +599,21 @@ pub enum ManaProduction {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
+    /// CR 106.7 + CR 106.1b: Produce N mana of any **type** (W/U/B/R/G/C) that a
+    /// land matching `land_filter` could produce. Differs from
+    /// `OpponentLandColors` in that the choice axis is the full type set
+    /// including colorless (Reflecting Pool, Naga Vitalist, Incubation Druid,
+    /// Cactus Preserve, Horizon of Progress). The `land_filter` controls which
+    /// lands contribute (typically `ControllerRef::You`, but parameterized so
+    /// future opponent-/player-scoped printings slot in without a new variant).
+    /// Per CR 106.7 the union ignores cost-payability of the surveyed lands'
+    /// mana abilities — only the resulting *type set* matters. CR 106.5 applies
+    /// when the union is empty (e.g. no matching lands → no mana).
+    AnyTypeProduceableBy {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        land_filter: TargetFilter,
+    },
     /// CR 605.1a + CR 406.1: Produce one mana of any of the colors among the cards
     /// linked to `source` via `state.exile_links` (e.g. Pit of Offerings —
     /// "Add one mana of any of the exiled cards' colors"). Colors are computed
@@ -717,6 +732,11 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         #[serde(default = "default_quantity_one")]
                         count: QuantityExpr,
                     },
+                    AnyTypeProduceableBy {
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
+                        land_filter: TargetFilter,
+                    },
                     ChoiceAmongExiledColors {
                         #[serde(default)]
                         source: LinkedExileScope,
@@ -778,6 +798,9 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     },
                     ManaProductionHelper::OpponentLandColors { count } => {
                         ManaProduction::OpponentLandColors { count }
+                    }
+                    ManaProductionHelper::AnyTypeProduceableBy { count, land_filter } => {
+                        ManaProduction::AnyTypeProduceableBy { count, land_filter }
                     }
                     ManaProductionHelper::ChoiceAmongExiledColors { source } => {
                         ManaProduction::ChoiceAmongExiledColors { source }
@@ -1686,6 +1709,13 @@ pub enum QuantityRef {
     /// unspecified (e.g., Nils, Discipline Enforcer — per the Scryfall rulings, ALL
     /// counters on the creature are considered, not just +1/+1 counters).
     AnyCountersOnTarget,
+    /// CR 122.1: Total counters of any type on the source object.
+    /// Used for bare "counter on it" / "counters on ~" phrasings where no
+    /// specific counter type is named (Gemstone Mine: "When there are no
+    /// counters on ~, sacrifice it"; depletion-land cycle and similar).
+    /// Mirrors `CountersOnSelf` (which restricts to one type) and
+    /// `AnyCountersOnTarget` (which sums all types on a targeted object).
+    AnyCountersOnSelf,
     /// CR 122.1: Total counters across all objects matching a filter.
     /// Used for phrases like "the number of +1/+1 counters on lands you control"
     /// (`counter_type: Some("P1P1")`) and "counters among artifacts and creatures

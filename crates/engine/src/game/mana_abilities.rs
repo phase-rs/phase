@@ -312,6 +312,24 @@ pub(crate) fn mana_choice_prompt(
                     .collect(),
             })
         }
+        // CR 106.7 + CR 106.1b: Reflecting Pool class — surface the union of
+        // mana types that filter-matching lands could produce, including
+        // `Colorless`. With 0 or 1 options the resolver handles it without a
+        // prompt (CR 106.5: empty union → no mana; single option auto-picks).
+        ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
+            let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
+            let options = super::mana_sources::produceable_mana_types_by_filter(
+                state,
+                land_filter,
+                owner,
+                source_id,
+            );
+            if options.len() > 1 {
+                Some(ManaChoicePrompt::SingleColor { options })
+            } else {
+                None
+            }
+        }
         // CR 903.4 + CR 903.4f + CR 106.5: Dynamically resolve the activator's
         // commander color identity. If the identity contains 0 or 1 colors,
         // the resolver handles it without a prompt (CR 106.5: undefined color

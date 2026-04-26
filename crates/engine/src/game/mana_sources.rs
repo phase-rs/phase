@@ -502,6 +502,26 @@ pub fn display_land_mana_pips(
                     push(&mut pips, ManaPip::OneOfColors(colors));
                 }
             }
+            // CR 106.7 + CR 106.1b: Reflecting Pool class — surface the full
+            // type union (including Colorless) as a per-unit choice. Each
+            // colored type emits a `Color` pip; a Colorless contribution emits
+            // a separate `Colorless` pip so the frame faithfully shows the
+            // full option set.
+            ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
+                let types =
+                    produceable_mana_types_by_filter(state, land_filter, controller, object_id);
+                let colors: Vec<ManaColor> = types
+                    .iter()
+                    .copied()
+                    .filter_map(mana_type_to_color)
+                    .collect();
+                if !colors.is_empty() {
+                    push(&mut pips, ManaPip::OneOfColors(colors));
+                }
+                if types.contains(&ManaType::Colorless) {
+                    push(&mut pips, ManaPip::Colorless);
+                }
+            }
             // CR 605.1a + CR 406.1: Colors of cards exiled-with this source.
             ManaProduction::ChoiceAmongExiledColors { source } => {
                 let colors = super::effects::mana::exiled_color_options(state, *source, object_id);
@@ -791,6 +811,11 @@ fn mana_options_from_production(
             .unwrap_or_default(),
         // CR 106.7: Compute colors dynamically from opponent-controlled lands.
         ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller),
+        // CR 106.7 + CR 106.1b: Compute the full type set (incl. Colorless)
+        // from lands matching `land_filter` (Reflecting Pool class).
+        ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
+            produceable_mana_types_by_filter(state, land_filter, controller, object_id)
+        }
         // CR 605.1a + CR 406.1 + CR 610.3: Compute colors dynamically from cards
         // exiled-with this source via `state.exile_links` (Pit of Offerings).
         ManaProduction::ChoiceAmongExiledColors { source } => {
@@ -924,6 +949,97 @@ pub(crate) fn opponent_land_color_options(
                 }
             )
         });
+        if !obj_had_explicit_ability {
+            if let Some(mana_type) = obj
+                .card_types
+                .subtypes
+                .iter()
+                .find_map(|s| super::mana_payment::land_subtype_to_mana_type(s))
+            {
+                if !options.contains(&mana_type) {
+                    options.push(mana_type);
+                }
+            }
+        }
+    }
+    options
+}
+
+/// CR 106.7 + CR 106.1b: Compute the mana types (W/U/B/R/G/C) that lands
+/// matching `land_filter` could produce, surveyed from the perspective of
+/// `controller`. Used by `ManaProduction::AnyTypeProduceableBy` (Reflecting
+/// Pool, Naga Vitalist, Incubation Druid, Cactus Preserve, Horizon of Progress).
+///
+/// Differs from `opponent_land_color_options` in two ways:
+/// 1. The land scope is parameterized via `TargetFilter` rather than hard-coded
+///    to opponents — so "you control" / "an opponent controls" / future
+///    "any player controls" variants slot in by passing a different filter.
+/// 2. Returns the full *type* set including `Colorless`, matching CR 106.1b's
+///    definition of "type" (six types) versus "color" (five colors). Reflecting
+///    Pool reads "any **type**", so a Wastes you control contributes `Colorless`.
+///
+/// Per CR 106.7 the surveyed lands' mana abilities are inspected for what types
+/// they *could* produce; cost-payability is ignored. Both `OpponentLandColors`
+/// and `AnyTypeProduceableBy` abilities on the surveyed lands are skipped to
+/// prevent infinite mutual recursion (e.g., two Reflecting Pools facing each
+/// other with no other lands produce no mana, per CR 106.5).
+pub(crate) fn produceable_mana_types_by_filter(
+    state: &GameState,
+    land_filter: &TargetFilter,
+    controller: PlayerId,
+    self_source_id: ObjectId,
+) -> Vec<ManaType> {
+    use crate::game::filter::{matches_target_filter, FilterContext};
+    // CR 109.4: `ControllerRef::You` resolves against the activator. Anchor the
+    // filter context to the explicit controller so the "you control" predicate
+    // is correct even when the source object has left play (e.g., self-sac
+    // costs) or in synthetic test contexts.
+    let filter_ctx = FilterContext::from_source_with_controller(self_source_id, controller);
+    let mut options = Vec::new();
+    for (object_id, obj) in state.objects.iter() {
+        if obj.zone != Zone::Battlefield {
+            continue;
+        }
+        if !obj.card_types.core_types.contains(&CoreType::Land) {
+            continue;
+        }
+        if !matches_target_filter(state, *object_id, land_filter, &filter_ctx) {
+            continue;
+        }
+        // CR 106.7: Survey each mana ability, skipping the recursive variants
+        // so a self-referential cycle yields the empty set (CR 106.5).
+        let mut obj_had_explicit_ability = false;
+        for ability in obj.abilities.iter() {
+            if ability.kind != AbilityKind::Activated
+                || !super::mana_abilities::is_mana_ability(ability)
+            {
+                continue;
+            }
+            if !has_tap_component(&ability.cost) {
+                continue;
+            }
+            let Effect::Mana { produced, .. } = &*ability.effect else {
+                continue;
+            };
+            // CR 106.7: Skip recursive producers to prevent infinite mutual
+            // recursion (Reflecting Pool ↔ Reflecting Pool, Reflecting Pool ↔
+            // Exotic Orchard).
+            if matches!(
+                produced,
+                ManaProduction::OpponentLandColors { .. }
+                    | ManaProduction::AnyTypeProduceableBy { .. }
+            ) {
+                obj_had_explicit_ability = true;
+                continue;
+            }
+            obj_had_explicit_ability = true;
+            for mana_type in mana_options_from_production(state, controller, *object_id, produced) {
+                if !options.contains(&mana_type) {
+                    options.push(mana_type);
+                }
+            }
+        }
+        // Fallback: basic-land subtype-only objects (no explicit mana ability).
         if !obj_had_explicit_ability {
             if let Some(mana_type) = obj
                 .card_types

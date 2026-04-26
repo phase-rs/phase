@@ -153,6 +153,44 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             });
         }
 
+        // CR 106.7 + CR 106.1b: "mana of any type that a land [scope] could
+        // produce" — Reflecting Pool, Naga Vitalist, Incubation Druid, Cactus
+        // Preserve, Horizon of Progress. The trailing scope phrase is
+        // dispatched via `alt()` over the printed variants so future
+        // opponent-/player-scoped printings slot in by adding a tag without
+        // touching the runtime. Per "build for the class": the resulting
+        // `TargetFilter` carries `ControllerRef` so a single primitive covers
+        // every scoping variant.
+        if let Some((controller_ref, _)) = nom_on_lower(rest, &rest_lower, |i| {
+            preceded(
+                tag("mana of any type that a land "),
+                terminated(
+                    alt((
+                        value(
+                            crate::types::ability::ControllerRef::You,
+                            tag("you control"),
+                        ),
+                        value(
+                            crate::types::ability::ControllerRef::Opponent,
+                            tag("an opponent controls"),
+                        ),
+                    )),
+                    tag(" could produce"),
+                ),
+            )
+            .parse(i)
+        }) {
+            let land_filter = TargetFilter::Typed(
+                crate::types::ability::TypedFilter::land().controller(controller_ref),
+            );
+            return Some(Effect::Mana {
+                produced: ManaProduction::AnyTypeProduceableBy { count, land_filter },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
         if let Some((_, after_color)) = nom_on_lower(rest, &rest_lower, |i| {
             alt((
                 value((), tag("mana of any one color")),
@@ -1133,6 +1171,52 @@ mod tests {
     #[test]
     fn trailing_period_is_tolerated() {
         assert!(extract_combinations("Add {U}{U}, {U}{B}, or {B}{B}.").is_some());
+    }
+
+    /// CR 106.7 + CR 106.1b: Reflecting Pool — "any type that a land you
+    /// control could produce" must parse to `AnyTypeProduceableBy` with a
+    /// `ControllerRef::You`-scoped land filter. This is the building-block
+    /// test (one parser arm covering the entire 5-card class).
+    #[test]
+    fn reflecting_pool_parses_any_type_you_control() {
+        use crate::types::ability::{ControllerRef, TargetFilter};
+        let effect = try_parse_add_mana_effect(
+            "Add one mana of any type that a land you control could produce",
+        )
+        .expect("Reflecting Pool clause must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana, got something else");
+        };
+        let ManaProduction::AnyTypeProduceableBy { count, land_filter } = produced else {
+            panic!("expected AnyTypeProduceableBy, got {produced:?}");
+        };
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Typed(typed) = land_filter else {
+            panic!("expected Typed land filter, got {land_filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 106.7: Future opponent-scoped "type" printings must dispatch via
+    /// the same primitive — this guards the parser's class generality even
+    /// though no current card prints this exact phrase.
+    #[test]
+    fn any_type_opponent_controls_routes_to_opponent_scope() {
+        use crate::types::ability::{ControllerRef, TargetFilter};
+        let effect = try_parse_add_mana_effect(
+            "Add one mana of any type that a land an opponent controls could produce",
+        )
+        .expect("opponent-scoped type clause must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::AnyTypeProduceableBy { land_filter, .. } = produced else {
+            panic!("expected AnyTypeProduceableBy, got {produced:?}");
+        };
+        let TargetFilter::Typed(typed) = land_filter else {
+            panic!("expected Typed land filter");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::Opponent));
     }
 
     /// CR 106.1 + CR 601.2h + CR 603.7c: "add an amount of {C} equal to the
