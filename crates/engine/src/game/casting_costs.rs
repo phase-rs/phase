@@ -4798,4 +4798,141 @@ mod tests {
             "unpayable pitch cost must fail: {result:?}"
         );
     }
+
+    /// CR 601.2b + CR 601.2h: `handle_exile_from_hand_for_cost` must reject a
+    /// selection whose length differs from the required count and an attempt
+    /// to exile a card that is not in the legal-cards list. These guards keep
+    /// the pitch flow from accepting illegal payments.
+    #[test]
+    fn handle_exile_from_hand_for_cost_rejects_wrong_count() {
+        use crate::game::zones::create_object;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source_id = create_object(
+            &mut state,
+            CardId(900),
+            caster,
+            "Pitch Source".to_string(),
+            Zone::Hand,
+        );
+        let blue_a = create_object(
+            &mut state,
+            CardId(901),
+            caster,
+            "Blue A".to_string(),
+            Zone::Hand,
+        );
+        let blue_b = create_object(
+            &mut state,
+            CardId(902),
+            caster,
+            "Blue B".to_string(),
+            Zone::Hand,
+        );
+        let pending = PendingCast {
+            object_id: source_id,
+            card_id: CardId(900),
+            ability: ResolvedAbility::new(
+                Effect::Counter {
+                    target: crate::types::ability::TargetFilter::Any,
+                    source_static: None,
+                    unless_payment: None,
+                },
+                Vec::new(),
+                source_id,
+                caster,
+            ),
+            cost: crate::types::mana::ManaCost::NoCost,
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: Vec::new(),
+            casting_variant: CastingVariant::Normal,
+            distribute: None,
+            origin_zone: Zone::Hand,
+        };
+
+        // Exactly one card is required. Selecting two must fail.
+        let mut events = Vec::new();
+        let result = handle_exile_from_hand_for_cost(
+            &mut state,
+            caster,
+            pending.clone(),
+            1,
+            &[blue_a, blue_b],
+            &[blue_a, blue_b],
+            &mut events,
+        );
+        assert!(
+            matches!(result, Err(EngineError::InvalidAction(_))),
+            "wrong count must be rejected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn handle_exile_from_hand_for_cost_rejects_illegal_selection() {
+        use crate::game::zones::create_object;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source_id = create_object(
+            &mut state,
+            CardId(900),
+            caster,
+            "Pitch Source".to_string(),
+            Zone::Hand,
+        );
+        let blue = create_object(
+            &mut state,
+            CardId(901),
+            caster,
+            "Blue Legal".to_string(),
+            Zone::Hand,
+        );
+        let red = create_object(
+            &mut state,
+            CardId(902),
+            caster,
+            "Red Illegal".to_string(),
+            Zone::Hand,
+        );
+        let pending = PendingCast {
+            object_id: source_id,
+            card_id: CardId(900),
+            ability: ResolvedAbility::new(
+                Effect::Counter {
+                    target: crate::types::ability::TargetFilter::Any,
+                    source_static: None,
+                    unless_payment: None,
+                },
+                Vec::new(),
+                source_id,
+                caster,
+            ),
+            cost: crate::types::mana::ManaCost::NoCost,
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: Vec::new(),
+            casting_variant: CastingVariant::Normal,
+            distribute: None,
+            origin_zone: Zone::Hand,
+        };
+
+        // `red` is not in the legal-cards list, so the cost handler must reject
+        // it even though it is in hand and the count matches.
+        let mut events = Vec::new();
+        let result = handle_exile_from_hand_for_cost(
+            &mut state,
+            caster,
+            pending,
+            1,
+            &[blue],
+            &[red],
+            &mut events,
+        );
+        assert!(
+            matches!(result, Err(EngineError::InvalidAction(_))),
+            "card not in legal list must be rejected: {result:?}"
+        );
+    }
 }

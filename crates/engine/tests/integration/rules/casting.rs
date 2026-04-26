@@ -552,6 +552,235 @@ fn escape_cancel_returns_to_priority() {
     );
 }
 
+// ── Exile-from-hand alternative-cost tests (Force of Will family) ───────────
+
+/// Helper: set up an instant in P0's hand with `AdditionalCost::Required(Exile
+/// {1, Hand, blue card filter})`. Mirrors the runtime shape of pitch alternatives
+/// (Force of Will, Force of Negation, Misdirection, Unmask, Mindbreak Trap, …)
+/// — the spell being cast must NOT appear in the eligible list, and only blue
+/// cards in hand are eligible.
+fn setup_pitch_scenario() -> (
+    engine::game::scenario::GameRunner,
+    CardId,
+    ObjectId,
+    ObjectId, // eligible blue filler in hand
+    ObjectId, // ineligible non-blue filler in hand
+) {
+    use engine::types::ability::{FilterProp, TypeFilter, TypedFilter};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let pitch_filter = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Card],
+        controller: Some(engine::types::ability::ControllerRef::You),
+        properties: vec![FilterProp::HasColor {
+            color: ManaColor::Blue,
+        }],
+    });
+
+    // The pitch spell itself: zero mana cost, Required Exile-from-hand cost.
+    // Build as a "creature" placeholder then morph to instant — same trick used
+    // by `optional_cost_skipped_clears_flag`.
+    let spell_id = scenario
+        .add_creature_to_hand(P0, "Pitch Counter", 0, 0)
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .with_ability(Effect::Counter {
+            target: TargetFilter::Any,
+            source_static: None,
+            unless_payment: None,
+        })
+        .with_additional_cost(AdditionalCost::Required(AbilityCost::Exile {
+            count: 1,
+            zone: Some(engine::types::zones::Zone::Hand),
+            filter: Some(pitch_filter),
+        }))
+        .id();
+
+    // Eligible blue filler card in hand.
+    let blue_id = scenario
+        .add_creature_to_hand(P0, "Blue Filler", 1, 1)
+        .as_instant()
+        .id();
+    // Ineligible red filler card in hand.
+    let red_id = scenario
+        .add_creature_to_hand(P0, "Red Filler", 1, 1)
+        .as_instant()
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell_id].card_id;
+
+    // Tag colors on the runtime objects: pitch spell itself is blue (so the
+    // self-exclusion guard inside `find_eligible_exile_from_hand_targets` is
+    // exercised end-to-end), `blue_id` is blue (eligible), `red_id` is red.
+    {
+        let s = runner.state_mut();
+        for &id in &[spell_id, blue_id] {
+            let obj = s.objects.get_mut(&id).unwrap();
+            obj.color.push(ManaColor::Blue);
+            obj.base_color.push(ManaColor::Blue);
+        }
+        let red = s.objects.get_mut(&red_id).unwrap();
+        red.color.push(ManaColor::Red);
+        red.base_color.push(ManaColor::Red);
+    }
+
+    (runner, card_id, spell_id, blue_id, red_id)
+}
+
+/// CR 118.9a + CR 601.2b + CR 601.2h: Full pitch flow — `CastSpell` →
+/// `ExileFromHandForCost` → `SelectCards` → spell on stack with the chosen card
+/// exiled. Mirrors the escape-cost integration test (`escape_full_casting_flow`)
+/// for the hand-source variant.
+#[test]
+fn pitch_full_casting_flow() {
+    let (mut runner, card_id, spell_id, blue_id, red_id) = setup_pitch_scenario();
+
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+        })
+        .expect("CastSpell should succeed");
+
+    // Counter target a player to advance past TargetSelection.
+    let result = if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("target selection should succeed")
+    } else {
+        result
+    };
+
+    let eligible = match &result.waiting_for {
+        WaitingFor::ExileFromHandForCost {
+            cards,
+            count,
+            player,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*count, 1);
+            cards.clone()
+        }
+        other => panic!("expected ExileFromHandForCost, got {other:?}"),
+    };
+    assert!(
+        !eligible.contains(&spell_id),
+        "the spell being cast must never appear in its own eligible list"
+    );
+    assert!(
+        eligible.contains(&blue_id),
+        "blue card in hand must be eligible: {eligible:?}"
+    );
+    assert!(
+        !eligible.contains(&red_id),
+        "non-blue card in hand must be filtered out: {eligible:?}"
+    );
+
+    let result2 = runner
+        .act(GameAction::SelectCards {
+            cards: vec![blue_id],
+        })
+        .expect("SelectCards for pitch cost should succeed");
+
+    // Zero mana cost + cost paid → spell lands on stack and we return to Priority.
+    assert!(
+        matches!(result2.waiting_for, WaitingFor::Priority { .. }),
+        "expected Priority after pitch payment, got {:?}",
+        result2.waiting_for
+    );
+
+    // Blue card was exiled, spell is on the stack.
+    assert_eq!(
+        runner.state().objects[&blue_id].zone,
+        engine::types::zones::Zone::Exile,
+        "pitched card must be in exile"
+    );
+    assert_eq!(
+        runner.state().objects[&red_id].zone,
+        engine::types::zones::Zone::Hand,
+        "non-pitched card must remain in hand"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "pitch spell should be on the stack"
+    );
+}
+
+/// CR 601.2i: `CancelCast` from `ExileFromHandForCost` rolls the cast back —
+/// no cards exiled, spell back in hand, priority restored.
+#[test]
+fn pitch_cancel_returns_to_priority() {
+    let (mut runner, card_id, spell_id, _blue_id, _red_id) = setup_pitch_scenario();
+
+    let cast_result = runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+        })
+        .expect("CastSpell should succeed");
+
+    // Advance past TargetSelection so we cancel from ExileFromHandForCost.
+    if matches!(cast_result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("target selection should succeed");
+    }
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ExileFromHandForCost { .. }
+        ),
+        "expected ExileFromHandForCost before cancel, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let result = runner
+        .act(GameAction::CancelCast)
+        .expect("CancelCast should succeed");
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "expected Priority after cancel, got {:?}",
+        result.waiting_for
+    );
+
+    // No cards exiled. Spell back in (or never left) the caster's hand.
+    let hand = &runner.state().players[P0.0 as usize].hand;
+    assert!(
+        hand.iter().any(|&id| id == spell_id),
+        "spell must be back in hand after CancelCast"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == engine::types::zones::Zone::Exile)
+            .count()
+            == 0,
+        "no cards may be exiled when CancelCast unwinds the pitch cost"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "stack must be empty after CancelCast"
+    );
+}
+
 // --- Zone-scoped cost modification tests ---
 
 /// CR 601.2f: Cost modifications scoped to "from graveyards or from exile"
