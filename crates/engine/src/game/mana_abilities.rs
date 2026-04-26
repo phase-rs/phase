@@ -688,6 +688,7 @@ fn advance_mana_ability_activation(
 
     if pending.color_override.is_none() {
         if let Some(choice) = mana_choice_prompt(&ability_def.effect, state, pending.source_id) {
+            let events_before = events.len();
             pay_mana_ability_cost_with_choices(
                 state,
                 pending.source_id,
@@ -699,6 +700,24 @@ fn advance_mana_ability_activation(
                 &mut pending.chosen_exiled_battlefield.iter().copied(),
                 pending.chosen_mana_payment.as_deref(),
             )?;
+            // CR 603.2a + CR 603.2g + CR 605.3b: Cost-payment events (Tap,
+            // Sacrifice, etc.) generated during a mana ability's cost step
+            // trigger external abilities normally — CR 603.2a allows triggers
+            // to fire even when cost payment is in flight, and CR 603.2g
+            // demands that any event that actually occurs trigger its
+            // observers. Mana abilities (CR 605.3b) resolve in two halves
+            // around an interactive `WaitingFor::ChooseManaColor` prompt:
+            // this branch pays the cost and returns the prompt without
+            // flowing back through `run_post_action_pipeline`, which is the
+            // engine's normal trigger scan site. Scan inline here so
+            // cost-payment triggers register before the prompt; otherwise
+            // the events are stranded and never fire any observers (Crime
+            // Novelist, Mayhem Devil, Cruel Celebrant, Korvold, Syr Ginger,
+            // …).
+            if events.len() > events_before {
+                let cost_events: Vec<_> = events[events_before..].to_vec();
+                super::triggers::process_triggers(state, &cost_events);
+            }
             return Ok(WaitingFor::ChooseManaColor {
                 player: pending.player,
                 choice,
