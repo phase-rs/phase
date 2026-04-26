@@ -304,6 +304,39 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Optio
     let ((), after_remove) = nom_on_lower(lower, lower, |i| value((), tag("remove ")).parse(i))?;
     let after_remove = after_remove.trim();
 
+    // CR 608.2k + CR 122.1: Anaphoric counter reference with no "from {target}"
+    // clause refers to counters on the ability source (the antecedent
+    // established earlier in the same ability's cost or trigger condition,
+    // e.g., "if there are four or more charge counters on it, remove those
+    // counters and transform it"). Covers the full anaphor class:
+    //   - "those counters" / "its counters" / "this {creature,artifact,...}'s counters"
+    //   - bare object pronoun "them" / "all of them" (CR 608.2k pronoun anaphor)
+    // Sentinel count -1 with empty counter_type tells the runtime resolver to
+    // strip every counter on the source. Mirrors `try_parse_move_counters`'
+    // anaphor handling.
+    if let Some(((), _)) = nom_on_lower(after_remove, after_remove, |i| {
+        value(
+            (),
+            alt((
+                tag("all of them"),
+                tag("those counters"),
+                tag("its counters"),
+                tag("this creature's counters"),
+                tag("this artifact's counters"),
+                tag("this enchantment's counters"),
+                tag("this permanent's counters"),
+                tag("them"),
+            )),
+        )
+        .parse(i)
+    }) {
+        return Some(Effect::RemoveCounter {
+            counter_type: String::new(),
+            count: -1,
+            target: TargetFilter::SelfRef,
+        });
+    }
+
     // CR 122.1: "remove all" uses sentinel count -1, resolved to actual count at runtime.
     // Also handle "up to N" prefix (player may remove fewer).
     let (count, rest) = if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
@@ -775,6 +808,42 @@ mod tests {
         };
         assert!(counter_type.is_empty());
         assert_eq!(count, 3);
+    }
+
+    /// CR 608.2k anaphor: "remove those counters" with no "from {target}"
+    /// clause refers to counters on the ability source. Building-block coverage
+    /// for the full anaphor surface — covers the Primal Amulet class plus
+    /// every related anaphor form so the next card with the same shape
+    /// (hatchling line, Brass's Tunnel-Grinder, etc.) parses cleanly.
+    #[test]
+    fn remove_counter_anaphor_no_from_target() {
+        let cases = [
+            "remove those counters",
+            "remove its counters",
+            "remove this creature's counters",
+            "remove this artifact's counters",
+            "remove this enchantment's counters",
+            "remove this permanent's counters",
+            "remove them",
+            "remove all of them",
+        ];
+        for input in cases {
+            let result = try_parse_remove_counter(input, &default_ctx());
+            let Some(Effect::RemoveCounter {
+                counter_type,
+                count,
+                target,
+            }) = result
+            else {
+                panic!("{input}: expected RemoveCounter, got {result:?}");
+            };
+            assert!(counter_type.is_empty(), "{input}: counter_type empty");
+            assert_eq!(count, -1, "{input}: sentinel -1 = all");
+            assert!(
+                matches!(target, TargetFilter::SelfRef),
+                "{input}: target SelfRef, got {target:?}"
+            );
+        }
     }
 
     #[test]

@@ -431,6 +431,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("surveil ")),
         value((), tag("tap ")),
         value((), tag("untap ")),
+        // CR 701.27 + CR 701.28: "transform"/"convert" are imperative game actions.
+        // Primal Amulet: "remove those counters and transform it" must split here so
+        // each clause reaches the effect dispatcher independently.
+        value((), tag("transform ")),
+        value((), tag("convert ")),
     ))
     .or(alt((
         // CR 608.2c: Subject-prefixed verb patterns — "you [verb]" is always a clause start.
@@ -1605,6 +1610,21 @@ mod tests {
     fn bare_and_splits_destroy_and_gain() {
         let chunks = clause_texts("destroy target creature and gain 3 life");
         assert_eq!(chunks, vec!["destroy target creature", "gain 3 life"]);
+    }
+
+    /// CR 701.27 + CR 701.28: "transform"/"convert" must split as clause-starts.
+    /// Primal Amulet class: "remove those counters and transform it" reaches
+    /// the dispatcher as two independent clauses so each parses cleanly.
+    #[test]
+    fn bare_and_splits_remove_and_transform() {
+        let chunks = clause_texts("remove those counters and transform it");
+        assert_eq!(chunks, vec!["remove those counters", "transform it"]);
+    }
+
+    #[test]
+    fn bare_and_splits_remove_and_convert() {
+        let chunks = clause_texts("remove all of them and convert this creature");
+        assert_eq!(chunks, vec!["remove all of them", "convert this creature"]);
     }
 
     // --- Bare " and " splitting: negative cases (must NOT split) ---

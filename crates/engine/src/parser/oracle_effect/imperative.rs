@@ -1717,10 +1717,16 @@ pub(super) fn parse_utility_imperative_ast(
         };
     }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
+    // CR 608.2k: bare object pronoun "it" / "itself" inside a self-trigger sub-ability
+    // refers to the trigger source — Primal Amulet's "remove those counters and transform
+    // it" is the canonical case. The literal-match list covers every form that resolves
+    // to `SelfRef`; the dynamic `parse_target` fallback below picks up explicit targets.
     if matches!(
         lower,
         "transform"
             | "transform ~"
+            | "transform it"
+            | "transform itself"
             | "transform this"
             | "transform this creature"
             | "transform this permanent"
@@ -1728,6 +1734,8 @@ pub(super) fn parse_utility_imperative_ast(
             | "transform this land"
             | "convert"
             | "convert ~"
+            | "convert it"
+            | "convert itself"
             | "convert this"
             | "convert this creature"
             | "convert this permanent"
@@ -4563,6 +4571,30 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 701.27 + CR 608.2k: "transform it" / "convert itself" — bare object
+    /// pronoun resolves to the trigger source. Building-block coverage for the
+    /// full SelfRef pronoun surface so all DFC self-transform sub-abilities
+    /// (Primal Amulet class) reach the Transform handler instead of falling
+    /// through to Unimplemented.
+    #[test]
+    fn parse_transform_self_pronouns() {
+        for input in [
+            "transform it",
+            "transform itself",
+            "convert it",
+            "convert itself",
+        ] {
+            let result = parse_utility_imperative_ast(input, input);
+            let Some(UtilityImperativeAst::Transform { target }) = result else {
+                panic!("{input}: expected Transform, got {result:?}");
+            };
+            assert!(
+                matches!(target, TargetFilter::SelfRef),
+                "{input}: target SelfRef, got {target:?}"
+            );
+        }
+    }
 
     #[test]
     fn parse_gain_life_equal_to_life_lost() {
