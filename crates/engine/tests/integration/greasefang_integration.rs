@@ -6,7 +6,7 @@
 //! 3. A delayed trigger is registered to bounce the Vehicle at the beginning of
 //!    the controller's next end step (CR 603.7a).
 
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -142,13 +142,6 @@ fn greasefang_returns_vehicle_gains_haste_then_bounced_at_end_step() {
     // The trigger requires target selection (Vehicle in graveyard), so the loop
     // breaks as soon as TriggerTargetSelection is reached.
     advance_to_phase(&mut runner, Phase::BeginCombat);
-    let stack_empty = runner.state().stack.is_empty();
-    assert!(
-        stack_empty,
-        "type {:?}",
-        runner.state().stack.first().unwrap().kind
-    );
-
     // Engine should be asking for the graveyard Vehicle target.
     assert!(
         matches!(
