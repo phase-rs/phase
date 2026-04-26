@@ -20,6 +20,7 @@ pub mod oracle_target;
 pub(crate) mod oracle_target_scope;
 pub mod oracle_trigger;
 pub mod oracle_util;
+pub(crate) mod oracle_vote;
 pub mod oracle_warnings;
 
 pub use oracle::parse_oracle_text;

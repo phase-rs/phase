@@ -331,8 +331,10 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
         .parse(input)
     }
 
-    /// CR 119.1 + CR 109.4: "deals [combat] damage to a player" also introduces
-    /// a player target, so "that player controls" in the effect refers to it
+    /// CR 120.3: "deals [combat] damage to a player" — damage dealt to a player
+    /// causes that player to lose life (CR 120.3a) and introduces the damaged
+    /// player as the target-referring player, so "that player controls" in the
+    /// effect refers to it
     /// (Dokuchi Silencer's "destroy target creature or planeswalker that player
     /// controls"). Mirrors `parse_attack_verb` — both verbs produce the same
     /// downstream scope.
@@ -363,7 +365,7 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
                 }
             }
         }
-        // CR 119.1: "[anything] deals [combat] damage to a player" — introduces
+        // CR 120.3: "[anything] deals [combat] damage to a player" — introduces
         // the damaged player as the target-referring player. The subject can be
         // SelfRef ("~"), equipped creature ("equipped creature"), or any typed
         // subject, so match on the verb phrase alone.
@@ -482,8 +484,20 @@ pub(crate) fn parse_trigger_line_with_index(
     // Parse the effect
     let has_up_to = scan_contains(&effect_for_parse, "up to one");
     let execute = if !effect_for_parse.is_empty() {
-        let mut ability =
-            parse_effect_chain_with_context(&effect_for_parse, AbilityKind::Spell, &effect_ctx);
+        // CR 701.38 + CR 207.2c: Council's-dilemma / Will-of-the-Council vote
+        // blocks have a fixed three-sentence shape ("starting with you, each
+        // player votes for X or Y. For each X vote, A. For each Y vote, B.")
+        // that can't be cleanly split by `parse_effect_chain` because the per-
+        // choice tally clauses are semantically welded to the vote prompt.
+        // Try the dedicated detector first; fall back to the chain parser if
+        // the input isn't a vote block.
+        let mut ability = if let Some(vote_def) =
+            crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
+        {
+            vote_def
+        } else {
+            parse_effect_chain_with_context(&effect_for_parse, AbilityKind::Spell, &effect_ctx)
+        };
         if has_up_to {
             ability.optional_targeting = true;
         }
@@ -2801,7 +2815,7 @@ fn try_parse_event(
         return Some((mode, def));
     }
 
-    // CR 120.1 + CR 603.2: "Whenever [subject] draws a card" — generic draw trigger
+    // CR 121.1 + CR 603.2: "Whenever [subject] draws a card" — generic draw trigger
     // (e.g. Rhystic Study, Sylvan Library patterns where subject is `a player`; Sheoldred's
     // first trigger where subject is `~`/you). Subject filter flows into `valid_target`
     // so `match_drawn` correctly scopes to the right player.
@@ -3874,9 +3888,14 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some(result);
     }
 
+    // CR 119.3 + CR 603.2: "Whenever you gain life" scopes the trigger event to the
+    // source's controller. Without `valid_target = Controller`, `valid_player_matches`
+    // accepts any player, so opponent life-gain incorrectly triggers (e.g. Vito,
+    // Thorn of the Dusk Rose; Ajani's Pridemate; Heliod, Sun-Crowned).
     if scan_contains(lower, "you gain life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeGained;
+        def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::LifeGained, def));
     }
 
@@ -4211,7 +4230,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     if scan_contains(lower, "you draw a card") {
-        // CR 120.1 + CR 603.2: "Whenever you draw a card" — scope to the trigger's
+        // CR 121.1 + CR 603.2: "Whenever you draw a card" — scope to the trigger's
         // controller. Without this filter, `match_drawn` would fire for all players'
         // draws (Sheoldred's first trigger misfires on opponent draws).
         let mut def = make_base();
@@ -4716,7 +4735,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         return None;
     }
 
-    // CR 121.6: "a [type] counter is removed from ~" — counter removal trigger.
+    // CR 122.1: "a [type] counter is removed from ~" — counter removal trigger.
     // Check removal before placement to avoid false-matching "removed" as "put".
     if let Some(result) = try_parse_counter_removed(lower) {
         return Some(result);
@@ -4755,7 +4774,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     Some((TriggerMode::CounterAdded, def))
 }
 
-/// CR 121.6: Parse "a [type] counter is removed from [subject]" patterns.
+/// CR 122.1: Parse "a [type] counter is removed from [subject]" patterns.
 /// Also handles zone constraints like "while it's exiled" (e.g. suspend cards).
 fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // Pattern: "a [type] counter is removed from [subject] [while ...]"
@@ -4798,7 +4817,7 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         def.description = Some(format!("{counter_type} counter"));
     }
 
-    // CR 121.6: Zone constraint for cards that trigger from exile (e.g. suspend)
+    // CR 122.1: Zone constraint for cards that trigger from exile (e.g. suspend)
     if let Some(zone) = zone_constraint {
         def.trigger_zones = vec![zone];
     }
@@ -5949,6 +5968,60 @@ mod tests {
         assert_eq!(def.constraint, None);
     }
 
+    // CR 119.3 + CR 603.2: "Whenever you gain life" must restrict the trigger to
+    // the source's controller. Regression for Vito, Thorn of the Dusk Rose and
+    // every other "you gain life" trigger that previously fired on opponent
+    // life-gain because `valid_target` was None.
+    #[test]
+    fn trigger_you_gain_life_scopes_to_controller() {
+        let def = parse_trigger_line(
+            "Whenever you gain life, target opponent loses that much life.",
+            "Vito, Thorn of the Dusk Rose",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_gain_life_pridemate_scopes_to_controller() {
+        let def = parse_trigger_line(
+            "Whenever you gain life, put a +1/+1 counter on this creature.",
+            "Ajani's Pridemate",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // Negative test: "an opponent gains life" must remain opponent-scoped, not
+    // pick up `Controller` from the "you gain life" fast-path.
+    #[test]
+    fn trigger_opponent_gains_life_scopes_to_opponent() {
+        let def = parse_trigger_line(
+            "Whenever an opponent gains life, you gain that much life.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    // Negative test: "a player gains life" (no scope qualifier) must accept any
+    // player. The subject-bearing handler stores the parsed subject filter, which
+    // for "a player" is the unscoped player filter.
+    #[test]
+    fn trigger_a_player_gains_life_unscoped() {
+        let def = parse_trigger_line("Whenever a player gains life, draw a card.", "Some Card");
+        assert_eq!(def.mode, TriggerMode::LifeGained);
+        // Whatever filter the subject parser produces for "a player", the key
+        // invariant is that it is NOT scoped to Controller (which would silently
+        // restrict to the source's controller).
+        assert_ne!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
     #[test]
     fn trigger_only_during_your_turn() {
         let def = parse_trigger_line(
@@ -6005,6 +6078,55 @@ mod tests {
             "Haliya, Guided by Light",
         );
         assert_eq!(result, "Whenever ~ or another creature enters");
+    }
+
+    /// CR 700.6: Arbaaz Mir's "Whenever ~ or another nontoken historic
+    /// permanent you control enters" must parse cleanly into a ChangesZone
+    /// trigger whose `valid_card` is an `Or { SelfRef, Typed[Permanent,
+    /// Non(Token), controller=You, [Historic, Another]] }`. Regression for
+    /// the previously-Unknown trigger phrase.
+    #[test]
+    fn trigger_self_or_another_nontoken_historic_permanent_arbaaz() {
+        use crate::types::ability::{FilterProp, TypeFilter};
+        let def = parse_trigger_line(
+            "Whenever Arbaaz Mir or another nontoken historic permanent you control enters, Arbaaz Mir deals 1 damage to each opponent and you gain 1 life.",
+            "Arbaaz Mir",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        let TargetFilter::Or { ref filters } = def.valid_card.as_ref().expect("valid_card present")
+        else {
+            panic!("Expected Or filter, got {:?}", def.valid_card);
+        };
+        assert_eq!(filters.len(), 2, "expected 2-leg Or, got {filters:#?}");
+        assert_eq!(filters[0], TargetFilter::SelfRef);
+        let TargetFilter::Typed(ref tf) = filters[1] else {
+            panic!("Expected Typed second leg, got {:?}", filters[1]);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Permanent),
+            "expected Permanent in {:?}",
+            tf.type_filters,
+        );
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                    "Token".to_string()
+                )))),
+            "expected Non(Subtype(Token)) in {:?}",
+            tf.type_filters,
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Historic),
+            "expected Historic in {:?}",
+            tf.properties,
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "expected Another in {:?}",
+            tf.properties,
+        );
     }
 
     #[test]
@@ -7230,7 +7352,7 @@ mod tests {
 
     #[test]
     fn trigger_you_draw_a_card_scopes_to_controller() {
-        // CR 120.1 + CR 603.2: Sheoldred's first trigger must scope to the
+        // CR 121.1 + CR 603.2: Sheoldred's first trigger must scope to the
         // controller so it does not fire on opponent draws.
         let def = parse_trigger_line(
             "Whenever you draw a card, you gain 2 life.",
@@ -8482,6 +8604,89 @@ mod tests {
         assert!(matches!(*exec.effect, Effect::CopyTokenOf { .. }));
     }
 
+    /// CR 508.4 + CR 614.1 — Kaalia of the Vast: the inline-tail patcher in
+    /// `try_parse_put_zone_change` must lift "tapped and attacking that
+    /// opponent" onto the produced `Effect::ChangeZone`, setting both
+    /// `enter_tapped` and `enters_attacking`.
+    #[test]
+    fn trigger_attacks_inline_tail_kaalia_tapped_and_attacking() {
+        let def = parse_trigger_line(
+            "Whenever Kaalia attacks an opponent, you may put an Angel, Demon, or Dragon creature card from your hand onto the battlefield tapped and attacking that opponent.",
+            "Kaalia of the Vast",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let exec = def.execute.as_ref().expect("expected execute");
+        match &*exec.effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Battlefield);
+                assert!(*enter_tapped, "expected enter_tapped");
+                assert!(*enters_attacking, "expected enters_attacking");
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Ilharg / Preeminent Captain bare form: tail without a
+    /// trailing player phrase. Both flags must still be set.
+    #[test]
+    fn trigger_attacks_inline_tail_ilharg_bare_tapped_and_attacking() {
+        let def = parse_trigger_line(
+            "Whenever Ilharg attacks, you may put a creature card from your hand onto the battlefield tapped and attacking.",
+            "Ilharg, the Raze-Boar",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let exec = def.execute.as_ref().expect("expected execute");
+        match &*exec.effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Battlefield);
+                assert!(*enter_tapped);
+                assert!(*enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Negative regression for the existing separate-sentence
+    /// patcher (`ContinuationAst::EntersTappedAttacking`). Stangg / Shark
+    /// Shredder / Thousand-Faced Shadow style "It enters tapped and attacking"
+    /// in a follow-on sentence must continue to set both flags on the prior
+    /// effect — the inline-tail patcher must not interfere.
+    #[test]
+    fn trigger_separate_sentence_patcher_still_sets_both_flags() {
+        // Synthetic Stangg-style: a token effect followed by a separate
+        // "It enters tapped and attacking" sentence patcher.
+        let def = parse_trigger_line(
+            "When this creature enters, create a 3/3 red Cat creature token. It enters tapped and attacking.",
+            "Stangg-Style Test",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        let exec = def.execute.as_ref().expect("expected execute");
+        match &*exec.effect {
+            Effect::Token {
+                tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(*tapped, "separate-sentence patcher must set tapped");
+                assert!(
+                    *enters_attacking,
+                    "separate-sentence patcher must set enters_attacking"
+                );
+            }
+            other => panic!("expected Token, got {other:?}"),
+        }
+    }
+
     #[test]
     fn cast_variant_paid_sneak_condition() {
         // CR 702.190a: "if its sneak cost was paid" → CastVariantPaid { variant: Sneak }
@@ -9241,7 +9446,7 @@ mod tests {
 
     #[test]
     fn trigger_time_counter_removed_exile() {
-        // CR 121.6: "a time counter is removed from ~ while it's exiled"
+        // CR 122.1: "a time counter is removed from ~ while it's exiled"
         let def = parse_trigger_line(
             "Whenever a time counter is removed from ~ while it's exiled, you may cast a copy of ~ without paying its mana cost.",
             "Rift Bolt",
@@ -9253,7 +9458,7 @@ mod tests {
 
     #[test]
     fn trigger_counter_removed_no_zone_constraint() {
-        // CR 121.6: "a time counter is removed from ~" without zone constraint.
+        // CR 122.1: "a time counter is removed from ~" without zone constraint.
         let def = parse_trigger_line(
             "Whenever a time counter is removed from ~, deal 1 damage to any target.",
             "Test Suspend Card",

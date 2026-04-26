@@ -87,13 +87,65 @@ function formatQuantity(q: QuantityExpr | number | undefined, fallback = 1): str
   }
 }
 
+// QuantityRef → English noun phrase for inline cost labels ("Pay <q> life",
+// "Discard <q> card(s)"). The engine's `QuantityRef` enum has 50+ variants;
+// only the ones that actually appear in resolved-cost contexts are listed
+// here. Variants not listed fall through to a humanized form of the variant
+// name (e.g. "TargetPower" → "target power") rather than literal "X" — that
+// keeps the UI debuggable when a new variant ships before this map is
+// updated, while still flagging it as a polish gap during review.
+//
+// The architecturally correct long-term fix is engine-side: have the engine
+// emit a `display_label` field on each `QuantityRef` payload so the frontend
+// stops curating this list. Tracked as a follow-up alongside the parser-side
+// `display_name` work.
 function formatQuantityRef(ref: { type: string; [key: string]: unknown }): string {
   switch (ref.type) {
+    // Controller-relative scalar references
     case "HandSize": return "cards in your hand";
     case "LifeTotal": return "your life total";
     case "GraveyardSize": return "cards in your graveyard";
     case "StartingLifeTotal": return "starting life total";
-    default: return "X";
+    case "LifeAboveStarting": return "life above your starting total";
+    case "LifeLostThisTurn": return "life you lost this turn";
+    case "LifeGainedThisTurn": return "life you gained this turn";
+    case "OpponentLifeLostThisTurn": return "life an opponent lost this turn";
+    // Source-object references
+    case "SelfPower": return "this creature's power";
+    case "SelfToughness": return "this creature's toughness";
+    // Target-object references
+    case "TargetPower": return "target's power";
+    case "TargetLifeTotal": return "target's life total";
+    case "AnyCountersOnTarget": return "counters on target";
+    // Per-turn aggregates
+    case "TurnsTaken": return "turns taken";
+    case "SpellsCastThisTurn": return "spells cast this turn";
+    case "SpellsCastLastTurn": return "spells cast last turn";
+    case "CreaturesDiedThisTurn": return "creatures that died this turn";
+    case "AttackedThisTurn": return "creatures that attacked this turn";
+    case "DescendedThisTurn": return "permanents that left the battlefield this turn";
+    case "PermanentsLeftBattlefieldThisTurn": return "permanents that left the battlefield this turn";
+    case "NonlandPermanentsLeftBattlefieldThisTurn": return "nonland permanents that left this turn";
+    case "CrimesCommittedThisTurn": return "crimes committed this turn";
+    // Counter / property references
+    case "BasicLandTypeCount": return "basic land types you control";
+    case "TrackedSetSize": return "exiled cards";
+    case "CardsExiledBySource": return "cards exiled by this";
+    case "ExiledFromHandThisResolution": return "cards exiled from hand";
+    case "Speed": return "your speed";
+    case "ChosenNumber": return "the chosen number";
+    case "PreviousEffectAmount": return "the previous amount";
+    case "EventContextAmount": return "the amount";
+    case "EventContextSourcePower": return "the source's power";
+    case "EventContextSourceToughness": return "the source's toughness";
+    case "EventContextSourceManaValue": return "the source's mana value";
+    case "EventContextSourceCostX": return "the source's X";
+    case "Variable": return typeof ref.name === "string" ? ref.name : "X";
+    default:
+      // Humanize the variant name as a debug-grade fallback. PascalCase →
+      // lowercased space-separated form so a new variant looks like a sentence
+      // fragment rather than a code identifier.
+      return ref.type.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
   }
 }
 

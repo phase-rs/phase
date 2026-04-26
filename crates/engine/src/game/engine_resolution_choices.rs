@@ -30,6 +30,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::VoteChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
@@ -335,6 +336,95 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
+        }
+        // CR 701.38: Tally a vote, then either advance to the same voter's
+        // next vote (CR 701.38d), the next voter (CR 101.4), or — if every
+        // voter has voted — fan out the per-choice sub-effects via
+        // `vote::resolve_tally` and drain the post-vote continuation.
+        (
+            WaitingFor::VoteChoice {
+                player,
+                remaining_votes,
+                options,
+                option_labels,
+                remaining_voters,
+                tallies,
+                per_choice_effect,
+                controller,
+                source_id,
+            },
+            GameAction::ChooseOption { choice },
+        ) => {
+            // CR 701.38a: Validate the cast vote. Compare lowercase against
+            // the canonical options list; reject anything else.
+            let lower = choice.to_lowercase();
+            let Some(idx) = options.iter().position(|o| o == &lower) else {
+                return Err(EngineError::InvalidAction(format!(
+                    "Invalid vote '{}'; valid choices are {:?}",
+                    choice, options
+                )));
+            };
+            let mut new_tallies = tallies.clone();
+            new_tallies[idx] += 1;
+            events.push(GameEvent::VoteCast {
+                voter: player,
+                choice: lower,
+                source_id,
+            });
+
+            if remaining_votes > 1 {
+                // CR 701.38d: Same player still has votes to cast.
+                state.waiting_for = WaitingFor::VoteChoice {
+                    player,
+                    remaining_votes: remaining_votes - 1,
+                    options,
+                    option_labels,
+                    remaining_voters,
+                    tallies: new_tallies,
+                    per_choice_effect,
+                    controller,
+                    source_id,
+                };
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
+                // CR 101.4: Advance to the next voter in turn order.
+                state.waiting_for = WaitingFor::VoteChoice {
+                    player: *next_player,
+                    remaining_votes: *next_votes,
+                    options,
+                    option_labels,
+                    remaining_voters: rest.to_vec(),
+                    tallies: new_tallies,
+                    per_choice_effect,
+                    controller,
+                    source_id,
+                };
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                // CR 701.38: All votes cast — resolve per-choice sub-effects,
+                // emit the final tally event, then drain any post-Vote
+                // continuation (e.g., a chained effect).
+                events.push(GameEvent::VoteResolved {
+                    source_id,
+                    tallies: options
+                        .iter()
+                        .cloned()
+                        .zip(new_tallies.iter().copied())
+                        .collect(),
+                });
+                let _ = effects::vote::resolve_tally(
+                    state,
+                    source_id,
+                    controller,
+                    &options,
+                    &per_choice_effect,
+                    &new_tallies,
+                    events,
+                );
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                    state, controller, events,
+                ))
             }
         }
         (
@@ -892,6 +982,7 @@ pub(super) fn handle_resolution_choice(
                             enter_transformed,
                             enter_tapped,
                             controller_override,
+                            &[],
                             events,
                         ) {
                             effects::change_zone::ZoneMoveResult::Done => {

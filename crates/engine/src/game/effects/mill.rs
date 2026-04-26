@@ -13,20 +13,25 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_cards, destination) = match &ability.effect {
+    let (num_cards, destination, target_player) = match &ability.effect {
         Effect::Mill {
-            count, destination, ..
+            count,
+            destination,
+            target,
         } => (
             // CR 107.1b: Resolve with full ability context so `QuantityRef::Variable { "X" }`
             // reads the caster-chosen X from the resolving ability.
             resolve_quantity_with_targets(state, count, ability) as usize,
             *destination,
+            // CR 701.17a + CR 115.1: Mirror Draw/Scry/Surveil — context-ref
+            // target filters (Controller, PostReplacementSourceController,
+            // ParentTargetController, etc.) must consult state slots, not
+            // `ability.targets`, so a Mill sub-ability chained off a Player-
+            // targeted parent does not inherit the parent's chosen player.
+            super::resolve_player_for_context_ref(state, ability, target),
         ),
-        _ => (1, Zone::Graveyard),
+        _ => (1, Zone::Graveyard, ability.controller),
     };
-
-    // CR 701.17a: Find target player, or default to controller (self-mill).
-    let target_player = ability.target_player();
 
     let player = state
         .players

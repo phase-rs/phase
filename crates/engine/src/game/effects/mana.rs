@@ -277,6 +277,21 @@ fn resolve_mana_types_impl(
         // `state.current_trigger_event` at resolution time. If the current
         // event is absent (off-stack resolution) or not a `ManaAdded` event,
         // this produces no mana (CR 106.5 — undefined mana type).
+        //
+        // Per-event single-type model: a `ManaAdded` event carries exactly one
+        // `ManaType`, so this branch produces exactly one mana matching that
+        // type. The engine fires one trigger per `ManaAdded` event, so a land
+        // tapping for {C}{C} produces two triggers and two singletons here —
+        // not one trigger producing `vec![Colorless, Colorless]`. This matches
+        // Vorinclex / Mana Reflex / Dictate of Karametra's "any type that land
+        // produced" semantics where there is no choice to make.
+        //
+        // If a future card requires the player to *choose* among multiple
+        // produced types in a single resolution ("any one type that land
+        // produced"), the resolver must be extended to emit a player choice
+        // rather than reading the singular event type. Add a separate
+        // `ManaProduction::TriggerEventManaTypeChoice` variant before reusing
+        // this branch — silently expanding the vec here would skip the choice.
         ManaProduction::TriggerEventManaType => {
             use crate::types::events::GameEvent;
             match &state.current_trigger_event {

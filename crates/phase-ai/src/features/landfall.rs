@@ -284,6 +284,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         );
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);

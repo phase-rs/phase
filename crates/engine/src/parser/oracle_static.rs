@@ -418,13 +418,43 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
+    // CR 701.38d: "While voting, you may vote an additional time." (Tivit,
+    // Seller of Secrets and the Council's-dilemma extra-vote family.) Built
+    // for the class — covers any phrasing where the controller gets one
+    // additional vote per session. Dispatched via nom so future variants
+    // ("two additional times", "while voting on a Council's dilemma you cast")
+    // can be added as new combinator arms rather than as additional
+    // string-equality checks.
+    {
+        let lower_trim = tp.lower.trim_end_matches('.').trim();
+        let res: nom::IResult<&str, (), nom_language::error::VerboseError<&str>> =
+            nom::combinator::value(
+                (),
+                nom::branch::alt((
+                    nom::bytes::complete::tag("while voting, you may vote an additional time"),
+                    nom::bytes::complete::tag("while voting you may vote an additional time"),
+                )),
+            )
+            .parse(lower_trim);
+        if res.is_ok() {
+            return Some(
+                StaticDefinition::new(StaticMode::GrantsExtraVote)
+                    .affected(TargetFilter::Player)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
     // CR 604.3 + CR 601.2a: "Once during each of your turns, you may cast [filter] from your graveyard."
     if let Some(result) = try_parse_graveyard_cast_permission(&text, &lower) {
         return Some(result);
     }
 
-    // CR 601.2b + CR 118.9a: "You may cast spells from your hand without paying their mana costs."
-    if let Some(result) = try_parse_hand_cast_free_permission(&text, &lower) {
+    // CR 601.2b + CR 118.9a + CR 601.2: Omniscience-class restricted free-cast
+    // static. Optional " from your hand" zone qualifier — Dracogenesis's
+    // "you may cast Dragon spells without paying their mana costs" relies on
+    // CR 601.2's implicit hand zone.
+    if let Some(result) = try_parse_cast_free_permission(&text, &lower) {
         return Some(result);
     }
 
@@ -6228,14 +6258,17 @@ fn inject_keyword_kind_filter_prop(filter: TargetFilter, kind: KeywordKind) -> T
     }
 }
 
-/// CR 601.2b + CR 118.9a: Parse "you may cast spells from your hand without
-/// paying their mana costs" (Omniscience, Tamiyo emblem) and the per-turn
-/// variant "once during each of your turns, you may cast [filter] from your
-/// hand without paying its mana cost" (Zaffai). Continuous static — not a
-/// one-shot effect.
-fn try_parse_hand_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+/// CR 601.2b + CR 118.9a: Parse Omniscience-class restricted free-cast static
+/// abilities — "you may cast [filter] [from your hand]? without paying [its|their]
+/// mana cost[s]?" — covering Omniscience and the Tamiyo, Field Researcher emblem
+/// (no filter, hand qualifier), Zaffai-and-the-Tempests (typed filter, hand
+/// qualifier, once-per-turn frequency), and Dracogenesis (subtype filter, no
+/// zone qualifier — implicit hand per CR 601.2: "To cast a spell is to take it
+/// from where it is (usually the hand)..."). Continuous static — not a one-shot
+/// effect.
+fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
     // CR 601.2b: Prefix determines frequency. `OncePerTurn` (Zaffai) is the
-    // explicit-choice path; `Unlimited` (Omniscience) runs silently.
+    // explicit-choice path; `Unlimited` (Omniscience, Dracogenesis) runs silently.
     let (rest, frequency) = if let Some(r) = nom_tag_lower(
         lower,
         lower,
@@ -6248,14 +6281,31 @@ fn try_parse_hand_cast_free_permission(text: &str, lower: &str) -> Option<Static
             CastFrequency::Unlimited,
         )
     };
-    // Must contain "from your hand" and "without paying"
-    let (filter_text, hand_rest) = nom_primitives::split_once_on(rest, " from your hand")
-        .ok()
-        .map(|(_, pair)| pair)?;
-    // "without paying" must follow "from your hand" — reject unusual word orders
-    if !nom_primitives::scan_contains(hand_rest, "without paying") {
-        return None;
-    }
+
+    // The zone qualifier "from your hand" is optional. CR 601.2 makes the hand
+    // the implicit cast zone, so Dracogenesis's "you may cast Dragon spells
+    // without paying their mana costs" carries the same semantics as Omniscience's
+    // "you may cast spells from your hand without paying their mana costs".
+    //
+    // Both branches must terminate at " without paying" — that token is the
+    // single anchor for the static. The qualified branch keeps a permissive
+    // type-parse (warns on unconsumed remainder) for established Omniscience /
+    // Zaffai / Expertise-cycle shapes; the unqualified branch is strict (rejects
+    // unconsumed remainder) so complex filters like Fires of Invention's
+    // "spells with mana value less than or equal to the number of lands you
+    // control" decline cleanly instead of misparsing as `TargetFilter::Any`.
+    let (filter_text, zone_qualified) = if let Ok((_, (before, hand_rest))) =
+        nom_primitives::split_once_on(rest, " from your hand")
+    {
+        // "without paying" must follow "from your hand" — reject unusual word orders
+        if !nom_primitives::scan_contains(hand_rest, "without paying") {
+            return None;
+        }
+        (before, true)
+    } else {
+        let (_, (before, _)) = nom_primitives::split_once_on(rest, " without paying").ok()?;
+        (before, false)
+    };
 
     // Intentional: "spells" with no qualifier → Any filter (Omniscience) — no warning needed.
     if filter_text == "spells" {
@@ -6281,8 +6331,15 @@ fn try_parse_hand_cast_free_permission(text: &str, lower: &str) -> Option<Static
 
     let (filter, remainder) = parse_type_phrase(&cleaned);
     if !remainder.trim().is_empty() {
+        if !zone_qualified {
+            // Unqualified branch is strict: an unconsumed remainder signals a
+            // complex filter we don't yet model (e.g. Fires of Invention's
+            // dynamic mana-value bound). Decline rather than emit a partial
+            // `Any` filter that would be wrong in a different way.
+            return None;
+        }
         push_warning(format!(
-            "ignored-remainder: '{}' after type parse in cast-from-hand-free",
+            "ignored-remainder: '{}' after type parse in cast-free-permission",
             remainder.trim()
         ));
     }
@@ -9309,7 +9366,7 @@ mod tests {
         // "you may cast ... from your hand" without "without paying" is not a free-cast static
         let text = "You may cast a spell from your hand.";
         let lower = text.to_lowercase();
-        assert!(try_parse_hand_cast_free_permission(text, &lower).is_none());
+        assert!(try_parse_cast_free_permission(text, &lower).is_none());
     }
 
     /// CR 601.2b: Zaffai and the Tempests — once-per-turn cast-from-hand-free.
@@ -9347,7 +9404,54 @@ mod tests {
         // Graveyard branch must decline (zone is hand, not graveyard).
         assert!(try_parse_graveyard_cast_permission(text, &lower).is_none());
         // Hand-free branch must succeed.
-        assert!(try_parse_hand_cast_free_permission(text, &lower).is_some());
+        assert!(try_parse_cast_free_permission(text, &lower).is_some());
+    }
+
+    // CR 601.2 + CR 118.9a: B10 Dracogenesis — Omniscience-class static with
+    // the zone qualifier omitted ("you may cast Dragon spells without paying
+    // their mana costs"). Implicit cast zone defaults to hand per CR 601.2.
+    #[test]
+    fn cast_free_dracogenesis_no_zone_qualifier() {
+        let text = "You may cast Dragon spells without paying their mana costs.";
+        let def = parse_static_line(text).expect("should parse Dracogenesis text");
+        assert_eq!(
+            def.mode,
+            StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+            }
+        );
+        // Dragon subtype filter must survive.
+        let filter = def.affected.expect("should have affected filter");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.get_subtype(), Some("Dragon"));
+            }
+            other => panic!("expected Typed[Subtype: Dragon] for Dracogenesis, got {other:?}"),
+        }
+    }
+
+    // CR 601.2: Unqualified branch must reject filters that `parse_type_phrase`
+    // can't fully consume — Fires of Invention's dynamic-MV filter would
+    // otherwise misparse as `TargetFilter::Any` (full Omniscience). Better to
+    // decline than to silently overgrant casting permission.
+    #[test]
+    fn cast_free_unqualified_rejects_complex_mv_filter() {
+        let text = "You may cast spells with mana value less than or equal to the number of lands you control without paying their mana costs.";
+        let lower = text.to_lowercase();
+        assert!(try_parse_cast_free_permission(text, &lower).is_none());
+    }
+
+    // Negative test: text without "without paying" must not match the
+    // free-cast combinator under either zone-qualifier branch.
+    #[test]
+    fn cast_free_rejects_text_without_without_paying() {
+        let text = "You may cast Dragon spells from your hand.";
+        let lower = text.to_lowercase();
+        assert!(try_parse_cast_free_permission(text, &lower).is_none());
+
+        let text2 = "You may cast Dragon spells.";
+        let lower2 = text2.to_lowercase();
+        assert!(try_parse_cast_free_permission(text2, &lower2).is_none());
     }
 
     // ── Fix 1: Irregular plural subtype normalization ──

@@ -1107,6 +1107,7 @@ impl GameRunner {
             WaitingFor::ChooseDungeonRoom { .. } => "ChooseDungeonRoom",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
+            WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
             WaitingFor::ChooseXValue { .. } => "ChooseXValue",
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",

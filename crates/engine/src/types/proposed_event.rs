@@ -78,7 +78,7 @@ pub struct TokenSpec {
     /// CR 113.3d: Static abilities granted to the token (e.g., "This token
     /// can't block.").
     pub static_abilities: Vec<StaticDefinition>,
-    /// CR 122.1a: Counters placed on the token as it enters the battlefield
+    /// CR 122.6a: Counters placed on the token as it enters the battlefield
     /// (resolved from `QuantityExpr` at propose time).
     pub enter_with_counters: Vec<(String, u32)>,
     /// CR 614.1: Token enters tapped.

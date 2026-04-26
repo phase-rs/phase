@@ -3490,6 +3490,16 @@ pub fn can_activate_ability_now(
     {
         return false;
     }
+    // CR 606.3: A loyalty ability may be activated only if no player has previously
+    // activated a loyalty ability of *that permanent* this turn. The generic
+    // `OnlyOnceEachTurn` activation restriction tracks per `(source_id, ability_index)`,
+    // which is the wrong granularity — it would let each loyalty ability fire once.
+    // Defer to `can_activate_loyalty`, the single authority for the per-permanent gate.
+    if matches!(ability_def.cost, Some(AbilityCost::Loyalty { .. }))
+        && !super::planeswalker::can_activate_loyalty(state, source_id, player)
+    {
+        return false;
+    }
     // CR 302.6 + CR 602.5a: Universal summoning-sickness gate for {T}/{Q} activated
     // abilities on creatures. Applies to every activated ability regardless of Oracle
     // text, so it lives as a structural helper rather than an ActivationRestriction.
@@ -3652,6 +3662,9 @@ pub fn handle_activate_ability(
         if let Some(c) = ability_def.condition.clone() {
             r = r.condition(c);
         }
+        // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
+        // before any branch path that pushes this ability onto the stack.
+        r.ability_index = Some(ability_index);
         r
     };
 
@@ -11530,6 +11543,210 @@ mod tests {
                     .filter(|e| matches!(e.affected, TargetFilter::SpecificObject { id: oid } if oid == id))
                     .count(),
                 0
+            );
+        }
+    }
+
+    // === CR 606.3: Planeswalker per-permanent loyalty gate tests ===
+    //
+    // CR 606.3: "A player may activate a loyalty ability of a permanent they
+    // control any time they have priority and the stack is empty during a
+    // main phase of their turn, but only if no player has previously activated
+    // a loyalty ability of *that permanent* that turn."
+    //
+    // Verifies that `can_activate_ability_now` defers to `can_activate_loyalty`
+    // so the per-permanent gate is honored. Without the dispatch, the generic
+    // `OnlyOnceEachTurn` activation restriction would track per
+    // `(source_id, ability_index)` and incorrectly let each loyalty ability of
+    // a planeswalker activate independently in the same turn.
+    mod loyalty_gate {
+        use super::*;
+        use crate::types::ability::ActivationRestriction;
+
+        /// Build a loyalty ability with the given amount and a non-targeted draw effect
+        /// so target-slot construction never blocks the gate under test. Mirrors
+        /// `apply_loyalty_restrictions`'s production output: AsSorcery + OnlyOnceEachTurn.
+        fn make_loyalty_ability(amount: i32) -> AbilityDefinition {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Loyalty { amount });
+            def.activation_restrictions
+                .push(ActivationRestriction::AsSorcery);
+            def.activation_restrictions
+                .push(ActivationRestriction::OnlyOnceEachTurn);
+            def.sorcery_speed = true;
+            def
+        }
+
+        /// Place a planeswalker on `owner`'s battlefield with the given loyalty and
+        /// abilities. Skips summoning sickness (PWs do not have it; CR 302.6 applies
+        /// only to {T}/{Q} costs anyway).
+        fn add_planeswalker(
+            state: &mut GameState,
+            owner: PlayerId,
+            name: &str,
+            loyalty: u32,
+            abilities: Vec<AbilityDefinition>,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                owner,
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            // CR 306.5b: loyalty IS the count of loyalty counters on the PW.
+            obj.loyalty = Some(loyalty);
+            obj.counters
+                .insert(crate::types::counter::CounterType::Loyalty, loyalty);
+            obj.abilities = Arc::new(abilities);
+            // Entered prior turn — irrelevant for loyalty (no summoning sickness),
+            // but keep it consistent with other PW tests.
+            obj.entered_battlefield_turn = Some(state.turn_number - 1);
+            id
+        }
+
+        /// CR 606.3: After activating loyalty ability A of a planeswalker, every
+        /// other loyalty ability on the *same* planeswalker must be denied for
+        /// the rest of the turn (per-permanent gate, not per-ability-index).
+        #[test]
+        fn second_loyalty_ability_same_pw_same_turn_denied() {
+            let mut state = setup_game_at_main_phase();
+            let pw = add_planeswalker(
+                &mut state,
+                PlayerId(0),
+                "Three-Ability PW",
+                4,
+                vec![
+                    make_loyalty_ability(1),
+                    make_loyalty_ability(-1),
+                    make_loyalty_ability(-3),
+                ],
+            );
+
+            // Pre-activation: all three abilities are activatable.
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), pw, 0),
+                "ability 0 must be activatable before any loyalty activation"
+            );
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), pw, 1),
+                "ability 1 must be activatable before any loyalty activation"
+            );
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), pw, 2),
+                "ability 2 must be activatable before any loyalty activation"
+            );
+
+            // Simulate first-loyalty activation by flipping the per-permanent gate
+            // (handle_activate_loyalty sets this; we exercise the predicate directly).
+            state
+                .objects
+                .get_mut(&pw)
+                .unwrap()
+                .loyalty_activated_this_turn = true;
+
+            // CR 606.3: every remaining loyalty ability on the same PW is denied.
+            assert!(
+                !can_activate_ability_now(&state, PlayerId(0), pw, 0),
+                "CR 606.3: ability 0 must be denied after PW's loyalty already used"
+            );
+            assert!(
+                !can_activate_ability_now(&state, PlayerId(0), pw, 1),
+                "CR 606.3: ability 1 must be denied after PW's loyalty already used"
+            );
+            assert!(
+                !can_activate_ability_now(&state, PlayerId(0), pw, 2),
+                "CR 606.3: ability 2 must be denied after PW's loyalty already used"
+            );
+        }
+
+        /// CR 606.3: The per-permanent gate resets at the start of the controller's
+        /// turn (verified via `loyalty_activation_resets_at_turn_start` in
+        /// `planeswalker.rs`). Reproducing the reset effect here ensures the
+        /// dispatch path re-allows activation once the flag is cleared.
+        #[test]
+        fn loyalty_ability_re_allowed_after_turn_reset() {
+            let mut state = setup_game_at_main_phase();
+            let pw = add_planeswalker(
+                &mut state,
+                PlayerId(0),
+                "PW",
+                4,
+                vec![make_loyalty_ability(1), make_loyalty_ability(-1)],
+            );
+
+            // Mark loyalty as used this turn — both abilities denied.
+            state
+                .objects
+                .get_mut(&pw)
+                .unwrap()
+                .loyalty_activated_this_turn = true;
+            assert!(!can_activate_ability_now(&state, PlayerId(0), pw, 0));
+            assert!(!can_activate_ability_now(&state, PlayerId(0), pw, 1));
+
+            // Simulate turn-start reset (turns.rs:260-261 does this for active player).
+            state
+                .objects
+                .get_mut(&pw)
+                .unwrap()
+                .loyalty_activated_this_turn = false;
+
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), pw, 0),
+                "ability 0 must be activatable again after loyalty_activated_this_turn reset"
+            );
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), pw, 1),
+                "ability 1 must be activatable again after loyalty_activated_this_turn reset"
+            );
+        }
+
+        /// CR 606.3: The gate is per-permanent, not per-controller. Activating a
+        /// loyalty ability on PW1 must not lock out loyalty abilities on PW2.
+        #[test]
+        fn different_planeswalkers_independent() {
+            let mut state = setup_game_at_main_phase();
+            let pw1 = add_planeswalker(
+                &mut state,
+                PlayerId(0),
+                "PW1",
+                4,
+                vec![make_loyalty_ability(1), make_loyalty_ability(-1)],
+            );
+            let pw2 = add_planeswalker(
+                &mut state,
+                PlayerId(0),
+                "PW2",
+                4,
+                vec![make_loyalty_ability(1), make_loyalty_ability(-1)],
+            );
+
+            // Use loyalty on PW1 only.
+            state
+                .objects
+                .get_mut(&pw1)
+                .unwrap()
+                .loyalty_activated_this_turn = true;
+
+            // PW1 fully locked.
+            assert!(!can_activate_ability_now(&state, PlayerId(0), pw1, 0));
+            assert!(!can_activate_ability_now(&state, PlayerId(0), pw1, 1));
+            // PW2 unaffected — both abilities still activatable.
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), pw2, 0),
+                "CR 606.3 is per-permanent: PW2 ability 0 must remain activatable"
+            );
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), pw2, 1),
+                "CR 606.3 is per-permanent: PW2 ability 1 must remain activatable"
             );
         }
     }

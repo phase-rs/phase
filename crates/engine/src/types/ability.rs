@@ -1305,6 +1305,16 @@ pub enum FilterProp {
     /// `FilterProp::Modified` for "modified creature(s)" subjects, analogous
     /// to how `FilterProp::Suspected` models CR 701.60b's "suspected" status.
     Modified,
+    /// CR 700.6: An object is historic if it has the legendary supertype, the
+    /// artifact card type, or the Saga subtype.
+    ///
+    /// Modeled as a first-class typed predicate rather than an `AnyOf`
+    /// composite because CR 700.6 names "historic" as a distinct concept and
+    /// the three legs share a single runtime match arm. Parser dispatch emits
+    /// `FilterProp::Historic` for "historic permanent" / "historic spell" /
+    /// "historic card" subjects, mirroring `FilterProp::Modified` for
+    /// CR 700.9's "modified" predicate.
+    Historic,
     /// Matches objects whose name differs from all objects matching the inner filter
     /// that the evaluating controller controls on the battlefield.
     /// Used for "with a different name than each [type] you control" (e.g. Light-Paws).
@@ -1821,6 +1831,21 @@ pub enum QuantityRef {
     /// CR 119.3: Amount of life any opponent has lost this turn.
     /// Used for "if an opponent lost life this turn" conditions.
     OpponentLifeLostThisTurn,
+    /// CR 119.3 + CR 603.4: Maximum amount of life lost this turn by any single
+    /// player (controller or opponent). Resolves to
+    /// `state.players.iter().map(|p| p.life_lost_this_turn).max()`.
+    ///
+    /// Used for the intervening-if clause "if a player lost N or more life this
+    /// turn" — semantically "any single player has individually lost ≥ N", not
+    /// "the sum of life lost across all players is ≥ N". Y'shtola, Night's
+    /// Blessed and Knight of the Ebon Legion both use this idiom with N=4.
+    ///
+    /// Distinct from `OpponentLifeLostThisTurn` because:
+    /// - The "a player" quantifier covers controller + opponents (not just
+    ///   opponents).
+    /// - The semantic is per-player max (one player crossed the threshold), not
+    ///   cross-player sum.
+    MaxLifeLostThisTurnAcrossPlayers,
     /// CR 122.1: Whether the controller added any counter to any permanent this turn.
     CounterAddedThisTurn,
     /// CR 701.9 + CR 603.4: Whether any opponent of the controller discarded a
@@ -1940,6 +1965,15 @@ pub enum PlayerFilter {
     /// "they [verb]" effects on triggers whose subject is a player (e.g. Firemane
     /// Commando's "another player ... they draw a card").
     TriggeringPlayer,
+    /// CR 120.3 + CR 603.2c: Each opponent other than the player identified by
+    /// `state.current_trigger_event`. Used by "each other opponent" phrasing on
+    /// damage triggers — the triggering opponent has already received the source's
+    /// damage in the same chain (e.g. Hydra Omnivore's "Whenever ~ deals combat
+    /// damage to an opponent, it deals that much damage to each other opponent.").
+    /// The "other" anaphors back to the triggering opponent named in the trigger
+    /// event clause. Falls back to plain `Opponent` semantics when no trigger
+    /// event is in scope (i.e. only excludes the controller).
+    OpponentOtherThanTriggering,
 }
 
 /// An expression that produces an integer for quantity comparisons.
@@ -3091,6 +3125,14 @@ pub enum Effect {
         /// ("put up to one land ...").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         up_to: bool,
+        /// CR 122.1 + CR 614.1c: Counters placed on the moved object as it
+        /// enters its destination zone. Each entry is `(counter_type, count)`.
+        /// Mirrors `Effect::Token.enter_with_counters` and is used by patterns
+        /// like "Put target creature card ... onto the battlefield ... with two
+        /// additional +1/+1 counters on it" (Darkness Crystal) and "exile it
+        /// with three egg counters on it" (Darigaaz Reincarnated).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(String, QuantityExpr)>,
     },
     ChangeZoneAll {
         #[serde(default)]
@@ -3163,6 +3205,19 @@ pub enum Effect {
         #[serde(default)]
         destination: Option<Zone>,
     },
+    /// CR 400.7 + CR 611.2c: Mass-bounce — return every permanent matching
+    /// `target` to its owner's hand (default) or `destination` if set. Mirrors
+    /// `Effect::DestroyAll` / `Effect::PumpAll` / `Effect::TapAll` for the
+    /// "return all/each [filter]" Oracle text class (Evacuation, Devastation
+    /// Tide, Upheaval, Sunderflock, Wash Out, Whelming Wave, Crush of
+    /// Tentacles, Coastal Breach, etc.). The default destination is the
+    /// owner's hand; `Some(Zone::Library)` covers top-of-library variants.
+    BounceAll {
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<Zone>,
+    },
     Explore,
     /// CR 701.44d: Simultaneous multi-permanent explore instruction.
     /// The resolver processes matching permanents one explore at a time in
@@ -3193,6 +3248,36 @@ pub enum Effect {
     Populate,
     /// CR 701.30: Clash with an opponent — reveal top cards, compare mana values.
     Clash,
+    /// CR 701.38: Vote — each player chooses one of the listed options, starting
+    /// with a specified player and proceeding in turn order. After all votes are
+    /// collected, the resolver runs `per_choice_effect[i]` once for each vote
+    /// cast for `choices[i]`. CR 701.38d: A player with multiple votes (granted
+    /// by static "you may vote an additional time") makes those choices at the
+    /// same time they would otherwise have voted.
+    ///
+    /// The starting player defaults to the ability's controller (the canonical
+    /// "Council's dilemma — starting with you" pattern). `per_choice_effect[i]`
+    /// resolves once per vote tallied for `choices[i]` (Tivit's "for each
+    /// evidence vote, investigate" / "for each bribery vote, create a Treasure
+    /// token"). Each per-vote sub-resolution inherits the source ability's
+    /// controller and source object, identical to how `ForEach`-style replicate
+    /// effects fan out.
+    Vote {
+        /// Lowercase choice identifiers ("evidence", "bribery", a creature
+        /// type, etc.). Display capitalization is restored from the original
+        /// Oracle text by the parser before serialization.
+        choices: Vec<String>,
+        /// One sub-effect per choice. `per_choice_effect[i]` resolves once for
+        /// every vote cast for `choices[i]`. Length must equal `choices.len()`
+        /// — the parser is the single authority and the resolver asserts this
+        /// invariant.
+        per_choice_effect: Vec<Box<AbilityDefinition>>,
+        /// CR 101.4 + CR 701.38a: The first voter. `ControllerRef::You` covers
+        /// "starting with you"; other refs cover "starting with the player to
+        /// your left" / "the affected player" if those phrasings ever land.
+        #[serde(default = "default_controller_ref_you")]
+        starting_with: ControllerRef,
+    },
     /// CR 613.4d: Switch a creature's power and toughness. Applied in layer 7d.
     SwitchPT {
         #[serde(default = "default_target_filter_any")]
@@ -3225,6 +3310,16 @@ pub enum Effect {
         /// Twinflame ("…except it has haste") is the canonical example.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extra_keywords: Vec<crate::types::keywords::Keyword>,
+        /// CR 707.9 + CR 707.2: Non-keyword "except" exceptions applied to the
+        /// synthesized token (e.g., Miirym, Sentinel Wyrm: "except the token
+        /// isn't legendary"). Mirrors `BecomeCopy.additional_modifications` so
+        /// the same building block (`become_copy_except.rs::parse_except_body`)
+        /// produces the modifications for both forms. The token-copy resolver
+        /// stamps each modification onto the synthesized token directly (see
+        /// `game/effects/token_copy.rs`), since copiable values for tokens are
+        /// baked in at creation rather than evaluated through the layer system.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_modifications: Vec<ContinuousModification>,
     },
     /// CR 707.2 / CR 613.1a: Become a copy of target permanent.
     /// Sets copiable characteristics at Layer 1.
@@ -3278,7 +3373,10 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 121.5: Put counters from source onto target.
+    /// CR 122.5 + CR 122.8: Put counters from source onto target. CR 122.5 is
+    /// the general "move a counter" rule; CR 122.8 covers the specific case of
+    /// triggered abilities that copy counters off a creature that left the
+    /// battlefield (e.g. dies-trigger "put its counters on…").
     MoveCounters {
         /// Where counters are read from (SelfRef = ability source object).
         #[serde(default = "default_target_filter_self_ref")]
@@ -4090,6 +4188,13 @@ fn default_target_filter_self_ref() -> TargetFilter {
     TargetFilter::SelfRef
 }
 
+/// CR 701.38a + CR 101.4: Default starting voter for `Effect::Vote` is the
+/// ability controller ("starting with you"). Defining this as a free function
+/// (not an enum default) keeps the serde shape stable across schema upgrades.
+fn default_controller_ref_you() -> ControllerRef {
+    ControllerRef::You
+}
+
 impl TargetFilter {
     /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
     /// context references (triggering event participants per CR 603.7c),
@@ -4292,6 +4397,7 @@ impl Effect {
             | Effect::DestroyAll { .. }
             | Effect::TapAll { .. }
             | Effect::UntapAll { .. }
+            | Effect::BounceAll { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::Dig { .. }
             | Effect::PutCounterAll { .. }
@@ -4303,6 +4409,7 @@ impl Effect {
             | Effect::Proliferate
             | Effect::Populate
             | Effect::Clash
+            | Effect::Vote { .. }
             | Effect::Cleanup { .. }
             | Effect::Mana { .. }
             | Effect::RevealTop { .. }
@@ -4406,6 +4513,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Surveil { .. } => "Surveil",
         Effect::Fight { .. } => "Fight",
         Effect::Bounce { .. } => "Bounce",
+        Effect::BounceAll { .. } => "BounceAll",
         Effect::Explore => "Explore",
         Effect::ExploreAll { .. } => "ExploreAll",
         Effect::Investigate => "Investigate",
@@ -4415,6 +4523,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Proliferate => "Proliferate",
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
+        Effect::Vote { .. } => "Vote",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
@@ -4564,6 +4673,7 @@ pub enum EffectKind {
     Surveil,
     Fight,
     Bounce,
+    BounceAll,
     Explore,
     ExploreAll,
     Investigate,
@@ -4573,6 +4683,8 @@ pub enum EffectKind {
     Proliferate,
     Populate,
     Clash,
+    /// CR 701.38: Vote — interactive APNAP-ordered choice with per-choice tally effects.
+    Vote,
     SwitchPT,
     CopySpell,
     CopyTokenOf,
@@ -4723,6 +4835,7 @@ impl From<&Effect> for EffectKind {
             Effect::Surveil { .. } => EffectKind::Surveil,
             Effect::Fight { .. } => EffectKind::Fight,
             Effect::Bounce { .. } => EffectKind::Bounce,
+            Effect::BounceAll { .. } => EffectKind::BounceAll,
             Effect::Explore => EffectKind::Explore,
             Effect::ExploreAll { .. } => EffectKind::ExploreAll,
             Effect::Investigate => EffectKind::Investigate,
@@ -4732,6 +4845,7 @@ impl From<&Effect> for EffectKind {
             Effect::Proliferate => EffectKind::Proliferate,
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
+            Effect::Vote { .. } => EffectKind::Vote,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
@@ -5303,6 +5417,18 @@ pub enum AbilityCondition {
     /// the ability's source object matches the filter. Used by leveler-style cards
     /// (e.g. Figure of Fable) where each activated ability gates on the source's current type.
     SourceMatchesFilter { filter: TargetFilter },
+    /// CR 608.2c + CR 614.1d: "if you control a/no [filter]" — gates sub_ability on whether
+    /// the ability controller controls at least one battlefield permanent matching the
+    /// filter (excluding the source itself). When `negated` is true, the condition is
+    /// satisfied iff the controller controls NO matching permanent. Used by reveal-tribal
+    /// land cycles (Fortified Beachhead, Temple of the Dragon Queen) where the on_decline
+    /// Tap fires only when the controller doesn't already control a [filter] permanent.
+    /// `filter` MUST have its `ControllerRef::You` pre-bound by the parser.
+    ControllerControlsMatching {
+        filter: TargetFilter,
+        #[serde(default)]
+        negated: bool,
+    },
     /// CR 608.2c: "If it's your turn" / "If it's not your turn" — gates sub_ability on
     /// whether the active player is the ability's controller.
     IsYourTurn {
@@ -5338,6 +5464,14 @@ pub enum AbilityCondition {
     /// Used by Daybound/Nightbound ETB initialization: "If it's neither day nor night,
     /// it becomes day as this creature enters."
     DayNightIsNeither,
+    /// CR 603.4: Intervening-if gate for "if this is the [Nth] time this ability has
+    /// resolved this turn". Counter is keyed by `(source_id, ability_index)` and
+    /// incremented at the top of `resolve_ability_chain` (depth 0). The condition is
+    /// satisfied when, after the increment, the per-turn resolution count equals `n`.
+    /// Cleared at end-of-turn cleanup alongside other per-turn counters.
+    /// Used by Omnath, Locus of Creation and the broader nth-resolution class
+    /// (Ashling the Pilgrim, Nissa Resurgent Animist, Teething Wurmlet, etc.).
+    NthResolutionThisTurn { n: u32 },
 }
 
 /// Casting-time facts that flow with a spell from casting through resolution.
@@ -5874,6 +6008,7 @@ impl TriggerDefinition {
 /// Static ability definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaticDefinition {
+    #[serde(deserialize_with = "crate::types::statics::deserialize_static_mode_fwd")]
     pub mode: StaticMode,
     #[serde(default)]
     pub affected: Option<TargetFilter>,
@@ -6434,6 +6569,43 @@ pub enum ContinuousModification {
     RetainPrintedTriggerFromSource {
         source_trigger_index: usize,
     },
+    /// CR 205.4 + CR 707.9d: Add a supertype to the affected object's
+    /// supertypes (e.g., Sarkhan, Soul Aflame: "it's legendary in addition
+    /// to its other types"). Idempotent: pushing an already-present supertype
+    /// is a no-op. Applied at Layer 4 (CR 613.1d) because supertypes are
+    /// types per CR 205.4b.
+    AddSupertype {
+        supertype: Supertype,
+    },
+    /// CR 205.4 + CR 707.9b: Remove a supertype from the affected object
+    /// (e.g., Miirym, Sentinel Wyrm: "except the token isn't legendary").
+    /// Applied at Layer 4 (CR 613.1d). For tokens, the synthesized object's
+    /// `base_card_types.supertypes` is also pruned at the resolver site
+    /// because copiable values for tokens are baked in at creation
+    /// (CR 707.2) rather than re-evaluated layer-by-layer.
+    RemoveSupertype {
+        supertype: Supertype,
+    },
+    /// CR 122.1 + CR 614.1c: Place counters on the entering / synthesized
+    /// object as part of the copy resolution, optionally gated by the
+    /// resolved core type of the entering object (Spark Double: "additional
+    /// +1/+1 counter on it if it's a creature, additional loyalty counter
+    /// if it's a planeswalker").
+    ///
+    /// This variant is NOT a continuous effect — it is consumed at
+    /// resolution time by the BecomeCopy / CopyTokenOf resolvers and never
+    /// reaches `apply_continuous_effect`. The placed counter then interacts
+    /// with the layer system normally (Layer 7c/7d) via the CounterPT
+    /// machinery already in place.
+    AddCounterOnEnter {
+        counter_type: String,
+        count: QuantityExpr,
+        /// `None` = unconditional. `Some(t)` gates the counter on the
+        /// resolved object having `core_type == t` after copy values are
+        /// applied (CR 707.9f-style "if the copy is or has certain
+        /// characteristics").
+        if_type: Option<CoreType>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -6557,6 +6729,13 @@ pub struct ResolvedAbility {
     /// Read during resolution by `QuantityRef::Variable { name: "X" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_x: Option<u32>,
+    /// CR 603.4: Index of the printed ability this resolution came from on the
+    /// source object's ability list. Identifies "this ability" for per-turn
+    /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
+    /// synthesized/runtime-only abilities (prowess, firebending) and activated
+    /// abilities for which nth-resolution gating is not yet wired through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_index: Option<usize>,
 }
 
 impl ResolvedAbility {
@@ -6589,6 +6768,7 @@ impl ResolvedAbility {
             distribution: None,
             player_scope: None,
             chosen_x: None,
+            ability_index: None,
         }
     }
 
@@ -7248,6 +7428,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(1),
@@ -7280,6 +7461,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

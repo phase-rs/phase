@@ -114,6 +114,7 @@ pub mod token_copy;
 pub mod transform_effect;
 pub mod tribute;
 pub mod venture;
+pub mod vote;
 pub mod win_lose;
 
 fn matches_player_scope(
@@ -163,6 +164,17 @@ fn matches_player_scope(
                         .as_ref()
                         .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
                         .is_some_and(|pid| pid == p.id),
+                    // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
+                    // Falls back to plain Opponent semantics when no trigger event is in scope.
+                    PlayerFilter::OpponentOtherThanTriggering => {
+                        if p.id == controller {
+                            return false;
+                        }
+                        let triggering = state.current_trigger_event.as_ref().and_then(|e| {
+                            crate::game::targeting::extract_player_from_event(e, state)
+                        });
+                        triggering.is_none_or(|pid| pid != p.id)
+                    }
                 }
         })
 }
@@ -295,6 +307,7 @@ pub fn resolve_effect(
         Effect::Surveil { .. } => surveil::resolve(state, ability, events),
         Effect::Fight { .. } => fight::resolve(state, ability, events),
         Effect::Bounce { .. } => bounce::resolve(state, ability, events),
+        Effect::BounceAll { .. } => bounce::resolve_all(state, ability, events),
         Effect::Explore => explore::resolve(state, ability, events),
         Effect::ExploreAll { .. } => explore::resolve_all(state, ability, events),
         Effect::Investigate => investigate::resolve(state, ability, events),
@@ -308,6 +321,8 @@ pub fn resolve_effect(
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
+        // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
+        Effect::Vote { .. } => vote::resolve(state, ability, events),
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
@@ -821,6 +836,21 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
+    // CR 603.4: Bump the per-ability per-turn resolution counter at the start of
+    // top-level resolution so that `AbilityCondition::NthResolutionThisTurn`
+    // gates can see the current resolution included in the count. Sub-abilities
+    // (depth > 0) share the parent's count — they belong to the same printed
+    // ability instance. Synthesized/runtime-only abilities (prowess, firebending)
+    // and activated abilities lack an `ability_index` stamp and skip this hook.
+    if depth == 0 {
+        if let Some(idx) = ability.ability_index {
+            *state
+                .ability_resolutions_this_turn
+                .entry((ability.source_id, idx))
+                .or_insert(0) += 1;
+        }
+    }
+
     // CR 608.2e: "Instead" kicker — check if a sub overrides the parent.
     // When condition is met, replace the current ability's effect with the sub's
     // effect, preserving the full resolution flow (tracked sets, continuations).
@@ -1169,6 +1199,12 @@ pub fn resolve_ability_chain(
                     Effect::ChangeZone { destination, .. }
                     | Effect::ChangeZoneAll { destination, .. } => Some(*destination),
                     Effect::ExileTop { .. } => Some(crate::types::zones::Zone::Exile),
+                    // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
+                    // Hand; downstream "those creatures" / "for each of those
+                    // permanents" tracking must filter by the actual landing zone.
+                    Effect::BounceAll { destination, .. } => {
+                        Some(destination.unwrap_or(crate::types::zones::Zone::Hand))
+                    }
                     _ => None,
                 };
                 events[events_before..]
@@ -1712,6 +1748,20 @@ fn evaluate_condition(
                 &crate::game::filter::FilterContext::from_ability(ability),
             )
         }
+        // CR 608.2c + CR 614.1d: "if you control a/no [filter]" — scan the battlefield
+        // for any other permanent owned/controlled by the ability controller matching
+        // `filter`. Excludes the source itself so a Soldier-typed land doesn't satisfy
+        // its own "you control a Soldier" check. `filter` carries `ControllerRef::You`
+        // pre-bound by the parser; FilterContext provides the source binding.
+        AbilityCondition::ControllerControlsMatching { filter, negated } => {
+            let ctx = crate::game::filter::FilterContext::from_ability(ability);
+            let controls_any = state.objects.values().any(|o| {
+                o.zone == crate::types::zones::Zone::Battlefield
+                    && o.id != ability.source_id
+                    && crate::game::filter::matches_target_filter(state, o.id, filter, &ctx)
+            });
+            controls_any != *negated
+        }
         // CR 608.2c: "If it's your turn" — check active player against controller.
         AbilityCondition::IsYourTurn { negated } => {
             (state.active_player == ability.controller) != *negated
@@ -1744,6 +1794,25 @@ fn evaluate_condition(
             .all(|c| evaluate_condition(c, state, ability)),
         // CR 730.2a: True when it's neither day nor night (no designation set yet).
         AbilityCondition::DayNightIsNeither => state.day_night.is_none(),
+        // CR 603.4: "if this is the [Nth] time this ability has resolved this turn".
+        // The counter is bumped at the top of `resolve_ability_chain` (depth 0)
+        // before this evaluator runs, so a freshly-incremented count of `n`
+        // satisfies the condition for the Nth resolution. Abilities without an
+        // `ability_index` stamp (synthesized triggers, activated abilities) never
+        // increment the counter and therefore evaluate as `count == 0`, which
+        // matches no `n >= 1` print.
+        AbilityCondition::NthResolutionThisTurn { n } => {
+            if let Some(idx) = ability.ability_index {
+                let count = state
+                    .ability_resolutions_this_turn
+                    .get(&(ability.source_id, idx))
+                    .copied()
+                    .unwrap_or(0);
+                count == *n
+            } else {
+                false
+            }
+        }
     }
 }
 
@@ -2118,6 +2187,7 @@ mod tests {
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
+                        enter_with_counters: vec![],
                     },
                 )),
                 uses_tracked_set: true,
@@ -2137,6 +2207,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(obj1), TargetRef::Object(obj2)],
             ObjectId(100),
@@ -2185,6 +2256,7 @@ mod tests {
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
+                        enter_with_counters: vec![],
                     },
                 )),
                 uses_tracked_set: false,
@@ -2204,6 +2276,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(obj)],
             ObjectId(100),
@@ -2343,6 +2416,7 @@ mod tests {
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
+                        enter_with_counters: vec![],
                     },
                 )),
                 uses_tracked_set: true,
@@ -2362,6 +2436,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![], // no targets
             ObjectId(100),
@@ -3555,6 +3630,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![TargetRef::Object(permanent)],
             ObjectId(100),
@@ -3600,5 +3676,210 @@ mod tests {
                 _ => panic!("expected PlayFromExile"),
             }
         }
+    }
+
+    // CR 603.4: Runtime tests for `AbilityCondition::NthResolutionThisTurn`.
+
+    /// Build a minimal `ResolvedAbility` with a stamped `ability_index` for
+    /// nth-resolution tracking tests.
+    fn nth_test_ability(source_id: ObjectId, idx: usize) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.ability_index = Some(idx);
+        ability
+    }
+
+    #[test]
+    fn nth_resolution_increments_per_resolution_and_gates_correctly() {
+        // Three sequential resolutions of the same printed ability — only the
+        // matching n-th resolution evaluates true; others evaluate false.
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+        let ability = nth_test_ability(source_id, 0);
+        let mut events = Vec::new();
+
+        // Initial state: counter is 0; n=1 should be false BEFORE any resolution.
+        assert!(
+            !evaluate_condition(
+                &AbilityCondition::NthResolutionThisTurn { n: 1 },
+                &state,
+                &ability
+            ),
+            "before any resolution, n=1 must not match (counter is 0)"
+        );
+
+        // Resolution 1 — counter becomes 1.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            *state
+                .ability_resolutions_this_turn
+                .get(&(source_id, 0))
+                .expect("counter must be present"),
+            1,
+            "first resolution must produce count=1"
+        );
+        assert!(
+            evaluate_condition(
+                &AbilityCondition::NthResolutionThisTurn { n: 1 },
+                &state,
+                &ability
+            ),
+            "n=1 must evaluate true after first resolution"
+        );
+        assert!(
+            !evaluate_condition(
+                &AbilityCondition::NthResolutionThisTurn { n: 2 },
+                &state,
+                &ability
+            ),
+            "n=2 must evaluate false after only one resolution"
+        );
+
+        // Resolution 2 — counter becomes 2.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.ability_resolutions_this_turn[&(source_id, 0)],
+            2,
+            "second resolution must produce count=2"
+        );
+        assert!(
+            !evaluate_condition(
+                &AbilityCondition::NthResolutionThisTurn { n: 1 },
+                &state,
+                &ability
+            ),
+            "n=1 must evaluate false after second resolution"
+        );
+        assert!(
+            evaluate_condition(
+                &AbilityCondition::NthResolutionThisTurn { n: 2 },
+                &state,
+                &ability
+            ),
+            "n=2 must evaluate true after second resolution"
+        );
+
+        // Resolution 3 — counter becomes 3.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(
+            evaluate_condition(
+                &AbilityCondition::NthResolutionThisTurn { n: 3 },
+                &state,
+                &ability
+            ),
+            "n=3 must evaluate true after third resolution"
+        );
+        assert!(
+            !evaluate_condition(
+                &AbilityCondition::NthResolutionThisTurn { n: 2 },
+                &state,
+                &ability
+            ),
+            "n=2 must evaluate false after third resolution"
+        );
+    }
+
+    #[test]
+    fn nth_resolution_counter_is_per_source() {
+        // Two distinct Omnaths must track resolutions independently — each
+        // has its own (source_id, ability_index) key.
+        let mut state = GameState::new_two_player(42);
+        let omnath_a = ObjectId(10);
+        let omnath_b = ObjectId(20);
+        let ability_a = nth_test_ability(omnath_a, 0);
+        let ability_b = nth_test_ability(omnath_b, 0);
+        let mut events = Vec::new();
+
+        // Resolve A twice, B once.
+        resolve_ability_chain(&mut state, &ability_a, &mut events, 0).unwrap();
+        resolve_ability_chain(&mut state, &ability_a, &mut events, 0).unwrap();
+        resolve_ability_chain(&mut state, &ability_b, &mut events, 0).unwrap();
+
+        assert_eq!(state.ability_resolutions_this_turn[&(omnath_a, 0)], 2);
+        assert_eq!(state.ability_resolutions_this_turn[&(omnath_b, 0)], 1);
+    }
+
+    #[test]
+    fn nth_resolution_counter_is_per_ability_index() {
+        // Same source, two distinct printed abilities (different ability_index)
+        // — counters are tracked separately. Mirrors a card with multiple
+        // triggered abilities each gated on its own nth-resolution count.
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+        let ability_idx_0 = nth_test_ability(source_id, 0);
+        let ability_idx_1 = nth_test_ability(source_id, 1);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability_idx_0, &mut events, 0).unwrap();
+        resolve_ability_chain(&mut state, &ability_idx_0, &mut events, 0).unwrap();
+        resolve_ability_chain(&mut state, &ability_idx_1, &mut events, 0).unwrap();
+
+        assert_eq!(state.ability_resolutions_this_turn[&(source_id, 0)], 2);
+        assert_eq!(state.ability_resolutions_this_turn[&(source_id, 1)], 1);
+    }
+
+    #[test]
+    fn nth_resolution_counter_resets_on_turn_start() {
+        // CR 514 + CR 603.4: Per-turn counter clears at start of next turn.
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+        let ability = nth_test_ability(source_id, 0);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.ability_resolutions_this_turn[&(source_id, 0)], 2);
+
+        // Simulate turn boundary by invoking start_next_turn, which is the
+        // canonical reset site for per-turn counters in the engine.
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut state, &mut events);
+
+        assert!(
+            state.ability_resolutions_this_turn.is_empty(),
+            "ability_resolutions_this_turn must be cleared at turn start, got {:?}",
+            state.ability_resolutions_this_turn
+        );
+    }
+
+    #[test]
+    fn nth_resolution_no_index_does_not_increment_or_match() {
+        // Synthesized abilities (prowess, firebending) lack an ability_index.
+        // They must NOT bump the counter and NthResolutionThisTurn must
+        // evaluate false against them (count is implicitly 0 / no key).
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        // ability.ability_index is None by default.
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.ability_resolutions_this_turn.is_empty(),
+            "abilities without ability_index must not register in counter"
+        );
+        assert!(
+            !evaluate_condition(
+                &AbilityCondition::NthResolutionThisTurn { n: 1 },
+                &state,
+                &ability
+            ),
+            "NthResolutionThisTurn must evaluate false when ability lacks an index"
+        );
     }
 }

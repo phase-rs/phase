@@ -110,6 +110,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::VoteChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::BattleProtectorChoice { .. }

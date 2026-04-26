@@ -123,10 +123,23 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
     {
-        let effect_text = extract_replacement_effect(&normalized);
         let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
             .valid_card(TargetFilter::SelfRef)
             .description(text.to_string());
+        // CR 614.1a + CR 122.1: Try the shared exile-anaphor recognizer first
+        // so the self-die branch sees the same prefix/suffix word-order
+        // handling and `with N <type> counter(s) on it` lift as the non-self
+        // `parse_creature_die_exile_replacement` branch. Darigaaz Reincarnated's
+        // "instead exile it with three egg counters on it" routes through
+        // here (self-die `~ would die`), not through the non-self path.
+        if let Some(execute) = self_die_exile_anaphor_execute(&normalized, &text) {
+            def = def.execute(execute);
+            return Some(def);
+        }
+        // Fall through: anaphor didn't match — keep prior coverage for compound
+        // tails like "return it to its owner's hand instead" via the generic
+        // chain parser.
+        let effect_text = extract_replacement_effect(&normalized);
         if let Some(e) = effect_text {
             def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
         }
@@ -364,24 +377,6 @@ fn parse_reveal_land(
     let remainder = after_filter;
     let remainder_lower = remainder.to_lowercase();
 
-    // The tail must be exactly the decline sentence. Accept both "it enters
-    // tapped" (pronoun) and "~ enters tapped" (normalized) variants; trailing
-    // punctuation is tolerated by `trim_end`.
-    let ((), tail) = nom_on_lower(remainder, &remainder_lower, |i| {
-        value(
-            (),
-            (
-                tag(" card from your hand. if you don't, "),
-                alt((tag("~ "), tag("it "))),
-                alt((tag("enters tapped"), tag("enters the battlefield tapped"))),
-            ),
-        )
-        .parse(i)
-    })?;
-    if !tail.trim_end_matches('.').trim().is_empty() {
-        return None;
-    }
-
     // Parse the filter phrase (e.g., "Plains or Island", "Elf") into a TargetFilter.
     // `parse_type_phrase` handles union types via `TargetFilter::Or` and single
     // subtypes via `TargetFilter::Typed`. Reject phrases we cannot classify —
@@ -395,20 +390,35 @@ fn parse_reveal_land(
         return None;
     }
 
+    // The tail dispatches between two grammatical variants:
+    //   (A) Port Town / Gilt-Leaf Palace: "if you don't, ~ enters tapped"
+    //   (B) Tarkir reveal-tribal cycle (Fortified Beachhead, Temple of the Dragon
+    //       Queen): "~ enters tapped unless you revealed a [filter] card this way
+    //       or you control a [filter]"
+    // Variant (B) is rules-correct as a single replacement: the on_decline Tap
+    // is gated by `AbilityCondition::ControllerControlsMatching { negated: true }`,
+    // so the Tap fires only when the controller doesn't already control a
+    // [filter] permanent. The accept-reveal path naturally short-circuits the
+    // on_decline branch (the optional reveal was satisfied), giving the Or
+    // semantics required by CR 614.1d.
+    let tail_variant = parse_reveal_land_tail(remainder, &remainder_lower, &filter)?;
+
     // The accept branch: a RevealFromHand effect that, when resolved, prompts
-    // the controller to pick a matching card or decline. on_decline taps self.
-    let tap_self = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Tap {
-            target: TargetFilter::SelfRef,
-        },
-    );
+    // the controller to pick a matching card or decline. on_decline runs the
+    // tail-specific decline ability (unconditional Tap for variant A, conditional
+    // Tap for variant B).
+    let on_decline = match tail_variant {
+        RevealLandTail::IfYouDontTap => unconditional_tap_self_ability(),
+        RevealLandTail::TappedUnlessRevealedOrControl => {
+            tap_self_unless_controls_matching_ability(&filter)
+        }
+    };
 
     let reveal = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::RevealFromHand {
             filter,
-            on_decline: Some(Box::new(tap_self)),
+            on_decline: Some(Box::new(on_decline)),
         },
     );
 
@@ -417,6 +427,141 @@ fn parse_reveal_land(
             .execute(reveal)
             .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1d: Distinguishes the two grammatical tails of the reveal-land cycle.
+/// The filter-bearing variant carries the disjunction structure into the resolver
+/// via the on_decline ability's condition, not via a new ReplacementCondition.
+enum RevealLandTail {
+    /// "if you don't, ~ enters tapped" — Port Town / Gilt-Leaf Palace cycle.
+    IfYouDontTap,
+    /// "~ enters tapped unless you revealed a [filter] card this way or you
+    /// control a [filter]" — Tarkir Dragonstorm reveal-tribal cycle (Fortified
+    /// Beachhead, Temple of the Dragon Queen).
+    TappedUnlessRevealedOrControl,
+}
+
+/// Parse the tail of a reveal-land Oracle text starting at `" card from your
+/// hand"`. Both grammatical variants share that prefix, so we dispatch on the
+/// remainder via a single `alt()` of nested combinators.
+///
+/// `expected_filter` is the filter parsed from the lead sentence. For the
+/// Tarkir variant we require the post-"or you control" filter phrase to match
+/// the same type — a coherence check that mirrors CR 614.1d (the disjunction
+/// gates the same permanent class).
+fn parse_reveal_land_tail(
+    remainder: &str,
+    remainder_lower: &str,
+    expected_filter: &TargetFilter,
+) -> Option<RevealLandTail> {
+    // Variant (A): "if you don't, [~|it] enters [the battlefield] tapped".
+    // Trailing punctuation (period) is tolerated by `trim_end_matches`.
+    let variant_a = nom_on_lower(remainder, remainder_lower, |i| {
+        value(
+            (),
+            (
+                tag(" card from your hand. if you don't, "),
+                alt((tag("~ "), tag("it "))),
+                alt((tag("enters tapped"), tag("enters the battlefield tapped"))),
+            ),
+        )
+        .parse(i)
+    });
+    if let Some(((), tail)) = variant_a {
+        if tail.trim_end_matches('.').trim().is_empty() {
+            return Some(RevealLandTail::IfYouDontTap);
+        }
+    }
+
+    // Variant (B): "[~|it] enters [the battlefield] tapped unless you revealed
+    // [a|an] " — match through the unless-you-revealed lead, then check the
+    // post-"this way or you control [a|an] " filter against the expected filter.
+    let variant_b = nom_on_lower(remainder, remainder_lower, |i| {
+        value(
+            (),
+            (
+                tag(" card from your hand. "),
+                alt((tag("~ "), tag("it "))),
+                alt((tag("enters tapped"), tag("enters the battlefield tapped"))),
+                tag(" unless you revealed "),
+                alt((tag("a "), tag("an "))),
+            ),
+        )
+        .parse(i)
+    });
+    let ((), after_unless) = variant_b?;
+    let after_unless_lower = after_unless.to_lowercase();
+
+    // Take until " card this way or you control " — between is the first
+    // disjunction filter phrase; it must match `expected_filter` for coherence.
+    let ((), after_first_filter) = nom_on_lower(after_unless, &after_unless_lower, |i| {
+        value(
+            (),
+            take_until::<_, _, VerboseError<&str>>(" card this way or you control "),
+        )
+        .parse(i)
+    })?;
+    let first_filter_consumed = after_unless.len() - after_first_filter.len();
+    let first_filter_phrase = &after_unless[..first_filter_consumed];
+    let (first_filter, first_remainder) = parse_type_phrase(first_filter_phrase.trim());
+    if !first_remainder.trim().is_empty() || first_filter != *expected_filter {
+        return None;
+    }
+
+    // Step past " card this way or you control " then "a "/"an ", and parse
+    // the second disjunction filter phrase up to end-of-string. Both filter
+    // phrases must canonicalize identically.
+    let after_first_filter_lower = after_first_filter.to_lowercase();
+    let ((), after_or) = nom_on_lower(after_first_filter, &after_first_filter_lower, |i| {
+        value(
+            (),
+            (
+                tag(" card this way or you control "),
+                alt((tag("a "), tag("an "))),
+            ),
+        )
+        .parse(i)
+    })?;
+    let second_filter_phrase = after_or.trim().trim_end_matches('.').trim();
+    let (second_filter, second_remainder) = parse_type_phrase(second_filter_phrase);
+    if !second_remainder.trim().is_empty() || second_filter != *expected_filter {
+        return None;
+    }
+
+    Some(RevealLandTail::TappedUnlessRevealedOrControl)
+}
+
+/// Build the unconditional `Tap SelfRef` on_decline used by Port Town / Gilt-Leaf
+/// Palace and the rest of the if-you-don't reveal-land cycle.
+fn unconditional_tap_self_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
+            target: TargetFilter::SelfRef,
+        },
+    )
+}
+
+/// CR 608.2c + CR 614.1d: Build the conditional `Tap SelfRef` on_decline used by
+/// the Tarkir reveal-tribal cycle. The Tap fires only when the controller
+/// doesn't already control a [filter] permanent, encoding the "or you control a
+/// [filter]" disjunction as an AbilityCondition gate on the decline branch.
+/// `filter` is cloned and bound to `ControllerRef::You` so the runtime evaluates
+/// it against the ability controller's permanents.
+fn tap_self_unless_controls_matching_ability(filter: &TargetFilter) -> AbilityDefinition {
+    let bound_filter = inject_controller(filter.clone(), ControllerRef::You);
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .condition(
+        crate::types::ability::AbilityCondition::ControllerControlsMatching {
+            filter: bound_filter,
+            negated: true,
+        },
     )
 }
 
@@ -690,10 +835,28 @@ fn split_on_clone_source_zone(after_copy: &str) -> Option<(&str, &str, Zone)> {
             }
         }
     }
-    let (pos, len, zone) = best?;
-    let type_text = &after_copy[..pos];
-    let suffix = &after_copy[pos + len..];
-    Some((type_text, suffix, zone))
+    if let Some((pos, len, zone)) = best {
+        let type_text = &after_copy[..pos];
+        let suffix = &after_copy[pos + len..];
+        return Some((type_text, suffix, zone));
+    }
+    // CR 614.1c fallback: no explicit zone qualifier means battlefield
+    // (Spark Double's "you may have ~ enter as a copy of a creature or
+    // planeswalker you control, except <body>"; Deceptive Frostkite's
+    // "a creature you control with power 4 or greater, except <body>").
+    // The except clause itself becomes the type/suffix boundary so the
+    // type phrase doesn't absorb the modification text. When no except
+    // clause is present either, treat the entire post-`copy of` text as
+    // the type phrase with an empty suffix.
+    if let Ok((_, (before, _))) = nom_primitives::split_once_on(after_copy, ", except") {
+        let pos = before.len();
+        let type_text = &after_copy[..pos];
+        // Suffix INCLUDES the leading `, except <body>` so `parse_clone_suffix`
+        // → `parse_except_clause` sees the expected `, except ` start.
+        let suffix = &after_copy[pos..];
+        return Some((type_text, suffix, Zone::Battlefield));
+    }
+    Some((after_copy, "", Zone::Battlefield))
 }
 
 /// Attach `FilterProp::InZone { zone }` to a filter produced by `parse_type_phrase`.
@@ -1510,9 +1673,14 @@ fn parse_external_enters_tapped(
     build_external_entry_replacement(subject, original_text, true)
 }
 
-/// CR 614.1a: Parse "If [filter] would die, exile it instead" replacement effects.
-/// Handles non-self creature filters like "another creature", "a nontoken creature
-/// an opponent controls", "a creature an opponent controls".
+/// CR 614.1a: Parse "If [filter] would die, …instead…" replacement effects.
+/// Handles non-self creature filters like "another creature", "a nontoken
+/// creature an opponent controls", "a creature an opponent controls", and
+/// recognizes the exile-anaphor in either word order via
+/// [`parse_exile_anaphor_clause`] (see that function for the prefix vs.
+/// suffix grammar). Compound effects whose verb isn't a bare exile-anaphor
+/// (e.g., "exile that card with an ice counter on it instead", "return it
+/// to its owner's hand instead") fall through to the generic chain parser.
 fn parse_creature_die_exile_replacement(
     norm_lower: &str,
     original_text: &str,
@@ -1560,29 +1728,42 @@ fn parse_creature_die_exile_replacement(
         None
     };
 
-    // Extract the replacement effect after the comma.
-    // "If [filter] would die, exile it instead." → effect is "exile it instead."
-    let after_would_die = &norm_lower[would_die_pos + "would die".len()..].trim_start();
-    let effect_text = after_would_die.strip_prefix(", ")?;
+    // Extract the replacement effect after "would die, " via a nom combinator.
+    // CR 614.1a: Replacement effects use "instead" — both word orders are equivalent:
+    //   suffix form: "exile it instead [.]"  (Void Maw, Valentin, Vren)
+    //   prefix form: "instead exile it [and <continuation>] [.]"  (Darkness Crystal,
+    //                Kalitas, Ravenloft Adventurer, Ravenous Slime, Doctor's Tomb)
+    let after_would_die = &norm_lower[would_die_pos + "would die".len()..];
+    let (effect_lower, _) = preceded(nom_primitives::ws, tag::<_, _, VerboseError<&str>>(", "))
+        .parse(after_would_die)
+        .ok()?;
 
-    // Parse the replacement effect (typically "exile it instead")
-    let effect_text_trimmed = effect_text
-        .strip_suffix('.')
-        .unwrap_or(effect_text)
-        .trim_end_matches(" instead")
-        .trim();
+    // Original-case slice covering the same bytes as effect_lower for chain parsing.
+    let effect_offset = norm_lower.len() - effect_lower.len();
+    let effect_orig = &original_text[effect_offset..];
+    let effect_pair = TextPair::new(effect_orig, effect_lower)
+        .trim_end()
+        .trim_end_matches('.')
+        .trim_end();
 
-    let execute = if effect_text_trimmed == "exile it"
-        || effect_text_trimmed == "exile that card"
-        || effect_text_trimmed == "exile that creature"
-    {
-        // The anaphoric "it"/"that card"/"that creature" refers to the object whose
-        // event is being replaced. In the replacement pipeline, the execute effect's
-        // ChangeZone is used only for zone redirection (destination extraction) —
-        // the affected object is already known from the ProposedEvent. SelfRef is
-        // semantically correct: "exile the same object this replacement is modifying,"
-        // consistent with how ETB-tapped replacements use SelfRef for their Tap execute.
-        AbilityDefinition::new(
+    // Match the exile-anaphor in either word order via nom alt(). The match
+    // also lifts an inline `with N <type> counter(s) on it` modifier into
+    // `enter_with_counters` so callers see counters on the resulting
+    // ChangeZone (Draugr Necromancer's "with an ice counter", Rayami's "with
+    // a blood counter", Darigaaz's "with three egg counters" via the self-die
+    // branch). Compound suffix tails ("and you gain 2 life") are routed
+    // through `parse_effect_chain` as sub-abilities.
+    let anaphor = parse_exile_anaphor_clause(effect_pair);
+
+    let execute = if anaphor.matched {
+        // CR 614.1a: The anaphoric "it" / "that card" / "that creature" refers
+        // to the object whose event is being replaced. In the replacement
+        // pipeline, the execute effect's ChangeZone is used only for zone
+        // redirection (destination extraction) — the affected object is already
+        // known from the ProposedEvent. SelfRef is semantically correct:
+        // "exile the same object this replacement is modifying," consistent
+        // with how ETB-tapped replacements use SelfRef.
+        let mut exile_self = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
                 destination: Zone::Exile,
@@ -1594,15 +1775,32 @@ fn parse_creature_die_exile_replacement(
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                // CR 122.1 + CR 614.1c: enter_with_counters is populated when
+                // the anaphor clause carried a "with N <type> counter(s) on it"
+                // modifier. Empty otherwise.
+                enter_with_counters: anaphor.enter_with_counters,
             },
-        )
+        );
+        // CR 614.6: Trailing clauses (e.g., "and you gain 2 life", "and put a
+        // hit counter on it") are additional effects that resolve as part of
+        // the modified event. Attach them as sub_abilities — the chain parser
+        // strips a leading "and " automatically.
+        let continuation = anaphor.continuation.original.trim();
+        if !continuation.is_empty() {
+            let chain = parse_effect_chain(continuation, AbilityKind::Spell);
+            exile_self = exile_self.sub_ability(chain);
+        }
+        exile_self
     } else {
-        // Generic effect text — parse as effect chain from the original-case text
+        // Fall through: the effect text isn't a bare exile-anaphor clause —
+        // hand the whole tail (with `instead` intact) to the chain parser.
+        // This preserves prior coverage for compound effects like
+        // "return it to its owner's hand instead" (Necromancer's Magemark).
         let orig_effect =
             if let Ok((_, (_, after))) = nom_primitives::split_once_on(original_text, ", ") {
                 after.trim()
             } else {
-                effect_text_trimmed
+                anaphor.continuation.original.trim()
             };
         parse_effect_chain(orig_effect, AbilityKind::Spell)
     };
@@ -1615,6 +1813,157 @@ fn parse_creature_die_exile_replacement(
         def = def.condition(cond);
     }
     Some(def)
+}
+
+/// CR 614.1a: Match the exile-anaphor clause in either word order, returning
+/// the continuation text after the anaphor and whether a match occurred.
+///
+/// Recognizes both equivalent phrasings:
+///   * **suffix form** — `"exile <anaphor> instead"` (Void Maw, Valentin, Vren)
+///   * **prefix form** — `"instead exile <anaphor>"` (Darkness Crystal, Kalitas,
+///     Ravenloft Adventurer, Ravenous Slime, Doctor's Tomb)
+///
+/// The anaphor is one of `"exile it"`, `"exile that card"`, `"exile that
+/// creature"`. Any text remaining after the matched clause (e.g.,
+/// `" and you gain 2 life"`) is returned as the continuation `TextPair` for
+/// downstream chain parsing.
+///
+/// Returns `(continuation, true)` when a clause matched (continuation = post-
+/// anaphor remainder). Returns `(input, false)` when the leading content does
+/// not match — the caller falls through to a generic `parse_effect_chain` on
+/// the unmodified text, preserving coverage for compound effects like
+/// `"exile that card with an ice counter on it instead"` (Draugr, Rayami) or
+/// `"return it to its owner's hand instead"` (Necromancer's Magemark).
+/// Outcome of `parse_exile_anaphor_clause`: continuation slice for any
+/// trailing `and <effect>` clause, plus whether the anaphor matched and
+/// (optionally) `enter_with_counters` lifted from a `with N <type> counter(s)
+/// on it` modifier sandwiched between the anaphor and `instead` / end-of-input.
+struct ExileAnaphorMatch<'a> {
+    continuation: TextPair<'a>,
+    matched: bool,
+    enter_with_counters: Vec<(String, QuantityExpr)>,
+}
+
+fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> {
+    use nom::sequence::terminated;
+
+    let lower = input.lower;
+    let exile_anaphor = || {
+        alt((
+            tag::<_, _, VerboseError<&str>>("exile it"),
+            tag("exile that card"),
+            tag("exile that creature"),
+        ))
+    };
+
+    // Optional `with N <type> counter(s) on it` modifier between the anaphor
+    // and the `instead` / end-of-input. Mirrors `Token.enter_with_counters`
+    // — see `parse_counter_suffix_body_combinator` in `oracle_effect/mod.rs`.
+    // The leading space is consumed here so the body combinator sees a clean
+    // input starting with the count.
+    let with_counters = || {
+        preceded(
+            tag::<_, _, VerboseError<&str>>(" with "),
+            crate::parser::oracle_effect::parse_counter_suffix_body_combinator,
+        )
+    };
+
+    // Try prefix form first: "instead exile <anaphor> [with N counters on it]".
+    // Then suffix form:    "exile <anaphor> [with N counters on it] instead".
+    // The body shape is unified: the `with-counters` slot is optional in both
+    // word orders.
+    let parsed: nom::IResult<&str, Option<(String, QuantityExpr)>, VerboseError<&str>> = alt((
+        // Prefix: "instead exile <anaphor> [with N counter(s) on it]"
+        preceded(
+            tag("instead "),
+            preceded(exile_anaphor(), nom::combinator::opt(with_counters())),
+        ),
+        // Suffix: "exile <anaphor> [with N counter(s) on it] instead"
+        terminated(
+            preceded(exile_anaphor(), nom::combinator::opt(with_counters())),
+            tag(" instead"),
+        ),
+    ))
+    .parse(lower);
+
+    match parsed {
+        Ok((rest, counters_opt)) => {
+            // Compute the byte offset where the continuation starts.
+            let consumed = lower.len() - rest.len();
+            let (_, continuation) = input.split_at(consumed);
+            ExileAnaphorMatch {
+                continuation,
+                matched: true,
+                enter_with_counters: counters_opt.into_iter().collect(),
+            }
+        }
+        Err(_) => ExileAnaphorMatch {
+            continuation: input,
+            matched: false,
+            enter_with_counters: Vec::new(),
+        },
+    }
+}
+
+/// CR 614.1a + CR 122.1: For the self-die `~ would die` branch, try to
+/// recognize the exile-anaphor clause (with optional `with N <type> counter(s)
+/// on it` modifier) on the post-`, ` slice and build a `ChangeZone`-to-Exile
+/// execute ability with the counters lifted onto `enter_with_counters`.
+///
+/// Compound trailing clauses ("and you gain 2 life") are routed through
+/// `parse_effect_chain` as sub-abilities, mirroring
+/// `parse_creature_die_exile_replacement` for the non-self path.
+fn self_die_exile_anaphor_execute(
+    normalized: &str,
+    original_text: &str,
+) -> Option<AbilityDefinition> {
+    // Find the boundary `, ` that separates "If ~ would die" from the
+    // replacement effect text.
+    let (_, (_before, after_norm)) = nom_primitives::split_once_on(normalized, ", ").ok()?;
+    let after_norm_lower = after_norm.to_lowercase();
+
+    // Compute the matching slice on the original (un-normalized) text so the
+    // continuation TextPair preserves original case for downstream chain
+    // parsing. The original may differ from `normalized` in case but lengths
+    // match for the suffix portion.
+    let after_orig =
+        if let Ok((_, (_, after_orig))) = nom_primitives::split_once_on(original_text, ", ") {
+            after_orig
+        } else {
+            return None;
+        };
+
+    let effect_pair = TextPair::new(after_orig, &after_norm_lower)
+        .trim_end()
+        .trim_end_matches('.')
+        .trim_end();
+
+    let anaphor = parse_exile_anaphor_clause(effect_pair);
+    if !anaphor.matched {
+        return None;
+    }
+
+    let mut exile_self = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            origin: None,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: anaphor.enter_with_counters,
+        },
+    );
+    let continuation = anaphor.continuation.original.trim();
+    if !continuation.is_empty() {
+        let chain = parse_effect_chain(continuation, AbilityKind::Spell);
+        exile_self = exile_self.sub_ability(chain);
+    }
+    Some(exile_self)
 }
 
 /// Parse graveyard-destination zone-change replacements (CR 614.6).
@@ -1725,6 +2074,7 @@ fn parse_graveyard_exile_replacement(
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         },
     );
 
@@ -3492,6 +3842,159 @@ mod tests {
         assert!(matches!(filter, TargetFilter::Typed(_)));
     }
 
+    /// CR 614.1d + CR 701.20a: Tarkir Dragonstorm reveal-tribal land cycle —
+    /// Fortified Beachhead. The disjunction "tapped unless revealed [filter]
+    /// this way OR you control [filter]" is encoded as a single replacement:
+    /// the on_decline Tap is gated by ControllerControlsMatching{filter,
+    /// negated:true}, so the decline branch only taps when the controller
+    /// doesn't already control a matching permanent. The accept-reveal path
+    /// short-circuits the on_decline entirely (via reveal_from_hand's pending
+    /// continuation drop on pick), giving the second OR arm semantically.
+    #[test]
+    fn reveal_land_fortified_beachhead_tarkir_disjunction() {
+        let def = parse_replacement_line(
+            "As Fortified Beachhead enters, you may reveal a Soldier card from your hand. Fortified Beachhead enters tapped unless you revealed a Soldier card this way or you control a Soldier.",
+            "Fortified Beachhead",
+        )
+        .expect("Tarkir reveal-tribal land must parse");
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+
+        let execute = def.execute.as_ref().unwrap();
+        let (filter, on_decline) = match &*execute.effect {
+            Effect::RevealFromHand { filter, on_decline } => (filter, on_decline),
+            other => panic!("expected RevealFromHand, got {other:?}"),
+        };
+        // Sentence-1 reveal filter: Soldier (single-subtype Typed).
+        match filter {
+            TargetFilter::Typed(tf) => assert!(tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Soldier"))),
+            other => panic!("expected Typed Soldier filter, got {other:?}"),
+        }
+
+        // Sentence-2 conditional Tap: gated by ControllerControlsMatching{Soldier,
+        // negated:true} — Tap fires only when controller controls no Soldier.
+        let decline = on_decline.as_ref().expect("on_decline must be present");
+        assert!(matches!(
+            *decline.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let cond = decline
+            .condition
+            .as_ref()
+            .expect("Tarkir variant on_decline must carry a condition");
+        match cond {
+            crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                filter: cond_filter,
+                negated,
+            } => {
+                assert!(*negated, "Tap is suppressed when controller has matching");
+                // Coherence check: condition filter has You-bound and Soldier subtype.
+                match cond_filter {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Soldier")));
+                    }
+                    other => panic!("expected Typed Soldier condition filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ControllerControlsMatching, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1d + CR 701.20a: Tarkir Dragonstorm — Temple of the Dragon Queen
+    /// covers the Dragon-tribal printing of the cycle. Verifies the pattern
+    /// scales across subtypes by parsing a different filter than Beachhead.
+    #[test]
+    fn reveal_land_temple_dragon_queen_tarkir_disjunction() {
+        let def = parse_replacement_line(
+            "As Temple of the Dragon Queen enters, you may reveal a Dragon card from your hand. Temple of the Dragon Queen enters tapped unless you revealed a Dragon card this way or you control a Dragon.",
+            "Temple of the Dragon Queen",
+        )
+        .expect("Temple of the Dragon Queen must parse");
+
+        let execute = def.execute.as_ref().unwrap();
+        let on_decline = match &*execute.effect {
+            Effect::RevealFromHand { on_decline, .. } => on_decline,
+            other => panic!("expected RevealFromHand, got {other:?}"),
+        };
+        let decline = on_decline.as_ref().unwrap();
+        match decline.condition.as_ref() {
+            Some(crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                filter,
+                negated,
+            }) => {
+                assert!(*negated);
+                match filter {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dragon")));
+                    }
+                    other => panic!("expected Typed Dragon filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ControllerControlsMatching, got {other:?}"),
+        }
+    }
+
+    /// Regression: Port Town (and the rest of the if-you-don't reveal-land
+    /// cycle) must continue to emit an unconditional Tap on_decline. The
+    /// Tarkir-variant tail recognizer must not fire on the older grammar.
+    #[test]
+    fn reveal_land_port_town_unchanged_after_tarkir_extension() {
+        let def = parse_replacement_line(
+            "As Port Town enters, you may reveal a Plains or Island card from your hand. If you don't, Port Town enters tapped.",
+            "Port Town",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        let on_decline = match &*execute.effect {
+            Effect::RevealFromHand { on_decline, .. } => on_decline,
+            other => panic!("expected RevealFromHand, got {other:?}"),
+        };
+        let decline = on_decline.as_ref().unwrap();
+        // No condition gates the Tap — Port Town's on_decline runs unconditionally.
+        assert!(
+            decline.condition.is_none(),
+            "Port Town on_decline must remain unconditional, got {:?}",
+            decline.condition
+        );
+    }
+
+    /// Negative: a mismatched filter pair ("reveal a Soldier ... or you control
+    /// a Dragon") must NOT be accepted as a Tarkir variant — the parser bails
+    /// rather than synthesize a coherently-typed disjunction from incoherent
+    /// text, preserving the existing fallback path for unrecognized tails.
+    #[test]
+    fn reveal_land_tarkir_rejects_mismatched_filter_pair() {
+        let def = parse_replacement_line(
+            "As Test Land enters, you may reveal a Soldier card from your hand. Test Land enters tapped unless you revealed a Soldier card this way or you control a Dragon.",
+            "Test Land",
+        );
+        // Falls through to the generic enters-tapped-unless fallback (Unrecognized
+        // condition) rather than emitting a malformed RevealFromHand.
+        let def = def.expect("must still parse via fallback");
+        assert!(
+            !matches!(
+                def.execute.as_ref().unwrap().effect.as_ref(),
+                Effect::RevealFromHand { .. }
+            ),
+            "mismatched filter pair must not be accepted as Tarkir variant",
+        );
+    }
+
     #[test]
     fn as_enters_choose_a_color() {
         let def = parse_replacement_line(
@@ -4001,6 +4504,192 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
+    }
+
+    /// CR 614.1a — prefix-form `instead exile it` mirrors the suffix-form
+    /// `exile it instead`. The Darkness Crystal is the canonical print and
+    /// chains `you gain 2 life` after `and` as a sub-ability.
+    #[test]
+    fn the_darkness_crystal_prefix_instead_exile_it() {
+        let def = parse_replacement_line(
+            "If a nontoken creature an opponent controls would die, instead exile it and you gain 2 life.",
+            "The Darkness Crystal",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        // The "and you gain 2 life" continuation must be attached as a sub_ability.
+        let sub = execute.sub_ability.as_ref().expect("expected sub_ability");
+        assert!(matches!(
+            *sub.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        // valid_card: nontoken creature, opponent-controlled.
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a — prefix-form with `exile that card` anaphor variant. Kalitas
+    /// chains a Token follow-up after `and`.
+    #[test]
+    fn kalitas_prefix_instead_exile_that_card() {
+        let def = parse_replacement_line(
+            "If a nontoken creature an opponent controls would die, instead exile that card and create a 2/2 black Zombie creature token.",
+            "Kalitas, Traitor of Ghet",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().expect("expected sub_ability");
+        assert!(
+            matches!(*sub.effect, Effect::Token { .. }),
+            "expected Token, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// CR 614.1a — bare prefix-form (no `and` continuation). Confirms the
+    /// continuation slot remains empty when there is no trailing clause.
+    #[test]
+    fn prefix_instead_exile_it_no_continuation() {
+        let def = parse_replacement_line(
+            "If another creature would die, instead exile it.",
+            "Hypothetical Card",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        assert!(
+            execute.sub_ability.is_none(),
+            "expected no sub_ability for bare anaphor"
+        );
+    }
+
+    /// CR 614.1a — prefix-form with `exile that creature` anaphor variant.
+    #[test]
+    fn prefix_instead_exile_that_creature() {
+        let def = parse_replacement_line(
+            "If a creature would die, instead exile that creature.",
+            "Hypothetical Card",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    /// CR 614.1a + CR 122.1 — Draugr Necromancer / Rayami class: the
+    /// suffix-form exile-anaphor with an inline `with N <type> counter(s) on
+    /// it` modifier lifts to `Effect::ChangeZone.enter_with_counters` so the
+    /// resolver stamps an "ice"/"blood" counter on the exiled card.
+    #[test]
+    fn parse_enter_with_counters_on_change_zone_destroy_to_exile() {
+        let def = parse_replacement_line(
+            "If a nontoken creature an opponent controls would die, exile that card with an ice counter on it instead.",
+            "Draugr Necromancer",
+        )
+        .expect("expected non-empty ReplacementDefinition for Draugr-shape die-replacement");
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+        let execute = def.execute.as_ref().expect("expected execute populated");
+        match &*execute.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert_eq!(
+                    enter_with_counters,
+                    &vec![("ice".to_string(), QuantityExpr::Fixed { value: 1 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a + CR 122.1 — Darigaaz Reincarnated: the self-die `~ would
+    /// die` branch with prefix-form `instead exile it with three egg counters
+    /// on it` lifts to `Effect::ChangeZone.enter_with_counters` (egg, 3) so
+    /// the recurring upkeep loop can find Darigaaz with its egg counters.
+    #[test]
+    fn parse_enter_with_counters_on_self_die_replacement() {
+        let def = parse_replacement_line(
+            "If Darigaaz Reincarnated would die, instead exile it with three egg counters on it.",
+            "Darigaaz Reincarnated",
+        )
+        .expect("expected non-empty ReplacementDefinition for Darigaaz self-die");
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert!(
+            matches!(def.valid_card, Some(TargetFilter::SelfRef)),
+            "self-die replacement must target the source via SelfRef"
+        );
+        let execute = def.execute.as_ref().expect("expected execute populated");
+        match &*execute.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert_eq!(
+                    enter_with_counters,
+                    &vec![("egg".to_string(), QuantityExpr::Fixed { value: 3 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+        // The bare prefix-form has no `and <continuation>` — sub_ability empty.
+        assert!(execute.sub_ability.is_none());
     }
 
     #[test]

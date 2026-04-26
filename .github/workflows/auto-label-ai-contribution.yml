@@ -1,0 +1,118 @@
+name: Auto-label AI-CONTRIBUTOR PRs
+
+# Detect-only labeler for PRs opened via docs/AI-CONTRIBUTOR.md.
+#
+# Fork PRs run with read-only GITHUB_TOKEN under `pull_request`, so they cannot
+# self-apply labels. `pull_request_target` runs in the base repo's context with
+# write permissions, but does NOT check out the PR's code — we only read PR
+# metadata (head ref, body) supplied by the event payload, which is safe.
+#
+# Prerequisite: the two labels below must already exist in the repo.
+# `addLabels` 404s on missing labels, and continue-on-error swallows that
+# silently. One-time setup:
+#
+#   gh label create ai-contribution \
+#     --color 6e5494 \
+#     --description "PR opened via docs/AI-CONTRIBUTOR.md flow"
+#   gh label create needs-maintainer \
+#     --color d93f0b \
+#     --description "AI-contribution PR requires human triage"
+#
+# Failures degrade silently via continue-on-error so a labeler hiccup never
+# blocks a PR.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  label:
+    name: Apply AI-CONTRIBUTOR labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Detect and apply labels
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const head = pr.head?.ref ?? '';
+            const body = pr.body ?? '';
+
+            const isCardBranch = /^card\//.test(head);
+            const hasTemplateSignature =
+              /^##\s+CR references/m.test(body) && /^##\s+Track/m.test(body);
+            const isAiContribution = isCardBranch || hasTemplateSignature;
+
+            if (!isAiContribution) {
+              core.info('Not an AI-CONTRIBUTOR PR; nothing to label.');
+              return;
+            }
+
+            const labels = ['ai-contribution'];
+
+            // Track line — accept "## Track\nDeveloper" (template canonical
+            // form) and inline "Track: Developer" (legacy fallback).
+            const trackMatch = body.match(/(?:^|\n)(?:##\s+Track\s*\n+|Track:\s*)([^\n]+)/i);
+            const track = trackMatch ? trackMatch[1].trim() : '';
+            const isNonDev = /non[-\s]?developer/i.test(track);
+            const isDev = !isNonDev && /developer/i.test(track);
+
+            // Extract the body of a section between `## <heading>` and the
+            // next `## ` (or end of body). `[\s\S]*?` is non-greedy so it
+            // stops at the first following heading; the lookahead allows
+            // either another `## ` heading or end-of-body trailing newlines.
+            const sectionBody = (heading) => {
+              const re = new RegExp(
+                String.raw`##\s+${heading}\s*\n+([\s\S]*?)(?=\n##\s+|\n*$)`,
+                'i'
+              );
+              const m = body.match(re);
+              return m ? m[1] : null;
+            };
+
+            // Conditional-heading "populated" predicate. The template now
+            // ships `None.` as the explicit default for Scope Expansion /
+            // Validation Failures / CI Failures, so any deviation from the
+            // narrow absent set ("None.", "None", "N/A", optionally followed
+            // by HTML-comment guidance) means the contributor wrote real
+            // content and the heading should trigger needs-maintainer.
+            const isAbsent = (raw) => {
+              if (raw === null) return true;
+              // Strip HTML comments (template includes <!-- ... --> guidance
+              // contributors are expected to keep).
+              const stripped = raw.replace(/<!--[\s\S]*?-->/g, '').trim();
+              if (!stripped) return true;
+              return /^(none|n\/a)\.?$/i.test(stripped);
+            };
+
+            const hasPopulated = (heading) => !isAbsent(sectionBody(heading));
+
+            // Verification missing on a Developer-track run is a triage
+            // signal — Step 6 was either skipped or omitted from the report.
+            // Non-dev track legitimately omits Verification (no Rust
+            // toolchain), so don't trigger on absence there.
+            const verificationMissing = isDev && isAbsent(sectionBody('Verification'));
+
+            const needsMaintainer =
+              isNonDev ||
+              hasPopulated('Scope Expansion') ||
+              hasPopulated('Validation Failures') ||
+              hasPopulated('CI Failures') ||
+              verificationMissing;
+
+            if (needsMaintainer) labels.push('needs-maintainer');
+
+            core.info(`Applying labels: ${labels.join(', ')}`);
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              labels,
+            });

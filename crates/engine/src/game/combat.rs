@@ -6,6 +6,7 @@ use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::parser::oracle_target::parse_target;
+use crate::types::ability::StaticDefinition;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -316,6 +317,50 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
     Ok(())
 }
 
+/// Iterate every battlefield `StaticDefinition` whose mode is a block-restriction
+/// (`CantBeBlocked`, `CantBeBlockedExceptBy`, or `CantBeBlockedBy`) AND whose
+/// `affected` filter matches `attacker_id`. Yields `(source, def)` pairs so
+/// callers can build a `FilterContext::from_source(state, source.id)` for the
+/// inner blocker filters on the latter two modes.
+///
+/// CR 509.1b: A blocker declaration is illegal if the attacker is "affected by
+/// any restrictions (effects that say a creature can't block, or that it can't
+/// block unless some condition is met)." The static may live on any
+/// battlefield permanent — most commonly the attacker itself (intrinsic
+/// SelfRef), an Equipment attached to it (CR 301.5a + `FilterProp::EquippedBy`),
+/// or an Aura attached to it (CR 303.4 + `FilterProp::EnchantedBy`) — so this
+/// scan iterates the whole battlefield rather than only the attacker's own
+/// `static_definitions`. CR 604.1 / CR 613.1 condition gating and the
+/// CR 702.26b / CR 114.4 functioning gate are applied via
+/// `battlefield_active_statics`.
+fn block_restriction_statics_against<'a>(
+    state: &'a GameState,
+    attacker_id: ObjectId,
+) -> impl Iterator<Item = (&'a GameObject, &'a StaticDefinition)> + 'a {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter(|(_, def)| {
+            matches!(
+                def.mode,
+                StaticMode::CantBeBlocked
+                    | StaticMode::CantBeBlockedExceptBy { .. }
+                    | StaticMode::CantBeBlockedBy { .. }
+            )
+        })
+        .filter(move |(src, def)| match def.affected.as_ref() {
+            // CR 604.1: a static with no `affected` filter is implicitly about
+            // its own source (intrinsic SelfRef semantics — preserves the
+            // pre-fix behavior of `active_static_definitions(attacker)` for
+            // statics constructed without an explicit filter).
+            None => src.id == attacker_id,
+            Some(filter) => matches_target_filter(
+                state,
+                attacker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ),
+        })
+}
+
 /// Validate blocker declarations per CR 509.1.
 /// Each assignment is (blocker_id, attacker_id).
 pub fn validate_blockers(
@@ -417,49 +462,48 @@ pub fn validate_blockers_for_player(
             .get(&attacker_id)
             .ok_or_else(|| format!("Attacker {:?} not found", attacker_id))?;
 
-        // CantBeBlocked static ability: creature is completely unblockable.
-        // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
-        if super::functioning_abilities::active_static_definitions(state, attacker)
-            .any(|sd| sd.mode == StaticMode::CantBeBlocked)
-        {
-            return Err(format!(
-                "{:?} cannot block {:?} (can't be blocked)",
-                blocker_id, attacker_id
-            ));
-        }
-
-        // CR 509.1b: "can't be blocked except by X" — blocker must match the exception filter.
-        for sd in super::functioning_abilities::active_static_definitions(state, attacker) {
-            if let StaticMode::CantBeBlockedExceptBy { filter } = &sd.mode {
-                let (target_filter, _) = parse_target(filter);
-                if !matches_target_filter(
-                    state,
-                    blocker_id,
-                    &target_filter,
-                    &FilterContext::from_source(state, attacker_id),
-                ) {
+        // CR 509.1b + CR 301.5a + CR 303.4: scan every battlefield static whose
+        // `affected` filter matches the attacker — covers intrinsic
+        // (`SelfRef`), Equipment-granted (`EquippedBy`), and Aura-granted
+        // (`EnchantedBy`) `CantBeBlocked*` modes uniformly. The static's own
+        // source supplies the `FilterContext` so inner filters like "creatures
+        // you control" resolve against the granting permanent's controller.
+        for (src, sd) in block_restriction_statics_against(state, attacker_id) {
+            match &sd.mode {
+                StaticMode::CantBeBlocked => {
                     return Err(format!(
-                        "{:?} cannot block {:?} (can't be blocked except by {})",
-                        blocker_id, attacker_id, filter
+                        "{:?} cannot block {:?} (can't be blocked)",
+                        blocker_id, attacker_id
                     ));
                 }
-            }
-        }
-
-        // CR 509.1b: "can't be blocked by X" — blocker matching the filter is prohibited.
-        for sd in super::functioning_abilities::active_static_definitions(state, attacker) {
-            if let StaticMode::CantBeBlockedBy { filter } = &sd.mode {
-                if matches_target_filter(
-                    state,
-                    blocker_id,
-                    filter,
-                    &FilterContext::from_source(state, attacker_id),
-                ) {
+                StaticMode::CantBeBlockedExceptBy { filter } => {
+                    let (target_filter, _) = parse_target(filter);
+                    if !matches_target_filter(
+                        state,
+                        blocker_id,
+                        &target_filter,
+                        &FilterContext::from_source(state, src.id),
+                    ) {
+                        return Err(format!(
+                            "{:?} cannot block {:?} (can't be blocked except by {})",
+                            blocker_id, attacker_id, filter
+                        ));
+                    }
+                }
+                StaticMode::CantBeBlockedBy { filter }
+                    if matches_target_filter(
+                        state,
+                        blocker_id,
+                        filter,
+                        &FilterContext::from_source(state, src.id),
+                    ) =>
+                {
                     return Err(format!(
                         "{:?} cannot block {:?} (can't be blocked by {filter:?})",
                         blocker_id, attacker_id
                     ));
                 }
+                _ => {}
             }
         }
 
@@ -1501,38 +1545,35 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     }) {
         return false;
     }
-    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating for
-    // CantBeBlocked / CantBeBlockedExceptBy / CantBeBlockedBy.
-    if super::functioning_abilities::active_static_definitions(state, attacker)
-        .any(|sd| sd.mode == StaticMode::CantBeBlocked)
-    {
-        return false;
-    }
-    // CR 509.1b: "can't be blocked except by X" — blocker must match the exception filter.
-    for sd in super::functioning_abilities::active_static_definitions(state, attacker) {
-        if let StaticMode::CantBeBlockedExceptBy { filter } = &sd.mode {
-            let (target_filter, _) = parse_target(filter);
-            if !matches_target_filter(
-                state,
-                blocker_id,
-                &target_filter,
-                &FilterContext::from_source(state, attacker_id),
-            ) {
+    // CR 509.1b + CR 301.5a + CR 303.4: scan every battlefield static whose
+    // `affected` filter matches the attacker — covers intrinsic, Equipment-
+    // granted, and Aura-granted `CantBeBlocked*` uniformly. Mirrors the
+    // declare-blockers validation in `validate_blockers_for_player`.
+    for (src, sd) in block_restriction_statics_against(state, attacker_id) {
+        match &sd.mode {
+            StaticMode::CantBeBlocked => return false,
+            StaticMode::CantBeBlockedExceptBy { filter } => {
+                let (target_filter, _) = parse_target(filter);
+                if !matches_target_filter(
+                    state,
+                    blocker_id,
+                    &target_filter,
+                    &FilterContext::from_source(state, src.id),
+                ) {
+                    return false;
+                }
+            }
+            StaticMode::CantBeBlockedBy { filter }
+                if matches_target_filter(
+                    state,
+                    blocker_id,
+                    filter,
+                    &FilterContext::from_source(state, src.id),
+                ) =>
+            {
                 return false;
             }
-        }
-    }
-    // CR 509.1b: "can't be blocked by X" — blocker matching the filter is prohibited.
-    for sd in super::functioning_abilities::active_static_definitions(state, attacker) {
-        if let StaticMode::CantBeBlockedBy { filter } = &sd.mode {
-            if matches_target_filter(
-                state,
-                blocker_id,
-                filter,
-                &FilterContext::from_source(state, attacker_id),
-            ) {
-                return false;
-            }
+            _ => {}
         }
     }
     for kw in &attacker.keywords {
@@ -2468,6 +2509,169 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
 
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    /// CR 509.1b + CR 301.5a: An Equipment-owned `CantBeBlocked` static must
+    /// propagate to the equipped creature. Mirrors Silver Shroud Costume,
+    /// Whispersilk Cloak, Trailblazer's Boots, etc.
+    #[test]
+    fn equipment_granted_cant_be_blocked_propagates_to_attacker() {
+        use crate::types::ability::{FilterProp, StaticDefinition, TargetFilter, TypedFilter};
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Equipped Creature", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        // Silver Shroud Costume: "Equipped creature can't be blocked."
+        let costume = create_creature(&mut state, PlayerId(0), "Silver Shroud Costume", 0, 0);
+        let costume_obj = state.objects.get_mut(&costume).unwrap();
+        costume_obj.attached_to = Some(attacker.into());
+        costume_obj.static_definitions.push(
+            StaticDefinition::new(StaticMode::CantBeBlocked).affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+            )),
+        );
+
+        // Block declaration should be rejected via global static scan.
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+        // Symbolic per-pair check must agree.
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b: Detaching the Equipment must restore blockability — the
+    /// global scan's `affected` filter no longer matches the attacker.
+    #[test]
+    fn unattached_equipment_does_not_grant_unblockable() {
+        use crate::types::ability::{FilterProp, StaticDefinition, TargetFilter, TypedFilter};
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        // Costume exists but is NOT attached to the attacker (or anything).
+        let costume = create_creature(&mut state, PlayerId(0), "Silver Shroud Costume", 0, 0);
+        state
+            .objects
+            .get_mut(&costume)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBeBlocked).affected(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                )),
+            );
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+        assert!(can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b: A `CantBeBlocked` static on a different battlefield object
+    /// (intrinsic SelfRef) must NOT bleed across to unrelated attackers. The
+    /// global scan still anchors `affected` to the static's own source.
+    #[test]
+    fn intrinsic_cant_be_blocked_on_other_creature_does_not_propagate() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+
+        let mut state = setup();
+        // Two attackers; one has the intrinsic static, the other is plain.
+        let stalker = create_creature(&mut state, PlayerId(0), "Invisible Stalker", 1, 1);
+        state
+            .objects
+            .get_mut(&stalker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlocked).affected(TargetFilter::SelfRef));
+        let bear = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+
+        // Stalker is unblockable.
+        assert!(validate_blockers(&state, &[(blocker, stalker)]).is_err());
+        // Plain Bear remains blockable — Stalker's static does not bleed across.
+        assert!(validate_blockers(&state, &[(blocker, bear)]).is_ok());
+        assert!(can_block_pair(&state, blocker, bear));
+    }
+
+    /// CR 509.1b: Two Equipments granting the same `CantBeBlocked` to the
+    /// attacker must still produce a single rejection — no double-count or
+    /// iterator overflow.
+    #[test]
+    fn multiple_equipments_granting_unblockable_block_correctly() {
+        use crate::types::ability::{FilterProp, StaticDefinition, TargetFilter, TypedFilter};
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Doubly Equipped", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        let make_equipment = |state: &mut GameState, name: &str| -> ObjectId {
+            let id = create_creature(state, PlayerId(0), name, 0, 0);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.attached_to = Some(attacker.into());
+            obj.static_definitions
+                .push(StaticDefinition::new(StaticMode::CantBeBlocked).affected(
+                    TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                    ),
+                ));
+            id
+        };
+        let _e1 = make_equipment(&mut state, "Whispersilk Cloak");
+        let _e2 = make_equipment(&mut state, "Silver Shroud Costume");
+
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 303.4: An Aura-granted `CantBeBlockedBy` (e.g., Snake
+    /// Cult Initiation, Pemmin's Aura-class) must propagate to the enchanted
+    /// creature, with the inner blocker filter resolved against the Aura's
+    /// own controller (CR 109.4).
+    #[test]
+    fn aura_granted_cant_be_blocked_by_propagates_to_enchanted() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Enchanted Creature", 2, 2);
+        let ground_blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let flying_blocker = create_creature(&mut state, PlayerId(1), "Bird", 1, 1);
+        state
+            .objects
+            .get_mut(&flying_blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        // Aura with "enchanted creature can't be blocked by creatures without flying"
+        // — modelled by `CantBeBlockedBy { filter: creatures-without-flying }`.
+        let aura = create_creature(&mut state, PlayerId(0), "Aqueous Form", 0, 0);
+        let aura_obj = state.objects.get_mut(&aura).unwrap();
+        aura_obj.card_types.core_types.push(CoreType::Enchantment);
+        aura_obj.attached_to = Some(attacker.into());
+        // Inner filter: creature without flying (negative keyword filter is
+        // hard to express crisply in tests; use a controller restriction
+        // instead — "can't be blocked by creatures the active player
+        // controls" is structurally identical for the global-scan check).
+        let blocker_filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        aura_obj.static_definitions.push(
+            StaticDefinition::new(StaticMode::CantBeBlockedBy {
+                filter: blocker_filter,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .properties(vec![crate::types::ability::FilterProp::EnchantedBy]),
+            )),
+        );
+
+        // Both blockers controlled by PlayerId(1) — opponent of the Aura's
+        // controller (PlayerId(0)) — so both match `Opponent` from the Aura's
+        // perspective and are prohibited. (Pre-fix: this scan never ran
+        // because the static lives on the Aura, not the attacker.)
+        assert!(validate_blockers(&state, &[(ground_blocker, attacker)]).is_err());
+        assert!(!can_block_pair(&state, ground_blocker, attacker));
+        assert!(validate_blockers(&state, &[(flying_blocker, attacker)]).is_err());
+        assert!(!can_block_pair(&state, flying_blocker, attacker));
     }
 
     #[test]

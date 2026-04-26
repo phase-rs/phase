@@ -954,6 +954,13 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
                 tag("that player lost life this turn"),
             )),
         ),
+        // CR 119.3 + CR 603.4: "a player lost N or more life this turn"
+        // (Y'shtola, Night's Blessed; Knight of the Ebon Legion). The "a
+        // player" quantifier covers controller + opponents; the threshold
+        // semantic is "any single player crossed N", not "sum across
+        // players" — see QuantityRef::MaxLifeLostThisTurnAcrossPlayers
+        // doc comment.
+        parse_player_lost_life_this_turn,
         // CR 701.9 + CR 603.4: "an opponent discarded a card this turn"
         value(
             make_quantity_ge(QuantityRef::OpponentDiscardedCardThisTurn, 1),
@@ -1200,6 +1207,27 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
     // "life this turn" (minimum 1)
     let (rest, _) = tag("life this turn").parse(rest)?;
     Ok((rest, make_quantity_ge(QuantityRef::LifeGainedThisTurn, 1)))
+}
+
+/// CR 119.3 + CR 603.4: Parse "a player lost N or more life this turn".
+///
+/// Y'shtola, Night's Blessed and Knight of the Ebon Legion use this idiom for
+/// the intervening-`if` clause of a phase trigger. The "a player" quantifier
+/// covers controller + opponents (not just opponents), and the per-player max
+/// semantic is enforced by `QuantityRef::MaxLifeLostThisTurnAcrossPlayers`
+/// (one player must individually have lost ≥ N — not the sum across players).
+///
+/// Grammar: `"a player lost " + parse_ge_threshold + "life this turn"`.
+/// Composes through the existing `StaticCondition::QuantityComparison` →
+/// `static_condition_to_trigger_condition` bridge with no new variants.
+fn parse_player_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("a player lost ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let (rest, _) = tag("life this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(QuantityRef::MaxLifeLostThisTurnAcrossPlayers, n),
+    ))
 }
 
 /// Parse "you cast another spell this turn" / "you cast a [type] spell this turn".
@@ -1581,10 +1609,88 @@ fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     ))
 }
 
+/// CR 400.7 + CR 608.2c: Parse "a[n] [type] (is|was) [verb-phrase] this way"
+/// — the noun-anaphoric clause that gates a sub-ability on the LKI of an
+/// object the parent effect just operated on (destroyed, exiled, sacrificed,
+/// returned, discarded, milled, countered, or "put onto the battlefield").
+///
+/// CR 303.4f / CR 301.5b are the host-rules that motivate the present-tense
+/// "is put onto the battlefield this way" variant — Aura/Equipment ETB
+/// continuations that read "If an Equipment is put onto the battlefield
+/// this way, you may attach it to a creature you control"
+/// (Armored Skyhunter, Vault 101: Birthday Party chapters II/III, Quest for
+/// the Holy Relic, Stonehewer Giant). The clause must be recognized so the
+/// chain assembler can wire `forward_result: true` on the parent zone-change
+/// and the runtime can check `state.last_zone_changed_ids` against the
+/// matched type filter.
+///
+/// Composes as four orthogonal axes — article × type-phrase × tense × verb —
+/// so adding a new tense or verb is a single `tag` arm, not an O(N!)
+/// permutation expansion.
+///
+/// Returns `(remainder, type_filter)` where `remainder` is the input after
+/// the consumed " this way" suffix (caller is responsible for stripping any
+/// trailing punctuation like ", " or "."). On `wasn't`/`was not` the negation
+/// is exposed via `negated`.
+pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+    // article: "a " | "an "
+    let (rest, _) = parse_article(input)?;
+
+    // type phrase — handled by the shared helper which already covers
+    // top-level types (creature, artifact, enchantment, …) and subtypes
+    // (Aura, Equipment, …) via the lowercase oracle subtype dictionary.
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+            )],
+        }));
+    }
+
+    // `parse_type_phrase` returns a slice of `rest`; trim any leading whitespace
+    // it left between the type phrase and the tense verb so the next `tag`
+    // matches cleanly.
+    let after_filter = after_filter.trim_start();
+
+    // tense: "is" | "was" | "wasn't" | "is not" | "was not" | "isn't"
+    let (rest, negated) = alt((
+        value(
+            true,
+            tag::<_, _, nom_language::error::VerboseError<&str>>("wasn't "),
+        ),
+        value(true, tag("isn't ")),
+        value(true, tag("was not ")),
+        value(true, tag("is not ")),
+        value(false, tag("was ")),
+        value(false, tag("is ")),
+    ))
+    .parse(after_filter)?;
+
+    // verb-phrase: single-word imperatives + the multi-word
+    // "put onto the battlefield". The verb itself is value-discarded; the
+    // " this way" suffix is the discriminator.
+    let (rest, _) = alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>("put onto the battlefield"),
+        tag("destroyed"),
+        tag("exiled"),
+        tag("sacrificed"),
+        tag("returned"),
+        tag("discarded"),
+        tag("milled"),
+        tag("countered"),
+    ))
+    .parse(rest)?;
+
+    let (rest, _) = tag(" this way").parse(rest)?;
+    Ok((rest, (filter, negated)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TypeFilter;
+    use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -3280,5 +3386,179 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 2 },
             }
         ));
+    }
+
+    /// CR 119.3 + CR 603.4: Y'shtola's "a player lost 4 or more life this
+    /// turn" must parse to MaxLifeLostThisTurnAcrossPlayers ≥ 4 — the
+    /// per-player-max semantic, not the cross-opponent sum semantic of
+    /// `OpponentLifeLostThisTurn`.
+    #[test]
+    fn test_parse_condition_a_player_lost_four_or_more_life() {
+        let (rest, c) = parse_inner_condition("a player lost 4 or more life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+    }
+
+    /// CR 119.3 + CR 603.4: Same idiom must parse via the "if " prefix
+    /// (intervening-if reading) — confirming `parse_condition` reaches
+    /// `parse_player_lost_life_this_turn` through the dispatcher.
+    #[test]
+    fn test_parse_condition_if_a_player_lost_two_or_more_life() {
+        let (rest, c) = parse_condition("if a player lost 2 or more life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            }
+        );
+    }
+
+    /// CR 119.3 + CR 603.4: The "at least N" idiom must share the threshold
+    /// alternative with "N or more" — `parse_ge_threshold` is the single
+    /// authority. Future cards using the synonym compose without per-card
+    /// code.
+    #[test]
+    fn test_parse_condition_a_player_lost_at_least_n_life() {
+        let (rest, c) = parse_inner_condition("a player lost at least 5 life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }
+        );
+    }
+
+    // ---- parse_zone_changed_this_way_clause ----
+    //
+    // CR 400.7 + CR 608.2c: this is the shared "noun-anaphoric this way"
+    // combinator — every present/past tense + every verb listed in the
+    // function's `alt` chain must round-trip.
+
+    /// CR 614.1a-style past-tense "was destroyed this way" — the original
+    /// shape used by Shredder's Technique. Establishes the negative-control
+    /// baseline before extending to present tense / multi-word verbs.
+    #[test]
+    fn test_zone_changed_this_way_was_destroyed_top_level_type() {
+        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+            "an enchantment was destroyed this way, you lose 2 life",
+        )
+        .unwrap();
+        assert_eq!(rest, ", you lose 2 life");
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert_eq!(type_filters, vec![TypeFilter::Enchantment]);
+            }
+            other => panic!("expected Typed Enchantment, got {other:?}"),
+        }
+    }
+
+    /// CR 303.4f / CR 301.5b: present-tense "is put onto the battlefield"
+    /// with subtype filter — the Armored Skyhunter / Vault 101 / Quest for
+    /// the Holy Relic / Stonehewer Giant case.
+    #[test]
+    fn test_zone_changed_this_way_is_put_onto_battlefield_equipment() {
+        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+            "an equipment is put onto the battlefield this way, you may attach it to a creature you control",
+        )
+        .unwrap();
+        assert_eq!(rest, ", you may attach it to a creature you control");
+        assert!(!negated);
+        // Subtype Equipment must round-trip (parse_type_phrase canonicalizes
+        // "equipment" → Subtype::Equipment via the oracle subtype dictionary).
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))),
+                    "expected Subtype Equipment, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Equipment, got {other:?}"),
+        }
+    }
+
+    /// CR 303.4f: Aura subtype mirrors the Equipment branch — same combinator.
+    #[test]
+    fn test_zone_changed_this_way_is_put_onto_battlefield_aura() {
+        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+            "an aura is put onto the battlefield this way, do something",
+        )
+        .unwrap();
+        assert_eq!(rest, ", do something");
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Aura"))
+                    ),
+                    "expected Subtype Aura, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Aura, got {other:?}"),
+        }
+    }
+
+    /// CR 400.7: "wasn't" negation must flip the boolean — used by future
+    /// "if a creature wasn't destroyed this way" patterns.
+    #[test]
+    fn test_zone_changed_this_way_wasnt_negated() {
+        let (rest, (_filter, negated)) =
+            parse_zone_changed_this_way_clause("a creature wasn't destroyed this way, do x")
+                .unwrap();
+        assert_eq!(rest, ", do x");
+        assert!(negated);
+    }
+
+    /// Every imperative verb in the `alt` chain must round-trip; this guards
+    /// against regression when someone reorders the alternatives.
+    #[test]
+    fn test_zone_changed_this_way_each_imperative_verb() {
+        for verb in &[
+            "destroyed",
+            "exiled",
+            "sacrificed",
+            "returned",
+            "discarded",
+            "milled",
+            "countered",
+        ] {
+            let input = format!("a creature was {verb} this way, x");
+            let (rest, (_filter, negated)) = parse_zone_changed_this_way_clause(&input)
+                .unwrap_or_else(|e| {
+                    panic!("verb {verb} failed to parse: {e:?}");
+                });
+            assert_eq!(rest, ", x", "verb {verb} produced wrong remainder");
+            assert!(!negated);
+        }
+    }
+
+    /// Negative: rejects unrecognized type phrases (returns `Any`) — the
+    /// caller should not get a synthetic match.
+    #[test]
+    fn test_zone_changed_this_way_rejects_unrecognized_type() {
+        // "a thing" — type_phrase returns Any → combinator must error.
+        assert!(parse_zone_changed_this_way_clause("a thing was destroyed this way").is_err());
     }
 }

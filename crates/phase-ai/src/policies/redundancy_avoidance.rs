@@ -223,6 +223,7 @@ fn redundancy_delta(
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }
         | Effect::DestroyAll { .. }
+        | Effect::BounceAll { .. }
         | Effect::ChangeZone { .. }
         | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }
@@ -240,6 +241,7 @@ fn redundancy_delta(
         | Effect::Proliferate
         | Effect::Populate
         | Effect::Clash
+        | Effect::Vote { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::CopyTokenOf { .. }

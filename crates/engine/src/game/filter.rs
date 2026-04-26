@@ -12,7 +12,7 @@ use crate::types::ability::{
     ChosenAttribute, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, SharedQuality,
     TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{GameState, SpellCastRecord, ZoneChangeRecord};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaColor;
@@ -910,6 +910,15 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::NotColor { color } => !record.colors.contains(color),
         FilterProp::HasSupertype { value } => record.supertypes.contains(value),
         FilterProp::NotSupertype { value } => !record.supertypes.contains(value),
+        // CR 700.6: An object is historic if it has the legendary supertype,
+        // the artifact card type, or the Saga subtype. Snapshot-derivable from
+        // the cast-time card-type record — used by "whenever you cast a
+        // historic spell" triggers.
+        FilterProp::Historic => {
+            record.supertypes.contains(&Supertype::Legendary)
+                || record.core_types.contains(&CoreType::Artifact)
+                || record.subtypes.iter().any(|s| s == "Saga")
+        }
         FilterProp::Multicolored => record.colors.len() > 1,
         // CR 105.2c: Colorless objects have no color.
         FilterProp::Colorless => record.colors.is_empty(),
@@ -1371,6 +1380,13 @@ fn matches_filter_prop(
             });
             has_counter || has_qualifying_attachment
         }
+        // CR 700.6: An object is historic if it has the legendary supertype,
+        // the artifact card type, or the Saga subtype.
+        FilterProp::Historic => {
+            obj.card_types.supertypes.contains(&Supertype::Legendary)
+                || obj.card_types.core_types.contains(&CoreType::Artifact)
+                || obj.card_types.subtypes.iter().any(|s| s == "Saga")
+        }
         // CR 510.1c: Match creatures whose toughness exceeds their power.
         FilterProp::ToughnessGTPower => {
             let power = obj.power.unwrap_or(0);
@@ -1454,6 +1470,15 @@ fn zone_change_record_matches_property(
         // CR 205.4a: Supertype membership as of the zone change.
         FilterProp::HasSupertype { value } => record.supertypes.contains(value),
         FilterProp::NotSupertype { value } => !record.supertypes.contains(value),
+        // CR 700.6: An object is historic if it has the legendary supertype,
+        // the artifact card type, or the Saga subtype. Snapshot-derivable from
+        // the zone-change card-type record — used by ETB triggers on
+        // "another nontoken historic permanent you control" (Arbaaz Mir).
+        FilterProp::Historic => {
+            record.supertypes.contains(&Supertype::Legendary)
+                || record.core_types.contains(&CoreType::Artifact)
+                || record.subtypes.iter().any(|s| s == "Saga")
+        }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
         // CR 208.1: Power threshold on the event-time object. A `None` power
@@ -3254,6 +3279,279 @@ mod tests {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Modified]));
         assert!(!matches_target_filter(&state, cre, &filter, source));
+    }
+
+    // CR 700.6: An object is historic if it has the legendary supertype, the
+    // artifact card type, or the Saga subtype.
+    #[test]
+    fn historic_matches_legendary_creature() {
+        use crate::types::ability::TypedFilter;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let obj = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Captain".into(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&obj).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.card_types.supertypes.push(Supertype::Legendary);
+        }
+        let filter =
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Historic]));
+        assert!(matches_target_filter(&state, obj, &filter, source));
+    }
+
+    #[test]
+    fn historic_matches_artifact() {
+        use crate::types::ability::TypedFilter;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let obj = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Bauble".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let filter =
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Historic]));
+        assert!(matches_target_filter(&state, obj, &filter, source));
+    }
+
+    #[test]
+    fn historic_matches_saga() {
+        use crate::types::ability::TypedFilter;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let obj = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "History of Benalia".into(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&obj).unwrap();
+            o.card_types.core_types.push(CoreType::Enchantment);
+            o.card_types.subtypes.push("Saga".into());
+        }
+        let filter =
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Historic]));
+        assert!(matches_target_filter(&state, obj, &filter, source));
+    }
+
+    #[test]
+    fn historic_does_not_match_vanilla_creature() {
+        use crate::types::ability::TypedFilter;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let obj = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Bear".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Historic]));
+        assert!(!matches_target_filter(&state, obj, &filter, source));
+    }
+
+    #[test]
+    fn historic_does_not_match_basic_land() {
+        use crate::types::ability::TypedFilter;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let obj = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Plains".into(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&obj).unwrap();
+            o.card_types.core_types.push(CoreType::Land);
+            o.card_types.supertypes.push(Supertype::Basic);
+            o.card_types.subtypes.push("Plains".into());
+        }
+        let filter =
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Historic]));
+        assert!(!matches_target_filter(&state, obj, &filter, source));
+    }
+
+    /// CR 700.6: `FilterProp::Historic` on a zone-change snapshot must read
+    /// the captured supertypes / core_types / subtypes — the path used by
+    /// Arbaaz Mir's "another nontoken historic permanent enters" trigger.
+    /// Each leg (legendary, artifact, Saga) is independently sufficient.
+    #[test]
+    fn zone_change_record_historic_matches_each_leg() {
+        use crate::types::game_state::ZoneChangeRecord;
+
+        let state = GameState::default();
+        let source_ctx = SourceContext {
+            id: ObjectId(1),
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+        };
+
+        // Leg 1: legendary creature (Arbaaz Mir, In Garruk's Wake-style ETB).
+        let legendary_record = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            supertypes: vec![Supertype::Legendary],
+            ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Library), Zone::Battlefield)
+        };
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Historic,
+            &state,
+            &legendary_record,
+            &source_ctx,
+        ));
+
+        // Leg 2: non-legendary artifact (e.g. Sol Ring entering).
+        let artifact_record = ZoneChangeRecord {
+            core_types: vec![CoreType::Artifact],
+            ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Hand), Zone::Battlefield)
+        };
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Historic,
+            &state,
+            &artifact_record,
+            &source_ctx,
+        ));
+
+        // Leg 3: Saga (non-legendary subtype path — Sagas are typically also
+        // Legendary but the predicate matches on the Saga subtype alone).
+        let saga_record = ZoneChangeRecord {
+            core_types: vec![CoreType::Enchantment],
+            subtypes: vec!["Saga".into()],
+            ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Hand), Zone::Battlefield)
+        };
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Historic,
+            &state,
+            &saga_record,
+            &source_ctx,
+        ));
+
+        // Negative: vanilla non-historic creature.
+        let vanilla_record = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            ..ZoneChangeRecord::test_minimal(ObjectId(45), Some(Zone::Hand), Zone::Battlefield)
+        };
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::Historic,
+            &state,
+            &vanilla_record,
+            &source_ctx,
+        ));
+    }
+
+    /// CR 700.6: `FilterProp::Historic` on a `SpellCastRecord` must read the
+    /// cast-time card-type snapshot — the path used by Jhoira, Weatherlight
+    /// Captain's "whenever you cast a historic spell" trigger.
+    #[test]
+    fn spell_record_historic_matches_each_leg() {
+        use crate::types::game_state::SpellCastRecord;
+
+        let make_record = |core_types: Vec<CoreType>,
+                           supertypes: Vec<Supertype>,
+                           subtypes: Vec<String>|
+         -> SpellCastRecord {
+            SpellCastRecord {
+                core_types,
+                supertypes,
+                subtypes,
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                mana_value: 0,
+                has_x_in_cost: false,
+            }
+        };
+
+        // Leg 1: legendary creature spell.
+        let legendary_record =
+            make_record(vec![CoreType::Creature], vec![Supertype::Legendary], vec![]);
+        assert!(spell_record_matches_property(
+            &legendary_record,
+            &FilterProp::Historic,
+        ));
+
+        // Leg 2: non-legendary artifact spell.
+        let artifact_record = make_record(vec![CoreType::Artifact], vec![], vec![]);
+        assert!(spell_record_matches_property(
+            &artifact_record,
+            &FilterProp::Historic,
+        ));
+
+        // Leg 3: Saga spell (legendary enchantment subtype).
+        let saga_record = make_record(
+            vec![CoreType::Enchantment],
+            vec![Supertype::Legendary],
+            vec!["Saga".into()],
+        );
+        assert!(spell_record_matches_property(
+            &saga_record,
+            &FilterProp::Historic,
+        ));
+
+        // Negative: vanilla creature spell.
+        let vanilla_record = make_record(vec![CoreType::Creature], vec![], vec![]);
+        assert!(!spell_record_matches_property(
+            &vanilla_record,
+            &FilterProp::Historic,
+        ));
     }
 
     /// CR 111.1: `FilterProp::Token` on a zone-change snapshot must read the

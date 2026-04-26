@@ -860,6 +860,21 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         }
     }
 
+    // CR 700.6: "historic" adjective prefix. An object is historic if it has
+    // the legendary supertype, the artifact card type, or the Saga subtype.
+    // Emits FilterProp::Historic (a first-class typed predicate — see
+    // `FilterProp::Historic` in types/ability.rs). Mirrors the "modified"
+    // adjective handling above: only consume when a type word follows, so
+    // bare "historic" alone doesn't hijack other contexts.
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("historic ").parse(&lower[pos..])
+    {
+        if starts_with_type_phrase_lead(rest) {
+            properties.push(FilterProp::Historic);
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
+
     // Handle color prefix: "white creature", "red spell", etc.
     let color_prop = parse_color_prefix(&lower[pos..]);
     if let Some((ref prop, color_len)) = color_prop {
@@ -921,6 +936,22 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
             pos += 1;
         }
         break;
+    }
+
+    // CR 700.6: "historic" adjective prefix can appear AFTER negation prefixes
+    // (e.g. "nontoken historic permanent" in Arbaaz Mir). The pre-negation arm
+    // above handles the bare-prefix case ("historic permanent"); this arm
+    // handles the post-negation case so the adjective composes with `non`
+    // negation. Mirrors the structural reasoning that produced
+    // `is_adjective_prefix_prop` — the predicate is leg-local but its position
+    // in surface text varies relative to negation.
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("historic ").parse(&lower[pos..])
+    {
+        if starts_with_type_phrase_lead(rest) && !properties.contains(&FilterProp::Historic) {
+            properties.push(FilterProp::Historic);
+            pos += lower[pos..].len() - rest.len();
+        }
     }
 
     // Parse the core type, falling back to subtype recognition
@@ -1209,6 +1240,37 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         }
     }
 
+    // CR 406.6: "exiled with [source]" linkage suffix on a typed reference.
+    // Singular targeted form ("target creature card exiled with ~") composes
+    // with the typed filter via `TargetFilter::And { [Typed, ExiledBySource] }`,
+    // mirroring the `exclude_chosen_type` wrapping pattern below. The plural
+    // and "each card" forms are handled at the top of `parse_target` since
+    // they bypass type-phrase parsing entirely.
+    let mut exiled_by_source = false;
+    let remaining_exiled = lower[pos..].trim_start();
+    let exiled_offset = lower[pos..].len() - remaining_exiled.len();
+    // Try "exiled with this <type>" first (longest-match-first); the trailing
+    // type word identifies the source object's card type and is informational
+    // here — consume it as a single non-space run via take_till1 so it doesn't
+    // leak into the remainder.
+    if let Ok((rest, _)) = (
+        tag::<_, _, nom_language::error::VerboseError<&str>>("exiled with this "),
+        nom::bytes::complete::take_till1::<_, _, nom_language::error::VerboseError<&str>>(
+            |c: char| c.is_whitespace(),
+        ),
+    )
+        .parse(remaining_exiled)
+    {
+        exiled_by_source = true;
+        pos += exiled_offset + (remaining_exiled.len() - rest.len());
+    } else if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("exiled with ~")
+            .parse(remaining_exiled)
+    {
+        exiled_by_source = true;
+        pos += exiled_offset + (remaining_exiled.len() - rest.len());
+    }
+
     // CR 608.2d: "of their choice" / "of his or her choice" — informational qualifier
     // on opponent-choice effects. The actual choice is handled by the WaitingFor state machine.
     let remaining_choice = lower[pos..].trim_start();
@@ -1267,6 +1329,19 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
                     )),
                 },
             ],
+        }
+    } else {
+        filter
+    };
+
+    // CR 406.6: Compose the typed filter with the exile-link constraint when
+    // the singular "exiled with ~" suffix was present. Runtime evaluation of
+    // `TargetFilter::And` requires every inner filter to match (game/filter.rs
+    // line 347), and `extract_in_zone` surfaces `Zone::Exile` from the
+    // `ExiledBySource` arm so the resolver scans the correct zone.
+    let filter = if exiled_by_source {
+        TargetFilter::And {
+            filters: vec![filter, TargetFilter::ExiledBySource],
         }
     } else {
         filter
@@ -1388,6 +1463,17 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             return true;
         }
     }
+    // CR 700.6: "historic <type>" adjective phrase leads a type phrase
+    // (e.g., "historic permanents you control"). Consume the adjective and
+    // verify a type word follows so the comma/and-list recursion can continue
+    // across the "historic" leg.
+    if let Ok((after_historic, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("historic ").parse(text)
+    {
+        if starts_with_type_phrase_lead(after_historic) {
+            return true;
+        }
+    }
     false
 }
 
@@ -1451,6 +1537,8 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
         prop,
         // CR 700.4 + CR 700.9: "modified [type]" adjective prefix.
         FilterProp::Modified
+            // CR 700.6: "historic [type]" adjective prefix.
+            | FilterProp::Historic
             // CR 303.4 + CR 301.5: "enchanted [type]" / "equipped [type]".
             | FilterProp::EnchantedBy
             | FilterProp::EquippedBy
@@ -2840,7 +2928,14 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
                 tag("each player's "),
             )),
         ),
-        value(ZoneQual::Plain, alt((tag("a "), tag("the ")))),
+        // CR 400.7: Adjective-qualified zone references — "a single graveyard" /
+        // "a random graveyard" — share the indefinite-article semantics with
+        // bare "a "/"the " for origin-zone tracking (the modifier constrains
+        // which instance, not which zone). Longest-match-first ordering.
+        value(
+            ZoneQual::Plain,
+            alt((tag("a single "), tag("a random "), tag("a "), tag("the "))),
+        ),
         // Bare form (e.g., "from exile"): zero-width match so the zone_word combinator runs next.
         value(ZoneQual::Plain, tag("")),
     ))
@@ -3827,6 +3922,68 @@ mod tests {
         assert_eq!(f, TargetFilter::ExiledBySource);
     }
 
+    #[test]
+    fn target_creature_card_exiled_with_tilde_produces_and_filter() {
+        // CR 406.6: Singular targeted form — composes typed filter with the
+        // exile-link constraint via TargetFilter::And.
+        let (f, rest) = parse_target("target creature card exiled with ~");
+        assert_eq!(
+            f,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::ExiledBySource,
+                ],
+            }
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_creature_card_exiled_with_this_creature_produces_and_filter() {
+        let (f, rest) = parse_target("target creature card exiled with this creature");
+        assert_eq!(
+            f,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::ExiledBySource,
+                ],
+            }
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    // ── "from a single graveyard" zone qualifier ──
+
+    #[test]
+    fn target_card_from_a_single_graveyard() {
+        // CR 400.7: "a single graveyard" shares origin-zone semantics with
+        // bare "a graveyard"; the modifier constrains which instance, not
+        // which zone.
+        let (f, rest) = parse_target("target card from a single graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn up_to_two_target_cards_from_a_single_graveyard() {
+        // Hearse activated ability target text after "exile " is stripped.
+        let (f, rest) = parse_target("up to two target cards from a single graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
     // ── Bare type phrase fallback ──
 
     #[test]
@@ -4201,6 +4358,87 @@ mod tests {
             other => panic!("Expected Or filter, got {other:?}"),
         }
         assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn historic_adjective_creates_filter_prop() {
+        // CR 700.6: "historic permanent" is a first-class adjective attaching
+        // FilterProp::Historic to a typed permanent filter.
+        let (f, rest) = parse_type_phrase("historic permanent you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Historic])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn historic_adjective_after_nontoken_arbaaz() {
+        // CR 700.6: Arbaaz Mir's "another nontoken historic permanent you
+        // control" composes negation (`Non(Token)` subtype), the Historic
+        // adjective, the Another property, and the You controller — all in
+        // sequence. The historic adjective parses AFTER the `non` negation
+        // sweep, exercising the post-negation arm.
+        let (f, rest) = parse_type_phrase("another nontoken historic permanent you control");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Permanent),
+                    "expected Permanent in {:?}",
+                    tf.type_filters,
+                );
+                assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                            "Token".to_string()
+                        )))),
+                    "expected Non(Token) in {:?}",
+                    tf.type_filters,
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Historic),
+                    "expected Historic in {:?}",
+                    tf.properties,
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "expected Another in {:?}",
+                    tf.properties,
+                );
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn historic_adjective_does_not_propagate_to_or_legs() {
+        // CR 700.6 + CR 700.4: `FilterProp::Historic` is leg-local — in a
+        // comma OR list it must NOT distribute back to earlier legs. Mirrors
+        // the Modified adjective handling for Silkguard.
+        let (f, _rest) = parse_type_phrase("artifacts and historic creatures you control");
+        let TargetFilter::Or { ref filters } = f else {
+            panic!("Expected Or filter, got {f:?}");
+        };
+        let leg_has_historic = |idx: usize| -> bool {
+            matches!(
+                filters.get(idx),
+                Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Historic)
+            )
+        };
+        assert!(
+            !leg_has_historic(0),
+            "Historic must not propagate to artifact leg in {filters:#?}",
+        );
+        assert!(
+            leg_has_historic(filters.len() - 1),
+            "creature leg must keep Historic in {filters:#?}",
+        );
     }
 
     #[test]

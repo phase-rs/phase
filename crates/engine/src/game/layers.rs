@@ -968,6 +968,8 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::AddSupertype { .. }
+            | ContinuousModification::RemoveSupertype { .. }
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
@@ -1168,11 +1170,29 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             ContinuousModification::SetToughness { value } => {
                 obj.toughness = Some(*value);
             }
+            // CR 702.16g: "Protection from [A] and from [B]" behaves as two
+            // separate protection abilities. Parameterized keywords like
+            // `Protection(ColorWhite)` and `Protection(ColorBlue)` share an
+            // enum discriminant, so a discriminant-based "already has" check
+            // (`has_keyword`, see `keywords.rs::has_keyword`) would drop the
+            // second grant. Use `Vec::contains` (PartialEq, exact match) so
+            // each distinct parameter value is preserved on the keyword list.
+            // CR 613.1f: This deduplication runs in Layer 6 alongside other
+            // keyword-granting effects. Same shape applies to `Ward(_)`,
+            // `Annihilator(_)`, `Cumulative Upkeep(_)`, and any other
+            // parameterized keyword variant.
             ContinuousModification::AddKeyword { keyword } => {
-                if !obj.has_keyword(keyword) {
+                if !obj.keywords.contains(keyword) {
                     obj.keywords.push(keyword.clone());
                 }
             }
+            // Asymmetric on purpose: `RemoveKeyword` strips every keyword that
+            // shares the same discriminant (e.g. "lose all flying"). The
+            // current Oracle parser only emits unparameterized variants here,
+            // so discriminant matching gives the intended "lose this kind of
+            // ability" scope. If a future card requires "lose protection from
+            // white but keep protection from blue," this arm needs to switch
+            // to PartialEq alongside a new typed parser shape.
             ContinuousModification::RemoveKeyword { keyword } => {
                 obj.keywords
                     .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(keyword));
@@ -1212,6 +1232,28 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::RemoveSubtype { ref subtype } => {
                 obj.card_types.subtypes.retain(|s| s != subtype);
+            }
+            // CR 205.4 + CR 707.9d: "in addition to its other types" — append
+            // the supertype if absent. Idempotent.
+            ContinuousModification::AddSupertype { supertype } => {
+                if !obj.card_types.supertypes.contains(supertype) {
+                    obj.card_types.supertypes.push(*supertype);
+                }
+            }
+            // CR 205.4 + CR 707.9b: "isn't legendary" / "isn't basic" copy
+            // exception. Strip the supertype from the layered view.
+            ContinuousModification::RemoveSupertype { supertype } => {
+                obj.card_types.supertypes.retain(|s| s != supertype);
+            }
+            // CR 122.1 + CR 614.1c: One-shot counter placement is consumed at
+            // copy resolution by token_copy::resolve / become_copy::resolve.
+            // Reaching this arm means a wiring bug.
+            ContinuousModification::AddCounterOnEnter { .. } => {
+                debug_assert!(
+                    false,
+                    "AddCounterOnEnter must be consumed at resolution time, \
+                     not via apply_continuous_effect"
+                );
             }
             ContinuousModification::AddAllCreatureTypes => {
                 for subtype in &state.all_creature_types {
@@ -4597,5 +4639,197 @@ mod tests {
         state.layers_dirty = true;
         // No panic; the diff loop's `get_mut(...).if let Some` swallows it.
         evaluate_layers(&mut state);
+    }
+
+    /// CR 702.16g: "Protection from [A] and from [B]" behaves as two separate
+    /// protection abilities. The Mirran Sword cycle (Sword of Truth and
+    /// Justice, Sword of Fire and Ice, etc.) emits both colors as separate
+    /// `AddKeyword(Protection(_))` modifications; the layer applier must
+    /// preserve both even though they share an enum discriminant.
+    #[test]
+    fn add_keyword_preserves_distinct_protection_parameters() {
+        use crate::types::keywords::ProtectionTarget;
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let source = make_creature(&mut state, "Sword of Truth and Justice", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(creature_you_ctrl())
+            .modifications(vec![
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Blue)),
+                },
+            ]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        let protection_keywords: Vec<&Keyword> = obj
+            .keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Protection(_)))
+            .collect();
+        assert_eq!(
+            protection_keywords.len(),
+            2,
+            "both Protection(White) and Protection(Blue) must coexist; got {:?}",
+            obj.keywords
+        );
+        assert!(obj
+            .keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::White
+            ))));
+        assert!(obj
+            .keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Blue
+            ))));
+    }
+
+    /// CR 702.21: Ward is parameterized by cost. Two separate `Ward(_)` grants
+    /// with different costs must both persist on the keyword list — the
+    /// targeting player pays each cost (CR 702.21b) so dropping one is a
+    /// silent rules violation. Regression-protects the same fix that unblocks
+    /// multi-protection swords for any future multi-Ward grants.
+    #[test]
+    fn add_keyword_preserves_distinct_ward_parameters() {
+        use crate::types::keywords::WardCost;
+        use crate::types::mana::ManaCost;
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let ward_one = Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        }));
+        let ward_two = Keyword::Ward(WardCost::PayLife(2));
+
+        let source = make_creature(&mut state, "Source", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(creature_you_ctrl())
+            .modifications(vec![
+                ContinuousModification::AddKeyword {
+                    keyword: ward_one.clone(),
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: ward_two.clone(),
+                },
+            ]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        let ward_keywords: Vec<&Keyword> = obj
+            .keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Ward(_)))
+            .collect();
+        assert_eq!(
+            ward_keywords.len(),
+            2,
+            "both Ward({{1}}) and Ward({{2}}) must coexist; got {:?}",
+            obj.keywords
+        );
+        assert!(obj.keywords.contains(&ward_one));
+        assert!(obj.keywords.contains(&ward_two));
+    }
+
+    /// CR 702.16m: Multiple instances of protection from the same quality on
+    /// the same permanent are redundant. `AddKeyword` must still deduplicate
+    /// when the parameter is identical — two grants of `Protection(White)`
+    /// from different sources should land as a single keyword entry.
+    #[test]
+    fn add_keyword_deduplicates_identical_parameters() {
+        use crate::types::keywords::ProtectionTarget;
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let source = make_creature(&mut state, "Source", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(creature_you_ctrl())
+            .modifications(vec![
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+                },
+            ]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        let white_protections = obj
+            .keywords
+            .iter()
+            .filter(|k| {
+                matches!(
+                    k,
+                    Keyword::Protection(ProtectionTarget::Color(ManaColor::White))
+                )
+            })
+            .count();
+        assert_eq!(
+            white_protections, 1,
+            "duplicate identical-parameter keyword grants must collapse to a single entry"
+        );
+    }
+
+    /// Regression: `keywords::has_keyword` is documented as discriminant-only
+    /// matching ("any kind of Protection"). The layer-applier fix must not
+    /// migrate that helper — generic-presence checks elsewhere in the engine
+    /// (e.g. "is this creature protected from anything?") still rely on the
+    /// discriminant semantic. Verify both call shapes coexist correctly.
+    #[test]
+    fn has_keyword_remains_discriminant_only_for_generic_presence_queries() {
+        use crate::types::keywords::ProtectionTarget;
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let obj = state.objects.get_mut(&bear).unwrap();
+        obj.keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Blue,
+            )));
+
+        let obj = state.objects.get(&bear).unwrap();
+        // Discriminant-based query: "do you have any kind of Protection?" — yes.
+        assert!(
+            obj.has_keyword(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::White
+            )))
+        );
+        // PartialEq query: "do you have Protection from White specifically?" — no.
+        assert!(!obj
+            .keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::White
+            ))));
+        assert!(obj
+            .keywords
+            .contains(&Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::Blue
+            ))));
     }
 }

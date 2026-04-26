@@ -22,6 +22,11 @@ pub fn printed_ref_from_face(card_face: &CardFace) -> Option<PrintedCardRef> {
 }
 
 pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
+    // CR 716.2b: capture the pre-call init flag so we can distinguish
+    // first-time face application from re-application by
+    // `rehydrate_game_from_card_db`. Used below to gate `class_level` seeding.
+    let was_initialized = obj.base_characteristics_initialized;
+
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
     let loyalty = card_face
@@ -80,9 +85,20 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.casting_restrictions = card_face.casting_restrictions.clone();
     obj.casting_options = card_face.casting_options.clone();
 
+    // CR 716.2b: "A level is a designation that any permanent can have. A
+    // Class retains its level even if it stops being a Class. Levels are not
+    // a copiable characteristic." — once a Class advances past level 1, that
+    // level must persist for as long as the permanent stays on the
+    // battlefield. `apply_card_face_to_object` is invoked both for first-time
+    // face application (deck loading, conjure, scenario seed) AND by
+    // `rehydrate_game_from_card_db`, which iterates every object on state
+    // load / multiplayer state-sync. Gating on the pre-call value of
+    // `base_characteristics_initialized` (`was_initialized`) ensures the
+    // level-1 seed runs only on first-time application; subsequent
+    // rehydration preserves the runtime level. Re-entry resets are handled
+    // separately by `reset_for_battlefield_entry` per CR 400.7.
     // CR 716.3: Each Class enchantment enters the battlefield at level 1.
-    // CR 400.7: A Class that re-enters is a new object at level 1.
-    if card_face.card_type.subtypes.iter().any(|s| s == "Class") {
+    if !was_initialized && card_face.card_type.subtypes.iter().any(|s| s == "Class") {
         obj.class_level = Some(1);
     }
 
@@ -499,6 +515,7 @@ mod tests {
     use super::*;
     use crate::database::CardDatabase;
     use crate::game::deck_loading::create_object_from_card_face;
+    use crate::game::game_object::GameObject;
     use crate::types::ability::{
         AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, ReplacementDefinition,
         SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
@@ -506,9 +523,11 @@ mod tests {
     use crate::types::card::CardFace;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::game_state::GameState;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     fn test_face(
         name: &str,
@@ -660,6 +679,90 @@ mod tests {
             back_face.layout_kind,
             Some(LayoutKind::Adventure),
             "Adventure back face should carry LayoutKind::Adventure from export"
+        );
+    }
+
+    fn test_class_face(name: &str, oracle_id: &str) -> CardFace {
+        let mut face = test_face(
+            name,
+            oracle_id,
+            vec![CoreType::Enchantment],
+            ManaCost::default(),
+        );
+        face.card_type.subtypes.push("Class".to_string());
+        face
+    }
+
+    /// CR 716.2b: "A Class retains its level even if it stops being a Class."
+    /// Once a Class has advanced past level 1, that level must persist for as
+    /// long as the permanent stays on the battlefield. `rehydrate_game_from_card_db`
+    /// must not stomp the runtime level back to 1 when refreshing card-face
+    /// characteristics on state load / multiplayer state-sync.
+    #[test]
+    fn rehydrate_preserves_advanced_class_level() {
+        let face = test_class_face("Test Class", "test-class-oracle-id");
+        let mut face_json = serde_json::to_value(&face).unwrap();
+        face_json["layout"] = serde_json::json!("class");
+        let export = serde_json::json!({
+            "test class": face_json,
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::default();
+        let object_id = create_object_from_card_face(
+            &mut state,
+            db.get_face_by_name("Test Class").unwrap(),
+            PlayerId(0),
+        );
+
+        // Precondition: first-time face application seeded class_level=1.
+        assert_eq!(
+            state.objects.get(&object_id).unwrap().class_level,
+            Some(1),
+            "first-time face application should seed CR 716.3 level 1"
+        );
+
+        // Simulate the Class advancing to level 3 (e.g. via SetClassLevel).
+        state.objects.get_mut(&object_id).unwrap().class_level = Some(3);
+
+        // Rehydration must not reset the runtime level.
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert_eq!(
+            state.objects.get(&object_id).unwrap().class_level,
+            Some(3),
+            "CR 716.2b: rehydration must preserve the advanced level"
+        );
+    }
+
+    /// CR 716.3: A fresh Class entering the battlefield seeds at level 1. The
+    /// `was_initialized` gate must not block first-time application.
+    #[test]
+    fn first_time_face_application_seeds_class_level_one() {
+        let face = test_class_face("Fresh Class", "fresh-class-oracle-id");
+
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Fresh Class".to_string(),
+            Zone::Battlefield,
+        );
+        // Precondition: a fresh GameObject has not been initialized.
+        assert!(!obj.base_characteristics_initialized);
+        assert_eq!(obj.class_level, None);
+
+        apply_card_face_to_object(&mut obj, &face);
+
+        assert_eq!(
+            obj.class_level,
+            Some(1),
+            "CR 716.3: first-time face application of a Class must seed level 1"
+        );
+        assert!(
+            obj.base_characteristics_initialized,
+            "first-time application must mark the object initialized"
         );
     }
 }

@@ -183,6 +183,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // additional_land_drops(). Coverage support is via is_data_carrying_static().
     // CR 114.3: EmblemStatic — fallback for unparseable emblem static text.
     registry.insert(StaticMode::EmblemStatic, handle_rule_mod);
+    // CR 701.38d: GrantsExtraVote — "While voting, you may vote an additional time."
+    // Runtime enforcement is in game/effects/vote.rs::votes_per_session_for(), which
+    // scans active_static_definitions at vote-session start. No continuous-effect
+    // plumbing needed; registered here so coverage marks the card as supported.
+    registry.insert(StaticMode::GrantsExtraVote, handle_rule_mod);
 
     // No generic `StaticMode::Other(...)` stubs are currently needed.
     //

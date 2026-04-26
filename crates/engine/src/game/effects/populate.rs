@@ -74,6 +74,7 @@ pub fn create_token_copy(
             tapped: false,
             count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
+            additional_modifications: vec![],
         },
         vec![TargetRef::Object(token_to_copy)],
         ability.source_id,

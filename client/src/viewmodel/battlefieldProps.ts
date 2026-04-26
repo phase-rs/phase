@@ -35,6 +35,9 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
   const other: ObjectId[] = [];
 
   for (const obj of objects) {
+    // Attached permanents render on their host (see AttachmentChipRow on
+    // PermanentCard) — they must not also occupy a partition row.
+    if (obj.attached_to !== null) continue;
     const coreTypes = obj.card_types.core_types;
 
     if (coreTypes.includes("Creature")) {

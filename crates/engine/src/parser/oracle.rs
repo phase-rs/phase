@@ -1300,6 +1300,7 @@ pub fn parse_oracle_text(
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
+                        enter_with_counters: vec![],
                     },
                 )
                 .description(line.to_string()),
@@ -7450,6 +7451,79 @@ mod tests {
                 );
             }
             other => panic!("expected QuantityCheck, got {other:?}"),
+        }
+    }
+
+    /// Regression: pin Helm of the Host's already-shipped non-legendary token
+    /// behavior so a future refactor of `parse_except_clause` /
+    /// `become_copy_except` cannot silently drop the `RemoveSupertype`
+    /// modification.
+    ///
+    /// CR 707.9b: "Some copy effects modify a characteristic as part of the
+    /// copying process. The final set of values for that characteristic
+    /// becomes part of the copiable values of the copy." — "except the token
+    /// isn't legendary" is exactly such a modification, lowered to
+    /// `ContinuousModification::RemoveSupertype { Legendary }` and stamped
+    /// onto the synthesized token at creation time so the legend rule
+    /// (CR 704.5j) cannot collapse the token even when its source is a
+    /// legendary creature.
+    ///
+    /// This test pins the parser side only — the resolver side is pinned by
+    /// `copy_token_remove_supertype_strips_legendary_from_token` in
+    /// `crates/engine/src/game/effects/token_copy.rs`.
+    #[test]
+    fn helm_of_the_host_emits_remove_supertype_legendary() {
+        use crate::types::card_type::Supertype;
+
+        let r = parse(
+            "At the beginning of combat on your turn, create a token that's a \
+             copy of equipped creature, except the token isn't legendary. That \
+             token gains haste.\nEquip {5}",
+            "Helm of the Host",
+            &[Keyword::Equip(Default::default())],
+            &["Artifact"],
+            &["Equipment"],
+        );
+
+        // One trigger (the begin-combat copy-token trigger) and one activated
+        // ability (Equip {5}).
+        assert_eq!(
+            r.triggers.len(),
+            1,
+            "expected exactly one trigger, got {}: {:?}",
+            r.triggers.len(),
+            r.triggers
+                .iter()
+                .map(|t| t.description.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+
+        let trig = &r.triggers[0];
+        let exec = trig
+            .execute
+            .as_ref()
+            .expect("begin-combat trigger must have an execute body");
+
+        // CR 707.9b + CR 205.4: top-level effect is `CopyTokenOf` with the
+        // `RemoveSupertype { Legendary }` modification baked in. The token
+        // copies "equipped creature" — the target filter is internal detail
+        // tested elsewhere; this regression test pins ONLY the
+        // additional_modifications, which is the load-bearing field for the
+        // non-legendary semantic.
+        match &*exec.effect {
+            Effect::CopyTokenOf {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.contains(&ContinuousModification::RemoveSupertype {
+                        supertype: Supertype::Legendary,
+                    }),
+                    "Helm of the Host must emit RemoveSupertype(Legendary); \
+                     additional_modifications was {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected CopyTokenOf at trigger.execute.effect, got {other:?}"),
         }
     }
 }

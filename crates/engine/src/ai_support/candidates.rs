@@ -634,6 +634,25 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             choice_type,
             ..
         } => named_choice_actions(state, *player, options, choice_type),
+        // CR 701.38: Vote — every option is a legal candidate; the AI picks via
+        // the standard ChooseOption action. Each remaining vote produces an
+        // identical action set (CR 701.38d allows repeats), so emitting one
+        // candidate per option is correct: the engine re-enters VoteChoice for
+        // each subsequent vote.
+        WaitingFor::VoteChoice {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|opt| {
+                candidate(
+                    GameAction::ChooseOption {
+                        choice: opt.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ModeChoice {
             player,
             modal,

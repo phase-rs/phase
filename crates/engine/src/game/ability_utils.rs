@@ -664,6 +664,7 @@ fn effect_references_target_player(effect: &Effect) -> bool {
         | Effect::DamageAll { target, .. }
         | Effect::TapAll { target, .. }
         | Effect::UntapAll { target, .. }
+        | Effect::BounceAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
         | Effect::DoublePTAll { target, .. } => {
             matches!(target, TargetFilter::Player) || filter_references_target_player(target)
@@ -2435,6 +2436,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(900),
@@ -2601,6 +2603,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(900),
@@ -2697,6 +2700,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
             vec![],
             ObjectId(10),

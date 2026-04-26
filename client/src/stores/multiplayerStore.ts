@@ -491,7 +491,23 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             });
           } else if (msg.type === "PlayerSlotsUpdate") {
             const data = msg.data as { slots: PlayerSlot[] };
+            // Toast newly-arrived human guests so the host gets per-joiner
+            // feedback in 3+ player lobbies. Without this, only the first
+            // joiner is signaled (via the `gameCreated` → `GameStarted`
+            // boundary in ws-adapter); subsequent guests appear silently in
+            // the slot list. Diff against the prior `playerSlots` snapshot:
+            // any slot whose seat transitioned from non-human-occupied to
+            // `JoinedHuman` is a fresh guest.
+            const prior = get().playerSlots;
+            const newJoiners = data.slots.filter((slot) => {
+              if (slot.kind.type !== "JoinedHuman") return false;
+              const before = prior.find((p) => p.playerId === slot.playerId);
+              return !before || before.kind.type !== "JoinedHuman";
+            });
             set({ playerSlots: data.slots });
+            for (const joiner of newJoiners) {
+              get().showToast(`${joiner.name} joined the game.`);
+            }
           } else if (msg.type === "Error") {
             const data = msg.data as { message: string };
             console.error("Host error:", data.message);

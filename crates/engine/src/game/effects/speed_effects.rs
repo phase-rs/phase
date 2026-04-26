@@ -86,6 +86,21 @@ fn players_for_filter(
             .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
             .into_iter()
             .collect(),
+        // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
+        // Falls back to plain Opponent semantics when no trigger event is in scope.
+        PlayerFilter::OpponentOtherThanTriggering => {
+            let triggering = state
+                .current_trigger_event
+                .as_ref()
+                .and_then(|e| crate::game::targeting::extract_player_from_event(e, state));
+            state
+                .players
+                .iter()
+                .filter(|player| !player.is_eliminated && player.id != controller)
+                .filter(|player| triggering.is_none_or(|pid| pid != player.id))
+                .map(|player| player.id)
+                .collect()
+        }
     }
 }
 

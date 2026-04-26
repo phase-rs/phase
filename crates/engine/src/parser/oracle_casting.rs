@@ -1,5 +1,5 @@
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -154,31 +154,27 @@ fn parse_self_flash_option(
     Some(option)
 }
 
+/// CR 118.9 (verified `docs/MagicCompRules.txt:1014`): "Some spells have alternative costs.
+/// An alternative cost is a cost listed in a spell's text, or applied to it from another
+/// effect, that its controller may pay rather than paying the spell's mana cost. Alternative
+/// costs are usually phrased, 'You may [action] rather than pay [this object's] mana cost,'
+/// or 'You may cast [this object] without paying its mana cost.'"
+///
+/// Parses both forms. The `"you may [verb-cost] rather than pay this spell's mana cost"`
+/// form is verb-agnostic: the cost text (with verb intact) is delegated to `parse_oracle_cost`,
+/// the single authority for cost parsing. This composes `pay {N}{C}`, `tap [filter]`,
+/// `sacrifice [filter]`, and any future cost verb uniformly without per-verb arms.
 fn parse_self_alternative_cost_option(
     body: &str,
     body_lower: &str,
     card_name: &str,
 ) -> Option<SpellCastingOption> {
-    if let Some(cost_text) = extract_alternative_cost(
-        body,
-        body_lower,
-        "you may pay ",
-        " rather than pay this spell's mana cost",
-    ) {
-        return Some(SpellCastingOption::alternative_cost(parse_oracle_cost(
-            cost_text,
-        )));
-    }
-
-    if let Some((cost_text, condition_text)) = extract_alternative_cost_with_trailing_condition(
-        body,
-        body_lower,
-        "you may pay ",
-        " rather than pay this spell's mana cost if ",
-    ) {
+    if let Some((cost_text, trailing_if)) = extract_rather_than_pay_alt_cost(body, body_lower) {
         let mut option = SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text));
-        if let Some(parsed) = parse_restriction_condition(condition_text) {
-            option = option.condition(parsed);
+        if let Some(condition_text) = trailing_if {
+            if let Some(parsed) = parse_restriction_condition(condition_text) {
+                option = option.condition(parsed);
+            }
         }
         return Some(option);
     }
@@ -201,31 +197,44 @@ fn parse_self_alternative_cost_option(
     None
 }
 
-fn extract_alternative_cost<'a>(
-    raw: &'a str,
-    lower: &str,
-    prefix: &str,
-    suffix: &str,
-) -> Option<&'a str> {
-    let after_prefix = lower.strip_prefix(prefix)?;
-    after_prefix.strip_suffix(suffix)?;
-    let cost_end = raw.len() - suffix.len();
-    Some(raw[prefix.len()..cost_end].trim())
-}
+/// Extract the cost-text and optional trailing-`if` condition from a
+/// `"you may [verb-cost] rather than pay this spell's mana cost[ if [condition]]"` line.
+///
+/// Composed via nom `tag()` + `take_until()`: prefix is verb-agnostic so a single combinator
+/// handles `pay`, `tap`, `sacrifice`, and any future cost verb that `parse_oracle_cost`
+/// recognizes. The cost text is returned in original case (preserves mana symbol casing for
+/// `parse_mana_symbols`); the optional trailing condition is returned as a raw slice for
+/// downstream `parse_restriction_condition`.
+fn extract_rather_than_pay_alt_cost<'a>(
+    body: &'a str,
+    body_lower: &str,
+) -> Option<(&'a str, Option<&'a str>)> {
+    const PREFIX: &str = "you may ";
+    const SUFFIX: &str = " rather than pay this spell's mana cost";
 
-fn extract_alternative_cost_with_trailing_condition<'a>(
-    raw: &'a str,
-    lower: &str,
-    prefix: &str,
-    marker: &str,
-) -> Option<(&'a str, &'a str)> {
-    lower.strip_prefix(prefix)?;
+    let (after_prefix_lower, _) = tag::<_, _, VerboseError<&str>>(PREFIX)
+        .parse(body_lower)
+        .ok()?;
+    let prefix_len = body_lower.len() - after_prefix_lower.len();
 
-    let tp = TextPair::new(raw, lower);
-    let marker_pos = tp.find(marker)?;
-    let cost_text = raw[prefix.len()..marker_pos].trim();
-    let condition = raw[marker_pos + marker.len()..].trim();
-    Some((cost_text, condition))
+    let (after_suffix_lower, _) = take_until::<_, _, VerboseError<&str>>(SUFFIX)
+        .parse(after_prefix_lower)
+        .ok()?;
+    let cost_end = body_lower.len() - after_suffix_lower.len();
+
+    let cost_text = body[prefix_len..cost_end].trim();
+    let after_suffix_pos = cost_end + SUFFIX.len();
+    let remainder_lower = &body_lower[after_suffix_pos..];
+    let trailing_if = if let Ok((cond_lower, _)) =
+        tag::<_, _, VerboseError<&str>>(" if ").parse(remainder_lower)
+    {
+        let cond_start = body.len() - cond_lower.len();
+        Some(body[cond_start..].trim())
+    } else {
+        None
+    };
+
+    Some((cost_text, trailing_if))
 }
 
 fn self_spell_phrase(lower: &str, card_name: &str) -> Option<String> {
@@ -793,5 +802,184 @@ mod tests {
             Some(AdditionalCost::Required(AbilityCost::Sacrifice { count: 1, .. })) => {}
             other => panic!("Expected Required(Sacrifice), got {:?}", other),
         }
+    }
+
+    // CR 118.9: Alternative-cost arms — verb-agnostic prefix delegates to `parse_oracle_cost`.
+    //
+    // Class: ~23 cards in card-data.json including Ramosian Rally, Lashknife, Orim's Cure,
+    // Angelic Favor, Sivvi's Valor, The Lady of Otaria (tap arm); Fireblast, Pulverize,
+    // Mogg Alarm, Crash, Hand of Emrakul, Delraich, Dark Triumph, Flare of Denial, Salvage
+    // Titan, Mind Swords, Mine Collapse, Thunderclap, Downhill Charge, Flare of Cultivation,
+    // Flare of Duplication, Flare of Fortitude, Flare of Malice (sacrifice arm); the
+    // pre-existing pay-mana arm covers Archive Trap, Force of Will, etc.
+
+    #[test]
+    fn alt_cost_tap_creature_arm() {
+        let option = parse_spell_casting_option_line(
+            "you may tap an untapped creature you control rather than pay this spell's mana cost.",
+            "Ramosian Rally",
+        )
+        .expect("alt-cost should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost:
+                    Some(AbilityCost::TapCreatures {
+                        count: 1,
+                        filter: _,
+                    }),
+                condition: None,
+            } => {}
+            other => panic!("expected TapCreatures alt-cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_tap_creature_arm_with_count() {
+        // The Lady of Otaria — "tap three untapped Dwarves you control"
+        let option = parse_spell_casting_option_line(
+            "You may tap three untapped Dwarves you control rather than pay this spell's mana cost.",
+            "The Lady of Otaria",
+        )
+        .expect("alt-cost should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost:
+                    Some(AbilityCost::TapCreatures {
+                        count: 3,
+                        filter: _,
+                    }),
+                condition: None,
+            } => {}
+            other => panic!("expected TapCreatures(count=3) alt-cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_sacrifice_arm() {
+        // Fireblast — "sacrifice two Mountains"
+        let option = parse_spell_casting_option_line(
+            "You may sacrifice two Mountains rather than pay this spell's mana cost.",
+            "Fireblast",
+        )
+        .expect("alt-cost should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost: Some(AbilityCost::Sacrifice { count: 2, .. }),
+                condition: None,
+            } => {}
+            other => panic!("expected Sacrifice(count=2) alt-cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_sacrifice_typed_creature_arm() {
+        // Delraich — "sacrifice three black creatures"
+        let option = parse_spell_casting_option_line(
+            "You may sacrifice three black creatures rather than pay this spell's mana cost.",
+            "Delraich",
+        )
+        .expect("alt-cost should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost: Some(AbilityCost::Sacrifice { count: 3, .. }),
+                condition: None,
+            } => {}
+            other => panic!("expected Sacrifice(count=3) alt-cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_tap_with_leading_if_condition_binds() {
+        // Ramosian Rally — leading "If you control a Plains, " binds via the outer
+        // `split_leading_if_clause` + `parse_restriction_condition` pipeline.
+        let option = parse_spell_casting_option_line(
+            "If you control a Plains, you may tap an untapped creature you control rather than pay this spell's mana cost.",
+            "Ramosian Rally",
+        )
+        .expect("alt-cost should parse with leading-if condition");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost:
+                    Some(AbilityCost::TapCreatures {
+                        count: 1,
+                        filter: _,
+                    }),
+                condition:
+                    Some(ParsedCondition::YouControlSubtypeCountAtLeast {
+                        ref subtype,
+                        count: 1,
+                    }),
+            } if subtype == "plains" => {}
+            other => panic!("expected TapCreatures + Plains-control condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_pay_mana_regression_unchanged() {
+        // Existing class — Archive Trap shape. Verifies the verb-agnostic prefix still
+        // routes "pay {N}" through `parse_oracle_cost` to `Mana { cost }`.
+        let option = parse_spell_casting_option_line(
+            "you may pay {0} rather than pay this spell's mana cost.",
+            "Archive Trap",
+        )
+        .expect("alt-cost should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost:
+                    Some(AbilityCost::Mana {
+                        cost:
+                            ManaCost::Cost {
+                                generic: 0,
+                                ref shards,
+                            },
+                    }),
+                condition: None,
+            } if shards.is_empty() => {}
+            other => panic!("expected Mana(0) alt-cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_pay_mana_composite_regression_unchanged() {
+        // Force of Will shape — composite cost via " and " split.
+        let option = parse_spell_casting_option_line(
+            "You may pay 1 life and exile a blue card from your hand rather than pay this spell's mana cost.",
+            "Force of Will",
+        )
+        .expect("alt-cost should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost: Some(AbilityCost::Composite { .. }),
+                condition: None,
+            } => {}
+            other => panic!("expected Composite alt-cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_trailing_if_condition_does_not_drop_cost() {
+        // Blasphemous Edict — only card in dataset with trailing "if [condition]" suffix.
+        // The mana cost {B} must still parse cleanly even with a trailing if-clause.
+        // (The condition itself, "there are thirteen or more creatures on the battlefield",
+        // is currently outside `parse_restriction_condition`'s recognized patterns; that's
+        // a separate parser gap and pre-existed this fix — see card-data.json's existing
+        // `condition: null` on Blasphemous Edict's casting_options.)
+        let option = parse_spell_casting_option_line(
+            "You may pay {B} rather than pay this spell's mana cost if there are thirteen or more creatures on the battlefield.",
+            "Blasphemous Edict",
+        )
+        .expect("alt-cost should parse even when trailing-if condition is unrecognized");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+        ));
+        assert!(matches!(option.cost, Some(AbilityCost::Mana { .. })));
     }
 }

@@ -96,10 +96,20 @@ impl ContinuousModification {
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::AddSupertype { .. }
+            | ContinuousModification::RemoveSupertype { .. }
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
-            | ContinuousModification::SetBasicLandType { .. } => Layer::Type, // CR 613.1d
+            | ContinuousModification::SetBasicLandType { .. } => Layer::Type, // CR 613.1d + CR 205.4b
+            // CR 122.1 + CR 614.1c: One-shot counter placement at copy
+            // resolution. Consumed by the BecomeCopy / CopyTokenOf resolvers
+            // before any continuous-effect machinery is reached. Reaching this
+            // arm via `apply_continuous_effect` indicates a wiring bug.
+            ContinuousModification::AddCounterOnEnter { .. } => unreachable!(
+                "AddCounterOnEnter is consumed at resolution; never layered. \
+                 Verify resolver dispatch in token_copy.rs / become_copy.rs."
+            ),
             ContinuousModification::SetColor { .. }
             | ContinuousModification::AddColor { .. }
             | ContinuousModification::AddChosenColor => Layer::Color,

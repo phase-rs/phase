@@ -547,8 +547,32 @@ fn check_unattached_auras(
                     if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
                         return false;
                     }
+                    // CR 704.5m / CR 704.5n apply specifically to *Auras* —
+                    // gate on the Aura subtype so non-Aura enchantments
+                    // (Saga, Class, Background, Shrine, etc.) are not
+                    // affected. The CoreType check above is necessary but
+                    // not sufficient.
+                    let is_aura = obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case("Aura"));
+                    if !is_aura {
+                        return false;
+                    }
                     // Note: the parser also routes player-attached Auras here.
                     // CR 303.4c: A player who has left the game is an illegal host.
+                    // CR 704.5n: An Aura that is "unattached and on the
+                    // battlefield" is also put into its owner's graveyard —
+                    // covers the case where a target legally chosen at
+                    // announcement is removed before resolution can attach
+                    // (target destroyed by another stack effect, target left
+                    // the battlefield mid-resolution, etc.). Without this, an
+                    // orphan Aura with `attached_to = None` would persist on
+                    // the battlefield doing nothing. Aura cast resolution
+                    // sets `attached_to` synchronously, so a freshly resolved
+                    // Aura is never observed here with `None` — by the time
+                    // SBAs run, an Aura with no host genuinely has no host.
                     match obj.attached_to {
                         Some(crate::game::game_object::AttachTarget::Object(t)) => {
                             !is_valid_attachment_target(state, t)
@@ -556,7 +580,7 @@ fn check_unattached_auras(
                         Some(crate::game::game_object::AttachTarget::Player(pid)) => {
                             !is_player_in_game(state, pid)
                         }
-                        None => false,
+                        None => true,
                     }
                 })
                 .unwrap_or(false)
@@ -1203,7 +1227,7 @@ mod tests {
     #[test]
     fn sba_unattached_aura_goes_to_graveyard() {
         let mut state = setup();
-        // Create an enchantment attached to a nonexistent object
+        // Create an Aura attached to a nonexistent object
         let aura_id = create_object(
             &mut state,
             CardId(1),
@@ -1213,6 +1237,7 @@ mod tests {
         );
         let obj = state.objects.get_mut(&aura_id).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
         obj.attached_to = Some(ObjectId(999).into()); // nonexistent target
 
         let mut events = Vec::new();
@@ -1239,6 +1264,7 @@ mod tests {
         );
         let obj = state.objects.get_mut(&aura_id).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
         obj.attached_to = Some(id.into());
 
         let mut events = Vec::new();
@@ -1375,6 +1401,7 @@ mod tests {
         );
         let obj = state.objects.get_mut(&aura_id).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
         obj.attached_to = Some(creature_id.into());
 
         let mut events = Vec::new();

@@ -211,6 +211,9 @@ fn finalize_loyalty_activation(
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
+    // CR 603.4: Stamp the loyalty-ability index for per-turn resolution tracking.
+    let mut resolved_with_idx = resolved;
+    resolved_with_idx.ability_index = Some(ability_index);
     stack::push_to_stack(
         state,
         StackEntry {
@@ -219,7 +222,7 @@ fn finalize_loyalty_activation(
             controller: player,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: pw_id,
-                ability: resolved,
+                ability: resolved_with_idx,
             },
         },
         events,

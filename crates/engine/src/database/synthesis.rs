@@ -687,6 +687,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
+                        enter_with_counters: vec![],
                     },
                 );
                 put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -920,6 +921,7 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         )));
         face.replacements.push(replacement);
@@ -1413,6 +1415,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         )
         .sub_ability(cast_sub);

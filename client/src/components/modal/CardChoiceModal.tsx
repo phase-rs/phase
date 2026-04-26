@@ -10,6 +10,7 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
+import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
@@ -115,6 +116,9 @@ export function CardChoiceModal() {
     case "NamedChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
+    case "VoteChoice":
+      if (!canActForWaitingState) return null;
+      return <VoteChoiceModal data={waitingFor.data} />;
     case "DiscardToHandSize":
       if (!canActForWaitingState) return null;
       return <DiscardModal data={waitingFor.data} />;

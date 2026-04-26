@@ -99,19 +99,22 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
     }
 }
 
-/// Returns true if any of three threat signals is present:
+/// Returns true if any of four threat signals is present:
 ///   - Stack contains an opponent-controlled object whose targets include
 ///     the AI player or any AI-controlled permanent (CR 117.1a — instants
 ///     are how protection responds to spells already on the stack).
+///   - Stack contains an opponent-controlled untargeted mass-removal /
+///     mass-bounce / mass-exile effect (Wrath of God, Damnation, Cyclonic
+///     Rift, etc.) — these have no `targets`, so the targeted-threat check
+///     above never sees them, but Heroic Intervention is exactly the right
+///     answer.
 ///   - The AI's own life total is below 40% of starting life.
 ///   - Some opponent's `threat_level` is at or above `THREAT_FLOOR`.
-///
-/// Stack-targeted threats are the load-bearing signal for the user-reported
-/// "opponent casts Doom Blade on my commander" scenario — neither board
-/// pressure nor life ratio change in that moment, but Heroic Intervention
-/// is exactly the right cast.
 fn any_immediate_threat(state: &GameState, ai_player: PlayerId) -> bool {
     if any_stack_targets_ai_or_ai_permanent(state, ai_player) {
+        return true;
+    }
+    if any_stack_has_untargeted_mass_threat(state, ai_player) {
         return true;
     }
     let starting_life = state.format_config.starting_life.max(1) as f64;
@@ -124,6 +127,34 @@ fn any_immediate_threat(state: &GameState, ai_player: PlayerId) -> bool {
             return false;
         }
         threat_level(state, ai_player, p.id) >= THREAT_FLOOR
+    })
+}
+
+/// Returns true if the stack contains an opponent-controlled mass-removal /
+/// mass-bounce / mass-exile effect — i.e., an effect that hits the AI's
+/// board without naming a specific target. Conservative: any such mass effect
+/// is treated as hostile, even if its filter excludes the AI's permanents
+/// (rare and not worth the analysis cost — over-permitting a defensive cast
+/// is strictly better than under-permitting).
+fn any_stack_has_untargeted_mass_threat(state: &GameState, ai_player: PlayerId) -> bool {
+    use engine::types::zones::Zone;
+    state.stack.iter().any(|entry| {
+        if entry.controller == ai_player {
+            return false;
+        }
+        let Some(ability) = entry.ability() else {
+            return false;
+        };
+        matches!(
+            &ability.effect,
+            Effect::DestroyAll { .. }
+                | Effect::DamageAll { .. }
+                | Effect::BounceAll { .. }
+                | Effect::ChangeZoneAll {
+                    destination: Zone::Exile | Zone::Graveyard | Zone::Hand,
+                    ..
+                }
+        )
     })
 }
 

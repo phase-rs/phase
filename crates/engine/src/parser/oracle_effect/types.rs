@@ -228,7 +228,7 @@ pub(super) enum ContinuationAst {
     /// Absorbs into preceding CopyTokenOf, Token, or ChangeZone by setting
     /// enters_attacking and tapped/enter_tapped flags.
     EntersTappedAttacking,
-    /// CR 122.1a: "The token enters with X +1/+1 counters on it, where X is ..."
+    /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
     /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
     TokenEntersWithCounters {
         counter_type: String,
@@ -487,6 +487,13 @@ pub(super) enum TargetedImperativeAst {
     Return {
         target: TargetFilter,
     },
+    /// CR 400.7 + CR 611.2c: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
+    /// for "return all/each [filter] to their owners' hands" Oracle text.
+    /// Lowers to `Effect::BounceAll`, not `Effect::Bounce`, so the runtime
+    /// resolver iterates every matching permanent instead of prompting for one.
+    ReturnAll {
+        target: TargetFilter,
+    },
     /// CR 400.7: Return to the battlefield (zone change, not bounce).
     ReturnToBattlefield {
         target: TargetFilter,
@@ -561,6 +568,10 @@ pub(super) enum SearchCreationImperativeAst {
         /// CR 707.2 + CR 702: "except it has [keyword]" — extra keywords granted
         /// to each created copy token. See `Effect::CopyTokenOf::extra_keywords`.
         extra_keywords: Vec<crate::types::keywords::Keyword>,
+        /// CR 707.9 + CR 707.2: "except <body>" non-keyword modifications
+        /// (e.g., `RemoveSupertype` for Miirym's "isn't legendary"). See
+        /// `Effect::CopyTokenOf::additional_modifications`.
+        additional_modifications: Vec<crate::types::ability::ContinuousModification>,
     },
     Token {
         token: Box<TokenDescription>,
@@ -643,6 +654,17 @@ pub(super) enum ChooseImperativeAst {
         categories: Vec<crate::types::card_type::CoreType>,
         chooser_scope: crate::types::ability::CategoryChooserScope,
     },
+    /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
+    /// target slots declared in a single targeting clause (Goblin Welder shape).
+    /// Each `target` becomes its own `Effect::TargetOnly` slot so that the
+    /// caster announces both targets at activation time per CR 601.2c. The
+    /// later sub_ability sentence ("If both targets are still legal …")
+    /// references them via `TargetFilter::ParentTarget` chained through the
+    /// sub_ability lattice.
+    TwoTargets {
+        target_a: TargetFilter,
+        target_b: TargetFilter,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,6 +680,15 @@ pub(super) enum PutImperativeAst {
         under_your_control: bool,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
+        /// CR 508.4: "tapped and attacking [<player_phrase>]" — the moved
+        /// object enters the battlefield as an attacking creature (without
+        /// having been declared as one). Set by the inline-tail patcher in
+        /// `try_parse_put_zone_change` for the Kaalia / Ilharg class.
+        enters_attacking: bool,
+        /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
+        /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
+        /// `(counter_type, count)`.
+        enter_with_counters: Vec<(String, QuantityExpr)>,
     },
     TopOfLibrary,
     BottomOfLibrary,
@@ -758,7 +789,7 @@ pub(super) enum ZoneCounterImperativeAst {
         count: i32,
         target: TargetFilter,
     },
-    /// CR 121.5: "Put its counters on [target]" — copy all counters from source to target.
+    /// CR 122.8: "Put its counters on [target]" — copy all counters from source to target.
     MoveCounters {
         source: TargetFilter,
         counter_type: Option<String>,

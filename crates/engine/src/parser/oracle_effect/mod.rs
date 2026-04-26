@@ -910,6 +910,7 @@ fn try_parse_self_name_exile(tp: TextPair<'_>, ctx: &ParseContext) -> Option<Par
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         }));
     }
     None
@@ -973,6 +974,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         }
     };
 
@@ -1040,6 +1042,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enter_tapped: true,
             enters_attacking: false,
             up_to: false,
+            enter_with_counters: vec![],
         },
     );
 
@@ -1131,6 +1134,26 @@ fn try_parse_choose_one_of_inline(
     // what's missing between the two returned halves.
     let (before_lower, after_lower) =
         split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
+
+    // Multi-`or` chains and inner-noun disjunctions ("discard a creature card
+    // or land, or sacrifice a creature") would split here at the FIRST `or`,
+    // leaving the left half's inner ` or ` to be silently dropped by
+    // `parse_effect_clause` — both halves parse to non-Unimplemented but the
+    // left has the wrong meaning. Reject unless the left half is unambiguously
+    // a single imperative (no further top-level ` or `). This keeps the
+    // 2-branch case working and conservatively declines on 3+ chains so they
+    // fall through to higher-fidelity parsing rather than misread silently.
+    //
+    // Detection uses nom's `take_until` to scan for ` or ` in the already-
+    // separated left half — a structural post-split sanity check, not parser
+    // dispatch.
+    if take_until::<_, _, VerboseError<&str>>(" or ")
+        .parse(before_lower)
+        .is_ok()
+    {
+        return None;
+    }
+
     let split_index = before_lower.len();
     let after_offset = tp.lower.len() - after_lower.len();
 
@@ -1225,9 +1248,15 @@ fn try_parse_have_causative(tp: TextPair<'_>, ctx: &ParseContext) -> Option<Pars
                 }));
             }
         }
-        // Fallback: parse remaining as a generic imperative effect
-        let clause = parse_effect_clause(rest.original, ctx);
-        return Some(clause);
+        // CR 611.2b: When the specific causative "deal damage" pattern does
+        // not match, decline so the more general `try_parse_have_redirection`
+        // (subject-predicate dispatch downstream of `parse_effect_clause`) can
+        // take this clause. Recursing through `parse_effect_clause` here would
+        // erase the subject (`~` / `it`) and reduce the remainder to a bare
+        // imperative — which `try_parse_subject_become_clause` and other
+        // subject-aware arms can no longer reach (Sarkhan, Soul Aflame's
+        // "have ~ become a copy of it ..." class).
+        return None;
     }
 
     // Pattern B: "have you [verb]" — controller performs an action directed by opponent
@@ -1299,6 +1328,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
+                enter_with_counters: vec![],
             },
         ))),
         distribute: None,
@@ -1619,7 +1649,8 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return clause;
     }
 
-    // CR 121.6: "{verb} cards equal to {quantity}" — dynamic count from game state.
+    // CR 121.1 + CR 701.17a: "{verb} cards equal to {quantity}" — dynamic count
+    // from game state for draw or mill.
     if let Some(clause) = try_parse_equal_to_quantity_effect(tp) {
         return clause;
     }
@@ -1966,8 +1997,11 @@ fn try_parse_have_its_controller(
     }
 
     // Rebind the acting player of player-scoped sub-effects to the triggering
-    // source's controller. Token creation is the scope for this ticket; other
-    // rebinding sites can be added here as needed.
+    // source's controller. Mirrors the original Token-only rebind across the
+    // common player-scoped sub-effects so cards in the same class (Captive
+    // Audience-style "have its controller draw/discard/lose life") resolve
+    // their player field to the *acting* player rather than the static
+    // ability's controller.
     let rebound = rebind_controller_to_triggering_source(clause);
     Some(rebound)
 }
@@ -1977,11 +2011,30 @@ fn try_parse_have_its_controller(
 /// player" fields) resolve to the controller of the triggering object at
 /// runtime. Only effects whose player-scope field is currently the default
 /// `Controller` are touched — an explicit target/filter is preserved.
+///
+/// Covers the player-scoped sub-effects that the "have its controller [verb]"
+/// pattern can produce: Token (creation), Draw, DiscardCard, LoseLife, Mill.
+/// Each receives the same defaulted-Controller-only guard so a parser arm
+/// that wired an explicit target (e.g. "have its controller mill target
+/// player's library") survives unchanged.
 fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> ParsedEffectClause {
-    if let Effect::Token { ref mut owner, .. } = clause.effect {
-        if matches!(owner, TargetFilter::Controller) {
-            *owner = TargetFilter::TriggeringSource;
+    let rebind = |target: &mut TargetFilter| {
+        if matches!(target, TargetFilter::Controller) {
+            *target = TargetFilter::TriggeringSource;
         }
+    };
+    match &mut clause.effect {
+        Effect::Token { owner, .. } => rebind(owner),
+        Effect::Draw { target, .. } => rebind(target),
+        Effect::DiscardCard { target, .. } => rebind(target),
+        Effect::Mill { target, .. } => rebind(target),
+        // CR 119.3: `LoseLife.target` is `Option<TargetFilter>` — only rebind
+        // the populated `Controller` case; `None` means "the controller of
+        // the resolving ability" and that semantic is preserved by leaving it.
+        Effect::LoseLife {
+            target: Some(t), ..
+        } => rebind(t),
+        _ => {}
     }
     clause
 }
@@ -2205,7 +2258,7 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     Some(parsed_clause(Effect::SkipNextTurn { target, count }))
 }
 
-/// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.6).
+/// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.1 + CR 701.17a).
 ///
 /// Handles verbs whose count field is `QuantityExpr` (mill, draw).
 fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause> {
@@ -2324,6 +2377,7 @@ fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause>
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
+        enter_with_counters: vec![],
     }))
 }
 
@@ -2393,9 +2447,49 @@ fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
 }
 
 fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
-    // Match: "exile cards from the top of your library until you exile a/an {filter} card"
+    // CR 701.57a + CR 702.85a + CR 400.7: Parse `exile[s] cards from the top of
+    // <possessive> library until <pronoun> exile[s] a/an {filter} card`.
+    //
+    // 701.57a / 702.85a (Discover / Cascade): canonical "exile from top until
+    // a nonland card" pattern that the typed `Effect::ExileFromTopUntil`
+    // generalizes — same shape with a parameterized hit filter (Etali, Primal
+    // Conqueror's "until they exile a nonland card").
+    // 400.7: each exiled card is a new object; tracked by ExileLink in the
+    // resolver so downstream `TargetFilter::ExiledBySource` lookups (Etali's
+    // "from among the nonland cards exiled this way" sub-clause) resolve
+    // correctly.
+    //
+    // Both second-person ("exile … your library … until you exile") and
+    // third-person ("exile … their library … until they exile") possessive
+    // variants are accepted. The "each player " subject is stripped upstream
+    // by `strip_each_player_subject`, which deconjugates "exiles" → "exile";
+    // by the time we get here Etali's trigger body reads
+    //   "exile cards from the top of their library until they exile a nonland card"
+    // — same verb form as the second-person path with a different determiner.
+    //
+    // Mirrors the analogous sub-combinator pattern in
+    // `parse_reveal_until_prefix` (oracle_effect/mod.rs:2433) which handles
+    // the same possessive variation for `RevealUntil`.
     let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("exile cards from the top of your library until you exile ").parse(i)?;
+        let (i, _) = alt((tag("exile "), tag("exiles "))).parse(i)?;
+        let (i, _) = tag("cards from the top of ").parse(i)?;
+        let (i, _) = alt((
+            tag("your "),
+            tag("their "),
+            tag("his "),
+            tag("her "),
+            tag("its "),
+        ))
+        .parse(i)?;
+        let (i, _) = tag("library until ").parse(i)?;
+        let (i, _) = alt((
+            tag("you exile "),
+            tag("they exile "),
+            tag("he exiles "),
+            tag("she exiles "),
+            tag("it exiles "),
+        ))
+        .parse(i)?;
         nom_primitives::parse_article(i)
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
@@ -3534,7 +3628,7 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
             Some((qty, rest))
         })?;
 
-    // Match: "each [opponent/player] and each [type phrase] they control"
+    // Match: "each [opponent/player] and each [type phrase] {they control | you don't control | your opponents control}"
     let (after_each, _) = tag::<_, _, VerboseError<&str>>("each ")
         .parse(after_amount)
         .ok()?;
@@ -3545,22 +3639,53 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
         .parse(after_player)
         .ok()?;
 
-    // Strip "they control" suffix to get the type phrase
-    // "creature and planeswalker they control" or "planeswalker they control"
-    let type_phrase_lower = after_and_each
-        .strip_suffix(" they control")
-        .or_else(|| after_and_each.strip_suffix(" they control."))?
-        .trim();
-    if type_phrase_lower.is_empty() {
+    // Trim a trailing period so suffix-anchored controller phrases match cleanly.
+    let after_and_each = after_and_each.trim_end_matches('.').trim_end();
+    if after_and_each.is_empty() {
         return None;
     }
 
-    // Use parse_target on "each [type]" to get the correct typed filter with controller
-    let target_text = format!("each {type_phrase_lower}");
+    // CR 109.4 + CR 109.5: Probe for one of the three controller-suffix variants
+    // this compound class uses. All three resolve to ControllerRef::Opponent for
+    // the object filter — "they" anaphors the opponent set named in the first
+    // half; "you don't control" and "your opponents control" are direct opponent
+    // refs. The suffix presence is the gate for the compound shape — without it
+    // the " and " is part of an unrelated clause and falls through to general
+    // split. `take_until` + an anchored controller-tag alt() is the single-pass
+    // gate; the take_until result (the type-phrase prefix) is unused here because
+    // we hand the full slice to parse_target below for native consumption.
+    let mut probe = alt((
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" they control"),
+            tag(" they control"),
+        ),
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" you don't control"),
+            tag(" you don't control"),
+        ),
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" your opponents control"),
+            tag(" your opponents control"),
+        ),
+    ));
+    let (gate_rest, _) = probe.parse(after_and_each).ok()?;
+    if !gate_rest.is_empty() {
+        return None;
+    }
+
+    // Use parse_target on "each [type phrase + controller suffix]" so the controller
+    // suffix is consumed natively by the parser pipeline. parse_target returns the
+    // typed filter with controller already populated (Opponent for "you don't control"
+    // / "your opponents control"; You for "they control" — we rewrite that below).
+    let target_text = format!("each {after_and_each}");
     let (mut object_filter, _rem) = parse_target(&target_text);
 
-    // Set controller to Opponent to match "they control" (where "they" = opponents).
-    // The filter may be a single Typed or an Or of multiple Typed filters.
+    // CR 109.5: "they" in this compound damage context anaphors back to the
+    // opponent set in the first half of the conjunction, NOT to the controller.
+    // Rewrite ControllerRef::You (parse_target's default for "they control") to
+    // Opponent so the runtime targets the same opponent set as `player_filter`.
+    // "you don't control" and "your opponents control" already resolve to
+    // Opponent via `parse_zone_controller` and are left unchanged.
     fn set_opponent_controller(filter: &mut TargetFilter) {
         match filter {
             TargetFilter::Typed(tf) => {
@@ -3763,6 +3888,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
+        enter_with_counters: vec![],
     };
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
     sub_def.sub_ability = Some(Box::new(shuffle_def));
@@ -3778,6 +3904,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
+        enter_with_counters: vec![],
     };
 
     Some(ParsedEffectClause {
@@ -3862,6 +3989,14 @@ fn replace_target_with_parent(effect: &mut Effect) {
 /// Check if an effect has a `Typed(...)` target filter (not SelfRef/ParentTarget/Any).
 /// Used to guard anaphoric replacement scope — prevents false positives when a
 /// pronoun clause follows a conditional effect without a typed target.
+///
+/// CR 608.2k: An anaphor in a later clause of a multi-step ability binds to the
+/// typed target chosen for an earlier clause. The predicate gates the rebinding
+/// so non-targeting prior clauses (e.g. `Effect::Draw`, untargeted `LoseLife`)
+/// don't capture a later "it" reference. `Effect::GenericEffect` carries an
+/// `Option<TargetFilter>` (becomes/animate/transform-class clauses such as
+/// "Target legendary creature becomes a God"); when populated with a typed
+/// filter, a following anaphor refers to the same chosen object.
 fn has_typed_target(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -3888,6 +4023,9 @@ fn has_typed_target(effect: &Effect) -> bool {
             ..
         } | Effect::Attach {
             target: TargetFilter::Typed(_),
+            ..
+        } | Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(_)),
             ..
         }
     )
@@ -6168,7 +6306,62 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         rewrite_rounding_mode(&mut result, mode);
     }
 
+    // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
+    // parent zone-change to Battlefield when the chained sub-ability is an
+    // `Attach` gated by `ZoneChangedThisWay`. Without this, the runtime
+    // resolves the sub-ability with `source_id` = the original ability source
+    // (the trigger source / Saga / activated permanent), so the Attach tries
+    // to equip *that* object to the chosen creature — wrong for Armored
+    // Skyhunter (Skyhunter cannot equip itself), wrong for Vault 101: Birthday
+    // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
+    // Stonehewer Giant (the searcher is not the moved Equipment).
+    //
+    // The `forward_result` flag makes the runtime forward the just-moved
+    // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
+    // forward_result branch), so `Attach::resolve` operates on the correct
+    // attaching object.
+    rewire_attach_forward_result(&mut result);
+
     result
+}
+
+/// CR 303.4f / CR 301.5b / CR 603.7d: Walk the chain and set
+/// `forward_result: true` on every `Dig`/`ChangeZone` whose `destination`
+/// is `Battlefield` and whose chained sub-ability is an `Attach` carrying
+/// the `ZoneChangedThisWay` condition. The condition is the parser-side
+/// signal that the Oracle text said "If a[n] [type] is/was put onto the
+/// battlefield this way, [attach it]" — i.e. the just-moved card must
+/// become the attaching object.
+///
+/// Recurses through nested sub-abilities so chains of arbitrary depth
+/// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
+fn rewire_attach_forward_result(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_ref() {
+        let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
+            && matches!(
+                sub.condition,
+                Some(AbilityCondition::ZoneChangedThisWay { .. })
+            );
+        let parent_moves_to_battlefield = matches!(
+            *def.effect,
+            Effect::Dig {
+                destination: Some(Zone::Battlefield),
+                ..
+            } | Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        );
+        if sub_is_attach_with_zone_changed_cond && parent_moves_to_battlefield {
+            def.forward_result = true;
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewire_attach_forward_result(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewire_attach_forward_result(else_branch);
+    }
 }
 
 /// CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"
@@ -6199,6 +6392,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
             enters_attacking,
             tapped,
             extra_keywords,
+            additional_modifications,
             ..
         } => Some(Effect::CopyTokenOf {
             target: target.clone(),
@@ -6208,6 +6402,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
                 value: count as i32,
             },
             extra_keywords: extra_keywords.clone(),
+            additional_modifications: additional_modifications.clone(),
         }),
         Effect::Token {
             name,
@@ -6274,16 +6469,22 @@ fn match_create_of_those_tokens(effect: &Effect) -> Option<u32> {
     }
 }
 
-/// CR 701.36a + CR 603.7c: Rewrite "the token created this way …" /
-/// "sacrifice it" anaphors following a token-creating effect.
+/// CR 608.2k + CR 603.7c + CR 701.36a: Rewrite token anaphors following a
+/// token-creating effect.
 ///
 /// Two rewrites, both scoped to defs whose chain contains a prior token
 /// creator (`Populate`, `CopyTokenOf`, `Token`):
 ///
-/// 1. `Effect::Unimplemented { description: "the token created this way <mod>" }`
+/// 1. `Effect::Unimplemented { description: "<anaphor> <mod>" }`
 ///    → `GenericEffect { target: Some(LastCreated), static_abilities: [...],
 ///    duration: Some(UntilEndOfTurn) }` where the modifications are parsed
 ///    from the verb phrase ("gains haste" / "gets +1/+1" / …).
+///    Recognized anaphor prefixes (longest-first to disambiguate):
+///    "the token created this way " / "the tokens created this way "
+///    (populate-specific qualifier) and the plain forms "this token " /
+///    "that token " / "the token " (covers Pietra, Inalla, and similar
+///    token-creators that follow with a generic pronoun rather than the
+///    populate-specific phrasing).
 ///
 /// 2. Inside a `CreateDelayedTrigger` whose inner effect references the
 ///    created token via `TargetFilter::ParentTarget` (currently the
@@ -6330,21 +6531,35 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
     }
 }
 
-/// If `effect` is `Unimplemented { description: "the token created this way
-/// <verb-phrase>" }`, try to parse the verb phrase as a continuous
-/// modification set and return a replacement `GenericEffect`. Returns `None`
-/// when the shape doesn't match so the caller leaves the effect untouched.
+/// If `effect` is `Unimplemented { description: "<anaphor> <verb-phrase>" }`,
+/// try to parse the verb phrase as a continuous modification set and return
+/// a replacement `GenericEffect`. Returns `None` when the shape doesn't
+/// match so the caller leaves the effect untouched.
+///
+/// CR 608.2k + CR 603.7c: Recognized anaphor prefixes resolve to the
+/// just-created token via `TargetFilter::LastCreated`. The longer
+/// populate-specific phrases ("the token(s) created this way ") MUST be
+/// tried before the plain "the token " prefix to avoid the latter
+/// shadowing the qualified forms when both could match.
 fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> Option<Effect> {
     let Effect::Unimplemented { description, .. } = effect else {
         return None;
     };
     let text = description.as_deref()?;
     let lower = text.to_lowercase();
-    // Accept both "the token" (populate / single) and "the tokens" (plural)
-    // anaphors — both resolve against LastCreated.
-    let rest = lower
-        .strip_prefix("the token created this way ")
-        .or_else(|| lower.strip_prefix("the tokens created this way "))?;
+    // Anaphor prefixes — longest-first so "the token created this way "
+    // wins over the bare "the token " when both could match. Plain forms
+    // ("this/that/the token ") cover token-creators (Pietra, Inalla,
+    // Ghired) that refer to the just-created token without the
+    // populate-specific qualifier.
+    let mut anaphor = alt((
+        tag::<&str, &str, ()>("the token created this way "),
+        tag("the tokens created this way "),
+        tag("this token "),
+        tag("that token "),
+        tag("the token "),
+    ));
+    let (rest, _matched) = anaphor.parse(lower.as_str()).ok()?;
     let mods = crate::parser::oracle_static::parse_continuous_modifications(rest);
     if mods.is_empty() {
         return None;
@@ -6366,6 +6581,15 @@ fn rewrite_token_created_this_way_unimplemented(effect: &Effect) -> Option<Effec
 /// Iteration) and related delayed-trigger anaphors: the imperative parser
 /// emits ParentTarget for bare "it", but in the populate context the
 /// antecedent is the newly created token, not a parent ability's target.
+///
+/// CR 608.2k: Scope is narrow — this runs only inside the inner effect of a
+/// `CreateDelayedTrigger` whose enclosing chain contains a token-creating
+/// effect. Within that scope, `ParentTarget` reflects the imperative
+/// parser's bare-pronoun fallback ("sacrifice it" / "exile it" / …) rather
+/// than a real parent target slot, so rewriting to `LastCreated` is safe.
+/// `ChangeZone` is included because Inalla-style "Exile it at the beginning
+/// of the next end step" lowers to `ChangeZone { destination: Exile,
+/// target: ParentTarget }`.
 fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
     match effect {
         Effect::Sacrifice { target, .. }
@@ -6373,7 +6597,8 @@ fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         | Effect::Bounce { target, .. }
         | Effect::Tap { target, .. }
         | Effect::Untap { target, .. }
-        | Effect::Pump { target, .. } => {
+        | Effect::Pump { target, .. }
+        | Effect::ChangeZone { target, .. } => {
             if matches!(target, TargetFilter::ParentTarget) {
                 *target = TargetFilter::LastCreated;
             }
@@ -6688,12 +6913,33 @@ pub(super) fn parse_damage_player_scope(
     .parse(input)
 }
 
-/// Parse an exact `each player` / `each opponent` / `each foe` damage scope.
+/// Parse an exact `each player` / `each opponent` / `each foe` / `each other opponent`
+/// / `each other player` damage scope.
 /// Returns `None` for compound phrases so dedicated compound parsers can handle them.
+///
+/// CR 120.3 + CR 603.2c: "each other opponent" anaphors back to the triggering
+/// opponent named in the preceding "deals combat damage to an opponent" clause,
+/// so the dispatch routes to `OpponentOtherThanTriggering` (a `PlayerFilter`
+/// variant that excludes both the controller and the triggering player).
+/// "each other player" excludes the controller (the only "other" antecedent
+/// available outside trigger context) and reduces to plain `Opponent`.
 pub(super) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter> {
-    let (rest, filter) = preceded(tag("each "), parse_damage_player_scope)
-        .parse(text)
-        .ok()?;
+    let (rest, filter) = preceded(
+        tag("each "),
+        alt((
+            value(
+                PlayerFilter::OpponentOtherThanTriggering,
+                alt((
+                    tag::<_, _, VerboseError<&str>>("other opponent"),
+                    tag("other foe"),
+                )),
+            ),
+            value(PlayerFilter::Opponent, tag("other player")),
+            parse_damage_player_scope,
+        )),
+    )
+    .parse(text)
+    .ok()?;
     rest.chars()
         .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
         .then_some(filter)
@@ -8087,6 +8333,74 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
     Some(PtValue::Fixed(sign * value))
 }
 
+/// CR 122.1 + CR 614.1c: Scan a remainder for a "with [N] [type] counter(s) on
+/// it" suffix and lift the matched counter type + count into a
+/// `Vec<(String, QuantityExpr)>` slot for `Effect::ChangeZone.enter_with_counters`.
+///
+/// Matches the patterns:
+///   * "with N <type> counter(s) on it" — fixed numeric (digits or English).
+///   * "with a/an <type> counter on it" — singular article.
+///   * Optional "additional " between count and type — purely a synonym in
+///     this position; the counter is still added once during the move.
+///
+/// Returns an empty `Vec` when no clause is present, so the caller can stamp
+/// it unconditionally.
+///
+/// Implemented as a `scan_preceded` over the body combinator — the scanner
+/// advances at word boundaries, so the suffix can appear anywhere after the
+/// destination phrase ("onto the battlefield tapped under your control with
+/// two additional +1/+1 counters on it") without the caller having to
+/// pre-trim. The body combinator gates on `tag("with ")` then dispatches to
+/// `parse_counter_suffix_body`.
+fn parse_with_counters_suffix(lower: &str) -> Vec<(String, QuantityExpr)> {
+    nom_primitives::scan_preceded(lower, |i| {
+        let (i, _) = tag::<_, _, VerboseError<&str>>("with ").parse(i)?;
+        parse_counter_suffix_body_combinator(i)
+    })
+    .map(|(_, val, _)| vec![val])
+    .unwrap_or_default()
+}
+
+/// CR 122.1 + CR 614.1c: Combinator body for "[N|a|an] [additional ]<type>
+/// counter(s) on it". Used by `parse_with_counters_suffix` AND by the exile-
+/// anaphor counter clause in `oracle_replacement.rs` so both paths share the
+/// same grammar.
+///
+/// Returns the parsed `(counter_type, count)` pair on success.
+pub(crate) fn parse_counter_suffix_body_combinator(
+    input: &str,
+) -> nom::IResult<&str, (String, QuantityExpr), VerboseError<&str>> {
+    // Count: digits, English word, or article ("a"/"an").
+    let (rest, count) = nom_primitives::parse_number.parse(input)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+
+    // Optional "additional " — a synonym in this grammatical position.
+    let (rest, _) =
+        nom::combinator::opt(tag::<_, _, VerboseError<&str>>("additional ")).parse(rest)?;
+
+    // Counter type: parse the token up to " counter" / " counters". The body
+    // accepts any non-whitespace name (including "+1/+1") followed by inline
+    // tokens that don't terminate at " counter".
+    let (rest, type_token) = take_until(" counter").parse(rest)?;
+    let counter_type = crate::types::counter::parse_counter_type(type_token)
+        .as_str()
+        .to_string();
+    let (rest, _) = tag(" counter").parse(rest)?;
+    // Optional plural "s".
+    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("s")).parse(rest)?;
+    let (rest, _) = tag(" on it").parse(rest)?;
+
+    Ok((
+        rest,
+        (
+            counter_type,
+            QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        ),
+    ))
+}
+
 fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
     let tp = TextPair::new(text, lower);
     let (_, after_put_tp) = tp.split_at(4);
@@ -8107,7 +8421,7 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
         (" on the bottom of", Zone::Library),
         (" on top of", Zone::Library),
     ] {
-        if let Some((before, _)) = after_put_tp.split_around(needle) {
+        if let Some((before, after)) = after_put_tp.split_around(needle) {
             let target_text = before.original.trim();
             if target_text.is_empty() {
                 return None;
@@ -8135,6 +8449,28 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             };
             // CR 110.2: "under your control" overrides the entering object's controller.
             let under_your_control = scan_contains_phrase(after_put_tp.lower, "under your control");
+            // CR 122.1 + CR 614.1c: Detect a trailing "with [N] [type] counter(s)
+            // on it" clause and stamp it onto `enter_with_counters`. This covers
+            // The Darkness Crystal's "with two additional +1/+1 counters on it"
+            // and the broader class of put-onto-battlefield-with-counters
+            // activated abilities. The combinator scans the post-destination
+            // remainder so the suffix is consumed only when present.
+            let enter_with_counters = parse_with_counters_suffix(after_put_tp.lower);
+            // CR 508.4 + CR 614.1: The post-destination tail may carry inline
+            // entry-qualifier clauses ("tapped" / "tapped and attacking
+            // [<player_phrase>]") that propagate flags onto the produced
+            // `Effect::ChangeZone`. The combinator inspects the immediate tail
+            // (the slice starting right after the destination needle) so the
+            // single-sentence Kaalia/Ilharg pattern — where the qualifiers
+            // trail the destination in the same clause — sets both flags in
+            // one pass. The separate-sentence form ("It enters tapped and
+            // attacking") is handled by the `EntersTappedAttacking`
+            // continuation patcher in `oracle_effect/sequence.rs`.
+            let (enter_tapped, enters_attacking) = if destination == Zone::Battlefield {
+                parse_battlefield_entry_qualifiers(after.lower)
+            } else {
+                (false, false)
+            };
             return Some(Effect::ChangeZone {
                 origin: infer_origin_zone(after_put_tp.lower),
                 destination,
@@ -8142,16 +8478,86 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
                 owner_library: false,
                 enter_transformed: false,
                 under_your_control,
-                // CR 603.6d: "enters tapped" — detect tapped qualifier after battlefield destination.
-                enter_tapped: destination == Zone::Battlefield
-                    && scan_contains_phrase(after_put_tp.lower, "battlefield tapped"),
-                enters_attacking: false,
+                enter_tapped,
+                enters_attacking,
                 up_to: false,
+                enter_with_counters,
             });
         }
     }
 
     None
+}
+
+/// CR 508.4 + CR 614.1: Detect inline entry-qualifier clauses ("tapped" or
+/// "tapped and attacking [<player_phrase>]") immediately following a "put X
+/// onto the battlefield" destination needle. Returns
+/// `(enter_tapped, enters_attacking)`.
+///
+/// The single-sentence "tapped and attacking" pattern is the Kaalia / Ilharg
+/// class: 25+ commander/legacy cards whose Oracle text reads
+/// "...onto the battlefield tapped and attacking[ that opponent | that player |
+/// defending player or a planeswalker they control | during your declare
+/// attackers step | , where X is ... | and the rest ...]." Without this
+/// inline-tail patcher, `enters_attacking` was silently dropped and the
+/// summoned creature entered tapped but not attacking (CR 508.4 violation).
+///
+/// The bare "tapped" branch preserves the prior behavior for the
+/// "onto the battlefield tapped" tutor / reanimation class (Coming Attraction,
+/// Dance of the Dead, Hunting Wilds, etc.).
+///
+/// `tail_lower` is the lowercase slice starting *immediately after* the
+/// destination needle (e.g. `" tapped and attacking that opponent."`); the
+/// leading space is part of the needle's word-boundary contract.
+fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
+    // Word-boundary anchor for the qualifier clause: the qualifier must end at
+    // a real boundary so " tapped" doesn't accidentally consume " tappedly".
+    // EOF, whitespace, or sentence punctuation all qualify.
+    fn qualifier_boundary(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        alt((
+            value((), nom::combinator::eof),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(input)
+    }
+
+    // Combinator for the most-specific "tapped and attacking" form. The
+    // boundary check absorbs the trailing player phrase ("that opponent",
+    // "defending player ...") or sentence terminator without consuming it.
+    fn tapped_and_attacking_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        preceded(tag(" tapped and attacking"), qualifier_boundary).parse(input)
+    }
+
+    // Combinator for the bare "tapped" form (no "and attacking"). Preserves
+    // existing tutor / reanimation behavior (Coming Attraction, Dance of the
+    // Dead, Hunting Wilds, etc.).
+    fn tapped_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        preceded(tag(" tapped"), qualifier_boundary).parse(input)
+    }
+
+    // CR 508.4 + CR 614.1: Scan every word-boundary position in the tail for
+    // the qualifier clause. This handles word-ordering variants where
+    // "under your control" or other phrasing appears between the destination
+    // and the qualifier (Chorale of the Void, The Grim Captain, Zara
+    // Renegade Recruiter: "...onto the battlefield under your control tapped
+    // and attacking..."). The scanner mirrors `oracle_effect/token.rs:195`
+    // which scans byte positions for the first leading-space match. Try the
+    // more-specific "tapped and attacking" combinator at every boundary
+    // first; if no boundary matches, fall back to the bare "tapped" form.
+    let scan_at_boundaries = |clause: fn(&str) -> nom::IResult<&str, (), VerboseError<&str>>| {
+        (0..tail_lower.len()).any(|pos| {
+            tail_lower.as_bytes().get(pos) == Some(&b' ') && clause(&tail_lower[pos..]).is_ok()
+        })
+    };
+    if scan_at_boundaries(tapped_and_attacking_clause) {
+        return (true, true);
+    }
+    if scan_at_boundaries(tapped_clause) {
+        return (true, false);
+    }
+    (false, false)
 }
 
 /// CR 118.12: Parse "unless its controller pays {X}" from counter/trigger text.
@@ -8206,11 +8612,24 @@ fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
 }
 
 fn infer_origin_zone(lower: &str) -> Option<Zone> {
+    // CR 400.7: An object that moves from one zone to another becomes a new
+    // object — the "from" prepositional phrase identifies that origin zone.
+    // Adjective-qualified indefinite forms ("a single graveyard", "a random
+    // graveyard") share the same semantic origin as bare "a graveyard"; the
+    // qualifier constrains *which* instance, not which zone.
     if contains_possessive(lower, "from", "graveyard")
         || scan_contains_phrase(lower, "from a graveyard")
+        || scan_contains_phrase(lower, "from a single graveyard")
+        || scan_contains_phrase(lower, "from a random graveyard")
     {
         Some(Zone::Graveyard)
-    } else if scan_contains_phrase(lower, "from exile") {
+    } else if scan_contains_phrase(lower, "from exile")
+        // CR 406.6: "[card] exiled with [source]" identifies the card via the
+        // exile-link from a prior linked exile ability — the implicit origin
+        // is the exile zone. Used by reanimation/return effects on cards that
+        // previously exiled their target (Darkness Crystal, Mimeoplasm, etc.).
+        || scan_contains_phrase(lower, "exiled with")
+    {
         Some(Zone::Exile)
     } else if contains_possessive(lower, "from", "hand") {
         Some(Zone::Hand)
@@ -8612,6 +9031,138 @@ mod tests {
                 player_filter: PlayerFilter::All,
             }
         ));
+    }
+
+    /// CR 120.3 + CR 603.2c: "each other opponent" routes to the
+    /// `OpponentOtherThanTriggering` variant — the trigger context excludes
+    /// the opponent who already received damage from the source. Hydra
+    /// Omnivore class.
+    #[test]
+    fn damage_each_player_scope_other_opponent() {
+        assert_eq!(
+            parse_damage_each_player_scope("each other opponent"),
+            Some(PlayerFilter::OpponentOtherThanTriggering)
+        );
+    }
+
+    /// "each other player" reduces to plain `Opponent` — outside trigger
+    /// context "other" anaphors the controller, leaving only opponents.
+    /// Syphon Soul class.
+    #[test]
+    fn damage_each_player_scope_other_player() {
+        assert_eq!(
+            parse_damage_each_player_scope("each other player"),
+            Some(PlayerFilter::Opponent)
+        );
+    }
+
+    /// Trailing punctuation after "each other opponent" is allowed.
+    #[test]
+    fn damage_each_player_scope_other_opponent_with_trailing_punctuation() {
+        assert_eq!(
+            parse_damage_each_player_scope("each other opponent."),
+            Some(PlayerFilter::OpponentOtherThanTriggering)
+        );
+    }
+
+    /// CR 120.3 + CR 603.2c: Effect-level lowering for Hydra Omnivore's body
+    /// "it deals that much damage to each other opponent".
+    #[test]
+    fn effect_damage_to_each_other_opponent_uses_player_scope() {
+        let e = parse_effect("~ deals that much damage to each other opponent");
+        assert!(
+            matches!(
+                e,
+                Effect::DamageEachPlayer {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    player_filter: PlayerFilter::OpponentOtherThanTriggering,
+                }
+            ),
+            "expected DamageEachPlayer{{OpponentOtherThanTriggering}}, got {e:?}"
+        );
+    }
+
+    /// CR 120.3: Composite "each opponent and each [type] you don't control"
+    /// routes to `DamageAll` with the typed object filter populated and the
+    /// `player_filter` set to Opponent. Omnath, Locus of Creation 3rd-branch class.
+    #[test]
+    fn effect_damage_compound_planeswalker_you_dont_control() {
+        let e = parse_effect(
+            "~ deals 4 damage to each opponent and each planeswalker you don't control",
+        );
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target,
+                player_filter: Some(PlayerFilter::Opponent),
+            } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    assert!(tf
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Planeswalker)));
+                }
+                other => panic!("expected Typed{{Planeswalker, Opponent}}, got {other:?}"),
+            },
+            other => panic!("expected DamageAll with player_filter Opponent, got {other:?}"),
+        }
+    }
+
+    /// Regression: "your opponents control" suffix variant (Sarkhan, Dragonsoul
+    /// class) routes through the same compound parser as "you don't control".
+    #[test]
+    fn effect_damage_compound_creature_your_opponents_control() {
+        let e = parse_effect(
+            "~ deals 1 damage to each opponent and each creature your opponents control",
+        );
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target,
+                player_filter: Some(PlayerFilter::Opponent),
+            } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    assert!(tf
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Creature)));
+                }
+                other => panic!("expected Typed{{Creature, Opponent}}, got {other:?}"),
+            },
+            other => panic!("expected DamageAll with player_filter Opponent, got {other:?}"),
+        }
+    }
+
+    /// Regression: existing "they control" suffix continues to work after the
+    /// refactor. Goblin Chainwhirler class.
+    #[test]
+    fn effect_damage_compound_creature_planeswalker_they_control() {
+        let e = parse_effect(
+            "~ deals 1 damage to each opponent and each creature and planeswalker they control",
+        );
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Or { filters },
+                player_filter: Some(PlayerFilter::Opponent),
+            } => {
+                assert_eq!(filters.len(), 2);
+                for f in &filters {
+                    if let TargetFilter::Typed(tf) = f {
+                        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    } else {
+                        panic!("expected Typed inside Or, got {f:?}");
+                    }
+                }
+            }
+            other => {
+                panic!("expected DamageAll Or{{...}} with player_filter Opponent, got {other:?}")
+            }
+        }
     }
 
     #[test]
@@ -9507,6 +10058,153 @@ mod tests {
     fn effect_bounce() {
         let e = parse_effect("Return target creature to its owner's hand");
         assert!(matches!(e, Effect::Bounce { .. }));
+    }
+
+    /// CR 400.7 + CR 611.2c: Mass-bounce class — "return all/each [filter]"
+    /// must lower to `Effect::BounceAll`, not single-target `Effect::Bounce`,
+    /// so the runtime resolver iterates every matching permanent instead of
+    /// prompting for one.
+    #[test]
+    fn effect_bounce_all_creatures_evacuation() {
+        let e = parse_effect("Return all creatures to their owners' hands");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                destination,
+            } => {
+                assert!(destination.is_none(), "default destination = owner's hand");
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+                assert!(filter.controller.is_none(), "no controller scoping");
+            }
+            other => panic!("expected BounceAll, got {other:?}"),
+        }
+    }
+
+    /// Plural "all nonland permanents" filter from Devastation Tide / Coastal
+    /// Breach / Crush of Tentacles / Worldpurge. The `Non(Land)` property must
+    /// thread through the parser unchanged.
+    #[test]
+    fn effect_bounce_all_nonland_permanents_devastation_tide() {
+        let e = parse_effect("Return all nonland permanents to their owners' hands");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert!(
+                    filter
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Permanent)),
+                    "permanent type filter present"
+                );
+                assert!(
+                    filter.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land)
+                    )),
+                    "nonland exclusion present, got {:?}",
+                    filter.type_filters
+                );
+            }
+            other => panic!("expected BounceAll {{ Permanent, Non(Land) }}, got {other:?}"),
+        }
+    }
+
+    /// Sunderflock-shape: "return all non-Elemental creatures" — class with a
+    /// subtype exclusion. Parser must preserve `Non(Subtype: Elemental)` in
+    /// the property list.
+    #[test]
+    fn effect_bounce_all_non_subtype_creatures_sunderflock() {
+        let e = parse_effect("Return all non-Elemental creatures to their owners' hands");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert!(
+                    filter
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Creature)),
+                    "creature type filter present"
+                );
+                assert!(
+                    filter.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if matches!(&**inner, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Elemental"))
+                    )),
+                    "non-Elemental subtype exclusion present, got {:?}",
+                    filter.type_filters
+                );
+            }
+            other => {
+                panic!("expected BounceAll {{ Creature, Non(Subtype: Elemental) }}, got {other:?}")
+            }
+        }
+    }
+
+    /// "Return each creature ..." pluralizer is the same class as "return all
+    /// creatures ..." per the verb-dispatch precheck.
+    #[test]
+    fn effect_bounce_all_each_creature_variant() {
+        let e = parse_effect("Return each creature to its owner's hand");
+        assert!(matches!(e, Effect::BounceAll { .. }), "got {e:?}");
+    }
+
+    /// CR 115.1 + CR 608.2c: Single-target "return target creature" must NOT
+    /// promote to `BounceAll` — it identifies one selected permanent. The
+    /// `tag("return ")` arm (without the `all`/`each` precheck) handles this
+    /// case unchanged. This regression test pins the boundary.
+    #[test]
+    fn effect_bounce_single_target_preservation() {
+        let e = parse_effect("Return target creature to its owner's hand");
+        assert!(
+            matches!(e, Effect::Bounce { .. }),
+            "single-target return must stay Bounce, got {e:?}"
+        );
+    }
+
+    /// CR 400.7: "Return all <filter> to the battlefield" (Open the Vaults,
+    /// Replenish, Splendid Reclamation, etc.) must NOT promote to `BounceAll`
+    /// — the destination is the battlefield, not hand. Routes through
+    /// `ReturnToBattlefield` ⇒ `Effect::ChangeZone { destination: Battlefield }`.
+    /// Pins the destination-routing boundary on the unified return arm.
+    #[test]
+    fn effect_return_all_to_battlefield_stays_change_zone() {
+        let e = parse_effect(
+            "Return all artifact and enchantment cards from all graveyards to the battlefield under their owners' control",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ),
+            "return-all-to-battlefield must lower to ChangeZone, not BounceAll, got {e:?}"
+        );
+    }
+
+    /// Praetor's Counsel: "Return all cards from your graveyard to your hand"
+    /// — origin is graveyard, destination is hand. The `BounceAll` resolver
+    /// only scans the battlefield, so this MUST remain a `ChangeZone` with
+    /// `origin: Graveyard, destination: Hand`. Regression guard.
+    #[test]
+    fn effect_return_all_from_graveyard_to_hand_stays_change_zone() {
+        let e = parse_effect("Return all cards from your graveyard to your hand");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Hand,
+                    ..
+                }
+            ),
+            "return-all from graveyard→hand must lower to ChangeZone, not BounceAll, got {e:?}"
+        );
     }
 
     #[test]
@@ -15190,6 +15888,73 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 608.2k: A `GenericEffect` (becomes/animate clause) with a typed
+    /// target must thread that target through to a following anaphoric sub-ability.
+    /// Tyrite Sanctum's "Target legendary creature becomes a God in addition to its
+    /// other types. Put a +1/+1 counter on it." — "it" refers to the chosen legendary
+    /// creature, not the activating land.
+    #[test]
+    fn generic_effect_with_typed_target_threads_anaphor_to_parent_target() {
+        let def = parse_effect_chain(
+            "Target legendary creature becomes a God in addition to its other types. Put a +1/+1 counter on it.",
+            crate::types::ability::AbilityKind::Activated,
+        );
+
+        // Primary effect: GenericEffect with Some(Typed(_)) target.
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::GenericEffect {
+                    target: Some(TargetFilter::Typed(_)),
+                    ..
+                }
+            ),
+            "expected GenericEffect with typed target, got: {:?}",
+            def.effect
+        );
+
+        // Sub-ability: PutCounter targeting ParentTarget (the chosen legendary creature).
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("should have sub_ability for 'put counters on it'");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::PutCounter {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "expected sub_ability PutCounter with ParentTarget, got: {:?}",
+            sub.effect
+        );
+    }
+
+    /// CR 608.2k: Predicate guard — the anaphor-rebinding gate must NOT fire when the
+    /// preceding effect lacks a typed target. An untargeted prior clause has no
+    /// antecedent for "it" to bind to via `ParentTarget`, so the resolver-side
+    /// `resolve_it_pronoun` default must be preserved.
+    #[test]
+    fn generic_effect_without_target_does_not_thread_anaphor() {
+        // Use an explicit no-target leading effect (Draw) so any "it" in the trailing
+        // clause cannot be interpreted as referring back to a typed antecedent.
+        let def = parse_effect_chain(
+            "Draw a card. Put a +1/+1 counter on it.",
+            crate::types::ability::AbilityKind::Activated,
+        );
+
+        // Sub-ability target must NOT be ParentTarget — there is no typed antecedent.
+        if let Some(sub) = def.sub_ability.as_ref() {
+            if let Effect::PutCounter { target, .. } = sub.effect.as_ref() {
+                assert!(
+                    !matches!(target, TargetFilter::ParentTarget),
+                    "anaphor must not thread through a non-targeted prior effect, got ParentTarget on sub_ability"
+                );
+            }
+        }
+    }
+
     // ── RevealUntil tests ──
 
     #[test]
@@ -16288,6 +17053,876 @@ mod tests {
         assert!(
             !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
             "must not emit ChooseOneOf when one branch fails to parse"
+        );
+    }
+
+    /// CR 608.2k: After a token-creating effect, a plain "the token <verb>"
+    /// anaphor (without the "created this way" populate qualifier) must
+    /// rewrite to a `GenericEffect` targeting `LastCreated`. Pietra,
+    /// Crafter of Clowns is the canonical case: "Create a 1/1 white Clown
+    /// Robot artifact creature token. … the token gains haste until end of
+    /// turn."
+    #[test]
+    fn the_token_plain_anaphor_after_token_creator_rewrites_to_last_created() {
+        let ability = parse_effect_chain(
+            "create a 1/1 white Clown Robot artifact creature token. the token gains haste",
+            AbilityKind::Spell,
+        );
+        // Outer effect is the Token creation.
+        assert!(
+            matches!(&*ability.effect, Effect::Token { .. }),
+            "expected Effect::Token, got {:?}",
+            ability.effect
+        );
+        // Sub-ability is the rewritten anaphor: GenericEffect bound to
+        // LastCreated with a Haste keyword grant.
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("anaphor sub-ability missing");
+        match &*sub.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(static_abilities.len(), 1);
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::LastCreated)
+                );
+                assert!(
+                    static_abilities[0].modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }
+                    )),
+                    "expected AddKeyword(Haste), got {:?}",
+                    static_abilities[0].modifications
+                );
+            }
+            other => panic!("expected GenericEffect anaphor rewrite, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2k: Recognizer-level coverage for the "this token "
+    /// anaphor — exercised directly via `Unimplemented` description so
+    /// the test pins the recognizer's behavior independent of upstream
+    /// dispatch (where "this token" gets normalized to `~`/SelfRef by
+    /// `SELF_REF_TYPE_PHRASES` and routed through the typed parser
+    /// before the post-pass runs). Test is the safety net for any
+    /// future surface form that survives normalization and lands here
+    /// as `Unimplemented`.
+    #[test]
+    fn rewrite_recognizer_accepts_this_token_prefix() {
+        let effect = Effect::Unimplemented {
+            name: "this".to_string(),
+            description: Some("this token gains haste".to_string()),
+        };
+        let rewritten = rewrite_token_created_this_way_unimplemented(&effect)
+            .expect("recognizer must accept 'this token' prefix");
+        match rewritten {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(target, Some(TargetFilter::LastCreated));
+                assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }
+                )));
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2k: Recognizer-level coverage for the "that token "
+    /// anaphor — exercised via `Unimplemented` description because
+    /// "that token" at the chain level is currently routed through the
+    /// trigger pipeline (producing `GenericEffect { affected:
+    /// ParentTarget }`), not the post-pass. The recognizer must still
+    /// accept it as a defensive catch for future flows.
+    #[test]
+    fn rewrite_recognizer_accepts_that_token_prefix() {
+        let effect = Effect::Unimplemented {
+            name: "that".to_string(),
+            description: Some("that token gains flying".to_string()),
+        };
+        let rewritten = rewrite_token_created_this_way_unimplemented(&effect)
+            .expect("recognizer must accept 'that token' prefix");
+        match rewritten {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                assert_eq!(target, Some(TargetFilter::LastCreated));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }
+                )));
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// Disambiguation regression: when the populate-specific qualifier
+    /// "the token created this way " is present, it MUST win over the
+    /// shorter "the token " prefix. The longest-first strip_prefix order
+    /// is the guard. If "the token " were tried first, the qualifier text
+    /// would leak into the parsed verb-phrase (`parse_continuous_modifications`
+    /// would receive "created this way gains haste"), producing an empty
+    /// modification set and silently dropping the rewrite.
+    #[test]
+    fn populate_qualifier_takes_precedence_over_plain_the_token() {
+        let ability = parse_effect_chain(
+            "populate. the token created this way gains haste",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*ability.effect, Effect::Populate),
+            "outer effect should be Populate, got {:?}",
+            ability.effect
+        );
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("anaphor sub-ability missing");
+        match &*sub.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert!(
+                    static_abilities[0].modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }
+                    )),
+                    "qualifier-form should still parse to AddKeyword(Haste); got {:?}",
+                    static_abilities[0].modifications
+                );
+            }
+            other => panic!("expected GenericEffect anaphor rewrite, got {other:?}"),
+        }
+    }
+
+    /// Negative gate: without a preceding token-creating effect, plain
+    /// "the token gains haste" must NOT be rewritten — there is no
+    /// antecedent for `LastCreated` to bind to. The outer
+    /// `resolve_populated_token_anaphors` walk gates on
+    /// `is_token_creating_effect` in the chain prefix.
+    #[test]
+    fn plain_anaphor_without_token_creator_is_not_rewritten() {
+        // Chain has no Token / Populate / CopyTokenOf — just a Pump and
+        // a dangling anaphor. The dangling clause must remain Unimplemented.
+        let ability = parse_effect_chain(
+            "target creature gets +1/+1. the token gains haste",
+            AbilityKind::Spell,
+        );
+        // Walk the chain's sub-ability tail; assert no GenericEffect with
+        // LastCreated target was produced.
+        fn contains_last_created_rewrite(def: &AbilityDefinition) -> bool {
+            if let Effect::GenericEffect {
+                target: Some(TargetFilter::LastCreated),
+                ..
+            } = &*def.effect
+            {
+                return true;
+            }
+            def.sub_ability
+                .as_deref()
+                .is_some_and(contains_last_created_rewrite)
+        }
+        assert!(
+            !contains_last_created_rewrite(&ability),
+            "no token creator preceded — must not produce LastCreated rewrite"
+        );
+    }
+
+    /// CR 608.2k + CR 603.7c: Inalla-style "Exile it at the beginning of
+    /// the next end step" inside a delayed trigger after a token-creating
+    /// effect must rewrite the inner `ChangeZone { target: ParentTarget }`
+    /// to `LastCreated`. Coverage gap before B11: `ChangeZone` was missing
+    /// from `rewrite_parent_target_to_last_created`'s effect-list, so
+    /// Inalla's exile-the-token delayed trigger leaked `ParentTarget`.
+    #[test]
+    fn delayed_trigger_change_zone_after_token_creator_rewrites_to_last_created() {
+        let ability = parse_effect_chain(
+            "create a token that's a copy of that creature. the token gains haste. exile it at the beginning of the next end step",
+            AbilityKind::Spell,
+        );
+        // Outermost is CopyTokenOf.
+        assert!(
+            matches!(&*ability.effect, Effect::CopyTokenOf { .. }),
+            "expected CopyTokenOf, got {:?}",
+            ability.effect
+        );
+        // Walk to the CreateDelayedTrigger and inspect its inner ChangeZone.
+        fn find_delayed_change_zone_target(def: &AbilityDefinition) -> Option<TargetFilter> {
+            if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+                if let Effect::ChangeZone { target, .. } = &*inner.effect {
+                    return Some(target.clone());
+                }
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(find_delayed_change_zone_target)
+        }
+        let target = find_delayed_change_zone_target(&ability)
+            .expect("expected CreateDelayedTrigger { ChangeZone } in chain");
+        assert_eq!(
+            target,
+            TargetFilter::LastCreated,
+            "ChangeZone target must be rewritten from ParentTarget to LastCreated"
+        );
+    }
+
+    /// CR 701.57a + CR 702.85a: `Effect::ExileFromTopUntil` must accept the
+    /// second-person possessive form ("your library" / "you exile").
+    /// Regression-protection for the pre-existing path Etali's parser
+    /// extension was layered onto.
+    #[test]
+    fn exile_from_top_until_second_person_nonland_filter() {
+        let e =
+            parse_effect("exile cards from the top of your library until you exile a nonland card");
+        let Effect::ExileFromTopUntil { filter } = e else {
+            panic!("expected ExileFromTopUntil, got {:?}", e);
+        };
+        // Filter is `Typed { type_filters: [Non(Land)] }`.
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter");
+        };
+        assert!(typed
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))));
+    }
+
+    /// CR 701.57a + CR 702.85a: Etali, Primal Conqueror's trigger body uses
+    /// the third-person possessive form ("their library" / "they exile") that
+    /// `strip_each_player_subject` produces after stripping "each player ".
+    /// Without the third-person prefix arms, the parser falls through to a
+    /// flat `ChangeZone` lowering and silently drops both the
+    /// "until …" loop semantic and the nonland filter.
+    #[test]
+    fn exile_from_top_until_third_person_possessive_etali_form() {
+        let e = parse_effect(
+            "exile cards from the top of their library until they exile a nonland card",
+        );
+        let Effect::ExileFromTopUntil { filter } = e else {
+            panic!("expected ExileFromTopUntil, got {:?}", e);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter");
+        };
+        assert!(typed
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))));
+    }
+
+    /// CR 603.2 + CR 701.57a + CR 702.85a + CR 608.2: Etali's outer ETB trigger
+    /// sentence — the "each player " subject phrase routes through
+    /// `strip_each_player_subject` which strips the subject and deconjugates
+    /// "exiles" → "exile", then the third-person possessive arm of
+    /// `try_parse_exile_from_top_until` finalizes the lowering. Outer ability
+    /// must carry `player_scope: All` so the resolver iterates per player;
+    /// outer effect must be `ExileFromTopUntil { filter: Non(Land) }`. (The
+    /// follow-up `cast any number of spells from among …` sub-sentence is a
+    /// separate parser path — not asserted here; see the runtime tests in
+    /// `game::effects::exile_from_top_until::tests` for per-resolution exile
+    /// linkage that the future sub-ability filter will consume.)
+    #[test]
+    fn each_player_exiles_outer_effect_lowers_to_exile_from_top_until() {
+        let def = parse_effect_chain(
+            "each player exiles cards from the top of their library until they exile a nonland card.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "player_scope must propagate from \"each player\" subject"
+        );
+        let Effect::ExileFromTopUntil { ref filter } = *def.effect else {
+            panic!("expected outer ExileFromTopUntil, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {:?}", filter);
+        };
+        assert!(
+            typed.type_filters.iter().any(
+                |t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))
+            ),
+            "filter must be Non(Land)"
+        );
+    }
+
+    // CR 603.4: Parser arms for `AbilityCondition::NthResolutionThisTurn`.
+    // Covers Omnath / Ashling / Nissa / Sephiroth / Teething Wurmlet class.
+
+    #[test]
+    fn nth_resolution_first_full_form() {
+        // "this is the first time this ability has resolved this turn" — the
+        // form printed in the LEADING-suffix sentence (Omnath, Teething Wurmlet).
+        let result = try_nom_condition_as_ability_condition(
+            "this is the first time this ability has resolved this turn",
+        );
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 1 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_third_full_form() {
+        // Ashling the Pilgrim print form.
+        let result = try_nom_condition_as_ability_condition(
+            "this is the third time this ability has resolved this turn",
+        );
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 3 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_anaphoric_second() {
+        // Omnath's continuation sentence: "If it's the second time, ..."
+        // The "this ability has resolved this turn" tail is anaphoric.
+        let result = try_nom_condition_as_ability_condition("it's the second time");
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 2 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_anaphoric_third() {
+        let result = try_nom_condition_as_ability_condition("it's the third time");
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 3 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_fourth() {
+        // Sephiroth, Fabled SOLDIER print form.
+        let result = try_nom_condition_as_ability_condition(
+            "this is the fourth time this ability has resolved this turn",
+        );
+        assert_eq!(
+            result,
+            Some(AbilityCondition::NthResolutionThisTurn { n: 4 })
+        );
+    }
+
+    #[test]
+    fn nth_resolution_partial_text_returns_none() {
+        // A leftover after the recognized phrase must not match — the parser
+        // requires either the full tail or empty remainder (anaphoric).
+        let result = try_nom_condition_as_ability_condition(
+            "this is the first time something else happened",
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn nth_resolution_omnath_chain_populates_three_branches() {
+        // End-to-end: Omnath's landfall trigger description should chain three
+        // sub-abilities, each gated on `NthResolutionThisTurn { n: 1/2/3 }`.
+        std::thread::Builder::new()
+            .name("omnath-nth".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let def = parse_effect_chain(
+                    "you gain 4 life if this is the first time this ability has resolved this turn. \
+                     If it's the second time, add {R}{G}{W}{U}. \
+                     If it's the third time, ~ deals 4 damage to each opponent.",
+                    AbilityKind::Spell,
+                );
+                assert!(
+                    matches!(*def.effect, Effect::GainLife { .. }),
+                    "first effect should be GainLife, got {:?}",
+                    def.effect
+                );
+                assert_eq!(
+                    def.condition,
+                    Some(AbilityCondition::NthResolutionThisTurn { n: 1 }),
+                    "first branch must gate on n=1, got {:?}",
+                    def.condition
+                );
+                let sub_n2 = def.sub_ability.as_ref().expect("must have n=2 branch");
+                assert_eq!(
+                    sub_n2.condition,
+                    Some(AbilityCondition::NthResolutionThisTurn { n: 2 }),
+                    "second branch must gate on n=2, got {:?}",
+                    sub_n2.condition
+                );
+                let sub_n3 = sub_n2.sub_ability.as_ref().expect("must have n=3 branch");
+                assert_eq!(
+                    sub_n3.condition,
+                    Some(AbilityCondition::NthResolutionThisTurn { n: 3 }),
+                    "third branch must gate on n=3, got {:?}",
+                    sub_n3.condition
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// CR 122.1 + CR 614.1c — The Darkness Crystal class:
+    ///   "Put target creature card exiled with ~ onto the battlefield tapped
+    ///    under your control with two additional +1/+1 counters on it."
+    /// `try_parse_put_zone_change` must lift the trailing
+    /// "with N <type> counter(s) on it" clause into
+    /// `Effect::ChangeZone.enter_with_counters` so the resolver stamps
+    /// counters during the same battlefield-entry replacement event.
+    #[test]
+    fn put_zone_change_lifts_with_counters_suffix() {
+        let text = "put target creature card onto the battlefield tapped under your control with two additional +1/+1 counters on it";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for put-onto-battlefield");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                under_your_control,
+                enter_tapped,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(under_your_control);
+                assert!(enter_tapped);
+                assert_eq!(
+                    enter_with_counters,
+                    vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 122.1 — Bare put-onto-battlefield without the counters suffix must
+    /// emit an empty `enter_with_counters` slot. Regression-protects existing
+    /// tutors / reanimation effects that place cards without counters.
+    #[test]
+    fn put_zone_change_without_suffix_has_empty_counters() {
+        let text = "put target creature card onto the battlefield";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for put-onto-battlefield");
+        match effect {
+            Effect::ChangeZone {
+                enter_with_counters,
+                ..
+            } => {
+                assert!(enter_with_counters.is_empty());
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 + CR 614.1 — Kaalia of the Vast: "put X from your hand onto
+    /// the battlefield tapped and attacking that opponent." The inline-tail
+    /// patcher in `try_parse_put_zone_change` must set both `enter_tapped`
+    /// and `enters_attacking` from the same trailing clause.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_and_attacking_with_player_phrase() {
+        let text = "put an angel, demon, or dragon creature card from your hand onto the battlefield tapped and attacking that opponent";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Kaalia inline tail");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(enter_tapped, "expected enter_tapped");
+                assert!(enters_attacking, "expected enters_attacking");
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Ilharg / Preeminent Captain bare form: "...onto the
+    /// battlefield tapped and attacking." with no trailing player phrase.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_and_attacking_bare() {
+        let text = "put a creature card from your hand onto the battlefield tapped and attacking";
+        let lower = text.to_lowercase();
+        let effect =
+            try_parse_put_zone_change(&lower, text).expect("expected ChangeZone for bare tail");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(enter_tapped);
+                assert!(enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Hans Eriksson form with "defending player" suffix.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_and_attacking_defending_player() {
+        let text = "put it onto the battlefield tapped and attacking defending player or a planeswalker they control";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Hans Eriksson tail");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(enter_tapped);
+                assert!(enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Paladin Elizabeth Taggerdy / Kinscaer Sentry "where X is" tail.
+    /// The qualifier boundary must accept comma so the trailing clause "where X
+    /// is ..." doesn't break the match.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_and_attacking_where_x_is() {
+        let text = "put a creature card with mana value x or less from your hand onto the battlefield tapped and attacking, where x is the number of attacking creatures you control";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for where-X-is tail");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(enter_tapped);
+                assert!(enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1 — Bare "tapped" without the "and attacking" continuation.
+    /// Preserves the existing tutor / reanimation behavior (Coming Attraction,
+    /// Dance of the Dead) where `enter_tapped` is true but `enters_attacking`
+    /// remains false.
+    #[test]
+    fn put_zone_change_inline_tail_tapped_only_does_not_set_attacking() {
+        let text = "put target creature card onto the battlefield tapped under your control";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for tapped-only tail");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                under_your_control,
+                ..
+            } => {
+                assert!(enter_tapped);
+                assert!(!enters_attacking, "tapped-only must not set attacking");
+                assert!(under_your_control);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 400.7 — No qualifier tail at all: neither flag set. Regression-
+    /// protects untapped reanimation forms (e.g., "put it onto the battlefield
+    /// under your control").
+    #[test]
+    fn put_zone_change_no_inline_tail_neither_flag() {
+        let text = "put target creature card onto the battlefield";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text).expect("expected ChangeZone");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert!(!enter_tapped);
+                assert!(!enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 — Negative: a non-battlefield destination must never set
+    /// `enters_attacking` even if "tapped" or "attacking" appear in the text.
+    #[test]
+    fn put_zone_change_non_battlefield_destination_never_attacks() {
+        let text = "put target creature card into your hand";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text).expect("expected ChangeZone");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Hand);
+                assert!(!enter_tapped);
+                assert!(!enters_attacking);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 508.4 + CR 110.2 — Chorale of the Void / The Grim Captain / Zara
+    /// Renegade Recruiter: word-ordering variant where "under your control"
+    /// appears between the destination and the "tapped and attacking"
+    /// qualifier. The scanner must locate the qualifier at any word-boundary
+    /// position in the tail, not only immediately after the needle.
+    #[test]
+    fn put_zone_change_inline_tail_under_control_then_tapped_and_attacking() {
+        let text = "put target creature card from defending player's graveyard onto the battlefield under your control tapped and attacking";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Chorale-of-the-Void shape");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                enter_tapped,
+                enters_attacking,
+                under_your_control,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(under_your_control);
+                assert!(enter_tapped, "expected enter_tapped");
+                assert!(enters_attacking, "expected enters_attacking");
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1 — Geth, Lord of the Vault / Tato Farmer / Pay-{E}-cost class:
+    /// "under your control tapped" with no "and attacking". Bare-tapped form
+    /// must still resolve through the scanner; `enters_attacking` stays false.
+    #[test]
+    fn put_zone_change_inline_tail_under_control_then_bare_tapped() {
+        let text = "put target creature card from a graveyard onto the battlefield under your control tapped";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for under-control-tapped shape");
+        match effect {
+            Effect::ChangeZone {
+                enter_tapped,
+                enters_attacking,
+                under_your_control,
+                ..
+            } => {
+                assert!(under_your_control);
+                assert!(enter_tapped, "expected enter_tapped");
+                assert!(
+                    !enters_attacking,
+                    "bare tapped without 'and attacking' must not set attacking"
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // L9-43 + L9-44: attach-the-just-moved-card primitive.
+    //
+    // CR 303.4f + CR 301.5b + CR 603.7d + CR 608.2c: when the chain is
+    // `Dig|ChangeZone(destination=Battlefield)` → `Attach` with a
+    // `ZoneChangedThisWay` condition, the parent must carry
+    // `forward_result: true` so the runtime forwards the just-moved card
+    // as the Attach's `source_id` instead of the trigger source / Saga /
+    // searcher.
+    // -------------------------------------------------------------------
+
+    /// Armored Skyhunter's attack trigger: Dig(6, Battlefield) →
+    /// Attach(creature you control) with the "If an Equipment is put onto
+    /// the battlefield this way" condition. Asserts the `forward_result`
+    /// rewire fires AND the condition is recognized AND the Attach target
+    /// slot is preserved.
+    #[test]
+    fn attach_just_moved_armored_skyhunter_dig_with_zone_changed_this_way() {
+        let def = parse_effect_chain(
+            "Look at the top six cards of your library. You may put an Aura or Equipment card from among them onto the battlefield. If an Equipment is put onto the battlefield this way, you may attach it to a creature you control. Put the rest of those cards on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+
+        // Parent: Dig{destination: Battlefield} with forward_result: true.
+        match &*def.effect {
+            Effect::Dig { destination, .. } => {
+                assert_eq!(*destination, Some(Zone::Battlefield));
+            }
+            other => panic!("expected outer Dig, got {other:?}"),
+        }
+        assert!(
+            def.forward_result,
+            "Dig parent must forward the just-moved card to the Attach sub_ability"
+        );
+
+        // Walk the sub_ability chain: Attach with ZoneChangedThisWay condition.
+        let attach = def
+            .sub_ability
+            .as_ref()
+            .expect("expected Attach sub_ability");
+        match &*attach.effect {
+            Effect::Attach { target } => {
+                // Target slot must not be vacuous (Any) — either a typed
+                // "creature you control" filter or `ParentTarget` (chain
+                // composition routes the player-chosen target through the
+                // parent's slot). Both are valid post-assembly shapes; what
+                // matters is that the runtime has a target binding to fill.
+                assert!(
+                    !matches!(target, TargetFilter::Any),
+                    "Attach target slot must not be Any, got {target:?}"
+                );
+                if let TargetFilter::Typed(t) = target {
+                    assert_eq!(t.controller, Some(ControllerRef::You));
+                    assert!(
+                        t.type_filters
+                            .iter()
+                            .any(|f| matches!(f, TypeFilter::Creature)),
+                        "expected Creature type_filter, got {:?}",
+                        t.type_filters
+                    );
+                }
+            }
+            other => panic!("expected Attach sub_ability, got {other:?}"),
+        }
+        match &attach.condition {
+            Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+                TargetFilter::Typed(t) => assert!(
+                    t.type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))),
+                    "expected Equipment subtype filter on ZoneChangedThisWay, got {:?}",
+                    t.type_filters
+                ),
+                other => panic!("expected Typed Equipment filter, got {other:?}"),
+            },
+            other => panic!("expected ZoneChangedThisWay condition on Attach, got {other:?}"),
+        }
+    }
+
+    /// Quest for the Holy Relic / Stonehewer Giant pattern:
+    /// SearchLibrary → ChangeZone(destination=Battlefield) → Attach. The
+    /// rewire detects the ChangeZone-to-battlefield parent and sets
+    /// forward_result regardless of how many shuffles / cleanups follow.
+    #[test]
+    fn attach_just_moved_change_zone_to_battlefield_attach_sub() {
+        // Synthetic minimal pattern that exercises the same chain shape as
+        // Stonehewer Giant ("you may search your library for an Equipment
+        // card, put it onto the battlefield, then shuffle. If that
+        // Equipment is put onto the battlefield this way, attach it to a
+        // creature you control."). Phrased with present-tense "is put"
+        // because that's the new pattern the combinator must recognize.
+        let def = parse_effect_chain(
+            "Search your library for an Equipment card and put it onto the battlefield. If an Equipment is put onto the battlefield this way, attach it to a creature you control. Then shuffle.",
+            AbilityKind::Spell,
+        );
+
+        // Walk the chain to find the ChangeZone(Battlefield) node — the
+        // outermost effect may be SearchLibrary depending on parser
+        // composition. The post-pass recurses, so any Dig/ChangeZone-to-
+        // Battlefield parent in the tree should be marked.
+        fn find_battlefield_change_zone_with_attach_sub(
+            def: &AbilityDefinition,
+        ) -> Option<&AbilityDefinition> {
+            let dest_is_bf = matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                } | Effect::Dig {
+                    destination: Some(Zone::Battlefield),
+                    ..
+                }
+            );
+            if dest_is_bf {
+                if let Some(sub) = def.sub_ability.as_ref() {
+                    if matches!(*sub.effect, Effect::Attach { .. })
+                        && matches!(
+                            sub.condition,
+                            Some(AbilityCondition::ZoneChangedThisWay { .. })
+                        )
+                    {
+                        return Some(def);
+                    }
+                }
+            }
+            if let Some(sub) = def.sub_ability.as_ref() {
+                if let Some(found) = find_battlefield_change_zone_with_attach_sub(sub) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        let parent = find_battlefield_change_zone_with_attach_sub(&def).expect(
+            "expected a ChangeZone|Dig to Battlefield with an Attach sub gated by ZoneChangedThisWay",
+        );
+        assert!(
+            parent.forward_result,
+            "battlefield-bound parent of conditional Attach must have forward_result: true"
+        );
+    }
+
+    /// Negative regression: Stoneforge Mystic-style "put an Equipment from
+    /// your hand onto the battlefield" must NOT receive `forward_result:
+    /// true` because the pattern has no Attach sub-ability — it's just a
+    /// ChangeZone, no chained attach. Guards against the rewire over-firing.
+    #[test]
+    fn attach_just_moved_negative_no_attach_sub_no_rewire() {
+        let def = parse_effect_chain(
+            "You may put an Equipment card from your hand onto the battlefield.",
+            AbilityKind::Spell,
+        );
+        // The chain may be wrapped (optional / target) but no descendant
+        // should carry forward_result: true since there's no Attach.
+        fn any_forward_result(def: &AbilityDefinition) -> bool {
+            if def.forward_result {
+                return true;
+            }
+            if let Some(sub) = def.sub_ability.as_ref() {
+                if any_forward_result(sub) {
+                    return true;
+                }
+            }
+            if let Some(else_branch) = def.else_ability.as_ref() {
+                if any_forward_result(else_branch) {
+                    return true;
+                }
+            }
+            false
+        }
+        assert!(
+            !any_forward_result(&def),
+            "ChangeZone-only (no Attach sub) must not be marked forward_result"
         );
     }
 }
