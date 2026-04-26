@@ -1261,6 +1261,20 @@ pub enum FilterProp {
     /// Equipment attached to ~" quantity clauses (Kellan, the Fae-Blooded) and
     /// for any compound filter whose subject is "attached to <self>".
     AttachedToSource,
+    /// CR 301.5 + CR 303.4 + CR 613.4c: True when the matched object's
+    /// `attached_to` field equals the *recipient* of the resolving effect (the
+    /// per-object `id` in a layer's affected list). Distinct from
+    /// `AttachedToSource` — for an Aura/Equipment static "Enchanted/Equipped
+    /// creature gets +N/+M for each X attached to it", the pronoun "it" refers
+    /// to the affected creature, not to the static's source object. The
+    /// recipient is supplied through `FilterContext::recipient_id`; when
+    /// recipient is unknown (no per-recipient context), this prop evaluates to
+    /// false. Covers ~25 cards: Strong Back, Mantle of the Ancients,
+    /// Auramancer's Guise, Champion of the Flame, Bruenor Battlehammer's
+    /// "Each creature you control gets +2/+0 for each Equipment attached to
+    /// it", and the broader "<subject> gets +N/+M for each Aura/Equipment
+    /// attached to it" family.
+    AttachedToRecipient,
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
     /// (which are source-relative — match when THIS source is attached to the object),

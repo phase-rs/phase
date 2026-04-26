@@ -1968,6 +1968,7 @@ fn extract_etb_counters(
             let ctx = crate::game::quantity::QuantityContext {
                 entering,
                 source: source_id,
+                recipient: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,

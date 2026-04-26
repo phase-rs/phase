@@ -38,6 +38,11 @@ pub struct QuantityContext {
     pub entering: Option<ObjectId>,
     /// The static ability source (always set).
     pub source: ObjectId,
+    /// CR 613.4c: The per-recipient binding for "<subject> gets +N/+M for
+    /// each X attached to it" Aura/Equipment statics. Set by the layer
+    /// evaluator when the dynamic modification's filter contains
+    /// `FilterProp::AttachedToRecipient`; `None` otherwise.
+    pub recipient: Option<ObjectId>,
 }
 
 impl QuantityContext {
@@ -65,6 +70,32 @@ pub fn resolve_quantity(
         QuantityContext {
             entering: None,
             source: source_id,
+            recipient: None,
+        },
+    )
+}
+
+/// CR 613.4c: Resolve a `QuantityExpr` for a layer-evaluated dynamic
+/// modification whose filter references the per-recipient pronoun "it"
+/// (`FilterProp::AttachedToRecipient`). The recipient is the affected
+/// object in the layer evaluator's loop — for "Enchanted creature gets
+/// +N/+M for each Aura and Equipment attached to it", that is the
+/// enchanted creature, not the static's source.
+pub fn resolve_quantity_with_recipient(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    recipient_id: ObjectId,
+) -> i32 {
+    resolve_quantity_with_ctx(
+        state,
+        expr,
+        controller,
+        QuantityContext {
+            entering: None,
+            source: source_id,
+            recipient: Some(recipient_id),
         },
     )
 }
@@ -213,6 +244,7 @@ pub fn resolve_quantity_with_targets(
             QuantityContext {
                 entering: None,
                 source: ability.source_id,
+                recipient: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -252,6 +284,7 @@ pub fn resolve_quantity_with_targets_slice(
             QuantityContext {
                 entering: None,
                 source: source_id,
+                recipient: None,
             },
             targets,
             None,
@@ -294,6 +327,7 @@ pub(crate) fn resolve_quantity_scoped(
             QuantityContext {
                 entering: None,
                 source: source_id,
+                recipient: None,
             },
             &[],
             None,
@@ -339,10 +373,15 @@ fn resolve_ref(
     // in nested filter thresholds) when available, falling back to the controller
     // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
     // path when no ability is in scope (X → 0).
-    let filter_ctx = match ability {
+    //
+    // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
+    // `FilterContext::recipient_id` so `FilterProp::AttachedToRecipient`
+    // resolves against the per-object recipient bound by the layer evaluator.
+    let mut filter_ctx = match ability {
         Some(a) => FilterContext::from_ability(a),
         None => FilterContext::from_source_with_controller(source_id, controller),
     };
+    filter_ctx.recipient_id = ctx.recipient;
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         QuantityRef::HandSize => player.map_or(0, |p| usize_to_i32_saturating(p.hand.len())),

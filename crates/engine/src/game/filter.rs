@@ -87,6 +87,12 @@ pub struct FilterContext<'a> {
     pub source_id: ObjectId,
     pub source_controller: Option<PlayerId>,
     pub ability: Option<&'a ResolvedAbility>,
+    /// CR 613.4c: Per-recipient binding for "<subject> gets +N/+M for each X
+    /// attached to it" statics. The pronoun "it" in an Aura/Equipment continuous
+    /// modification refers to the *affected* object (the per-id recipient in
+    /// `apply_continuous_effect`'s loop), NOT the static's source. When set,
+    /// `FilterProp::AttachedToRecipient` evaluates against this id.
+    pub recipient_id: Option<ObjectId>,
 }
 
 impl<'a> FilterContext<'a> {
@@ -99,6 +105,7 @@ impl<'a> FilterContext<'a> {
             source_id,
             source_controller,
             ability: None,
+            recipient_id: None,
         }
     }
 
@@ -110,6 +117,27 @@ impl<'a> FilterContext<'a> {
             source_id,
             source_controller: Some(controller),
             ability: None,
+            recipient_id: None,
+        }
+    }
+
+    /// CR 613.4c: Builder used by layer evaluation when an additive dynamic
+    /// modification's filter contains `FilterProp::AttachedToRecipient`. The
+    /// recipient is the per-object `id` in the affected loop (the creature
+    /// being modified), allowing "for each Aura and Equipment attached to it"
+    /// to count attachments on the affected object rather than on the static's
+    /// source (which would be the Aura/Equipment itself).
+    pub fn from_source_with_recipient(
+        state: &GameState,
+        source_id: ObjectId,
+        recipient_id: ObjectId,
+    ) -> Self {
+        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+        Self {
+            source_id,
+            source_controller,
+            ability: None,
+            recipient_id: Some(recipient_id),
         }
     }
 
@@ -121,6 +149,7 @@ impl<'a> FilterContext<'a> {
             source_id: ability.source_id,
             source_controller: Some(ability.controller),
             ability: Some(ability),
+            recipient_id: None,
         }
     }
 
@@ -137,6 +166,7 @@ impl<'a> FilterContext<'a> {
             source_id: ability.source_id,
             source_controller: Some(controller),
             ability: Some(ability),
+            recipient_id: None,
         }
     }
 }
@@ -158,6 +188,7 @@ pub fn matches_target_filter(
         ctx.source_id,
         ctx.source_controller,
         ctx.ability,
+        ctx.recipient_id,
     )
 }
 
@@ -186,6 +217,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.source_id,
                 ctx.source_controller,
                 ctx.ability,
+                ctx.recipient_id,
             )
         }
         _ => false,
@@ -222,6 +254,7 @@ fn filter_inner(
     source_id: ObjectId,
     source_controller: Option<PlayerId>,
     ability: Option<&ResolvedAbility>,
+    recipient_id: Option<ObjectId>,
 ) -> bool {
     // CR 702.26b: a phased-out permanent is treated as though it does not
     // exist. The only exception the rules allow — "rules and effects that
@@ -242,9 +275,11 @@ fn filter_inner(
         source_id,
         source_controller,
         ability,
+        recipient_id,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn filter_inner_for_object(
     state: &GameState,
     obj: &GameObject,
@@ -253,6 +288,7 @@ fn filter_inner_for_object(
     source_id: ObjectId,
     source_controller: Option<PlayerId>,
     ability: Option<&ResolvedAbility>,
+    recipient_id: Option<ObjectId>,
 ) -> bool {
     match filter {
         TargetFilter::None => false,
@@ -320,6 +356,7 @@ fn filter_inner_for_object(
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
                 ability,
+                recipient_id,
             };
             properties
                 .iter()
@@ -333,6 +370,7 @@ fn filter_inner_for_object(
             source_id,
             source_controller,
             ability,
+            recipient_id,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
             filter_inner_for_object(
@@ -343,6 +381,7 @@ fn filter_inner_for_object(
                 source_id,
                 source_controller,
                 ability,
+                recipient_id,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|f| {
@@ -354,6 +393,7 @@ fn filter_inner_for_object(
                 source_id,
                 source_controller,
                 ability,
+                recipient_id,
             )
         }),
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
@@ -395,6 +435,7 @@ fn filter_inner_for_object(
                     source_id,
                     source_controller,
                     ability,
+                    recipient_id,
                 )
         }
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
@@ -540,6 +581,7 @@ fn zone_change_filter_inner(
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
                 ability,
+                recipient_id: None,
             };
 
             properties
@@ -1070,6 +1112,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -1124,6 +1167,12 @@ struct SourceContext<'a> {
     /// without a resolving ability (combat restrictions, layer predicates); in that
     /// case, per CR 107.2, any `Variable("X")` fallback resolves to 0.
     ability: Option<&'a ResolvedAbility>,
+    /// CR 613.4c: The per-object recipient of an ongoing layer evaluation, when
+    /// one is bound. Used by `FilterProp::AttachedToRecipient` so "for each X
+    /// attached to it" resolves against the affected creature instead of the
+    /// static's source. `None` outside per-recipient contexts (e.g., target
+    /// validation, spell-record matching, single-shot quantity resolution).
+    recipient_id: Option<ObjectId>,
 }
 
 /// CR 201.2 + CR 400.7: Resolve the printed name of the first
@@ -1358,6 +1407,29 @@ fn matches_filter_prop(
         // quantity clauses on the source object (Kellan, the Fae-Blooded).
         FilterProp::AttachedToSource => {
             obj.attached_to.and_then(|t| t.as_object()) == Some(source.id)
+        }
+        // CR 301.5 + CR 303.4 + CR 613.4c + CR 109.3: Anaphoric "it" referent
+        // in "for each X attached to it". Two contextual referents share the
+        // same parser-emitted prop:
+        //
+        // 1. Aura/Equipment statics ("Enchanted creature gets +N/+M for each
+        //    Aura and Equipment attached to it") — "it" is the per-recipient
+        //    enchanted creature, supplied via `FilterContext::recipient_id`
+        //    by the layer evaluator.
+        // 2. Self-source triggers ("Whenever ~ attacks, put a +1/+1 counter
+        //    on it for each Equipment attached to it" — Catti-brie, Wyleth)
+        //    — "it" is the trigger's source object, the same as
+        //    `FilterContext::source_id`. No per-recipient binding exists at
+        //    trigger resolution; the source is the only sensible referent.
+        //
+        // The combined rule: when a recipient is bound, use it; otherwise
+        // fall back to source. This is the same semantic the parser already
+        // assumed: emit `AttachedToRecipient` whenever "it" appears, and
+        // resolve against whichever object is the effective subject of the
+        // surrounding effect.
+        FilterProp::AttachedToRecipient => {
+            let referent = source.recipient_id.unwrap_or(source.id);
+            obj.attached_to.and_then(|t| t.as_object()) == Some(referent)
         }
         // CR 303.4 + CR 301.5: Non-source-relative attachment predicate.
         // Matches objects that have at least one attachment of the given kind whose
@@ -1743,6 +1815,7 @@ fn zone_change_record_matches_property(
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::FaceDown
@@ -2326,6 +2399,116 @@ mod tests {
         assert!(
             !matches_target_filter(&state, kellan, &filter, kellan),
             "AttachedToSource must NOT match the source itself (it is not attached)"
+        );
+    }
+
+    #[test]
+    fn attached_to_recipient_matches_attachments_on_layer_recipient() {
+        // CR 301.5 + CR 303.4 + CR 613.4c: `FilterProp::AttachedToRecipient`
+        // matches when the candidate object's `attached_to` references the
+        // *recipient* of the resolving continuous modification — used by
+        // Aura/Equipment statics whose Oracle text says "for each X attached
+        // to it" (Strong Back, Bruenor Battlehammer, Mantle of the Ancients).
+        // Crucially, the predicate is FALSE when the matching is performed
+        // against attachments on the source rather than the recipient: that's
+        // exactly the bug that produced flat +0/+0 boosts for Strong Back.
+        let mut state = setup();
+        let strong_back = add_creature(&mut state, PlayerId(0), "Strong Back"); // playing source role
+        let enchanted_creature = add_creature(&mut state, PlayerId(0), "Equipped Bear");
+        let unrelated_creature = add_creature(&mut state, PlayerId(0), "Other Bear");
+
+        // Two attachments on the enchanted creature — the recipient.
+        let aura_id = state.next_object_id;
+        let aura = create_object(
+            &mut state,
+            CardId(aura_id),
+            PlayerId(0),
+            "Rancor".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(enchanted_creature.into());
+
+        let equip_id = state.next_object_id;
+        let equip = create_object(
+            &mut state,
+            CardId(equip_id),
+            PlayerId(0),
+            "Sword".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&equip)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        state.objects.get_mut(&equip).unwrap().attached_to = Some(enchanted_creature.into());
+
+        // One unrelated attachment — on a different creature, must not count.
+        let bystander_id = state.next_object_id;
+        let bystander = create_object(
+            &mut state,
+            CardId(bystander_id),
+            PlayerId(0),
+            "Wild Growth".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bystander)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state.objects.get_mut(&bystander).unwrap().attached_to = Some(unrelated_creature.into());
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent().properties(vec![FilterProp::AttachedToRecipient]),
+        );
+
+        // Recipient bound to enchanted_creature: aura and equip match,
+        // bystander does not.
+        let ctx =
+            FilterContext::from_source_with_recipient(&state, strong_back, enchanted_creature);
+        assert!(
+            super::matches_target_filter(&state, aura, &filter, &ctx),
+            "AttachedToRecipient must match an attachment on the recipient"
+        );
+        assert!(
+            super::matches_target_filter(&state, equip, &filter, &ctx),
+            "AttachedToRecipient must match every attachment on the recipient"
+        );
+        assert!(
+            !super::matches_target_filter(&state, bystander, &filter, &ctx),
+            "AttachedToRecipient must NOT match attachments on a different creature"
+        );
+
+        // CR 109.3: When no recipient is bound (e.g., trigger-time
+        // resolution where "it" refers to the trigger's source — Catti-brie,
+        // Wyleth), AttachedToRecipient falls back to source-attachment
+        // semantics. With strong_back as the source, attachments-on-source
+        // is empty, so neither aura nor equip match.
+        let ctx_source_only = FilterContext::from_source(&state, strong_back);
+        assert!(
+            !super::matches_target_filter(&state, aura, &filter, &ctx_source_only),
+            "Without recipient, must check attachments on source — strong_back has none"
+        );
+
+        // But with the source itself = the bear, attachments-on-source IS
+        // the right answer — confirms the trigger-self-source case.
+        let ctx_source_is_recipient = FilterContext::from_source(&state, enchanted_creature);
+        assert!(
+            super::matches_target_filter(&state, aura, &filter, &ctx_source_is_recipient),
+            "When source = the affected creature (trigger-self pattern), \
+             AttachedToRecipient must match attachments on the source"
         );
     }
 
@@ -3790,6 +3973,7 @@ mod tests {
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
+            recipient_id: None,
         };
 
         // Leg 1: legendary creature (Arbaaz Mir, In Garruk's Wake-style ETB).
@@ -3916,6 +4100,7 @@ mod tests {
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
+            recipient_id: None,
         };
 
         let token_record = ZoneChangeRecord {

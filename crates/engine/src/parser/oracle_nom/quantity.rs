@@ -987,7 +987,22 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
         types.push(next);
         rest = after_type;
     }
-    let (rest, _) = tag(" attached to ~").parse(rest)?;
+    // CR 301.5 + CR 303.4 + CR 613.4c: Two referents share the "<type>
+    // [and <type>]* attached to <referent>" shape. The static parser already
+    // normalizes the source's printed name to `~`, so a literal `~` referent
+    // means "attached to the static's source object" (Kellan, the
+    // Fae-Blooded — `AttachedToSource`). The pronoun `it` is anaphoric on the
+    // affected subject of the surrounding continuous modification — for
+    // "Enchanted creature gets +N/+M for each Aura and Equipment attached to
+    // it", "it" refers to the enchanted creature, the per-recipient host of
+    // the layer-evaluated boost (`AttachedToRecipient`). Both literals are
+    // single-token leaves of the same combinator, so we dispatch with `alt`
+    // and select the matching `FilterProp` from a typed pair.
+    let (rest, prop) = alt((
+        value(FilterProp::AttachedToSource, tag(" attached to ~")),
+        value(FilterProp::AttachedToRecipient, tag(" attached to it")),
+    ))
+    .parse(rest)?;
     let type_filters = if types.len() == 1 {
         types
     } else {
@@ -999,7 +1014,7 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters,
                 controller: None,
-                properties: vec![FilterProp::AttachedToSource],
+                properties: vec![prop],
             }),
         },
     ))
@@ -1133,6 +1148,64 @@ mod tests {
                 }) => {
                     assert_eq!(controller, None);
                     assert_eq!(properties, vec![FilterProp::AttachedToSource]);
+                    assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_recipient_two_kinds_strong_back() {
+        // CR 301.5 + CR 303.4 + CR 613.4c: Strong Back's "Enchanted creature
+        // gets +2/+2 for each Aura and Equipment attached to it." The pronoun
+        // "it" refers to the *enchanted creature* (the per-recipient host of
+        // the Aura's continuous boost), not to the static's source. The
+        // combinator must emit `AttachedToRecipient`, distinct from Kellan's
+        // self-relative `AttachedToSource`.
+        let (rest, q) = parse_for_each_clause_ref("aura and equipment attached to it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(controller, None);
+                    assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                    assert_eq!(
+                        type_filters,
+                        vec![TypeFilter::AnyOf(vec![
+                            TypeFilter::Subtype("Aura".into()),
+                            TypeFilter::Subtype("Equipment".into())
+                        ])]
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_attached_to_recipient_single_kind() {
+        // CR 303.4 + CR 613.4c: Single-subtype variant ("for each Aura
+        // attached to it" — Auramancer's Guise / Gatherer of Graces /
+        // Graceblade Artisan family). Confirms the singular path also emits
+        // `AttachedToRecipient`.
+        let (rest, q) = parse_for_each_clause_ref("aura attached to it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(controller, None);
+                    assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
                     assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
                 }
                 other => panic!("expected Typed filter, got {other:?}"),

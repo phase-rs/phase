@@ -9770,6 +9770,82 @@ mod tests {
     }
 
     #[test]
+    fn static_strong_back_attached_to_recipient_emits_attached_to_recipient_prop() {
+        // CR 301.5 + CR 303.4 + CR 613.4c: Strong Back's third static —
+        // "Enchanted creature gets +2/+2 for each Aura and Equipment attached
+        // to it." The pronoun "it" is anaphoric on the enchanted creature
+        // (the per-recipient affected of the boost), not on the Aura source.
+        // The static must therefore lower to a `QuantityRef::ObjectCount`
+        // whose filter carries `FilterProp::AttachedToRecipient`, NOT
+        // `FilterProp::AttachedToSource`. The legacy bug was a flat
+        // `AddPower(2) + AddToughness(2)` because the for-each clause did not
+        // recognize "attached to it" and the parser fell through to the
+        // fixed-P/T fallback.
+        let def = parse_static_line(
+            "Enchanted creature gets +2/+2 for each Aura and Equipment attached to it.",
+        )
+        .expect("Strong Back static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+
+        // Capture the dynamic-power modification's QuantityExpr for inspection.
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower for the for-each scaling");
+
+        // The factor-2 multiplier wraps an ObjectCount whose filter carries
+        // AttachedToRecipient — confirming the per-recipient referent.
+        let inner = match dyn_pow {
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(*factor, 2);
+                inner.as_ref()
+            }
+            other => panic!("expected QuantityExpr::Multiply, got {other:?}"),
+        };
+        match inner {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(TypedFilter { properties, .. }) => {
+                    assert!(
+                        properties.contains(&FilterProp::AttachedToRecipient),
+                        "filter must carry AttachedToRecipient, got {properties:?}"
+                    );
+                    assert!(
+                        !properties.contains(&FilterProp::AttachedToSource),
+                        "filter must NOT carry AttachedToSource (would point at the Aura)"
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount ref, got {other:?}"),
+        }
+
+        // Negative regression: ensure the parser is not also producing a
+        // bogus flat `AddPower(2)` alongside the dynamic version. (Layered
+        // application would otherwise grant +2 *plus* +2/attached, which is
+        // a different bug from the original 0-multiplier symptom but equally
+        // wrong.)
+        assert!(
+            !def.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddPower { .. })),
+            "must not emit a flat AddPower alongside AddDynamicPower; got {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
     fn static_enchanted_creature_dynamic_where_x() {
         // Dynamic grant: "enchanted creature gets +X/+X, where X is the number of cards in your hand"
         let def = parse_static_line(
