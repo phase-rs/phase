@@ -188,12 +188,27 @@ export function PlayerHand() {
         setSelectedCardId(null);
       }}
     >
-      {isMobile && handObjects.length > 0 && (
+      {handObjects.length > 0 && (
         <button
-          className="absolute -top-1 left-1/2 z-20 -translate-x-1/2 rounded-full bg-white/10 px-3 py-0.5 text-[10px] font-medium text-white/60 backdrop-blur-sm active:bg-white/20"
+          aria-label={`View full hand (${handObjects.length} cards)`}
+          className="absolute right-2 top-1 z-20 flex items-center gap-1.5 rounded-full border border-white/20 bg-slate-900/70 px-3 py-1 text-xs font-semibold text-white shadow-lg shadow-black/40 ring-1 ring-cyan-400/40 backdrop-blur-md transition hover:border-cyan-300/60 hover:bg-slate-800/80 hover:ring-cyan-300/70 active:scale-95"
           onClick={(e) => { e.stopPropagation(); setMobileHandOpen(true); }}
         >
-          Tap to view hand ({handObjects.length})
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            className="h-3.5 w-3.5 text-cyan-300"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <rect x="4" y="3" width="11" height="16" rx="2" />
+            <path d="M9 7l11 3-3 11-7-2" />
+          </svg>
+          <span>Hand</span>
+          <span className="tabular-nums text-cyan-300">{handObjects.length}</span>
         </button>
       )}
       <AnimatePresence>
