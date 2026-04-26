@@ -2689,19 +2689,45 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
 }
 
 pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
-    let (rest_orig, rest) = {
+    // CR 701.6 + CR 405.1: "Counter all/each [filter] spells/abilities"
+    // mass-counter precheck. Mirrors the `parse_destroy_ast` precheck +
+    // `BounceAll` precedent: consume the verb plus an optional `all`/`each`
+    // pluralizer, set `all: true`, and let the existing target / spell-stack
+    // / activated-or-triggered-ability dispatch run unchanged on the tail.
+    let (mass_consumed, rest_orig, rest) = if let Some((_, rest_orig)) =
+        nom_on_lower(text, lower, |input| {
+            value((), alt((tag("counter all "), tag("counter each ")))).parse(input)
+        }) {
+        let rest_lower = &lower[lower.len() - rest_orig.len()..];
+        (true, rest_orig, rest_lower)
+    } else {
         let (_, rest_orig) =
             nom_on_lower(text, lower, |input| value((), tag("counter ")).parse(input))?;
         let rest_lower = &lower[lower.len() - rest_orig.len()..];
-        (rest_orig, rest_lower)
+        (false, rest_orig, rest_lower)
     };
-    if nom_primitives::scan_contains(rest, "activated or triggered ability") {
+
+    // CR 113.3: "abilities" (or "activated or triggered ability") with no
+    // intervening type phrase ⇒ stack-ability filter. Mass mode also accepts
+    // bare "abilities" (Kadena's Silencer: "counter all abilities your
+    // opponents control"). Single-target mode keeps the original strict
+    // `activated or triggered ability` requirement to avoid false positives
+    // on noun-counter phrases like "page counter on this artifact".
+    // Bare "abilities" head: tag-match (skipping leading whitespace) so the
+    // dispatch is a real nom combinator, not a string starts_with.
+    fn abilities_head(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+        preceded(nom::character::complete::multispace0, tag("abilities")).parse(i)
+    }
+    let abilities_match = nom_primitives::scan_contains(rest, "activated or triggered ability")
+        || (mass_consumed && abilities_head(rest).is_ok());
+    if abilities_match {
         // CR 118.12: Parse "unless pays" even for ability counters.
         let unless_payment = super::parse_unless_payment(rest);
         return Some(ZoneCounterImperativeAst::Counter {
             target: TargetFilter::StackAbility,
             source_static: None,
             unless_payment,
+            all: mass_consumed,
         });
     }
 
@@ -2719,6 +2745,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         target,
         source_static: None,
         unless_payment,
+        all: mass_consumed,
     })
 }
 
@@ -4239,11 +4266,25 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             target,
             source_static,
             unless_payment,
-        } => Effect::Counter {
-            target,
-            source_static: source_static.map(|s| *s),
-            unless_payment,
-        },
+            all,
+        } => {
+            if all {
+                // CR 701.6 + CR 405.1: Mass counter. Drops `source_static` and
+                // `unless_payment` — neither has a corpus card combining them
+                // with mass counter, and the runtime resolver does not honor
+                // those slots on `Effect::CounterAll`. (Source-static is a
+                // per-target-permanent silencing pattern; unless-pays is a
+                // controller opt-out that doesn't apply to non-targeting
+                // mass effects per CR 115.1.)
+                Effect::CounterAll { target }
+            } else {
+                Effect::Counter {
+                    target,
+                    source_static: source_static.map(|s| *s),
+                    unless_payment,
+                }
+            }
+        }
         ZoneCounterImperativeAst::PutCounter {
             counter_type,
             count,

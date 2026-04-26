@@ -2927,6 +2927,19 @@ pub enum Effect {
         #[serde(default)]
         unless_payment: Option<UnlessCost>,
     },
+    /// CR 701.6 + CR 405.1: Mass counter — counter every spell or ability on
+    /// the stack matching `target`. Mirrors `Effect::DestroyAll` /
+    /// `Effect::BounceAll` for the "counter all/each [filter] spells" /
+    /// "counter all [filter] abilities" Oracle text class (Glen Elendra's
+    /// Answer, Swift Silence, Kadena's Silencer, etc.). The class filter must
+    /// pin the stack property (`InZone { Stack }` or `StackAbility`) — the
+    /// resolver iterates the stack zone and counters each match. Since the
+    /// effect is non-targeting (CR 115.1: "all" does not target), it never
+    /// asks for player input and Ward / hexproof / shroud do not apply.
+    CounterAll {
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
+    },
     Token {
         name: String,
         #[serde(default = "default_pt_value_zero")]
@@ -4398,6 +4411,7 @@ impl Effect {
             | Effect::TapAll { .. }
             | Effect::UntapAll { .. }
             | Effect::BounceAll { .. }
+            | Effect::CounterAll { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::Dig { .. }
             | Effect::PutCounterAll { .. }
@@ -4487,6 +4501,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Destroy { .. } => "Destroy",
         Effect::Regenerate { .. } => "Regenerate",
         Effect::Counter { .. } => "Counter",
+        Effect::CounterAll { .. } => "CounterAll",
         Effect::Token { .. } => "Token",
         Effect::GainLife { .. } => "GainLife",
         Effect::LoseLife { .. } => "LoseLife",
@@ -4646,6 +4661,7 @@ pub enum EffectKind {
     Pump,
     Destroy,
     Counter,
+    CounterAll,
     Token,
     GainLife,
     LoseLife,
@@ -4809,6 +4825,7 @@ impl From<&Effect> for EffectKind {
             Effect::Destroy { .. } => EffectKind::Destroy,
             Effect::Regenerate { .. } => EffectKind::Regenerate,
             Effect::Counter { .. } => EffectKind::Counter,
+            Effect::CounterAll { .. } => EffectKind::CounterAll,
             Effect::Token { .. } => EffectKind::Token,
             Effect::GainLife { .. } => EffectKind::GainLife,
             Effect::LoseLife { .. } => EffectKind::LoseLife,

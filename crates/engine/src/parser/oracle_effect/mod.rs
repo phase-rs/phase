@@ -3370,12 +3370,51 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
 
-    // CR 701.5a: Counter a spell or ability on the stack.
+    // CR 701.6 + CR 405.1: "Counter all/each [filter] spells/abilities" mass-
+    // counter precheck — must run before the bare `tag("counter ")` arm so a
+    // compound-clause head like "Counter all spells your opponents control
+    // and ..." promotes to `Effect::CounterAll` instead of falling through to
+    // single-target. Mirrors the imperative.rs `parse_counter_ast` precheck.
+    if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
+        value((), alt((tag("counter all "), tag("counter each ")))).parse(i)
+    }) {
+        let rest_lower = &lower[lower.len() - rest.len()..];
+        let (parsed_target, rem) = parse_target(rest);
+        // CR 113.3: Bare "abilities" (no intervening type phrase) ⇒ stack-
+        // ability filter. Mass mode is loose enough to accept this form
+        // because the mass keyword has already disambiguated the verb sense.
+        // Bare "abilities" head: nom tag-match (skipping leading whitespace)
+        // so the dispatch is a combinator, not a string starts_with.
+        fn abilities_head(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+            preceded(nom::character::complete::multispace0, tag("abilities")).parse(i)
+        }
+        let target = if scan_contains_phrase(rest_lower, "activated or triggered ability")
+            || abilities_head(rest_lower).is_ok()
+        {
+            TargetFilter::StackAbility
+        } else if scan_contains_phrase(rest_lower, "spell") {
+            constrain_filter_to_stack(parsed_target)
+        } else {
+            parsed_target
+        };
+        let unless_payment = parse_unless_payment(rest_lower);
+        return Some((
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
+                target,
+                source_static: None,
+                unless_payment,
+                all: true,
+            })),
+            rem,
+        ));
+    }
+
+    // CR 701.6: Counter a spell or ability on the stack.
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("counter ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (parsed_target, rem) = parse_target(rest);
         let target = if scan_contains_phrase(rest_lower, "activated or triggered ability") {
-            // CR 701.5a: "activated or triggered ability" is a special-case target
+            // CR 701.6: "activated or triggered ability" is a special-case target
             // that maps to StackAbility. We still use parse_target's remainder to
             // preserve the compound-detection contract.
             TargetFilter::StackAbility
@@ -3391,6 +3430,7 @@ fn try_parse_verb_and_target<'a>(
                 target,
                 source_static: None,
                 unless_payment,
+                all: false,
             })),
             rem,
         ));
@@ -10205,6 +10245,125 @@ mod tests {
                 }
             ),
             "return-all from graveyard→hand must lower to ChangeZone, not BounceAll, got {e:?}"
+        );
+    }
+
+    /// CR 701.6 + CR 405.1: "Counter all spells your opponents control"
+    /// (Glen Elendra's Answer) must lower to `Effect::CounterAll` with the
+    /// class filter preserving `controller: Opponent`, `InZone Stack`, and
+    /// the spell-card type — so the runtime resolver iterates the stack and
+    /// counters every matching opponent spell instead of prompting for one.
+    #[test]
+    fn effect_counter_all_opponent_spells_glen_elendra() {
+        let e = parse_effect("Counter all spells your opponents control");
+        match e {
+            Effect::CounterAll {
+                target: TargetFilter::Typed(filter),
+            } => {
+                assert!(
+                    matches!(
+                        filter.controller,
+                        Some(crate::types::ability::ControllerRef::Opponent)
+                    ),
+                    "controller scoping preserved, got {:?}",
+                    filter.controller
+                );
+                assert!(
+                    filter
+                        .properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })),
+                    "InZone Stack preserved, got {:?}",
+                    filter.properties
+                );
+            }
+            other => panic!("expected CounterAll {{ Typed }}, got {other:?}"),
+        }
+    }
+
+    /// "Counter all other spells" (Swift Silence) — `other` lowers to a
+    /// `FilterProp::Another` constraint plus the stack-zone pin.
+    #[test]
+    fn effect_counter_all_other_spells_swift_silence() {
+        let e = parse_effect("Counter all other spells");
+        match e {
+            Effect::CounterAll {
+                target: TargetFilter::Typed(filter),
+            } => {
+                assert!(
+                    filter
+                        .properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Another)),
+                    "Another constraint preserved, got {:?}",
+                    filter.properties
+                );
+                assert!(
+                    filter
+                        .properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })),
+                    "InZone Stack preserved"
+                );
+            }
+            other => panic!("expected CounterAll {{ Typed, Another }}, got {other:?}"),
+        }
+    }
+
+    /// "Counter all abilities your opponents control" (Kadena's Silencer
+    /// trigger body) — bare "abilities" with the mass precheck routes to
+    /// `TargetFilter::StackAbility`. (Controller scoping on stack abilities
+    /// is a separate filter-extension follow-up — see resolver doc.)
+    #[test]
+    fn effect_counter_all_abilities_kadena() {
+        let e = parse_effect("Counter all abilities your opponents control");
+        assert!(
+            matches!(
+                e,
+                Effect::CounterAll {
+                    target: TargetFilter::StackAbility,
+                }
+            ),
+            "expected CounterAll {{ StackAbility }}, got {e:?}"
+        );
+    }
+
+    /// "Counter each spell" pluralizer is the same class as "counter all
+    /// spells" per the verb-dispatch precheck.
+    #[test]
+    fn effect_counter_each_spell_variant() {
+        let e = parse_effect("Counter each spell");
+        assert!(matches!(e, Effect::CounterAll { .. }), "got {e:?}");
+    }
+
+    /// CR 115.1 + CR 608.2c: "Counter target spell" must NOT promote to
+    /// `CounterAll` — it identifies one selected spell. Regression test pins
+    /// the boundary on the unified counter precheck.
+    #[test]
+    fn effect_counter_single_target_preservation() {
+        let e = parse_effect("Counter target spell");
+        assert!(
+            matches!(e, Effect::Counter { .. }),
+            "single-target counter must stay Counter, got {e:?}"
+        );
+    }
+
+    /// "Counter target activated or triggered ability" (single-target ability
+    /// counter) must remain `Effect::Counter { target: StackAbility }`.
+    /// Regression guard against the "abilities"-bare-mass arm leaking into
+    /// the single-target path.
+    #[test]
+    fn effect_counter_single_target_ability_preservation() {
+        let e = parse_effect("Counter target activated or triggered ability");
+        assert!(
+            matches!(
+                e,
+                Effect::Counter {
+                    target: TargetFilter::StackAbility,
+                    ..
+                }
+            ),
+            "single-target ability counter must stay Counter {{ StackAbility }}, got {e:?}"
         );
     }
 

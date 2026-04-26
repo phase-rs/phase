@@ -967,6 +967,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TapAll { target }
         | Effect::UntapAll { target }
         | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
         | Effect::DamageAll {
             amount: _,
             target,

@@ -224,6 +224,7 @@ fn redundancy_delta(
         | Effect::DamageEachPlayer { .. }
         | Effect::DestroyAll { .. }
         | Effect::BounceAll { .. }
+        | Effect::CounterAll { .. }
         | Effect::ChangeZone { .. }
         | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }

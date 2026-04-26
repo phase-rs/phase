@@ -760,6 +760,11 @@ pub(super) enum ZoneCounterImperativeAst {
         target: TargetFilter,
         source_static: Option<Box<StaticDefinition>>,
         unless_payment: Option<UnlessCost>,
+        /// CR 701.6 + CR 405.1: When `true`, lower to `Effect::CounterAll`
+        /// (mass counter) instead of `Effect::Counter`. Mirrors the
+        /// `Destroy { all }` and `Exile { all }` flags above. Triggered by
+        /// the "counter all "/"counter each " precheck in `parse_counter_ast`.
+        all: bool,
     },
     PutCounter {
         counter_type: String,

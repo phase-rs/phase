@@ -665,6 +665,7 @@ fn effect_references_target_player(effect: &Effect) -> bool {
         | Effect::TapAll { target, .. }
         | Effect::UntapAll { target, .. }
         | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
         | Effect::DoublePTAll { target, .. } => {
             matches!(target, TargetFilter::Player) || filter_references_target_player(target)

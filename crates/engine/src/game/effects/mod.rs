@@ -278,6 +278,7 @@ pub fn resolve_effect(
         Effect::Destroy { .. } => destroy::resolve(state, ability, events),
         Effect::Regenerate { .. } => regenerate::resolve(state, ability, events),
         Effect::Counter { .. } => counter::resolve(state, ability, events),
+        Effect::CounterAll { .. } => counter::resolve_all(state, ability, events),
         Effect::Token { .. } => token::resolve(state, ability, events),
         Effect::GainLife { .. } => life::resolve_gain(state, ability, events),
         Effect::LoseLife { .. } => life::resolve_lose(state, ability, events),
