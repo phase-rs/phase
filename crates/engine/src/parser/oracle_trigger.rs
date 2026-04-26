@@ -5754,6 +5754,26 @@ mod tests {
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
 
+    // Thrummingbird: pins the trigger event shape AND the parsed execute body
+    // (Effect::Proliferate) — siblings above only assert the event shape.
+    // CR 603.2 + CR 701.34a.
+    #[test]
+    fn trigger_thrummingbird_combat_damage_proliferate() {
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to a player, proliferate.",
+            "Thrummingbird",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        let exec = def.execute.as_deref().expect("execute should be set");
+        assert!(
+            matches!(exec.effect.as_ref(), Effect::Proliferate),
+            "execute body should be Effect::Proliferate, got {:?}",
+            exec.effect,
+        );
+    }
+
     #[test]
     fn trigger_combat_damage_to_opponent() {
         let def = parse_trigger_line(
