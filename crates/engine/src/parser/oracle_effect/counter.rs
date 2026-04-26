@@ -364,11 +364,18 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Optio
 }
 
 /// Normalize oracle-text counter type strings to canonical engine names.
+///
+/// - `+1/+1` / `-1/-1` map to the canonical `P1P1` / `M1M1` keys.
+/// - All other names are lowercased so that producers emitting different
+///   cases (e.g. the replacement parser previously emitted `MINING`, while
+///   the cost parser emits `mining`) collapse onto the same `Generic`
+///   string at parse time. This makes the AST canonical without relying
+///   on the runtime `parse_counter_type` lowercase fallback.
 pub(crate) fn normalize_counter_type(raw: &str) -> String {
     match raw {
         "+1/+1" => "P1P1".to_string(),
         "-1/-1" => "M1M1".to_string(),
-        other => other.to_string(),
+        other => other.to_lowercase(),
     }
 }
 

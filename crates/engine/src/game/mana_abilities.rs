@@ -3301,7 +3301,11 @@ mod tests {
     //
     // This fixture exercises the full depletion-land pattern — composite
     // Tap+RemoveCounter cost — so that any regression in counter-type
-    // normalisation surfaces immediately.
+    // normalisation surfaces immediately. The negative test below
+    // (`gemstone_mine_unpayable_without_counters`) locks in the *other*
+    // direction: the payability gate must remain coupled to the canonical
+    // key, so that counters going to zero correctly blocks activation
+    // rather than the gate silently passing on a stale uppercase key.
     fn make_gemstone_mine(state: &mut GameState, player: PlayerId) -> ObjectId {
         let land = create_object(
             state,
