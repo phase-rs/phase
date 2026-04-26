@@ -179,7 +179,27 @@ describe("AttachmentStack", () => {
     useGameStore.setState({ waitingFor: targetingState([50]) });
 
     render(<AttachmentStack objectIds={[50]} />);
-    expect(screen.getByLabelText("Bonesplitter").className).toContain("ring-amber-400/70");
+    expect(screen.getByLabelText("Bonesplitter").className).toContain("ring-amber-300");
+  });
+
+  it("applies a subtype-tinted frame ring (amber for Aura, zinc for Equipment)", () => {
+    injectObjects([
+      makeAttachment({
+        id: 50,
+        name: "Bonesplitter",
+        card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      }),
+      makeAttachment({
+        id: 51,
+        card_id: 201,
+        name: "Holy Mantle",
+        card_types: { supertypes: [], core_types: ["Enchantment"], subtypes: ["Aura"] },
+      }),
+    ]);
+    render(<AttachmentStack objectIds={[50, 51]} />);
+
+    expect(screen.getByLabelText("Bonesplitter").className).toContain("ring-zinc-300");
+    expect(screen.getByLabelText("Holy Mantle").className).toContain("ring-amber-400");
   });
 
   it("preserves the data-card-hover invariant for usePreviewDismiss", () => {

@@ -17,14 +17,27 @@ interface AttachmentStackProps {
   objectIds: ObjectId[];
 }
 
-// Vertical reveal: each attachment peeks above the host by this fraction of
-// its own height. 0.55 = ~55% of the attached card is visible above the host's
-// top edge — enough for the title bar plus most of the art so the player can
-// recognize the card without hovering. Each subsequent attachment in a stack
-// reveals a further fraction beyond the previous one (see PEEK_STAGGER) so a
-// creature with two Auras shows both names rather than fully occluding one.
-const PEEK_REVEAL = 0.55;
-const PEEK_STAGGER = 0.18;
+// Horizontal reveal: each attachment peeks to the right of the host by this
+// fraction of its own width. 0.45 = the right ~45% of the attached card is
+// visible past the host's right edge — enough for the title bar plus part of
+// the art. Each subsequent attachment in a stack reveals a further fraction
+// beyond the previous one and shifts down slightly so Auras under Auras don't
+// fully occlude each other.
+const PEEK_REVEAL = 0.45;
+const PEEK_STAGGER = 0.22;
+const PEEK_VERTICAL_DROP = 28; // px between stacked attachments
+
+// Subtype-tinted frame ring so the player can identify Aura vs Equipment vs
+// Fortification at a glance — colors mirror the MTG card-frame conventions
+// (gold for enchantments, silver for artifacts) so the highlight reads as
+// "this card is THAT type" without any text label.
+function frameTint(subtypes: string[], faceDown: boolean): string {
+  if (faceDown) return "ring-2 ring-slate-500/80 shadow-[0_0_8px_1px_rgba(100,116,139,0.6)]";
+  if (subtypes.includes("Aura")) return "ring-2 ring-amber-400/90 shadow-[0_0_10px_2px_rgba(251,191,36,0.55)]";
+  if (subtypes.includes("Equipment")) return "ring-2 ring-zinc-300/90 shadow-[0_0_10px_2px_rgba(228,228,231,0.55)]";
+  if (subtypes.includes("Fortification")) return "ring-2 ring-stone-400/90 shadow-[0_0_10px_2px_rgba(168,162,158,0.55)]";
+  return "ring-2 ring-slate-400/80 shadow-[0_0_8px_1px_rgba(148,163,184,0.5)]";
+}
 
 /**
  * Staggered card stack rendered above the host PermanentCard. Each attached
@@ -96,20 +109,23 @@ const AttachmentPeek = memo(function AttachmentPeek({ id, revealRatio, zIndex }:
     selectObject(id);
   };
 
-  const targetingRing = isValidTarget
-    ? "ring-2 ring-amber-400/70 shadow-[0_0_10px_2px_rgba(201,176,55,0.7)]"
-    : "";
+  // Targeting wins over subtype tint — when a peek-card is a legal target
+  // the player needs to see "click here for ChooseTarget" first, ahead of
+  // the subtype hint. Otherwise apply the subtype-tinted frame.
+  const ringClass = isValidTarget
+    ? "ring-2 ring-amber-300 shadow-[0_0_12px_3px_rgba(251,191,36,0.85)]"
+    : frameTint(obj.card_types.subtypes, obj.face_down);
 
   const counter = predominantCounter(obj.counters);
   const counterLabel = counter ? `${formatCounterType(counter.type)} ×${counter.count}` : null;
   const tooltip = counterLabel ? `${obj.name} (${counterLabel})` : obj.name;
 
-  // The card sits tucked behind the host: its bottom is `(1 - revealRatio) *
-  // attachmentHeight` below the host's top edge, so `revealRatio` of the
-  // attachment is visible above the host. We position via `bottom: 100%` (puts
-  // the attachment's bottom at the host's top) plus a downward translate of
-  // `(1 - revealRatio) * 100%` of the attachment's own height.
-  const tuckOffset = `${Math.round((1 - revealRatio) * 100)}%`;
+  // Tuck the peek-card to the right of the host. The card's left edge sits
+  // at the host's right edge (`left: 100%`), pulled back leftward by
+  // `(1 - revealRatio) * 100%` of its own width so `revealRatio` percent
+  // of the card sticks out to the right. Each subsequent attachment in the
+  // stack drops PEEK_VERTICAL_DROP px so a bearer with two Auras shows both.
+  const tuckPullX = `${Math.round((1 - revealRatio) * 100)}%`;
 
   return (
     <div
@@ -121,18 +137,14 @@ const AttachmentPeek = memo(function AttachmentPeek({ id, revealRatio, zIndex }:
       aria-label={tooltip}
       style={{
         position: "absolute",
-        bottom: "100%",
-        left: "50%",
-        transform: `translate(-50%, ${tuckOffset}) scale(0.7)`,
-        transformOrigin: "bottom center",
+        top: `${zIndex * PEEK_VERTICAL_DROP - PEEK_VERTICAL_DROP}px`,
+        left: "100%",
+        transform: `translateX(-${tuckPullX}) scale(0.62)`,
+        transformOrigin: "top left",
         zIndex,
         cursor: "pointer",
-        // Slight rotation if tapped to mirror the host's tap convention,
-        // applied here independently because the attachment may be tapped
-        // even when the host isn't (e.g., Equipment with its own activated
-        // ability that taps it without tapping the bearer).
       }}
-      className={`rounded-lg ${targetingRing}`}
+      className={`rounded-lg ${ringClass}`}
       {...handlers}
     >
       {useArtCrop ? (
