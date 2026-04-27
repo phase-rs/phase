@@ -71,6 +71,7 @@ fn swans_followup_draws_for_damage_sources_controller() {
                 qty: QuantityRef::EventContextAmount,
             },
             target: TargetFilter::PostReplacementSourceController,
+            up_to: false,
         },
         vec![],
         ObjectId(999), // Swans

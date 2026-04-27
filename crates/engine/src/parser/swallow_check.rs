@@ -341,6 +341,14 @@ fn any_ability_has_unimplemented(parsed: &ParsedAbilities) -> bool {
             .replacements
             .iter()
             .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented))
+        // CR 603: A `TriggerMode::Unknown(_)` is the trigger-side equivalent
+        // of `Effect::Unimplemented` — the parser preserved the original
+        // trigger text but couldn't classify the timing/event. Suppress
+        // swallow detectors so we don't double-report the same gap. The
+        // unparsed trigger mode text is a coverage signal in its own right.
+        || parsed.triggers.iter().any(|t| {
+            matches!(t.mode, crate::types::triggers::TriggerMode::Unknown(_))
+        })
 }
 
 fn any_ability_has_target_replacement(parsed: &ParsedAbilities) -> bool {
@@ -807,6 +815,16 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
         // CR 117.3a: TopOfLibraryCastPermission with `alt_cost` IS the "if
         // you cast a spell this way, pay X" gate (Bolas's Citadel etc.).
         "TopOfLibraryCastPermission",
+        // CR 705: FlipCoin / FlipCoins / RollDie variants encode the
+        // "if you win the flip" / "if you lose" / die-result branches as
+        // structured win_effect/lose_effect/results sub-trees. Their
+        // presence IS the conditional gate (Aleatory, Chaotic Strike,
+        // Boompile, Bottle of Suleiman, etc.).
+        "\"win_effect\":{",
+        "\"lose_effect\":{",
+        "\"type\":\"FlipCoin\"",
+        "\"type\":\"FlipCoins\"",
+        "\"type\":\"RollDie\"",
     ];
     if json_has_any(ast_json, cond_markers) {
         return;
@@ -890,6 +908,12 @@ fn detect_condition_as_long_as(cleaned: &str, original: &str, ast_json: &str) {
         "\"AsLongAs\"",
         "AsLongAs",
         "ConditionalStatic",
+        // CR 611.3a: A `Duration::UntilHostLeavesPlay` IS the "as long as
+        // you control this creature" / "as long as ~ remains on the
+        // battlefield" gate (Aegis Angel, Hostage Taker, Gonti, etc.).
+        // The duration's lifetime equates to a perpetual conditional
+        // static on the host's controllership.
+        "UntilHostLeavesPlay",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -932,6 +956,17 @@ fn detect_duration_this_turn(cleaned: &str, original: &str, ast_json: &str) {
         // not a separate `duration` slot.
         "\"event\":\"DamageDone\"",
         "AddTargetReplacement",
+        // CR 603.7c: A `CreateDelayedTrigger` with `WhenNextEvent` condition
+        // IS the "next [event] this turn" delayed-trigger scope (Chandra,
+        // the Firebrand's [-2], Doublecast-class copy-on-next-cast). The
+        // "this turn" scope is implicit in the delayed-trigger semantics —
+        // delayed triggers created by spells expire at end of turn per CR.
+        "CreateDelayedTrigger",
+        "WhenNextEvent",
+        // CR 514.2 + CR 601.2f: `ReduceNextSpellCost` is a one-shot cost
+        // reduction consumed by the next-cast spell — its "this turn"
+        // scope is structural, not a `duration` slot.
+        "ReduceNextSpellCost",
     ];
     if json_has_any(ast_json, markers) {
         return;

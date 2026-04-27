@@ -919,6 +919,7 @@ mod tests {
                 Effect::Draw {
                     count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         state
@@ -1012,6 +1013,7 @@ mod tests {
                 Effect::Draw {
                     count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         state
@@ -1141,6 +1143,7 @@ mod tests {
                 Effect::Draw {
                     count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )]);
 

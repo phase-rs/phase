@@ -3028,6 +3028,12 @@ pub enum Effect {
         count: QuantityExpr,
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
+        /// CR 121.1 + CR 608.2d: When true, the drawing player may choose any
+        /// number of cards from 0..count to actually draw. Mirrors
+        /// `Effect::Sacrifice.up_to`. "Draw up to N cards" — Arcane Denial,
+        /// Diminishing Returns, Indentured Djinn, Truce, etc.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
     },
     Pump {
         #[serde(default = "default_pt_value_zero")]
@@ -7172,6 +7178,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -7248,6 +7255,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ))),
             valid_card: Some(TargetFilter::SelfRef),
@@ -7360,6 +7368,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
         ))
         .duration(Duration::UntilEndOfTurn)
@@ -7679,6 +7688,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(1),
@@ -7967,6 +7977,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             );
             assert!(def.cost_categories().is_empty());
@@ -7979,6 +7990,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )
             .cost(AbilityCost::Sacrifice {
@@ -8004,6 +8016,7 @@ mod modal_ability_tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
         );
         let mode2 = AbilityDefinition::new(

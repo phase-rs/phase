@@ -235,6 +235,7 @@ mod tests {
             Effect::Draw {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 target: crate::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),

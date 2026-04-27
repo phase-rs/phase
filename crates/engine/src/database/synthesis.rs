@@ -650,6 +650,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
+                        up_to: false,
                     },
                 )
                 .cost(composite_cost);

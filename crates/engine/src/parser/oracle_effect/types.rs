@@ -360,6 +360,9 @@ pub(super) enum ImperativeFamilyAst {
 pub(super) enum NumericImperativeAst {
     Draw {
         count: QuantityExpr,
+        /// CR 121.1 + CR 608.2d: "Draw up to N cards" — drawing player picks
+        /// any 0..count. Mirrors NumericImperativeAst::Sacrifice's up_to.
+        up_to: bool,
     },
     GainLife {
         amount: QuantityExpr,
@@ -425,8 +428,9 @@ impl NumericImperativeAst {
             }
         }
         match self {
-            Self::Draw { count } => Self::Draw {
+            Self::Draw { count, up_to } => Self::Draw {
                 count: replace_fixed_quantity(count, quantity),
+                up_to,
             },
             Self::GainLife { amount } => Self::GainLife {
                 amount: replace_fixed_quantity(amount, quantity),

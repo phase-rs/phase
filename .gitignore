@@ -86,3 +86,11 @@ replay_dtypes.py
 # Scratch planning files
 parser-batch-plan.md
 parser-fallback-plan.md
+
+# External reference / scratch
+mtgish/
+mtgish*.tgz
+
+# Python bytecode cache
+__pycache__/
+*.pyc

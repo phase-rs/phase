@@ -356,6 +356,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: engine::types::ability::TargetFilter::Controller,
+                    up_to: false,
                 },
                 Vec::new(),
                 mockingbird_id,
@@ -423,6 +424,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: engine::types::ability::TargetFilter::Controller,
+                    up_to: false,
                 },
                 Vec::new(),
                 mockingbird_id,

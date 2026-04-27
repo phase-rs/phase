@@ -410,6 +410,7 @@ mod tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: engine::types::ability::TargetFilter::Controller,
+                        up_to: false,
                     },
                 )),
         );
@@ -421,6 +422,7 @@ mod tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: engine::types::ability::TargetFilter::Controller,
+                        up_to: false,
                     },
                 )),
             );
@@ -478,6 +480,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         );
         Arc::make_mut(&mut object.abilities).push(draw.clone());
@@ -507,6 +510,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         ));
         Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
@@ -534,6 +538,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         );
         let mut draw_with_else = AbilityDefinition::new(
@@ -541,6 +546,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         );
         draw_with_else.else_ability = Some(Box::new(AbilityDefinition::new(
@@ -548,6 +554,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         )));
         Arc::make_mut(&mut object.abilities).push(draw);

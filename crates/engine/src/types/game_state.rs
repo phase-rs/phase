@@ -3595,6 +3595,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
                 vec![],
                 ObjectId(5),
@@ -3633,6 +3634,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
                 vec![],
                 ObjectId(5),

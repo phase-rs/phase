@@ -755,6 +755,31 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         value(QuantityRef::LifeLostThisTurn, tag("the life you lost")),
         value(QuantityRef::LifeLostThisTurn, tag("life you've lost")),
         value(QuantityRef::LifeLostThisTurn, tag("life you lost")),
+        // CR 119.3 + CR 608.2k: Third-person variants resolve against the
+        // per-target player during effect iteration. The runtime's
+        // `LifeLostThisTurn` reads `player.life_lost_this_turn` where
+        // `player` is the resolution context's bound player — for
+        // `LoseLife { target: EachOpponent }` this rebinds per-opponent,
+        // so "they lost" / "that player lost" resolve correctly without
+        // a new typed variant. Archfiend of Despair, Wound Reflection,
+        // Astarion (Feed mode), Blitzwing, Warlock Class.
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life that player lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life they lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the amount of life they lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life that player lost"),
+        ),
+        value(QuantityRef::LifeLostThisTurn, tag("the life they lost")),
     ))
     .parse(input)
 }
@@ -870,11 +895,32 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse "target creature's power" / "that player's life total".
+/// Parse target-creature power refs:
+///   - Saxon-genitive: "target creature's power" / "the target creature's power"
+///   - Of-form: "the power of target creature [you control|an opponent controls]?"
+///
+/// All variants resolve to the same `QuantityRef::TargetPower`. CR 107.1.
+/// Longest-first ordering: the controller-qualified of-form variants must come
+/// before the bare of-form so `alt`'s short-circuit doesn't strand the
+/// "you control" / "an opponent controls" suffix as un-consumed remainder
+/// (which would cause `parse_quantity_ref`'s `rest.is_empty()` check to fail).
+/// Soul's Majesty, Predator's Rapport, and similar.
 fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::TargetPower, tag("target creature's power")),
         value(QuantityRef::TargetPower, tag("the target creature's power")),
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature you control"),
+        ),
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature an opponent controls"),
+        ),
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature"),
+        ),
     ))
     .parse(input)
 }

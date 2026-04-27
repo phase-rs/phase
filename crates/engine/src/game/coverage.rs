@@ -940,9 +940,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::Draw { count, target } => {
+        Effect::Draw {
+            count,
+            target,
+            up_to,
+        } => {
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), fmt_quantity(count)));
+            }
+            if *up_to {
+                d.push(("up_to".into(), "true".into()));
             }
             if !matches!(target, TargetFilter::Controller) {
                 d.push(("target".into(), fmt_target(target)));
@@ -7547,6 +7554,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )
             .condition(AbilityCondition::QuantityCheck {

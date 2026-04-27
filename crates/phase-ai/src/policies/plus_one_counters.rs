@@ -600,6 +600,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         );
         Arc::make_mut(&mut state.objects.get_mut(&draw_id).unwrap().abilities).push(draw_ability);

@@ -1442,6 +1442,7 @@ mod tests {
             builder.with_ability(Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             });
             builder.with_static(StaticMode::Continuous);
             builder.id()

@@ -15,6 +15,13 @@ interface CardImageProps {
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
   /**
+   * Canonical lookup id from `printed_ref.oracle_id` (battlefield call sites).
+   * When provided, the image is resolved by oracle id + `faceName`, which is
+   * the only correct path for MDFCs played as Scryfall's back face.
+   */
+  oracleId?: string;
+  faceName?: string;
+  /**
    * Oracle text rendered inside the broken-image fallback when the image fails
    * to load. If omitted, the component looks it up via the engine card database.
    */
@@ -31,9 +38,18 @@ export function CardImage({
   colors,
   isToken = false,
   tokenFilters,
+  oracleId,
+  faceName,
   oracleText,
 }: CardImageProps) {
-  const { src, isLoading } = useCardImage(cardName, { size, faceIndex, isToken, tokenFilters });
+  const { src, isLoading } = useCardImage(cardName, {
+    size,
+    faceIndex,
+    isToken,
+    tokenFilters,
+    oracleId,
+    faceName,
+  });
   const [imageError, setImageError] = useState(false);
   const fallbackData = useEngineCardData(oracleText === undefined ? cardName : null);
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;

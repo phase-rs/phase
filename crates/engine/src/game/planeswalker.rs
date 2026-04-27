@@ -313,6 +313,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )],
         );
@@ -340,6 +341,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )],
         );
@@ -364,6 +366,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )],
         );
@@ -392,6 +395,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )],
         );
@@ -428,6 +432,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )],
         );
@@ -492,6 +497,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
         )
         .cost(AbilityCost::Loyalty { amount: -3 });
@@ -507,6 +513,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
         );
         assert_eq!(parse_loyalty_cost(&ability), 0);
@@ -520,6 +527,7 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 }
             )),
             1
@@ -551,6 +559,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
         );
         assert_eq!(parse_loyalty_cost(&no_cost), 0);

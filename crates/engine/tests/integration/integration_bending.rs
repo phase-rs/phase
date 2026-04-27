@@ -356,6 +356,7 @@ fn test_mana_payment_cancel_clears_pending_cast() {
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
+            up_to: false,
         },
         vec![],
         spell_id,

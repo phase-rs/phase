@@ -3791,6 +3791,7 @@ mod tests {
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
+                        up_to: false,
                     },
                     vec![],
                     spell_id,
@@ -3816,6 +3817,7 @@ mod tests {
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
+                        up_to: false,
                     },
                     vec![],
                     ObjectId(10),

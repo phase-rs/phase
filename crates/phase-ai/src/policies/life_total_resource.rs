@@ -229,6 +229,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 0 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         ));
 
@@ -289,6 +290,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 0 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         ));
 

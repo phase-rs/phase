@@ -31,13 +31,17 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   );
 
   const cardName = obj?.name ?? "";
-  const imageLookup = obj ? cardImageLookup(obj) : { name: "", faceIndex: 0 };
+  const imageLookup = obj
+    ? cardImageLookup(obj)
+    : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
   const isToken = obj?.display_source === "Token";
   const { src, isLoading } = useCardImage(imageLookup.name, {
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken,
     tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
+    oracleId: imageLookup.oracleId,
+    faceName: imageLookup.faceName,
   });
 
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {

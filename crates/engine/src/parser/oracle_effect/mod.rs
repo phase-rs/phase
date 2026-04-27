@@ -2433,6 +2433,7 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
         EqualToQtyVerb::Draw => Some(parsed_clause(Effect::Draw {
             count: qty,
             target: TargetFilter::Controller,
+            up_to: false,
         })),
     }
 }

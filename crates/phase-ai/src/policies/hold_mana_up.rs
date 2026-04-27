@@ -300,6 +300,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         ));
         oid

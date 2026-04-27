@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import { fetchCardImageUrl, fetchTokenImageUrl } from "../services/scryfall.ts";
+import {
+  fetchCardImageByOracleId,
+  fetchCardImageUrl,
+  fetchTokenImageUrl,
+} from "../services/scryfall.ts";
 import type { TokenSearchFilters } from "../services/scryfall.ts";
 
 interface UseCardImageOptions {
@@ -7,6 +11,14 @@ interface UseCardImageOptions {
   faceIndex?: number;
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
+  /** Canonical lookup id from `printed_ref.oracle_id`. When provided, the
+   * Scryfall service resolves the image by oracle id (preferred) and
+   * `cardName`/`faceIndex` are used only as cache-key disambiguators and
+   * `aria-label`/diagnostic context. Battlefield call sites should set this. */
+  oracleId?: string;
+  /** Companion to `oracleId` — the engine-reported face name selects which
+   * Scryfall `card_faces` entry to render. */
+  faceName?: string;
 }
 
 interface UseCardImageResult {
@@ -30,11 +42,13 @@ function imageRequestKey(
   filterPower: number | null,
   filterToughness: number | null,
   filterColors: string,
+  oracleId: string,
+  faceName: string,
 ): string {
   return [
-    cardName,
+    oracleId || cardName,
+    oracleId ? faceName : String(faceIndex),
     size,
-    String(faceIndex),
     isToken ? "token" : "card",
     filterPower ?? "",
     filterToughness ?? "",
@@ -60,6 +74,8 @@ async function acquireCachedImageSrc(
   filterPower: number | null,
   filterToughness: number | null,
   filterColors: string,
+  oracleId: string,
+  faceName: string,
 ): Promise<string | null> {
   const existing = imageRequestCache.get(key);
   if (existing) {
@@ -76,13 +92,18 @@ async function acquireCachedImageSrc(
   imageRequestCache.set(key, entry);
 
   entry.promise = (async () => {
-    const remoteSrc = isToken
-      ? await fetchTokenImageUrl(cardName, size, {
-          power: filterPower,
-          toughness: filterToughness,
-          colors: filterColors ? filterColors.split(",") : undefined,
-        })
-      : await fetchCardImageUrl(cardName, faceIndex, size);
+    let remoteSrc: string | null;
+    if (isToken) {
+      remoteSrc = await fetchTokenImageUrl(cardName, size, {
+        power: filterPower,
+        toughness: filterToughness,
+        colors: filterColors ? filterColors.split(",") : undefined,
+      });
+    } else if (oracleId) {
+      remoteSrc = await fetchCardImageByOracleId(oracleId, faceName, size);
+    } else {
+      remoteSrc = await fetchCardImageUrl(cardName, faceIndex, size);
+    }
     entry.src = remoteSrc;
     entry.promise = null;
     if (entry.refCount === 0) {
@@ -105,6 +126,8 @@ export function useCardImage(
   const faceIndex = options?.faceIndex ?? 0;
   const isToken = options?.isToken ?? false;
   const tokenFilters = options?.tokenFilters;
+  const oracleId = options?.oracleId ?? "";
+  const faceName = options?.faceName ?? "";
   // Stabilize tokenFilters into primitives so the effect doesn't re-fire on every render
   const filterPower = tokenFilters?.power ?? null;
   const filterToughness = tokenFilters?.toughness ?? null;
@@ -119,10 +142,12 @@ export function useCardImage(
     filterPower,
     filterToughness,
     filterColors,
+    oracleId,
+    faceName,
   );
 
   useEffect(() => {
-    if (!cardName) {
+    if (!cardName && !oracleId) {
       setSrc(null);
       setIsLoading(false);
       return;
@@ -144,6 +169,8 @@ export function useCardImage(
           filterPower,
           filterToughness,
           filterColors,
+          oracleId,
+          faceName,
         );
         if (!cancelled) {
           setSrc(imageUrl);
@@ -162,7 +189,18 @@ export function useCardImage(
       cancelled = true;
       releaseCachedImageSrc(requestKey);
     };
-  }, [cardName, faceIndex, filterColors, filterPower, filterToughness, isToken, requestKey, size]);
+  }, [
+    cardName,
+    faceIndex,
+    faceName,
+    filterColors,
+    filterPower,
+    filterToughness,
+    isToken,
+    oracleId,
+    requestKey,
+    size,
+  ]);
 
   return { src, isLoading };
 }

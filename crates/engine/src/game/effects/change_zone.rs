@@ -2346,6 +2346,7 @@ mod tests {
                         qty: QuantityRef::ExiledFromHandThisResolution,
                     },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
                 vec![],
                 ObjectId(100),

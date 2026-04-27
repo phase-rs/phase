@@ -760,6 +760,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     let draw_effect = Effect::Draw {
                         count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
+                        up_to: false,
                     };
                     let draw_ability =
                         ResolvedAbility::new(draw_effect, Vec::new(), ObjectId(0), monarch_id);
@@ -2247,6 +2248,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2272,6 +2274,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2443,6 +2446,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2595,6 +2599,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2620,6 +2625,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -2666,6 +2672,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .valid_card(TargetFilter::Typed(TypedFilter::creature()))
@@ -2904,6 +2911,7 @@ pub mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )
             .sub_ability(AbilityDefinition::new(
@@ -3571,6 +3579,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -3690,6 +3699,7 @@ pub mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             )));
             spell.trigger_definitions.push(trigger);
@@ -3704,6 +3714,7 @@ pub mod tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
+                        up_to: false,
                     },
                     vec![],
                     spell_id,
@@ -3772,6 +3783,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .valid_card(TargetFilter::Typed(
@@ -4904,6 +4916,7 @@ pub mod tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
+                        up_to: false,
                     },
                 ))
                 .destination(Zone::Battlefield),
@@ -4988,6 +5001,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .destination(Zone::Battlefield),
@@ -5112,6 +5126,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .origin(Zone::Battlefield)
@@ -5177,6 +5192,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .origin(Zone::Battlefield)
@@ -5241,6 +5257,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .origin(Zone::Battlefield)
@@ -6000,6 +6017,7 @@ pub mod tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
+                        up_to: false,
                     },
                 ))
                 .destination(Zone::Battlefield);
@@ -6055,6 +6073,7 @@ pub mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
+                            up_to: false,
                         },
                     ))
                     .origin(Zone::Battlefield)
@@ -6088,6 +6107,7 @@ pub mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         def.valid_card = type_filter;
@@ -6652,6 +6672,7 @@ pub mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         let static_def = StaticDefinition::continuous()
@@ -6709,6 +6730,7 @@ pub mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         let static_def = StaticDefinition::continuous()
@@ -6771,6 +6793,7 @@ pub mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         let static_def = StaticDefinition::continuous()
@@ -6914,6 +6937,7 @@ mod dedup_regression_tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ))
     }

@@ -2707,7 +2707,7 @@ mod tests {
             &[],
         );
         assert_eq!(r.abilities.len(), 1);
-        let Effect::Draw { count, target } = &*r.abilities[0].effect else {
+        let Effect::Draw { count, target, .. } = &*r.abilities[0].effect else {
             panic!("expected Effect::Draw, got {:?}", r.abilities[0].effect);
         };
         assert_eq!(*count, QuantityExpr::Fixed { value: 1 });

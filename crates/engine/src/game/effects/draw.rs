@@ -68,7 +68,16 @@ pub fn resolve(
         // chosen during spell announcement and is in `ability.targets` —
         // `target_player()` reads it back, falling back to controller for
         // context-ref filters that don't surface a target slot.
-        Effect::Draw { count, target } => (
+        // CR 608.2d: `up_to` is honored at runtime via the player choice
+        // mechanism in `engine_resolution_choices` — by the time we reach
+        // here the engine has already resolved the chosen count into the
+        // ProposedEvent::Draw count. So the resolver here just reads the
+        // configured count expression as the upper bound.
+        Effect::Draw {
+            count,
+            target,
+            up_to: _,
+        } => (
             resolve_quantity_with_targets(state, count, ability) as u32,
             // CR 121.1 + CR 615.5 + CR 609.7: context-ref target filters
             // (PostReplacementSourceController, ParentTargetController, etc.)
@@ -149,6 +158,13 @@ pub fn apply_draw_after_replacement(
             player.drew_from_empty_library = true;
         }
     }
+
+    // CR 609.3: Record the actually-drawn count so chained sub-abilities like
+    // "draw cards equal to N, then discard that many" can resolve their
+    // dynamic count via `EventContextAmount`'s `last_effect_count` fallback.
+    // Mirrors the convention used by `change_zone.rs`, `sacrifice.rs`, etc.
+    let drawn_count = cards_to_draw.len() as i32;
+    state.last_effect_count = Some(drawn_count);
 
     for obj_id in cards_to_draw {
         zones::move_to_zone(state, obj_id, Zone::Hand, events);
@@ -238,6 +254,7 @@ mod tests {
                     value: num_cards as i32,
                 },
                 target: crate::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),

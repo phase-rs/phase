@@ -2730,6 +2730,7 @@ mod tests {
                         offset: 1,
                     },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -2771,6 +2772,7 @@ mod tests {
                         offset: 1,
                     },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -2805,6 +2807,7 @@ mod tests {
                         offset: 1,
                     },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -4399,6 +4402,7 @@ mod tests {
                         offset: 1,
                     },
                     target: TargetFilter::Controller,
+                    up_to: false,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);

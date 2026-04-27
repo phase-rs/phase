@@ -11,7 +11,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
-import { StatusBadge } from "./HudBadges.tsx";
+import { CounterBadge, StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
@@ -140,6 +140,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const isValidTarget = validPlayerTargetIds.includes(opponentId);
     const opponentCompanion = gameState?.players[opponentId]?.companion;
     const opponentSpeed = gameState?.players[opponentId]?.speed ?? 0;
+    const opponentPoisonCounters = gameState?.players[opponentId]?.poison_counters ?? 0;
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
       gameState?.players[opponentId]?.status?.type === "PhasedOut";
@@ -166,10 +167,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           seatColor={opponentSeatColor}
           underAttack={isOpponentUnderAttack}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
-          trailing={opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
+          trailing={opponentPoisonCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
               {isOpponentPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
-              {opponentSpeed > 0 ? <StatusBadge label="Speed" value={opponentSpeed} tone={opponentSpeed >= 4 ? "amber" : "neutral"} /> : null}
+              {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
+              {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
               {opponentCompanion ? <StatusBadge label="Companion" /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
             </>
@@ -309,6 +311,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
 
   const handCount = player.hand.length;
   const speed = player.speed ?? 0;
+  const poisonCounters = player.poison_counters;
   const isPhasedOut = player.status?.type === "PhasedOut";
 
   const label = ally ? "Ally" : getOpponentDisplayName(playerId);
@@ -376,12 +379,13 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           <span className={`text-sm font-semibold ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-slate-100"}`}>
             {player.life}
           </span>
+          {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+          {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
           {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
         </div>
       </div>
 
       <Stat label="Hand" value={handCount} color="text-slate-200" />
-      {speed > 0 && <Stat label="Speed" value={speed} color={speed >= 4 ? "text-amber-200" : "text-slate-200"} />}
       {counts.creatures > 0 && <Stat label="Creatures" value={counts.creatures} color="text-rose-200" />}
       {counts.lands > 0 && <Stat label="Lands" value={counts.lands} color="text-emerald-200" />}
       {counts.other > 0 && <Stat label="Other" value={counts.other} color="text-cyan-200" />}

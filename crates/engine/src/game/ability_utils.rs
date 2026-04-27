@@ -1896,6 +1896,7 @@ mod tests {
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
         )));
 
@@ -1950,6 +1951,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
         );
         let mode_discard = AbilityDefinition::new(
@@ -2003,6 +2005,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Player,
+                up_to: false,
             },
         );
         let mode_damageall = AbilityDefinition::new(

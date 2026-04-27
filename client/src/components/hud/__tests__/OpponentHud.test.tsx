@@ -15,10 +15,10 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
     active_player: 2,
     phase: "PreCombatMain",
     players: [
-      { id: 0, life: 40, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
-      { id: 1, life: 40, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
-      { id: 2, life: 40, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
-      { id: 3, life: 40, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
+      { id: 0, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
+      { id: 1, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
+      { id: 2, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
+      { id: 3, life: 40, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
     ],
     priority_player: 2,
     objects: {},
@@ -105,5 +105,62 @@ describe("OpponentHud", () => {
     await waitFor(() => {
       expect(useUiStore.getState().focusedOpponent).toBe(3);
     });
+  });
+
+  it("renders compact poison and speed badges in multiplayer tabs", () => {
+    const gameState = createGameState();
+    gameState.players[1].poison_counters = 3;
+    gameState.players[1].speed = 2;
+
+    act(() => {
+      useGameStore.setState({ gameState });
+    });
+
+    render(<OpponentHud />);
+
+    expect(screen.getByTitle("Poison counters: 3")).toHaveAttribute("aria-label", "3 poison counters");
+    expect(screen.getByTitle("Speed: 2")).toHaveAttribute("aria-label", "Speed 2");
+    expect(screen.queryByText("Speed")).toBeNull();
+  });
+
+  it("hides zero poison counters", () => {
+    render(<OpponentHud />);
+
+    expect(screen.queryByTitle(/Poison counters:/)).toBeNull();
+  });
+
+  it("renders compact poison and speed badges for the 1v1 opponent HUD", () => {
+    const gameState = createGameState({
+      players: [
+        { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
+        { id: 1, life: 20, poison_counters: 4, speed: 1, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0 },
+      ],
+      active_player: 1,
+      priority_player: 1,
+      waiting_for: { type: "Priority", data: { player: 1 } },
+      seat_order: [0, 1],
+      format_config: {
+        format: "Standard",
+        starting_life: 20,
+        min_players: 2,
+        max_players: 2,
+        deck_size: 60,
+        singleton: false,
+        command_zone: false,
+        commander_damage_threshold: null,
+        range_of_influence: null,
+        team_based: false,
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState });
+    });
+
+    render(<OpponentHud />);
+
+    expect(screen.getByTitle("Poison counters: 4")).toHaveAttribute("aria-label", "4 poison counters");
+    expect(screen.getByTitle("Speed: 1")).toHaveAttribute("aria-label", "Speed 1");
+    expect(screen.queryByText("Speed")).toBeNull();
   });
 });

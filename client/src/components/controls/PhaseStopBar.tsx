@@ -1,5 +1,5 @@
 import type { Phase } from "../../adapter/types";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -96,13 +96,75 @@ const COMBAT_PHASES: Phase[] = [
   "EndCombat",
 ];
 
+const PHASE_DETAILS: Record<Phase, { label: string; description: string }> = {
+  Untap: {
+    label: "Untap step",
+    description: "Your tapped permanents untap here.",
+  },
+  Upkeep: {
+    label: "Upkeep step",
+    description: "Upkeep triggers and recurring costs happen here.",
+  },
+  Draw: {
+    label: "Draw step",
+    description: "You draw for turn here.",
+  },
+  PreCombatMain: {
+    label: "First main phase",
+    description: "Play lands and cast spells before combat.",
+  },
+  BeginCombat: {
+    label: "Beginning of combat step",
+    description: "Last priority window before attackers are chosen.",
+  },
+  DeclareAttackers: {
+    label: "Declare attackers step",
+    description: "The attacking player chooses attackers.",
+  },
+  DeclareBlockers: {
+    label: "Declare blockers step",
+    description: "Defending players choose blockers.",
+  },
+  CombatDamage: {
+    label: "Combat damage step",
+    description: "Creatures assign and deal combat damage.",
+  },
+  EndCombat: {
+    label: "End of combat step",
+    description: "Last combat priority window after damage.",
+  },
+  PostCombatMain: {
+    label: "Second main phase",
+    description: "Play lands or cast spells after combat.",
+  },
+  End: {
+    label: "End step",
+    description: "End-step triggers and end-of-turn actions happen here.",
+  },
+  Cleanup: {
+    label: "Cleanup step",
+    description: "Damage wears off and maximum hand size is checked.",
+  },
+};
+
+function getPhaseTooltip(phase: Phase, hasStop: boolean, isActive: boolean): string {
+  const details = PHASE_DETAILS[phase];
+  const stopText = hasStop
+    ? "Stop set: click to remove this auto-pass stop."
+    : "No stop set: click to pause auto-pass here.";
+  const activeText = isActive ? " Current phase." : "";
+  return `Phase stop: ${details.label}. ${details.description} ${stopText}${activeText}`;
+}
+
 function PhaseDot({ phase }: { phase: Phase }) {
+  const tooltipId = useId();
   const currentPhase = useGameStore((s) => s.gameState?.phase);
   const phaseStops = usePreferencesStore((s) => s.phaseStops);
   const setPhaseStops = usePreferencesStore((s) => s.setPhaseStops);
 
   const isActive = phase === currentPhase;
   const hasStop = phaseStops.includes(phase);
+  const tooltip = getPhaseTooltip(phase, hasStop, isActive);
 
   const togglePhase = () => {
     if (hasStop) {
@@ -114,9 +176,12 @@ function PhaseDot({ phase }: { phase: Phase }) {
 
   return (
     <button
+      type="button"
       onClick={togglePhase}
-      title={phase}
-      className={`relative flex h-6 w-6 items-center justify-center rounded-full border transition-all duration-200 lg:h-8 lg:w-8 lg:p-1 ${
+      aria-label={tooltip}
+      aria-describedby={tooltipId}
+      aria-pressed={hasStop}
+      className={`group relative flex h-6 w-6 items-center justify-center rounded-full border transition-all duration-200 lg:h-8 lg:w-8 lg:p-1 ${
         isActive
           ? "border-cyan-300/45 bg-cyan-400/18 text-white shadow-[0_10px_22px_rgba(34,211,238,0.22)]"
           : hasStop
@@ -131,6 +196,13 @@ function PhaseDot({ phase }: { phase: Phase }) {
       {hasStop && (
         <span className="absolute -bottom-0.5 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full bg-amber-400" />
       )}
+      <span
+        id={tooltipId}
+        role="tooltip"
+        className="pointer-events-none absolute right-0 bottom-full z-50 mb-2 hidden w-64 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2 text-left text-[11px] leading-snug font-medium text-slate-100 shadow-2xl shadow-black/40 backdrop-blur-xl group-hover:block group-focus-visible:block"
+      >
+        {tooltip}
+      </span>
     </button>
   );
 }

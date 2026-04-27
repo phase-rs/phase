@@ -254,6 +254,7 @@ pub fn room_effects(
                 Effect::Draw {
                     count: fixed(1),
                     target: TargetFilter::Controller,
+                            up_to: false,
                 },
                 source_id,
                 controller,
@@ -546,6 +547,7 @@ pub fn room_effects(
                 Effect::Draw {
                     count: fixed(1),
                     target: TargetFilter::Controller,
+                            up_to: false,
                 },
                 source_id,
                 controller,
@@ -634,6 +636,7 @@ pub fn room_effects(
                 Effect::Draw {
                     count: fixed(1),
                     target: TargetFilter::Controller,
+                            up_to: false,
                 },
                 vec![],
                 source_id,
@@ -719,6 +722,7 @@ pub fn room_effects(
                 Effect::Draw {
                     count: fixed(2),
                     target: TargetFilter::Controller,
+                            up_to: false,
                 },
                 source_id,
                 controller,

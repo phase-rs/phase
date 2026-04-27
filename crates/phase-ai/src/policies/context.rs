@@ -247,6 +247,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
             Vec::new(),
             ObjectId(1),
@@ -322,6 +323,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         )));
         let spell_id = create_object(
@@ -387,6 +389,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
         ));
         object.trigger_definitions.push(
