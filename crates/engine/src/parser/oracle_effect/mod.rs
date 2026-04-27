@@ -9279,6 +9279,24 @@ pub(crate) fn normalize_verb_token(token: &str) -> String {
         _ if token.ends_with("ies") && token.len() > 3 => {
             format!("{}y", &token[..token.len() - 3])
         }
+        // English orthographic rule (parser-internal, no game-rule annotation):
+        // verbs ending in /ʃ/, /tʃ/, /s/, /z/, /ks/ take "-es" instead of "-s"
+        // for third-person singular (search→searches, wash→washes,
+        // watch→watches, fix→fixes, buzz→buzzes). Strip "es" only when the
+        // resulting stem is a known predicate verb — without this validator
+        // the rule over-strips real `-eze`/`-eeze` words like "freezes",
+        // "breezes", "sneezes" into nonsense stems ("freez", "breez", "sneez")
+        // that no downstream lookup recognizes. The PREDICATE_VERBS guard
+        // ensures unknown words pass through unchanged ("parser must not
+        // swallow"); only registered verbs are de-conjugated.
+        // allow-noncombinator: verb-morphology suffix check on pre-tokenized word
+        _ if token.ends_with("es") && token.len() > 2 && {
+            let stem = &token[..token.len() - 2];
+            crate::parser::oracle_effect::subject::PREDICATE_VERBS.contains(&stem)
+        } =>
+        {
+            token[..token.len() - 2].to_string()
+        }
         // allow-noncombinator: verb-morphology suffix check on pre-tokenized word
         _ if token.ends_with('s') && !token.ends_with("ss") => token[..token.len() - 1].to_string(),
         _ => token.to_string(),
@@ -9445,6 +9463,38 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
+
+    /// Parser must not invent verb stems for unknown words. The "-es" stripping
+    /// rule in `normalize_verb_token` was previously triggered purely by
+    /// orthographic suffix (stem ends in `ch`/`sh`/`ss`/`x`/`z`), which
+    /// produced nonsense stems like `freez`/`breez`/`sneez` for the `-eze`/
+    /// `-eeze` family. The narrowed rule only strips when the result is a
+    /// known `PREDICATE_VERBS` member, so unrecognized verbs pass through
+    /// unchanged ("parser must not swallow").
+    #[test]
+    fn normalize_verb_token_does_not_invent_stems_for_unknown_verbs() {
+        // -eze / -eeze words must NOT be over-stripped. The actual stem
+        // ("freeze", "breeze", "sneeze") is not in PREDICATE_VERBS, so the
+        // -es branch must reject the strip and fall through to the -s branch
+        // (which strips a single trailing 's' but only if the word doesn't
+        // end in 'ss' — these end in 'es', not 'ss', so 's' strip applies and
+        // yields "freeze"/"breeze"/"sneeze"). The critical assertion is the
+        // negative: we never produce "freez"/"breez"/"sneez".
+        for token in ["freezes", "breezes", "sneezes"] {
+            let normalized = normalize_verb_token(token);
+            assert_ne!(
+                normalized,
+                &token[..token.len() - 2],
+                "normalize_verb_token({token:?}) must not produce the invented stem {:?}",
+                &token[..token.len() - 2]
+            );
+        }
+
+        // Sanity check: the registered "search" verb still de-conjugates so
+        // the Winds of Abandon-class chain ("its controller searches their
+        // library") continues to dispatch through the predicate path.
+        assert_eq!(normalize_verb_token("searches"), "search");
+    }
 
     /// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among>" must produce
     /// a conditional Dig alternative where the `else_ability` is the base Dig
@@ -11632,6 +11682,120 @@ mod tests {
         assert!(
             shuffle.sub_ability.is_none(),
             "chain must end after Shuffle; got extra: {:?}",
+            shuffle.sub_ability
+        );
+    }
+
+    /// CR 608.2c + CR 117.3a + CR 701.23a + CR 609.3 + CR 603.7: Winds of
+    /// Abandon — iterated subject-anchored search. The structure mirrors
+    /// Assassin's Trophy but the search step carries `repeat_for:
+    /// TrackedSetSize` so each exiled creature's controller searches their own
+    /// library. The tracked-set anchor is published by the leading exile step;
+    /// the per-iteration parent-target rebind in `repeat_for` execution
+    /// (game/effects/mod.rs) ensures `ParentTargetController` resolves to a
+    /// different exiled creature per iteration.
+    #[test]
+    fn winds_of_abandon_iterated_subject_search_chain() {
+        use crate::types::ability::AbilityKind;
+        let def = parse_effect_chain(
+            "Exile target creature you don't control. For each creature exiled this way, its controller searches their library for a basic land card. Those players put those cards onto the battlefield tapped, then shuffle.",
+            AbilityKind::Spell,
+        );
+        // Top-level: ChangeZone(exile target opponent's creature)
+        match &*def.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert!(
+                    matches!(target, TargetFilter::Typed(_)),
+                    "exile target should be a typed filter, got {:?}",
+                    target
+                );
+            }
+            other => panic!("expected top-level ChangeZone(Exile), got {:?}", other),
+        }
+        // Sub: SearchLibrary { target_player: ParentTargetController, basic land,
+        //                     repeat_for: TrackedSetSize }
+        let search = def
+            .sub_ability
+            .as_deref()
+            .expect("chain must continue into SearchLibrary");
+        match &*search.effect {
+            Effect::SearchLibrary {
+                filter,
+                target_player,
+                ..
+            } => {
+                assert_eq!(
+                    target_player.as_ref(),
+                    Some(&TargetFilter::ParentTargetController),
+                    "search must route to the parent target's controller"
+                );
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(tf.type_filters.contains(&TypeFilter::Land));
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasSupertype {
+                                value: crate::types::card_type::Supertype::Basic
+                            }
+                        )),
+                        "search filter must require Basic supertype"
+                    );
+                } else {
+                    panic!("search filter must be Typed, got {:?}", filter);
+                }
+            }
+            other => panic!("expected SearchLibrary, got {:?}", other),
+        }
+        assert_eq!(
+            search.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            }),
+            "SearchLibrary must iterate over the tracked-set size"
+        );
+        // Sub-sub: ChangeZone(Library→Battlefield, enter_tapped=true)
+        let put = search
+            .sub_ability
+            .as_deref()
+            .expect("search must chain a put-step");
+        match &*put.effect {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                enter_tapped,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Library));
+                assert_eq!(*destination, Zone::Battlefield);
+                assert!(
+                    *enter_tapped,
+                    "put-step must set enter_tapped (Oracle: 'onto the battlefield tapped')"
+                );
+            }
+            other => panic!("expected ChangeZone Library→Battlefield, got {:?}", other),
+        }
+        // Sub-sub-sub: Shuffle with ParentTargetController so each searching
+        // player shuffles their own library (CR 701.23i).
+        let shuffle = put.sub_ability.as_deref().expect("must chain Shuffle");
+        match &*shuffle.effect {
+            Effect::Shuffle { target } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTargetController,
+                    "Shuffle must target the searching player, not the caster"
+                );
+            }
+            other => panic!("expected Shuffle, got {:?}", other),
+        }
+        // No spurious tail — the third Oracle clause must have been absorbed.
+        assert!(
+            shuffle.sub_ability.is_none(),
+            "chain must end at Shuffle; got extra: {:?}",
             shuffle.sub_ability
         );
     }

@@ -254,6 +254,17 @@ fn def_tree_has_optional(def: &AbilityDefinition) -> bool {
 /// cast/play" permission — granting permission is opt-in by definition,
 /// so the def-level optional flag does not need to be set.
 ///
+/// CR 601.2 + CR 118.9: `CastFromZone` likewise grants a "you may cast/play"
+/// permission ("you may cast sorcery spells as though they had flash",
+/// Teferi/Time Raveler class; "you may play one of those cards", Nashi-class
+/// impulse-draw). The "may" is the permission itself — the player choosing
+/// not to cast doesn't need a separate `optional: true` flag.
+///
+/// CR 118.9: `PayCost` paired with the alt-cost grammar ("you may exile two
+/// green cards from your hand rather than pay this spell's mana cost",
+/// Allosaurus Rider) carries the "may" inside the alternative-cost choice
+/// — the player either pays the alt cost or the original.
+///
 /// CR 305.9 / CR 701.20: `RevealFromHand` with an `on_decline` branch is
 /// the structural shape of "you may reveal X. If you don't, ..." — the
 /// player's reveal choice IS the "may" decision, with the decline branch
@@ -263,6 +274,8 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         effect,
         Effect::Dig { up_to: true, .. }
             | Effect::GrantCastingPermission { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::PayCost { .. }
             | Effect::RevealFromHand {
                 on_decline: Some(_),
                 ..

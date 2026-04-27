@@ -15,6 +15,36 @@ use crate::types::ability::{
 };
 use crate::types::zones::Zone;
 
+/// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
+/// continuation chunk so the absorption matcher sees the bare verb form. Used
+/// by the SearchDestination follow-up absorber to handle iterated-search
+/// variants (Winds of Abandon: "those players put those cards onto the
+/// battlefield tapped") whose subject was demoted from a top-level subject
+/// because the put-step has already been folded into the search continuation.
+///
+/// Single nom `alt()` over the player-subject prefixes — extend by adding new
+/// arms here, never by adding more enumerated `matches!` arms downstream.
+///
+/// Intentionally does NOT delegate to `subject::parse_subject_application`:
+/// that function is a full subject parser that returns a `SubjectApplication`
+/// (filter + targeting + multi-target spec) for use at clause boundaries.
+/// Here we only need to peel a known set of player-pronoun prefixes from a
+/// continuation chunk before re-tokenizing — there is no filter to derive,
+/// no target to attach, and no multi-target structure. The simpler local form
+/// keeps the search-continuation absorber decoupled from the subject parser's
+/// richer return type and avoids constructing/then-discarding a
+/// `SubjectApplication` on the hot continuation path.
+fn strip_search_result_subject(lower: &str) -> &str {
+    alt((
+        tag::<_, _, VerboseError<&str>>("those players "),
+        tag("that player "),
+        tag("each player "),
+    ))
+    .parse(lower)
+    .map(|(rest, _)| rest)
+    .unwrap_or(lower)
+}
+
 /// Parse count from "choose one/two/three/N of them/those" text using nom combinator.
 /// Handles all chooser prefix forms: "choose ", "you choose ", "an opponent chooses ",
 /// "target opponent chooses ".
@@ -1439,19 +1469,33 @@ pub(super) fn parse_followup_continuation_ast(
         // (e.g., Assassin's Trophy / Ranging Raptors / Harrow compound), the
         // explicit "put it onto the battlefield" chunk in the same sentence is
         // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
+        //
+        // CR 701.23i + CR 609.3: Iterated-search variants (Winds of Abandon class)
+        // surface a plural subject ("those players put those cards onto the
+        // battlefield tapped") because the search step has `repeat_for:
+        // TrackedSetSize`. The compound has already been folded by the
+        // SearchDestination intrinsic continuation; the standalone restatement
+        // here would duplicate the ChangeZone if not absorbed. Use a structural
+        // prefix-strip on the player-subject so all (subject × pronoun × tapped)
+        // permutations match without N! enumerated arms.
         Effect::ChangeZone {
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             ..
-        } if matches!(
-            lower.trim().trim_end_matches('.'),
-            "put that card onto the battlefield"
-                | "put it onto the battlefield"
-                | "put them onto the battlefield"
-                | "put those cards onto the battlefield"
-                | "put that card onto the battlefield tapped"
-                | "put it onto the battlefield tapped"
-        ) =>
+        } if {
+            let bare = strip_search_result_subject(lower.trim().trim_end_matches('.'));
+            matches!(
+                bare,
+                "put that card onto the battlefield"
+                    | "put it onto the battlefield"
+                    | "put them onto the battlefield"
+                    | "put those cards onto the battlefield"
+                    | "put that card onto the battlefield tapped"
+                    | "put it onto the battlefield tapped"
+                    | "put them onto the battlefield tapped"
+                    | "put those cards onto the battlefield tapped"
+            )
+        } =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)
         }

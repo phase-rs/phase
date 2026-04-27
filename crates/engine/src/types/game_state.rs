@@ -426,6 +426,41 @@ impl PendingContinuation {
     }
 }
 
+/// CR 609.3 + CR 109.5: Resume state for a `repeat_for` iteration loop paused
+/// when the inner effect entered an interactive `WaitingFor` state.
+///
+/// When `resolve_ability_chain` is executing the iteration loop for a
+/// `repeat_for` quantity (e.g., Winds of Abandon overloaded, where each
+/// exiled creature's controller searches their library), the inner effect can
+/// transition to `WaitingFor::SearchChoice` (or any other player-choice
+/// state). Without resumption, only the first iteration would ever run — the
+/// loop breaks at the first paused iteration and the remaining iterations are
+/// silently dropped.
+///
+/// This struct stashes everything needed to re-enter the loop after the
+/// current iteration's player choice (and any chained sub-ability) drains:
+/// - `ability` — the effective per-iteration ability (parent of the loop's
+///   `effect`); cloned with `sub_ability = None` because the sub-ability is
+///   already wired through `pending_continuation` for the current iteration.
+/// - `tracked_members` — the tracked-set members snapshotted at loop entry
+///   (used by `effect_refs_parent_target` rebinding). Empty when no rebind
+///   is required.
+/// - `next_iteration` — index of the iteration that should run next when the
+///   resume fires.
+/// - `total_iterations` — original loop bound, used to detect completion.
+///
+/// Drained by `drain_pending_continuation` after the per-iteration
+/// `pending_continuation` chain fully drains. Each resumed iteration may
+/// itself pause and re-stash this struct (recursive drive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRepeatIteration {
+    pub ability: Box<crate::types::ability::ResolvedAbility>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracked_members: Vec<ObjectId>,
+    pub next_iteration: usize,
+    pub total_iterations: usize,
+}
+
 /// CR 603.7: A delayed triggered ability created during resolution of a spell or ability.
 /// Fires once at the specified condition, then is removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2476,6 +2511,15 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_continuation: Option<PendingContinuation>,
 
+    /// CR 609.3 + CR 109.5: Pending `repeat_for` iteration loop paused mid-flight
+    /// because the inner effect entered an interactive `WaitingFor` state.
+    /// Drained by `drain_pending_continuation` AFTER `pending_continuation`,
+    /// so the per-iteration chain (e.g., the SearchLibrary's
+    /// "put-onto-battlefield" continuation) completes before the next
+    /// iteration begins. See [`PendingRepeatIteration`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_repeat_iteration: Option<PendingRepeatIteration>,
+
     /// Pending optional effect ability chain, awaiting player accept/decline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
@@ -2810,6 +2854,7 @@ impl GameState {
             modal_modes_chosen_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
             pending_continuation: None,
+            pending_repeat_iteration: None,
             pending_optional_effect: None,
             last_named_choice: None,
             all_creature_types: Vec::new(),
@@ -2978,6 +3023,7 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation
+            && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids

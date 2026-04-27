@@ -201,14 +201,97 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let Some(cont) = state.pending_continuation.take() else {
-        return;
-    };
-    let PendingContinuation { chain, parent_kind } = cont;
-    let source_id = chain.source_id;
-    let _ = resolve_ability_chain(state, &chain, events, 0);
-    if let Some(kind) = parent_kind {
-        events.push(GameEvent::EffectResolved { kind, source_id });
+    if let Some(cont) = state.pending_continuation.take() {
+        let PendingContinuation { chain, parent_kind } = cont;
+        let source_id = chain.source_id;
+        let _ = resolve_ability_chain(state, &chain, events, 0);
+        if let Some(kind) = parent_kind {
+            events.push(GameEvent::EffectResolved { kind, source_id });
+        }
+    }
+    // CR 609.3 + CR 109.5: After the per-iteration chain drains, drive any
+    // remaining `repeat_for` iterations. Each resumed iteration may itself
+    // pause and re-stash via the loop in `resolve_ability_chain`, producing a
+    // chain of resumed iterations until the loop completes.
+    drain_pending_repeat_iteration(state, events);
+}
+
+/// CR 609.3 + CR 109.5: Resume a paused `repeat_for` loop. Each iteration
+/// may itself pause (re-stashing into `pending_repeat_iteration`); the outer
+/// driver in `drain_pending_continuation` re-enters this on the next choice
+/// resolution. If an iteration completes synchronously and a further
+/// iteration also completes synchronously, this function drives them all
+/// in-line so the loop only pauses again when an inner effect actually
+/// transitions to a player-choice state.
+fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    while let Some(pending) = state.pending_repeat_iteration.take() {
+        let crate::types::game_state::PendingRepeatIteration {
+            ability,
+            tracked_members,
+            next_iteration,
+            total_iterations,
+        } = pending;
+        let initial_waiting_for = state.waiting_for.clone();
+        let initial_continuation_present = state.pending_continuation.is_some();
+        let mut iteration = next_iteration;
+        let mut paused = false;
+        while iteration < total_iterations {
+            let mut iter_ability;
+            let iter_effective: &ResolvedAbility =
+                if let Some(member) = tracked_members.get(iteration) {
+                    iter_ability = (*ability).clone();
+                    rebind_first_object_target(&mut iter_ability.targets, *member);
+                    &iter_ability
+                } else {
+                    &ability
+                };
+            // CR 609.3 + CR 109.5: Drive the FULL chain (parent effect +
+            // sub_ability + line-1660 continuation wiring) for each resumed
+            // iteration, mirroring iteration 0's path. Calling `resolve_effect`
+            // here would skip the sub_ability stash, so e.g. Winds of Abandon's
+            // put-onto-battlefield + shuffle continuation would never run for
+            // opponents 2+. The stashed `ability` had `repeat_for` cleared at
+            // stash time so this call resolves a single iteration only.
+            //
+            // Pass depth=1 to preserve chain-local state (`chain_tracked_set_id`,
+            // `last_revealed_ids`, `last_zone_changed_ids`, `last_effect_amount`)
+            // that the depth==0 prelude in `resolve_ability_chain` would
+            // otherwise reset. The resumed iteration is logically continuing the
+            // outer chain, not starting a fresh top-level resolution.
+            let _ = resolve_ability_chain(state, iter_effective, events, 1);
+            // CR 609.3: Iteration may transition to a player-choice state OR
+            // synchronously install a `pending_continuation` (e.g. when the
+            // sub_ability chain wires itself for later drain). Either signals
+            // that this iteration is not yet fully resolved — re-stash the
+            // remaining iterations and break so the outer
+            // `drain_pending_continuation` can run the continuation, then
+            // re-enter this drain for the next iteration. Without re-stashing
+            // on the synchronous-continuation case, subsequent iterations are
+            // silently dropped.
+            let entered_choice = state.waiting_for != initial_waiting_for;
+            let installed_continuation =
+                !initial_continuation_present && state.pending_continuation.is_some();
+            if entered_choice || installed_continuation {
+                let next = iteration + 1;
+                if next < total_iterations {
+                    state.pending_repeat_iteration =
+                        Some(crate::types::game_state::PendingRepeatIteration {
+                            ability: ability.clone(),
+                            tracked_members: tracked_members.clone(),
+                            next_iteration: next,
+                            total_iterations,
+                        });
+                }
+                paused = true;
+                break;
+            }
+            iteration += 1;
+        }
+        if paused {
+            // Loop paused mid-iteration; the next call to
+            // `drain_pending_continuation` will resume.
+            break;
+        }
     }
 }
 
@@ -600,6 +683,62 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
             ..
         }
     )
+}
+
+/// CR 603.7 + CR 109.5: Returns `true` when the effect resolves an acting
+/// subject relative to the parent target — i.e., any effect-target slot
+/// reachable via [`effect_target_filter`] contains
+/// `TargetFilter::ParentTargetController` or `TargetFilter::ParentTarget`.
+/// Used by the `repeat_for: TrackedSetSize` loop to decide whether
+/// per-iteration parent rebinding is required.
+///
+/// CR 109.5: "you/your" on an object refers to its controller; for an iterated
+/// effect that derives the acting subject from the parent target (e.g., "its
+/// controller" on Winds of Abandon's per-creature search), each iteration must
+/// rebind the parent reference to the i-th tracked-set member so the per-iter
+/// subject resolves correctly.
+///
+/// Generic: scans whatever target filter the effect exposes via
+/// `effect_target_filter`, so any future effect family that carries a
+/// parent-target filter (search, draw, life-gain by parent's controller, etc.)
+/// participates without code changes here. `Effect::target_filter()` already
+/// surfaces `SearchLibrary::target_player`, so iterated-search variants are
+/// covered through the same single path.
+fn effect_refs_parent_target(effect: &Effect) -> bool {
+    effect_target_filter(effect).is_some_and(filter_refs_parent_target)
+}
+
+/// Recurse into compound filters so a wrapped `ParentTargetController` is
+/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
+fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ParentTargetController | TargetFilter::ParentTarget => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_refs_parent_target)
+        }
+        TargetFilter::Not { filter } => filter_refs_parent_target(filter),
+        _ => false,
+    }
+}
+
+/// CR 603.7 + CR 109.5: Replace the first `TargetRef::Object` in a target
+/// slice with the supplied object id. Used by the `repeat_for: TrackedSetSize`
+/// per-iteration rebind so the i-th iteration's parent reference (e.g.,
+/// `ParentTargetController` resolution in `search_library::resolve_library_owner`)
+/// binds to the i-th tracked-set member, making "its controller" (CR 109.5)
+/// resolve to the i-th object's controller per iteration.
+fn rebind_first_object_target(
+    targets: &mut Vec<TargetRef>,
+    new_id: crate::types::identifiers::ObjectId,
+) {
+    if let Some(slot) = targets
+        .iter_mut()
+        .find(|t| matches!(t, TargetRef::Object(_)))
+    {
+        *slot = TargetRef::Object(new_id);
+    } else {
+        targets.push(TargetRef::Object(new_id));
+    }
 }
 
 pub(crate) fn resolved_object_filter(
@@ -1137,14 +1276,87 @@ pub fn resolve_ability_chain(
                 1
             };
 
+            // CR 603.7 + CR 608.2c + CR 109.5: Per-iteration parent-target
+            // rebinding for tracked-set iterations. When `repeat_for ==
+            // TrackedSetSize` and the effect references the parent target via
+            // a context-ref filter (e.g., `ParentTargetController`,
+            // `ParentTarget`), each iteration must bind to a different member
+            // of the tracked set so the per-iteration acting subject is the
+            // i-th tracked object's controller (Winds of Abandon, where each
+            // exiled creature's controller searches their own library).
+            //
+            // Without this rebind, every iteration sees `effective.targets[0]`
+            // — the first exiled creature only — and only that creature's
+            // controller would search.
+            let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> = if matches!(
+                ability.repeat_for,
+                Some(crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::TrackedSetSize
+                })
+            )
+                && effect_refs_parent_target(&effective.effect)
+            {
+                state
+                    .chain_tracked_set_id
+                    .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
             let initial_waiting_for = state.waiting_for.clone();
-            for _ in 0..iterations {
-                let _ = resolve_effect(state, effective, events);
-                // Break if inner effect entered a player-choice state — avoid
-                // executing subsequent iterations against state awaiting input.
+            let mut iteration = 0usize;
+            while iteration < iterations {
+                // Snapshot per-iteration ability with parent-target rebinding when applicable.
+                let mut iter_ability;
+                let iter_effective: &ResolvedAbility =
+                    if let Some(member) = iter_tracked_members.get(iteration) {
+                        iter_ability = effective.clone();
+                        rebind_first_object_target(&mut iter_ability.targets, *member);
+                        &iter_ability
+                    } else {
+                        effective
+                    };
+                let _ = resolve_effect(state, iter_effective, events);
+                // CR 609.3 + CR 109.5: When the inner effect enters an
+                // interactive WaitingFor (e.g. SearchChoice), stash the
+                // remaining iterations so `drain_pending_continuation` can
+                // resume the loop after the player choice (and its chained
+                // sub-ability) complete. Without this, only the first
+                // iteration would ever fire — the loop would break and the
+                // remaining iterations would be silently dropped.
                 if state.waiting_for != initial_waiting_for {
+                    let next_iteration = iteration + 1;
+                    if next_iteration < iterations {
+                        // CR 609.3 + CR 109.5: Each resumed iteration must run
+                        // through the FULL chain (parent effect + sub_ability)
+                        // exactly the way iteration 0 just did. The drain path
+                        // re-enters via `resolve_ability_chain`, which goes
+                        // through the line-1461 sub_ability wiring and the
+                        // line-1660 SearchChoice continuation stash. Without
+                        // preserving `sub_ability` here, opponents picked
+                        // during iterations 1+ would never have their chosen
+                        // card placed onto the battlefield (Winds of Abandon).
+                        //
+                        // Clear `repeat_for` on the resumed copy so
+                        // `resolve_ability_chain` treats each resumed call as
+                        // a single iteration rather than re-entering this
+                        // outer iteration loop (which would re-iterate from
+                        // zero against `total_iterations`). The drain driver
+                        // owns iteration accounting via `next_iteration`.
+                        let mut resume_ability = effective.clone();
+                        resume_ability.repeat_for = None;
+                        state.pending_repeat_iteration =
+                            Some(crate::types::game_state::PendingRepeatIteration {
+                                ability: Box::new(resume_ability),
+                                tracked_members: iter_tracked_members.clone(),
+                                next_iteration,
+                                total_iterations: iterations,
+                            });
+                    }
                     break;
                 }
+                iteration += 1;
             }
         } // end shares_quality_failed else
     }
@@ -2935,6 +3147,671 @@ mod tests {
             3,
             "repeat_for=3 with Draw(1) should draw 3 cards"
         );
+    }
+
+    /// CR 603.7 + CR 109.5 + CR 701.23a: Winds of Abandon-shape — per-iteration
+    /// parent-target rebinding for `repeat_for: TrackedSetSize` over a
+    /// `ParentTargetController` search. Two creatures controlled by *different*
+    /// opponents (P1 and P2) are exiled. Without the per-iteration rebind both
+    /// iterations would prompt the same player; with the rebind, the FIRST
+    /// iteration must prompt the controller of the FIRST tracked-set member
+    /// specifically (not just "some opponent"), proving the rebind is the only
+    /// mechanism that places the per-iteration creature as the parent.
+    ///
+    /// Critical: `ability.targets` starts EMPTY. Without the rebind path the
+    /// SearchLibrary resolver would fall through to `ability.controller`
+    /// (the caster, P0) rather than to either creature's controller, so the
+    /// assertion below is reachable only through the rebind.
+    #[test]
+    fn repeat_for_rebinds_parent_target_to_tracked_set_member_per_iteration() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::format::FormatConfig;
+
+        // 3-player game so each tracked-set member can have a distinct
+        // controller — proves the rebind picks per-iteration, not "any opponent".
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+
+        let creature_a = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Exile,
+        );
+        let creature_b = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(2),
+            "Wolf".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&creature_a).unwrap().controller = PlayerId(1);
+        state.objects.get_mut(&creature_b).unwrap().controller = PlayerId(2);
+
+        // Seed P1's and P2's libraries with basic lands so the search finds
+        // matching cards in each opponent's library.
+        for (lib_owner, card_id, name) in [
+            (PlayerId(1), CardId(60), "Forest"),
+            (PlayerId(2), CardId(61), "Plains"),
+        ] {
+            let land = create_object(
+                &mut state,
+                card_id,
+                lib_owner,
+                name.to_string(),
+                Zone::Library,
+            );
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types = vec![crate::types::card_type::CoreType::Land];
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+        }
+
+        // Publish a chain-scoped tracked set listing both creatures in order.
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![creature_a, creature_b]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        // ability.targets is EMPTY: the only way for SearchLibrary's
+        // ParentTargetController to resolve to any opponent is via the
+        // per-iteration rebind populating targets[0] with the i-th member.
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ParentTargetController),
+                selection_constraint: SearchSelectionConstraint::None,
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0), // caster is P0
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+
+        let mut events = Vec::new();
+        // Depth=1 simulates being inside a larger chain (Winds of Abandon's
+        // outer chain publishes the tracked set in its first sub-ability).
+        // Calling at depth=0 would clear `chain_tracked_set_id` per CR 603.7's
+        // chain-local reset, defeating the test's setup.
+        resolve_ability_chain(&mut state, &ability, &mut events, 1).unwrap();
+
+        // First iteration must prompt P1 — controller of `creature_a`, the
+        // FIRST tracked-set member. If the rebind didn't run, this would
+        // resolve via `ability.controller` (P0) — which is not an
+        // opponent — and the SearchLibrary would never set
+        // WaitingFor::SearchChoice for P1 specifically.
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "first iteration must prompt the controller of the FIRST tracked-set member (P1, not P2 or P0)"
+                );
+            }
+            other => panic!("expected SearchChoice, got {:?}", other),
+        }
+
+        // The remaining iteration must be stashed in `pending_repeat_iteration`
+        // so subsequent SearchChoice resolutions resume the loop.
+        let pending = state
+            .pending_repeat_iteration
+            .as_ref()
+            .expect("second iteration must be stashed for resumption");
+        assert_eq!(pending.next_iteration, 1);
+        assert_eq!(pending.total_iterations, 2);
+        assert_eq!(pending.tracked_members, vec![creature_a, creature_b]);
+    }
+
+    /// CR 609.3 + CR 109.5: End-to-end iteration resumption — overloaded Winds
+    /// of Abandon shape across two distinct opponent controllers. After the
+    /// FIRST iteration's SearchChoice is resolved (P1 picks a basic land), the
+    /// loop must resume and prompt the SECOND opponent (P2) for their own
+    /// search. Without the `pending_repeat_iteration` infrastructure, only
+    /// the first iteration would ever fire.
+    #[test]
+    fn repeat_for_resumes_iteration_after_search_choice_resolves() {
+        use crate::game::engine::apply;
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+
+        let creature_a = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Exile,
+        );
+        let creature_b = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(2),
+            "Wolf".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&creature_a).unwrap().controller = PlayerId(1);
+        state.objects.get_mut(&creature_b).unwrap().controller = PlayerId(2);
+
+        // Seed each opponent's library with one basic land.
+        let p1_forest = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&p1_forest).unwrap();
+            obj.card_types.core_types = vec![crate::types::card_type::CoreType::Land];
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+        }
+        let p2_plains = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(2),
+            "Plains".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&p2_plains).unwrap();
+            obj.card_types.core_types = vec![crate::types::card_type::CoreType::Land];
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+        }
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![creature_a, creature_b]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ParentTargetController),
+                selection_constraint: SearchSelectionConstraint::None,
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+
+        let mut events = Vec::new();
+        // Depth=1: simulate being inside Winds of Abandon's outer chain (the
+        // tracked set is published by the parent sub-ability before this
+        // iteration loop runs). See sibling test for rationale.
+        resolve_ability_chain(&mut state, &ability, &mut events, 1).unwrap();
+
+        // Iteration 0: P1 prompted.
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, .. } => assert_eq!(*player, PlayerId(1)),
+            other => panic!("expected SearchChoice for P1, got {:?}", other),
+        }
+
+        // P1 picks the Forest. After resolving, the loop must resume and
+        // prompt P2 for the second iteration.
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectCards {
+                cards: vec![p1_forest],
+            },
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, .. } => assert_eq!(
+                *player,
+                PlayerId(2),
+                "second iteration must prompt the controller of the SECOND tracked-set member (P2). \
+                 Without iteration resumption, only the first iteration would ever fire."
+            ),
+            other => panic!(
+                "expected SearchChoice for P2 after P1 resolves, got {:?}. \
+                 This indicates the repeat_for loop did not resume.",
+                other
+            ),
+        }
+
+        // P2 picks the Plains; the loop should now complete with no further
+        // pending iteration.
+        apply(
+            &mut state,
+            PlayerId(2),
+            GameAction::SelectCards {
+                cards: vec![p2_plains],
+            },
+        )
+        .unwrap();
+
+        assert!(
+            state.pending_repeat_iteration.is_none(),
+            "loop must clear pending_repeat_iteration after final iteration completes"
+        );
+    }
+
+    /// CR 609.3 + CR 109.5 + CR 701.23i: End-to-end Winds of Abandon shape —
+    /// the resumed iteration MUST run its full sub_ability chain
+    /// (put-onto-battlefield + shuffle), not just the SearchLibrary effect.
+    /// Without preserving `sub_ability` on the resumed `pending_repeat_iteration`,
+    /// the FIRST opponent's chosen card lands on the battlefield (iteration 0
+    /// goes through the line-1660 SearchChoice continuation wiring), but the
+    /// SECOND opponent's chosen card is silently lost — the resume path
+    /// previously called `resolve_effect` directly and never wired the
+    /// continuation. This test asserts BOTH opponents' cards land on the
+    /// battlefield AND the search emits a Shuffle for each iteration.
+    #[test]
+    fn repeat_for_resumed_iteration_runs_full_sub_ability_chain() {
+        use crate::game::engine::apply;
+        use crate::types::ability::{EffectKind, SearchSelectionConstraint};
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+
+        let creature_a = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Exile,
+        );
+        let creature_b = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(2),
+            "Wolf".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&creature_a).unwrap().controller = PlayerId(1);
+        state.objects.get_mut(&creature_b).unwrap().controller = PlayerId(2);
+
+        let p1_forest = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&p1_forest).unwrap();
+            obj.card_types.core_types = vec![crate::types::card_type::CoreType::Land];
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+        }
+        let p2_plains = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(2),
+            "Plains".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&p2_plains).unwrap();
+            obj.card_types.core_types = vec![crate::types::card_type::CoreType::Land];
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+        }
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![creature_a, creature_b]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        // Build the full Winds of Abandon sub-chain:
+        //   SearchLibrary (repeat_for=TrackedSetSize, target_player=ParentTargetController)
+        //     -> ChangeZone (Library -> Battlefield, enter_tapped=true)
+        //       -> Shuffle (target=ParentTargetController)
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetController,
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0),
+        );
+        let put = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle);
+        let mut search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ParentTargetController),
+                selection_constraint: SearchSelectionConstraint::None,
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0),
+        )
+        .sub_ability(put);
+        search.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+
+        let mut all_events: Vec<GameEvent> = Vec::new();
+        // depth=1 to preserve the chain-scoped tracked set we published above.
+        resolve_ability_chain(&mut state, &search, &mut all_events, 1).unwrap();
+
+        // Iteration 0: P1 prompted; P1 picks the Forest.
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, .. } => assert_eq!(*player, PlayerId(1)),
+            other => panic!("expected SearchChoice for P1, got {:?}", other),
+        }
+        let r1 = apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectCards {
+                cards: vec![p1_forest],
+            },
+        )
+        .unwrap();
+        all_events.extend(r1.events);
+
+        // Iteration 1: P2 prompted; P2 picks the Plains.
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, .. } => assert_eq!(
+                *player,
+                PlayerId(2),
+                "iteration 1 must prompt P2 — controller of the SECOND tracked-set member"
+            ),
+            other => panic!("expected SearchChoice for P2, got {:?}", other),
+        }
+        let r2 = apply(
+            &mut state,
+            PlayerId(2),
+            GameAction::SelectCards {
+                cards: vec![p2_plains],
+            },
+        )
+        .unwrap();
+        all_events.extend(r2.events);
+
+        // Both chosen lands MUST be on the battlefield. This is the regression
+        // that the resumed-iteration `sub_ability` preservation guards against
+        // — without it, p2_plains would still be in P2's library.
+        let forest_zone = state.objects.get(&p1_forest).unwrap().zone;
+        let plains_zone = state.objects.get(&p2_plains).unwrap().zone;
+        assert_eq!(
+            forest_zone,
+            Zone::Battlefield,
+            "P1's chosen Forest must be on the battlefield (iteration 0's sub_ability)"
+        );
+        assert_eq!(
+            plains_zone,
+            Zone::Battlefield,
+            "P2's chosen Plains must be on the battlefield — failure means iteration 1's \
+             sub_ability (put-onto-battlefield) was dropped on the resume path."
+        );
+
+        // Both controllers must own their respective lands on their side.
+        assert_eq!(
+            state.objects.get(&p1_forest).unwrap().controller,
+            PlayerId(1),
+            "Forest controller is P1"
+        );
+        assert_eq!(
+            state.objects.get(&p2_plains).unwrap().controller,
+            PlayerId(2),
+            "Plains controller is P2"
+        );
+
+        // The Shuffle sub_ability must have run for each iteration. Each
+        // Shuffle resolution emits an EffectResolved { kind: Shuffle } event.
+        let shuffle_count = all_events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Shuffle,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(
+            shuffle_count >= 2,
+            "expected at least 2 Shuffle resolutions (one per iteration), got {}. \
+             Failure means iteration 1's Shuffle sub_ability was dropped on the resume path.",
+            shuffle_count
+        );
+
+        assert!(
+            state.pending_repeat_iteration.is_none(),
+            "loop must clear pending_repeat_iteration after final iteration completes"
+        );
+    }
+
+    /// CR 609.3 + CR 109.5: Direct unit test of the synchronous-continuation
+    /// re-stash predicate inside `drain_pending_repeat_iteration`. Constructs
+    /// a multi-iteration resume whose iterations install a `pending_continuation`
+    /// without changing `waiting_for`, then verifies the drain detects the
+    /// continuation transition and re-stashes the remaining iterations rather
+    /// than letting them be silently dropped.
+    ///
+    /// Strategy: use `ConditionInstead` with `else_ability` set. When the
+    /// instead condition is NOT met, line 1486-1487 of `resolve_ability_chain`
+    /// stashes the `else_ability` chain into `pending_continuation` whenever
+    /// `waiting_for != Priority`. We pre-set `waiting_for` to a non-Priority
+    /// state so the stash fires synchronously without any waiting_for change,
+    /// directly exercising the new `installed_continuation` predicate.
+    #[test]
+    fn drain_pending_repeat_iteration_restashes_on_synchronous_continuation() {
+        use crate::types::ability::AbilityCondition;
+        use crate::types::game_state::PendingRepeatIteration;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..10 {
+            create_object(
+                &mut state,
+                CardId(i + 10),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        // Pre-seed waiting_for to a non-Priority state so the
+        // `ConditionInstead` else-branch stash path fires synchronously
+        // (line 1486 requires `waiting_for != Priority`). The drain's
+        // `entered_choice` predicate compares against this initial value, so
+        // the same waiting_for at end-of-iteration registers as "no
+        // transition" — only `installed_continuation` can fire the re-stash.
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            cards: vec![],
+            count: 0,
+            reveal: false,
+            up_to: true,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+        };
+
+        // Build a Draw ability (synchronous, no waiting_for change) with a
+        // sub_ability whose condition is `ConditionInstead` carrying an
+        // `else_ability`. When the inner condition evaluates to false, the
+        // else branch is stashed synchronously into pending_continuation
+        // via line 1486.
+        let else_branch = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::ConditionInstead {
+            // Pick a condition that evaluates to false in this state so the
+            // swap does NOT fire and the else branch stash path runs.
+            inner: Box::new(AbilityCondition::IsYourTurn { negated: true }),
+        });
+        sub.else_ability = Some(Box::new(else_branch));
+
+        let mut iter_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        iter_ability.repeat_for = None;
+
+        // Stage a resume of 3 iterations starting at iteration 1.
+        state.pending_repeat_iteration = Some(PendingRepeatIteration {
+            ability: Box::new(iter_ability),
+            tracked_members: vec![],
+            next_iteration: 1,
+            total_iterations: 3,
+        });
+
+        let mut events = Vec::new();
+        super::drain_pending_repeat_iteration(&mut state, &mut events);
+
+        // Iteration 1 ran: parent Draw fired (1 card), then the
+        // ConditionInstead sub stashed its else_ability into
+        // pending_continuation synchronously (no waiting_for change). The
+        // drain's `installed_continuation` predicate must observe this
+        // transition and re-stash iteration 2 for the next drain pass.
+        assert!(
+            state.pending_continuation.is_some(),
+            "iteration 1 must have installed a synchronous pending_continuation \
+             (else_ability of ConditionInstead)"
+        );
+        let pending = state.pending_repeat_iteration.as_ref().expect(
+            "iteration 2 must be re-stashed — without the synchronous-continuation \
+             predicate, this would be None and iteration 2 would be silently dropped",
+        );
+        assert_eq!(
+            pending.next_iteration, 2,
+            "re-stash must advance to iteration 2"
+        );
+        assert_eq!(pending.total_iterations, 3);
+
+        // Exactly one iteration's worth of effects fired before the break:
+        // iteration 1's parent Draw (1 card). The else_ability chain has not
+        // run yet — it is stashed in pending_continuation, awaiting the next
+        // drain_pending_continuation call.
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "only iteration 1's parent Draw should have fired before the re-stash break"
+        );
+    }
+
+    /// CR 603.7 + CR 608.2c: Regression — when `repeat_for` is set but the
+    /// effect does NOT use a parent-target reference (e.g. plain Draw), the
+    /// per-iteration rebind logic must NOT touch `ability.targets`. Guards
+    /// against the new rebind path leaking into unrelated `repeat_for`
+    /// callers.
+    #[test]
+    fn repeat_for_does_not_rebind_when_effect_lacks_parent_ref() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 10),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        // Publish a tracked set with a pretend object so the rebind path could
+        // misfire if the gate were too loose.
+        let dummy = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Dummy".to_string(),
+            Zone::Battlefield,
+        );
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![dummy]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // 1 tracked-set member → 1 iteration → 1 card drawn. Targets remain empty
+        // (no spurious Object rebind).
+        assert_eq!(state.players[0].hand.len(), 1);
     }
 
     #[test]

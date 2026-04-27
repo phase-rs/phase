@@ -20,6 +20,12 @@
 //! - `Bounce { target, destination }` → `BounceAll { target, destination }`
 //!   (the canonical mass-bounce variant; mirrors `Destroy` → `DestroyAll`
 //!   and `Pump` → `PumpAll` in shape — see CR 400.7 + CR 611.2c).
+//! - `ChangeZone { destination, target, ... }` → `ChangeZoneAll { origin, destination, target }`
+//!   (Winds of Abandon: "Exile target creature you don't control" → exile
+//!   each. The single-target flags `enter_tapped`/`enter_transformed`/
+//!   `under_your_control`/`enters_attacking`/`up_to`/`enter_with_counters`
+//!   are dropped — `ChangeZoneAll` does not carry them and the overload
+//!   corpus exiles to a hidden zone where they have no semantics.)
 //!
 //! Effects with no all-matching counterpart (e.g. `Counter` — Counterflux)
 //! are preserved unchanged; the overloaded cast simply has no useful effect
@@ -92,6 +98,35 @@ fn transform_effect_in_place(effect: &mut Effect) {
         } => Effect::BounceAll {
             target,
             destination,
+        },
+        // CR 702.96b + CR 701.13a: Winds of Abandon overload — promote the
+        // single-target `ChangeZone` to its mass counterpart so "exile target
+        // creature you don't control" becomes "exile each creature you don't
+        // control". Single-target-only flags (enter_tapped, enter_transformed,
+        // under_your_control, enters_attacking, up_to, enter_with_counters)
+        // are dropped — `ChangeZoneAll` carries no equivalents and the
+        // overload corpus uses this only for hidden-zone exile where these
+        // modifiers have no semantics.
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            // Single-target-only modifiers — `ChangeZoneAll` carries no
+            // equivalents and the overload corpus uses ChangeZone only for
+            // hidden-zone exile where these have no semantics. Bind each
+            // field by name (no `..`) so any new `ChangeZone` field added
+            // upstream forces a deliberate decision here.
+            owner_library: _, // dropped: ChangeZoneAll always uses target's library scope
+            enter_transformed: _, // dropped: hidden-zone exile, no battlefield-side effect
+            under_your_control: _, // dropped: hidden-zone exile, no controller swap
+            enter_tapped: _,  // dropped: hidden-zone exile, tap state irrelevant
+            enters_attacking: _, // dropped: hidden-zone exile, combat irrelevant
+            up_to: _,         // dropped: ChangeZoneAll has no count semantics
+            enter_with_counters: _, // dropped: hidden-zone exile, no counters
+        } => Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
         },
         // Effects without an all-matching counterpart (e.g. `Counter` for
         // Counterflux) are preserved as-is. No overload corpus card has a
@@ -201,6 +236,51 @@ mod tests {
                 ..
             } => assert_eq!(dest, Zone::Library),
             ref other => panic!("expected BounceAll {{ destination: Library }}, got {other:?}"),
+        }
+    }
+
+    /// CR 702.96b + CR 701.13a: Winds of Abandon overload — single-target
+    /// `ChangeZone(exile target opponent's creature)` must promote to
+    /// `ChangeZoneAll(exile each creature you don't control)`. The filter
+    /// (controller=Opponent) survives unchanged so the mass exile only hits
+    /// opponents' creatures, never the caster's own.
+    #[test]
+    fn change_zone_becomes_change_zone_all() {
+        use crate::types::ability::ControllerRef;
+        let mut def = leaf(Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }),
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        });
+        transform_ability_def(&mut def);
+        match *def.effect {
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                ref target,
+            } => {
+                assert!(origin.is_none());
+                assert_eq!(destination, Zone::Exile);
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    }
+                    other => panic!("expected typed creature filter, got {other:?}"),
+                }
+            }
+            ref other => panic!("expected ChangeZoneAll, got {other:?}"),
         }
     }
 
