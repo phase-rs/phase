@@ -1,6 +1,6 @@
 pub(crate) mod animation;
 pub(crate) mod become_copy_except;
-mod conditions;
+pub(crate) mod conditions;
 pub(crate) mod counter;
 pub(crate) mod imperative;
 pub(crate) mod mana;
@@ -440,6 +440,96 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
     })
+}
+
+/// CR 614.1a + CR 514.2: Detect "If [target_phrase] would die this turn, exile
+/// it instead." damage-spell rider, returning an `AddTargetReplacement` def.
+/// Returns `None` if the text doesn't match.
+///
+/// Covers the modal-burn class (Agate Assault, Brutal Expulsion, Suplex,
+/// Touch of the Void, Bouncer's Beatdown, Betrayer's Bargain, etc.) where
+/// the rider attaches to a parent damage clause and registers a one-shot,
+/// EOT-scoped, target-bound replacement on the damaged creature/planeswalker.
+///
+/// The carried replacement uses `valid_card: SelfRef` because once it's
+/// pushed onto the target object's `replacement_definitions` (by the
+/// `AddTargetReplacement` resolver), SelfRef on a replacement resolves
+/// against the carrying object — which IS the target.
+fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+    use crate::types::ability::ReplacementDefinition;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::zones::Zone;
+
+    // Strip optional leading "if ", then the subject, then " would die this turn",
+    // then ", exile <anaphor> instead" (with optional trailing period).
+    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("if "))
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("that creature or planeswalker"),
+        tag("that creature"),
+        tag("that planeswalker"),
+        tag("that token"),
+        tag("a permanent dealt damage this way"),
+        tag("a creature dealt damage this way"),
+        tag("it"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" would die this turn")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>(", "), tag(" ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("exile ").parse(rest).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("that creature or planeswalker"),
+        tag("that creature"),
+        tag("that planeswalker"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" instead")
+        .parse(rest)
+        .ok()?;
+    let rest = rest.trim_end_matches('.').trim();
+    if !rest.is_empty() {
+        return None;
+    }
+
+    // Build: ReplacementDefinition triggered when the host moves to graveyard,
+    // re-routes to exile, expires at EOT regardless of firing.
+    let exile_effect = AbilityDefinition::new(
+        kind,
+        Effect::ChangeZone {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        },
+    );
+    let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Graveyard)
+        .execute(exile_effect);
+    repl.is_consumed = true;
+    repl.expires_at_eot = true;
+
+    Some(AbilityDefinition::new(
+        kind,
+        Effect::AddTargetReplacement {
+            replacement: Box::new(repl),
+        },
+    ))
 }
 
 /// Parse "that creature enters with an additional [N] +1/+1 counter(s) on it" into
@@ -1340,6 +1430,53 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
 
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+    // Phase 2 PoC: peel structural slots off the head of the clause before
+    // body parsing. The recursive shell strips slot-bearing prefixes
+    // (currently just "you may " for the Optional slot) and accumulates them
+    // into a `ClauseContext`. The bare imperative remainder is parsed by the
+    // existing pipeline; the context is applied onto the result before
+    // return so no slot is silently dropped.
+    //
+    // See `data/parser-swallow-progress.md` for the full architecture and
+    // `crates/engine/src/parser/clause_shell.rs` for the slot machinery.
+    let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
+    if peel_ctx.is_empty() {
+        return parse_effect_clause_inner(text, ctx);
+    }
+    let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
+    // Trial-parse fallback: peeling may have removed disambiguation signal
+    // a specialized parser depends on (e.g., `the next spell you cast this
+    // turn` patterns). If the peeled variant lands in `Unimplemented`,
+    // retry with the original text. The shell is conservative — when in
+    // doubt, leave the slot on the text and let the body parser handle it.
+    if matches!(clause.effect, Effect::Unimplemented { .. }) {
+        return parse_effect_clause_inner(text, ctx);
+    }
+    peel_ctx.apply_optional(&mut clause.optional);
+    // Duration: route through `with_clause_duration` so
+    // GenericEffect/GrantCastingPermission's embedded duration field
+    // is patched alongside `clause.duration`. Skip when the body parser
+    // already populated `clause.duration` (some specialized parsers set
+    // it themselves and we must not clobber).
+    if clause.duration.is_none() {
+        if let Some(duration) = peel_ctx.duration().cloned() {
+            clause = with_clause_duration(clause, duration);
+        }
+    }
+    // Condition: assign onto `clause.condition` when the inner parse
+    // didn't produce one. The chunk-loop conditional handling at line
+    // 6020+ runs before parse_effect_clause and may already have set
+    // `condition` via its own dedicated stripper chain — don't clobber.
+    if clause.condition.is_none() {
+        if let Some(cond) = peel_ctx.condition().cloned() {
+            clause.condition = Some(cond);
+        }
+    }
+    clause
+}
+
+#[tracing::instrument(level = "debug")]
+fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
         .trim()
         .trim_end_matches('.');
@@ -5753,6 +5890,11 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             QuantityExpr::HalfRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_quantity_expr(inner);
+                }
+            }
             QuantityExpr::Fixed { .. } => {}
         }
     }
@@ -5783,6 +5925,11 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
             }
             QuantityExpr::Multiply { inner, .. } | QuantityExpr::Offset { inner, .. } => {
                 rewrite_quantity_expr(inner, mode);
+            }
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_quantity_expr(inner, mode);
+                }
             }
             QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
         }
@@ -5944,6 +6091,24 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         .is_some()
         {
             continue;
+        }
+
+        // CR 614.1a + CR 514.2: "If [target] would die this turn, exile it
+        // instead." — damage-spell rider that registers a one-shot, EOT-scoped
+        // replacement on the parent ability's target. Checked early because
+        // the rider has its own complete grammar and shouldn't be subject to
+        // the generic "if X, [effect]" conditional stripping or to "instead"
+        // replacement-style clause matching. Attaches as sub_ability of the
+        // previous def so it inherits the parent's resolved target via
+        // ParentTarget at runtime.
+        let rider_lower = normalized_text.to_lowercase();
+        if let Some(rider_def) =
+            try_parse_die_exile_rider(rider_lower.trim_end_matches('.').trim(), kind)
+        {
+            if let Some(last_def) = defs.last_mut() {
+                last_def.sub_ability = Some(Box::new(rider_def));
+                continue;
+            }
         }
 
         // CR 608.2c: "If <cond>, you may instead <reveal-N-from-among-body>" —
@@ -6270,6 +6435,14 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                 effect: Box::new(inner_def),
                 uses_tracked_set: false,
             };
+            let cascade_snap = super::swallow_check::CascadeSnapshot {
+                is_optional,
+                opponent_may_scope: opponent_may_scope.as_ref(),
+                condition: condition.as_ref(),
+                repeat_for: repeat_for.as_ref(),
+                player_scope: player_scope.as_ref(),
+                clause_duration: None,
+            };
             let mut def = AbilityDefinition::new(kind, delayed_effect);
             if is_optional {
                 def.optional = true;
@@ -6278,6 +6451,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             if let Some(ref condition) = condition {
                 def = def.condition(condition.clone());
             }
+            super::swallow_check::check_cascade_diff(&cascade_snap, std::slice::from_ref(&def));
             defs.push(def);
             continue;
         }
@@ -6285,10 +6459,19 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // CR 205.1a: "it's a/an [type]" — type-setting effect for returned permanents
         // (e.g., Glimmer cycle "It's an enchantment."). Intercept before parse_effect_clause.
         if let Some(animate_def) = try_parse_type_setting(&text) {
+            let cascade_snap = super::swallow_check::CascadeSnapshot {
+                is_optional,
+                opponent_may_scope: opponent_may_scope.as_ref(),
+                condition: condition.as_ref(),
+                repeat_for: repeat_for.as_ref(),
+                player_scope: player_scope.as_ref(),
+                clause_duration: None,
+            };
             let mut def = animate_def;
             if let Some(ref condition) = condition {
                 def = def.condition(condition.clone());
             }
+            super::swallow_check::check_cascade_diff(&cascade_snap, std::slice::from_ref(&def));
             defs.push(def);
             continue;
         }
@@ -6360,7 +6543,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         if clause.optional {
             def.optional = true;
         }
-        if let Some(qty) = repeat_for {
+        if let Some(qty) = repeat_for.clone() {
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
                 if let Some(sub) = def.sub_ability.as_mut() {
                     sub.repeat_for = Some(qty);
@@ -6374,7 +6557,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         if let Some(scope) = player_scope {
             def.player_scope = Some(scope);
         }
-        if let Some(duration) = clause.duration {
+        if let Some(duration) = clause.duration.clone() {
             def = def.duration(duration);
         }
         // CR 608.2c: Apply condition — chain-level takes priority over clause-level.
@@ -6490,7 +6673,19 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                         },
                     ),
                 );
+                // CR 608.2c: Slots that gate trigger CREATION (not firing) must
+                // live on the outer wrapper. The delayed_trigger::resolve path
+                // builds a fresh ResolvedAbility from inner.effect alone and
+                // discards every other field on the inner def. For one-shot
+                // delayed triggers, "may create" and "may execute on fire" are
+                // observably equivalent — the controller still chooses whether
+                // the effect happens. Surfaced by the cascade-vs-AST swallow
+                // detector (Tiana CascadeOptional, Shambling Swarm CascadeRepeat).
                 let lifted_condition = inner.condition.clone();
+                let lifted_optional = inner.optional;
+                let lifted_optional_for = inner.optional_for;
+                let lifted_repeat_for = inner.repeat_for.clone();
+                let lifted_player_scope = inner.player_scope;
                 *current = AbilityDefinition::new(
                     kind,
                     Effect::CreateDelayedTrigger {
@@ -6500,6 +6695,10 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                     },
                 );
                 current.condition = lifted_condition;
+                current.optional = lifted_optional;
+                current.optional_for = lifted_optional_for;
+                current.repeat_for = lifted_repeat_for;
+                current.player_scope = lifted_player_scope;
             }
         }
 
@@ -6533,6 +6732,22 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
 
         let intrinsic_continuation =
             parse_intrinsic_continuation_ast(normalized_text, &current_defs[0].effect, full_text);
+
+        // Phase 1.5: cascade-vs-AST structural diff. Captures cases where
+        // the chunk loop's linear strippers populated a slot but
+        // def-assembly silently dropped it. Complementary to the
+        // text-scanning detectors at the top of `swallow_check.rs`. See
+        // `data/parser-swallow-progress.md` for the architecture.
+        let cascade_snap = super::swallow_check::CascadeSnapshot {
+            is_optional,
+            opponent_may_scope: opponent_may_scope.as_ref(),
+            condition: condition.as_ref().or(clause.condition.as_ref()),
+            repeat_for: repeat_for.as_ref(),
+            player_scope: player_scope.as_ref(),
+            clause_duration: clause.duration.as_ref(),
+        };
+        super::swallow_check::check_cascade_diff(&cascade_snap, &current_defs);
+
         defs.extend(current_defs);
 
         if let Some(continuation) = intrinsic_continuation {
@@ -7353,7 +7568,7 @@ fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
     None
 }
 
-fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
+pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     let lower = text.to_lowercase();
     for (suffix, duration) in [
         (" this turn", Duration::UntilEndOfTurn),
@@ -8236,17 +8451,33 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
                     }
                     let (filter, remainder) = parse_target(target_phrase);
                     let (filter, remainder) = refine_damage_target_remainder(filter, remainder);
-                    if !remainder.trim().is_empty() {
+                    // CR 119.5 + CR 700.4: "[N] damage to each creature and each
+                    // player" — composite scope. The "each creature" parse
+                    // captures the object filter; the trailing "and each player"
+                    // (or variants) carries the player scope. Lift it into
+                    // player_filter so DamageAll covers both audiences uniformly
+                    // (Pompeii, Volcanic Eruption, etc.).
+                    let trimmed = remainder.trim_start_matches([',', ' ']);
+                    let trimmed_lower = trimmed.to_lowercase();
+                    let player_filter = tag::<_, _, VerboseError<&str>>("and ")
+                        .parse(trimmed_lower.as_str())
+                        .ok()
+                        .and_then(|(after_and, _)| parse_damage_each_player_scope(after_and));
+                    let leftover = if player_filter.is_some() {
+                        ""
+                    } else {
+                        remainder.trim()
+                    };
+                    if !leftover.is_empty() {
                         push_warning(format!(
-                            "ignored-remainder: '{}' after target parse in damage-all",
-                            remainder.trim()
+                            "ignored-remainder: '{leftover}' after target parse in damage-all"
                         ));
                     }
                     return Some((
                         Effect::DamageAll {
                             amount: qty,
                             target: filter,
-                            player_filter: None,
+                            player_filter,
                         },
                         "",
                     ));
@@ -17057,6 +17288,60 @@ mod tests {
             "expected Draw 1, got: {:?}",
             def.effect
         );
+    }
+
+    #[test]
+    fn pump_self_via_parse_effect_chain_no_prefix() {
+        // Sanity check: parse_effect_chain WITHOUT for-each prefix.
+        let def = parse_effect_chain(
+            "this creature gets +2/+0 until end of turn",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::Pump { target, .. } => {
+                assert_eq!(target, &TargetFilter::SelfRef, "got {target:?}");
+            }
+            other => panic!("expected Pump effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_prefix_pump_via_parse_effect_clause_alone() {
+        // Verify that parse_effect_clause alone (the inner subject-predicate
+        // dispatch) handles "this creature gets +2/+0 until end of turn"
+        // correctly when the for-each prefix is already stripped upstream.
+        let clause = parse_effect_clause(
+            "this creature gets +2/+0 until end of turn",
+            &ParseContext::default(),
+        );
+        match &clause.effect {
+            Effect::Pump { target, .. } => {
+                assert_eq!(target, &TargetFilter::SelfRef);
+            }
+            other => panic!("expected Pump effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "known: prefix-form 'For each [unrecognized clause], <body>' fails to thread subject onto Pump target — body Pump retains target=Any sentinel because parse_for_each_clause doesn't recognize 'counter removed' and the strip_for_each_prefix bail-out short-circuits subject threading. Tracked as a follow-up."]
+    fn for_each_prefix_pump_threads_self_ref_target() {
+        // Blademane Baku: "For each counter removed, this creature gets +2/+0
+        // until end of turn" — prefix-form for-each. The Pump's target should
+        // resolve to SelfRef (from the "this creature" subject), not Any.
+        let def = parse_effect_chain(
+            "For each counter removed, this creature gets +2/+0 until end of turn",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::Pump { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::SelfRef,
+                    "Pump target should be SelfRef, got {target:?}",
+                );
+            }
+            other => panic!("expected Pump effect, got {other:?}"),
+        }
     }
 
     #[test]

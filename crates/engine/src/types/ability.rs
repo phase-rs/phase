@@ -2131,6 +2131,12 @@ pub enum QuantityExpr {
         factor: i32,
         inner: Box<QuantityExpr>,
     },
+    /// Sum of N independent quantity expressions. Used for conjunctive
+    /// "for each X and each Y" patterns where the two filters span
+    /// disjoint zones or axes that cannot be expressed as a single
+    /// `TargetFilter::Or` (e.g., Alrund's "+1/+1 for each card in your
+    /// hand and each foretold card you own in exile").
+    Sum { exprs: Vec<QuantityExpr> },
 }
 
 /// Comparison operator used in static conditions.
@@ -3794,6 +3800,18 @@ pub enum Effect {
         #[serde(default)]
         uses_tracked_set: bool,
     },
+    /// CR 614.1a + CR 514.2: Register a one-shot replacement effect on the parent
+    /// ability's target object at resolution time. Used by riders like
+    /// "If that creature would die this turn, exile it instead." attached to
+    /// damage-dealing spells/abilities. The replacement is appended to the
+    /// target object's `replacement_definitions`; `valid_card: SelfRef`
+    /// inside the carried definition naturally binds to *that* object since
+    /// SelfRef on a replacement resolves against the carrying object.
+    /// Cleanup at end-of-turn relies on `expires_at_eot: true` on the
+    /// carried definition (CR 514.2).
+    AddTargetReplacement {
+        replacement: Box<ReplacementDefinition>,
+    },
     /// CR 614.16: Apply a game-level restriction (e.g., disable damage prevention).
     AddRestriction {
         restriction: GameRestriction,
@@ -4601,6 +4619,7 @@ impl Effect {
             | Effect::SolveCase
             | Effect::SetClassLevel { .. }
             | Effect::CreateDelayedTrigger { .. }
+            | Effect::AddTargetReplacement { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
             | Effect::GrantNextSpellAbility { .. }
@@ -4746,6 +4765,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BecomeUnprepared { .. } => "BecomeUnprepared",
         Effect::SetClassLevel { .. } => "SetClassLevel",
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
+        Effect::AddTargetReplacement { .. } => "AddTargetReplacement",
         Effect::AddRestriction { .. } => "AddRestriction",
         Effect::ReduceNextSpellCost { .. } => "ReduceNextSpellCost",
         Effect::GrantNextSpellAbility { .. } => "GrantNextSpellAbility",
@@ -4905,6 +4925,7 @@ pub enum EffectKind {
     BecomeUnprepared,
     SetClassLevel,
     CreateDelayedTrigger,
+    AddTargetReplacement,
     AddRestriction,
     ReduceNextSpellCost,
     GrantNextSpellAbility,
@@ -5070,6 +5091,7 @@ impl From<&Effect> for EffectKind {
             Effect::BecomeUnprepared { .. } => EffectKind::BecomeUnprepared,
             Effect::SetClassLevel { .. } => EffectKind::SetClassLevel,
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
+            Effect::AddTargetReplacement { .. } => EffectKind::AddTargetReplacement,
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::ReduceNextSpellCost { .. } => EffectKind::ReduceNextSpellCost,
             Effect::GrantNextSpellAbility { .. } => EffectKind::GrantNextSpellAbility,
@@ -5948,6 +5970,16 @@ pub enum ReplacementCondition {
     /// CR 702.138c: "escapes with" — replacement applies only when the creature
     /// entered the battlefield via escape.
     CastViaEscape,
+    /// CR 603.4: "if you cast it from [zone]" — replacement applies only when
+    /// the source object was cast from the specified zone (e.g., Myojin's
+    /// "enters with an indestructible counter on it if you cast it from your
+    /// hand"). Evaluated against `GameObject.cast_from_zone`.
+    CastFromZone { zone: Zone },
+    /// CR 207.2c (Raid ability word) + CR 614.1c: "if you attacked this turn"
+    /// — replacement applies only when the controller attacked with a
+    /// creature earlier this turn. Evaluated against
+    /// `state.creatures_attacked_this_turn` for the controller.
+    YouAttackedThisTurn,
     /// CR 702.33d: "if was kicked" — replacement applies only when the creature
     /// was cast with its kicker cost paid. Optional `cost_text` narrows to a specific
     /// kicker variant (e.g., "its {1}{R} kicker").
@@ -6437,6 +6469,14 @@ pub struct ReplacementDefinition {
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
+    /// CR 514.2 + CR 614.1a: When true, this replacement is removed at the end-of-turn
+    /// cleanup step regardless of whether it fired. Used by resolution-time replacement
+    /// registrations like "If [target] would die this turn, exile it instead." (CR 614.1a).
+    /// Orthogonal to `shield_kind`: shields imply EOT expiry via `is_shield()`, but this
+    /// flag covers non-shield replacements (e.g., zone-redirection riders) that also need
+    /// EOT cleanup. Cleanup logic ORs both signals.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expires_at_eot: bool,
     /// CR 615.1a: Damage redirection target filter — when present, prevented damage is
     /// redirected to matching target instead (e.g., Pariah: "all damage that would be dealt
     /// to you is dealt to ~ instead" → SelfRef, meaning the enchanted permanent/source).
@@ -6494,6 +6534,7 @@ impl ReplacementDefinition {
             token_owner_scope: None,
             valid_player: None,
             is_consumed: false,
+            expires_at_eot: false,
             redirect_target: None,
             mana_modification: None,
             additional_token_spec: None,

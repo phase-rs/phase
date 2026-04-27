@@ -455,6 +455,7 @@ mod tests {
             token_owner_scope: None,
             valid_player: None,
             is_consumed: false,
+            expires_at_eot: false,
             redirect_target: None,
             mana_modification: None,
             additional_token_spec: None,

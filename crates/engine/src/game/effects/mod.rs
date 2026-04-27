@@ -15,6 +15,7 @@ use crate::types::player::PlayerId;
 
 pub mod adapt;
 pub mod add_restriction;
+pub mod add_target_replacement;
 pub mod additional_combat;
 pub mod amass;
 pub mod animate;
@@ -447,6 +448,9 @@ pub fn resolve_effect(
         }
         Effect::SetClassLevel { .. } => set_class_level::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
+        Effect::AddTargetReplacement { .. } => {
+            add_target_replacement::resolve(state, ability, events)
+        }
         Effect::AddRestriction { .. } => add_restriction::resolve(state, ability, events),
         Effect::ReduceNextSpellCost { .. } => {
             resolve_reduce_next_spell_cost(state, ability, events)
@@ -655,6 +659,7 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::HalfRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
     }
 }
 

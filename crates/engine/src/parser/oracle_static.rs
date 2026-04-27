@@ -2291,8 +2291,11 @@ fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<Static
     let suffix = "assigns combat damage equal to its toughness rather than its power";
     let suffix_alt = "assign combat damage equal to their toughness rather than their power";
 
-    // CR 510.1c: Self-referential variant — "This creature assigns..."
-    if let Some(rest) = nom_tag_lower(lower, lower, "this creature ") {
+    // CR 510.1c: Self-referential variant — "This creature assigns..." or
+    // the canonical "~ assigns..." form (post-self-noun normalization).
+    if let Some(rest) =
+        nom_tag_lower(lower, lower, "this creature ").or_else(|| nom_tag_lower(lower, lower, "~ "))
+    {
         let cleaned = rest.trim_end_matches('.').trim();
         if nom_tag_lower(cleaned, cleaned, suffix).is_some_and(|r| r.is_empty()) {
             return Some(
@@ -5376,8 +5379,9 @@ fn parse_continuous_gets_has(
             .unwrap_or(&pt_lower);
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
-            if let Some(qty) = super::oracle_quantity::parse_for_each_clause(for_each_clause) {
-                let quantity = QuantityExpr::Ref { qty };
+            if let Some(quantity) =
+                super::oracle_quantity::parse_for_each_clause_expr(for_each_clause)
+            {
                 let mut modifications = Vec::new();
                 if p != 0 {
                     let value = if p.abs() == 1 {

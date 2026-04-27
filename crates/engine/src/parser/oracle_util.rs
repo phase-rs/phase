@@ -1257,14 +1257,33 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // Strip A- prefix (Alchemy rebalanced cards in MTGJSON)
     let effective_name = card_name.strip_prefix("A-").unwrap_or(card_name);
 
+    // Alchemy rebalanced cards (CR n/a — MTGJSON convention): the Oracle
+    // text often references the prefixed name literally ("Return A-~ from
+    // your graveyard"). Replace the prefixed forms first so the residual
+    // "A-" doesn't cling to a `~` placeholder when the suffix is replaced.
+    // Both case-variants ("A-…" and "a-…") show up in normalized text.
+    let mut result = text.to_string();
+    // allow-noncombinator: structural detection of MTGJSON A-/a- card-name prefix (not parsing)
+    if card_name.starts_with("A-") || card_name.starts_with("a-") {
+        let prefixed_upper = format!("A-{effective_name}");
+        let prefixed_lower = format!("a-{}", effective_name.to_lowercase());
+        if effective_name.contains(' ') {
+            result = replace_all_words(&result, &prefixed_upper, "~");
+            result = replace_all_words(&result, &prefixed_lower, "~");
+        } else {
+            result = replace_all_words_case_sensitive(&result, &prefixed_upper, "~");
+            result = replace_all_words_case_sensitive(&result, &prefixed_lower, "~");
+        }
+    }
+
     // Replace full card name (word-boundary-aware, all occurrences).
     // Use case-insensitive matching only for multi-word names (proper nouns).
     // Single-word names like "Scheme", "Contraption" are case-sensitive to avoid
     // matching generic English words in Oracle text (e.g., "this scheme in motion").
-    let mut result = if effective_name.contains(' ') {
-        replace_all_words(text, effective_name, "~")
+    result = if effective_name.contains(' ') {
+        replace_all_words(&result, effective_name, "~")
     } else {
-        replace_all_words_case_sensitive(text, effective_name, "~")
+        replace_all_words_case_sensitive(&result, effective_name, "~")
     };
 
     // Comma-based legendary short name: "Haliya, Guided by Light" → "Haliya"

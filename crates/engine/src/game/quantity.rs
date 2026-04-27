@@ -112,15 +112,29 @@ pub fn resolve_quantity_with_ctx(
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, ctx, &[], None, None),
-        QuantityExpr::HalfRounded { inner, rounding } => {
-            let base = resolve_quantity_with_ctx(state, inner, controller, ctx);
-            half_rounded(base, *rounding)
-        }
-        QuantityExpr::Offset { inner, offset } => {
-            resolve_quantity_with_ctx(state, inner, controller, ctx) + offset
-        }
-        QuantityExpr::Multiply { factor, inner } => {
-            factor * resolve_quantity_with_ctx(state, inner, controller, ctx)
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_ctx(state, inner, controller, ctx)
+        }),
+    }
+}
+
+/// Compose recursively-resolved inner values for the non-leaf
+/// `QuantityExpr` variants (`HalfRounded`, `Offset`, `Multiply`, `Sum`).
+/// All four resolver entry points share this logic; only the leaf arms
+/// (`Fixed`, `Ref`) differ in context handling. `recurse` is a closure
+/// the caller supplies that re-enters its own resolver with the inner
+/// expression.
+///
+/// Panics if called with a leaf variant — callers must dispatch leaves
+/// before delegating here.
+fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> i32 {
+    match expr {
+        QuantityExpr::HalfRounded { inner, rounding } => half_rounded(recurse(inner), *rounding),
+        QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
+        QuantityExpr::Multiply { factor, inner } => factor * recurse(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
+            unreachable!("fold_compose called on leaf variant — caller must dispatch leaves first")
         }
     }
 }
@@ -250,16 +264,9 @@ pub fn resolve_quantity_with_targets(
             ability.chosen_x,
             Some(ability),
         ),
-        QuantityExpr::HalfRounded { inner, rounding } => {
-            let base = resolve_quantity_with_targets(state, inner, ability);
-            half_rounded(base, *rounding)
-        }
-        QuantityExpr::Offset { inner, offset } => {
-            resolve_quantity_with_targets(state, inner, ability) + offset
-        }
-        QuantityExpr::Multiply { factor, inner } => {
-            factor * resolve_quantity_with_targets(state, inner, ability)
-        }
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_targets(state, inner, ability)
+        }),
     }
 }
 
@@ -290,19 +297,9 @@ pub fn resolve_quantity_with_targets_slice(
             None,
             None,
         ),
-        QuantityExpr::HalfRounded { inner, rounding } => {
-            let base =
-                resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets);
-            half_rounded(base, *rounding)
-        }
-        QuantityExpr::Offset { inner, offset } => {
+        other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets)
-                + offset
-        }
-        QuantityExpr::Multiply { factor, inner } => {
-            factor
-                * resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets)
-        }
+        }),
     }
 }
 
@@ -333,16 +330,9 @@ pub(crate) fn resolve_quantity_scoped(
             None,
             None,
         ),
-        QuantityExpr::HalfRounded { inner, rounding } => {
-            let base = resolve_quantity_scoped(state, inner, source_id, scope_player);
-            half_rounded(base, *rounding)
-        }
-        QuantityExpr::Offset { inner, offset } => {
-            resolve_quantity_scoped(state, inner, source_id, scope_player) + offset
-        }
-        QuantityExpr::Multiply { factor, inner } => {
-            factor * resolve_quantity_scoped(state, inner, source_id, scope_player)
-        }
+        other => fold_compose(other, |inner| {
+            resolve_quantity_scoped(state, inner, source_id, scope_player)
+        }),
     }
 }
 
@@ -2597,6 +2587,42 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
             12
+        );
+    }
+
+    #[test]
+    fn resolve_sum_of_independent_refs_against_state() {
+        // A-Alrund pattern: hand size + count of foretold cards in exile.
+        // Validates that Sum recurses through fold_compose and that each
+        // child resolves independently against game state (not a tautology
+        // over Fixed values).
+        let mut state = GameState::new_two_player(42);
+        let player_id = state.players[0].id;
+
+        // Put 3 cards in hand. `create_object(..., Zone::Hand)` already
+        // pushes onto the player's hand vector — no second push needed.
+        for _ in 0..3 {
+            let _ = create_object(
+                &mut state,
+                CardId(0),
+                player_id,
+                "Card".to_string(),
+                Zone::Hand,
+            );
+        }
+
+        let expr = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize,
+                },
+                QuantityExpr::Fixed { value: 7 },
+            ],
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, player_id, ObjectId(1)),
+            10,
+            "expected 3 (hand) + 7 (fixed) = 10"
         );
     }
 

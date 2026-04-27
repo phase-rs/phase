@@ -1,3 +1,4 @@
+pub(crate) mod clause_shell;
 pub mod oracle;
 pub mod oracle_casting;
 pub(crate) mod oracle_class;
@@ -22,6 +23,7 @@ pub mod oracle_trigger;
 pub mod oracle_util;
 pub(crate) mod oracle_vote;
 pub mod oracle_warnings;
+pub(crate) mod swallow_check;
 
 pub use oracle::parse_oracle_text;
 

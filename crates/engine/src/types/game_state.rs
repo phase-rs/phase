@@ -783,6 +783,12 @@ pub enum WaitingFor {
     MulliganDecision {
         player: PlayerId,
         mulligan_count: u8,
+        /// CR 103.5c + Commander RC supplement: whether this game grants a
+        /// free first mulligan (multiplayer ≥3 seats, or a duel in a format
+        /// where `GameFormat::grants_free_first_mulligan()` is true).
+        /// Surfaced so display layers can render "Free Mulligan" labelling
+        /// without re-deriving format/seat rules.
+        free_first_mulligan: bool,
     },
     MulliganBottomCards {
         player: PlayerId,
@@ -3159,6 +3165,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::MulliganDecision {
             player: PlayerId(0),
             mulligan_count: 1,
+            free_first_mulligan: false,
         }));
         variants.push(Box::new(WaitingFor::MulliganBottomCards {
             player: PlayerId(0),

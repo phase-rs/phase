@@ -540,6 +540,7 @@ pub(crate) fn deterministic_choice(
     if let WaitingFor::MulliganDecision {
         player,
         mulligan_count,
+        ..
     } = &state.waiting_for
     {
         let ctx = build_ai_context(state, *player, config);

@@ -199,9 +199,11 @@ pub(super) fn parse_numeric_imperative_ast(
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
     {
-        let count = parse_count_expr(rest)
-            .map(|(q, _)| q)
-            .unwrap_or(QuantityExpr::Fixed { value: 1 });
+        // CR 119.1 / CR 121.1: When the verb committed but the quantity phrase
+        // can't be classified, return None so the line surfaces as
+        // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
+        // dynamic-quantity gaps from the coverage report.
+        let count = parse_count_expr(rest).map(|(q, _)| q)?;
         return Some(NumericImperativeAst::Draw { count });
     }
 
@@ -240,9 +242,9 @@ pub(super) fn parse_numeric_imperative_ast(
             {
                 return Some(NumericImperativeAst::GainLife { amount: qty });
             }
-            let amount = parse_count_expr(after_gain)
-                .map(|(q, _)| q)
-                .unwrap_or(QuantityExpr::Fixed { value: 1 });
+            // CR 119.1: GainLife committed but quantity phrase unclassified —
+            // surface as Unimplemented rather than fabricating Fixed{1}.
+            let amount = parse_count_expr(after_gain).map(|(q, _)| q)?;
             return Some(NumericImperativeAst::GainLife { amount });
         }
     }
@@ -285,16 +287,16 @@ pub(super) fn parse_numeric_imperative_ast(
                     return Some(NumericImperativeAst::LoseLife { amount: qty });
                 }
             }
+            // CR 119.3: LoseLife committed but neither the event-context phrase
+            // nor a numeric tail parsed — return None so the line lands in
+            // `Effect::Unimplemented` upstream instead of fabricating Fixed{1}.
+            // (This is the Keen Duelist class: "lose life equal to <unparsed>".)
             let before_life = before_life.trim();
             let last_word = before_life.split_whitespace().next_back().unwrap_or("");
-            let amount = parse_count_expr(last_word)
-                .map(|(q, _)| q)
-                .unwrap_or(QuantityExpr::Fixed { value: 1 });
+            let amount = parse_count_expr(last_word).map(|(q, _)| q)?;
             return Some(NumericImperativeAst::LoseLife { amount });
         }
-        return Some(NumericImperativeAst::LoseLife {
-            amount: QuantityExpr::Fixed { value: 1 },
-        });
+        return None;
     }
 
     if nom_primitives::scan_contains(lower, "gets +")
@@ -326,9 +328,10 @@ pub(super) fn parse_numeric_imperative_ast(
         ))
         .parse(input)
     }) {
-        let count = parse_count_expr(rest)
-            .map(|(q, _)| q)
-            .unwrap_or(QuantityExpr::Fixed { value: 1 });
+        // CR 701.22a / CR 701.25a / CR 701.13a: Scry/Surveil/Mill verbs always
+        // require a count. If the count phrase doesn't parse, return None so the
+        // line surfaces as Unimplemented rather than silently scrying/milling 1.
+        let count = parse_count_expr(rest).map(|(q, _)| q)?;
         return match verb {
             "scry" => Some(NumericImperativeAst::Scry { count }),
             "surveil" => Some(NumericImperativeAst::Surveil { count }),
@@ -676,9 +679,10 @@ pub(super) fn parse_targeted_action_ast(
             parse_discard_unless_filter(after_discard, original_after);
         // Re-derive original_after for the narrowed (unless-stripped) text.
         let original_after = &original_after[..after_discard.len()];
-        let count = parse_count_expr(original_after)
-            .map(|(q, _)| q)
-            .unwrap_or(QuantityExpr::Fixed { value: 1 });
+        // CR 701.8a: Discard count must be explicit (or the implicit 1 from
+        // "a/an" inside `parse_count_expr`). If the count phrase doesn't parse,
+        // return None so the line surfaces as Unimplemented.
+        let count = parse_count_expr(original_after).map(|(q, _)| q)?;
         // CR 701.9a + CR 608.2c: Extract card-type filter from phrases like
         // "a creature card" / "an artifact card". Mirrors the filter slot on
         // `AbilityCost::Discard` so trigger-effect discards carry the same
@@ -4380,9 +4384,10 @@ fn try_parse_incubate(lower: &str) -> Option<Effect> {
         return None;
     }
 
-    let count = parse_count_expr(rest)
-        .map(|(q, _)| q)
-        .unwrap_or(QuantityExpr::Fixed { value: 1 });
+    // CR 716.1: Incubate's count is part of the keyword action; if it doesn't
+    // parse, return None so the line lands in Unimplemented rather than
+    // fabricating "incubate 1".
+    let count = parse_count_expr(rest).map(|(q, _)| q)?;
 
     Some(Effect::Incubate { count })
 }
@@ -4405,10 +4410,9 @@ fn try_parse_amass(text: &str, lower: &str) -> Option<Effect> {
     let (subtype, consumed) = crate::parser::oracle_util::parse_subtype(original_rest)?;
     let remainder = rest[consumed..].trim();
 
-    // Parse count: numeric or "X" via shared helper.
-    let count = parse_count_expr(remainder)
-        .map(|(q, _)| q)
-        .unwrap_or(QuantityExpr::Fixed { value: 1 });
+    // CR 701.47a: Amass requires an explicit count after the subtype. If it
+    // doesn't parse, surface as Unimplemented rather than amassing 1.
+    let count = parse_count_expr(remainder).map(|(q, _)| q)?;
 
     Some(Effect::Amass { subtype, count })
 }

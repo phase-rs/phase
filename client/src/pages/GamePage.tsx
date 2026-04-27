@@ -1192,6 +1192,7 @@ function GamePageContent({
           <MulliganDecisionPrompt
             playerId={waitingFor.data.player}
             mulliganCount={waitingFor.data.mulligan_count}
+            freeFirstMulligan={waitingFor.data.free_first_mulligan}
             onChoose={handleMulliganChoice}
           />
         )}
@@ -1294,6 +1295,7 @@ interface MulliganBottomCardsPromptProps {
 interface MulliganDecisionPromptProps {
   playerId: number;
   mulliganCount: number;
+  freeFirstMulligan: boolean;
   onChoose: (id: string) => void;
 }
 
@@ -1350,12 +1352,19 @@ function MulliganPanel({
 function MulliganDecisionPrompt({
   playerId,
   mulliganCount,
+  freeFirstMulligan,
   onChoose,
 }: MulliganDecisionPromptProps) {
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [buttonsVisible, setButtonsVisible] = useState(false);
+
+  // Engine rule (CR 103.5 + 103.5c): bottom_count_on_keep = mulligan_count - (free_first ? 1 : 0).
+  // The *next* mulligan is "free" iff applying that formula at mulligan_count + 1 yields 0.
+  const bottomOnKeep = Math.max(0, mulliganCount - (freeFirstMulligan ? 1 : 0));
+  const nextMulliganFree = freeFirstMulligan && mulliganCount === 0;
+  const nextHandSize = 7 - Math.max(0, mulliganCount + 1 - (freeFirstMulligan ? 1 : 0));
 
   if (!player || !objects) {
     return (
@@ -1366,14 +1375,16 @@ function MulliganDecisionPrompt({
             id: "keep",
             label: "Keep Hand",
             description:
-              mulliganCount > 0
-                ? `Put ${mulliganCount} on the bottom`
+              bottomOnKeep > 0
+                ? `Put ${bottomOnKeep} on the bottom`
                 : "No cards to the bottom",
           },
           {
             id: "mulligan",
-            label: "Mulligan",
-            description: "Shuffle and draw 7 again",
+            label: nextMulliganFree ? "Free Mulligan" : "Mulligan",
+            description: nextMulliganFree
+              ? "Shuffle and draw 7 — no cards to the bottom"
+              : "Shuffle and draw 7 again",
           },
         ]}
         onChoose={onChoose}
@@ -1382,15 +1393,18 @@ function MulliganDecisionPrompt({
   }
 
   const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
-  const nextHandSize = 7 - mulliganCount - 1;
   return (
     <MulliganPanel
       eyebrow={mulliganCount > 0 ? `Mulligan ${mulliganCount} · London` : "Opening Hand · London Mulligan"}
       title="Review your opening hand"
       subtitle={
         mulliganCount > 0
-          ? `Keep this hand (you'll put ${mulliganCount} on the bottom) or mulligan again for a fresh 7.`
-          : "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
+          ? bottomOnKeep > 0
+            ? `Keep this hand (you'll put ${bottomOnKeep} on the bottom) or mulligan again for a fresh 7.`
+            : "Keep this hand (free mulligan — no cards to the bottom) or mulligan again for a fresh 7."
+          : nextMulliganFree
+            ? "Keep this hand or take a free mulligan (no cards to the bottom)."
+            : "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
       }
       footer={
         <AnimatePresence>
@@ -1405,7 +1419,7 @@ function MulliganDecisionPrompt({
                 onClick={() => onChoose("mulligan")}
                 className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
               >
-                Mulligan to {nextHandSize}
+                {nextMulliganFree ? "Free Mulligan" : `Mulligan to ${nextHandSize}`}
               </button>
               <button
                 onClick={() => onChoose("keep")}

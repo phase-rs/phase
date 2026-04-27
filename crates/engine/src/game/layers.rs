@@ -1074,6 +1074,7 @@ fn quantity_expr_uses_recipient(expr: &crate::types::ability::QuantityExpr) -> b
         QuantityExpr::HalfRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
     }
 }
 

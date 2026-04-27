@@ -13,6 +13,13 @@ use super::zones;
 const STARTING_HAND_SIZE: usize = 7;
 const MAX_MULLIGANS: u8 = 7;
 
+/// CR 103.5c + Commander RC supplement: whether `state` grants a free first
+/// mulligan. True for any multiplayer game (≥3 seats), and for duels in
+/// formats where `GameFormat::grants_free_first_mulligan()` holds.
+fn free_first_mulligan(state: &GameState) -> bool {
+    state.seat_order.len() > 2 || state.format_config.format.grants_free_first_mulligan()
+}
+
 /// CR 103.4: Start the mulligan process — shuffle libraries and draw 7 for each player.
 pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     events.push(GameEvent::MulliganStarted);
@@ -31,9 +38,11 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
 
     // First player in seat order gets the first mulligan decision
     let first_player = state.seat_order.first().copied().unwrap_or(PlayerId(0));
+    let free_first = free_first_mulligan(state);
     WaitingFor::MulliganDecision {
         player: first_player,
         mulligan_count: 0,
+        free_first_mulligan: free_first,
     }
 }
 
@@ -45,13 +54,7 @@ pub fn handle_mulligan_decision(
     mulligan_count: u8,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    // CR 103.5c: Multiplayer games (3+ seats) always grant a free first
-    // mulligan. In 2-player games, CR 103.5c additionally covers Brawl;
-    // the Commander Rules Committee's supplementary rule extends the
-    // free-first-mulligan affordance to Commander and Historic Brawl duels.
-    // See `GameFormat::grants_free_first_mulligan` for the duel predicate.
-    let free_first_mulligan =
-        state.seat_order.len() > 2 || state.format_config.format.grants_free_first_mulligan();
+    let free_first_mulligan = free_first_mulligan(state);
 
     if keep {
         // CR 103.5: Bottom N cards where N = mulligans taken,
@@ -97,6 +100,7 @@ pub fn handle_mulligan_decision(
             WaitingFor::MulliganDecision {
                 player,
                 mulligan_count: new_count,
+                free_first_mulligan,
             }
         }
     }
@@ -154,9 +158,11 @@ fn advance_mulligan(
     // Check if there's another player after current in seat order
     if current_idx + 1 < seat_order.len() {
         let next_player = seat_order[current_idx + 1];
+        let free_first = free_first_mulligan(state);
         WaitingFor::MulliganDecision {
             player: next_player,
             mulligan_count: 0,
+            free_first_mulligan: free_first,
         }
     } else {
         finish_mulligans(state, events)
@@ -305,6 +311,7 @@ mod tests {
             WaitingFor::MulliganDecision {
                 player: PlayerId(0),
                 mulligan_count: 0,
+                ..
             }
         ));
     }
@@ -334,6 +341,7 @@ mod tests {
             WaitingFor::MulliganDecision {
                 player: PlayerId(1),
                 mulligan_count: 0,
+                ..
             }
         ));
     }
@@ -351,6 +359,7 @@ mod tests {
             WaitingFor::MulliganDecision {
                 player: PlayerId(0),
                 mulligan_count: 1,
+                ..
             }
         ));
 

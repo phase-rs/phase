@@ -1230,6 +1230,11 @@ pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
         QuantityExpr::HalfRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => rewrite_variable_x_to_cost_x_paid(inner),
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                rewrite_variable_x_to_cost_x_paid(inner);
+            }
+        }
     }
 }
 
@@ -1361,11 +1366,19 @@ fn parse_enters_with_counters(
         def = def.destination_zone(Zone::Battlefield);
     }
 
-    // Apply condition: escape or kicker
+    // Apply condition: escape, kicker, or cast-from-zone suffix.
+    // CR 603.4: Myojin-class "enters with [counter] on it if you cast it
+    // from your hand" — trailing zone gate on a self-ETB replacement.
     if is_escape {
         def = def.condition(ReplacementCondition::CastViaEscape);
     } else if let Some(cond) = kicker_condition {
         def = def.condition(cond);
+    } else if let Some(zone) = extract_cast_from_zone_suffix(work_text) {
+        def = def.condition(ReplacementCondition::CastFromZone { zone });
+    } else if extract_you_attacked_this_turn_suffix(work_text) {
+        // CR 207.2c (Raid): "Raid — ~ enters with [counter] on it if you
+        // attacked this turn." (Cruel Administrator, Goblin Boarders, etc.)
+        def = def.condition(ReplacementCondition::YouAttackedThisTurn);
     }
 
     Some(def)
@@ -1562,6 +1575,56 @@ fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondi
         }
         Err(_) => (None, norm_lower),
     }
+}
+
+/// CR 603.4: Detect a trailing "if you cast it from [zone]" gate on a
+/// self-ETB replacement. Used by Myojin of Blooming Dawn / of Cryptic
+/// Dreams / of Grim Betrayal / of Towering Might / of Roaring Blades —
+/// "~ enters with an indestructible counter on it if you cast it from
+/// your hand."
+///
+/// Composable: any zone that the runtime tracks via `cast_from_zone` can
+/// be matched here. We currently parse `your hand`, `your graveyard`,
+/// and `exile` since those are the textually attested forms.
+fn extract_cast_from_zone_suffix(work_text: &str) -> Option<Zone> {
+    use nom::bytes::complete::tag;
+    use nom_language::error::VerboseError;
+    // Locate the suffix.
+    let (rest, _) = take_until::<_, _, VerboseError<&str>>("if you cast it from ")
+        .parse(work_text)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("if you cast it from ")
+        .parse(rest)
+        .ok()?;
+    // Match the zone tail.
+    let zone = if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("your hand").parse(rest) {
+        Zone::Hand
+    } else if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("your graveyard").parse(rest) {
+        Zone::Graveyard
+    } else if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("exile").parse(rest) {
+        Zone::Exile
+    } else {
+        return None;
+    };
+    Some(zone)
+}
+
+/// CR 207.2c (Raid): Detect a trailing "if you attacked this turn" gate
+/// on a self-ETB replacement. Used by Raid-flavor cards (Cruel
+/// Administrator, Goblin Boarders, Mardu Heart-Piercer, Swaggering
+/// Corsair, etc.) — "~ enters with a +1/+1 counter on it if you
+/// attacked this turn."
+fn extract_you_attacked_this_turn_suffix(work_text: &str) -> bool {
+    use nom::bytes::complete::tag;
+    use nom_language::error::VerboseError;
+    let Ok((rest, _)) =
+        take_until::<_, _, VerboseError<&str>>("if you attacked this turn").parse(work_text)
+    else {
+        return false;
+    };
+    tag::<_, _, VerboseError<&str>>("if you attacked this turn")
+        .parse(rest)
+        .is_ok()
 }
 
 fn replacement_condition_from_static(condition: StaticCondition) -> Option<ReplacementCondition> {

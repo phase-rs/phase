@@ -28,6 +28,19 @@ pub fn parse_restriction_condition(text: &str) -> Option<ParsedCondition> {
 }
 
 fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
+    // Counter-threshold predicates ("there are N counters on this artifact",
+    // "there are no charge counters on this artifact"). Tried before
+    // parse_source_condition because they have no self-ref subject prefix —
+    // the "there are" lead-in is matched directly by the helpers' own gates.
+    if let Some((counter_type, count)) = parse_counter_requirement(text) {
+        return Some(ParsedCondition::SourceHasCounterAtLeast {
+            counter_type,
+            count,
+        });
+    }
+    if let Some(counter_type) = parse_counter_absence_requirement(text) {
+        return Some(ParsedCondition::SourceHasNoCounter { counter_type });
+    }
     if let Some(condition) = parse_source_condition(text) {
         return Some(condition);
     }
@@ -76,12 +89,16 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
 }
 
 fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
-    // Source conditions require "this creature/permanent/card/land" or "enchanted" or "from your"
-    // as a prefix — reject bare "~" or unrecognized subjects via nom prefix check.
+    // Source conditions accept self-reference and source-state subjects:
+    //   "~ <state>"          — canonical normalized self-ref (e.g., "~ is attacking")
+    //   "this <noun>"        — explicit self-reference ("this creature is blocked")
+    //   "enchanted <noun>"   — Aura-attached source predicate
+    //   "from your <zone>"   — zone-based source predicate
     if alt((
         tag::<_, _, VerboseError<&str>>("this "),
         tag("enchanted "),
         tag("from your "),
+        tag("~ "),
     ))
     .parse(text)
     .is_err()
@@ -111,17 +128,25 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
             }
         }
     }
-    // "this creature doesn't have [keyword]"
-    if let Ok((keyword_text, _)) =
-        tag::<_, _, VerboseError<&str>>("this creature doesn't have ").parse(text)
+    // "this creature doesn't have [keyword]" / "~ doesn't have [keyword]"
+    if let Ok((keyword_text, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("this creature doesn't have "),
+        tag("~ doesn't have "),
+    ))
+    .parse(text)
     {
         let keyword: Keyword = keyword_text.trim().parse().unwrap();
         if !matches!(keyword, Keyword::Unknown(_)) {
             return Some(ParsedCondition::SourceLacksKeyword { keyword });
         }
     }
-    // "this creature is [color]"
-    if let Ok((color_text, _)) = tag::<_, _, VerboseError<&str>>("this creature is ").parse(text) {
+    // "this creature is [color]" / "~ is [color]"
+    if let Ok((color_text, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("this creature is "),
+        tag("~ is "),
+    ))
+    .parse(text)
+    {
         if let Some(color) = parse_color_word(color_text) {
             return Some(ParsedCondition::SourceIsColor { color });
         }
@@ -681,7 +706,8 @@ fn parse_creature_pt_condition(text: &str) -> Option<(i32, i32)> {
 
 fn parse_counter_requirement(text: &str) -> Option<(CounterType, u32)> {
     if let Some(counter_name) = alt((
-        tag::<_, _, VerboseError<&str>>("this artifact has "),
+        tag::<_, _, VerboseError<&str>>("~ has "),
+        tag("this artifact has "),
         tag("this enchantment has "),
     ))
     .parse(text)
@@ -694,10 +720,18 @@ fn parse_counter_requirement(text: &str) -> Option<(CounterType, u32)> {
             parse_count_word(count_text)? as u32,
         ));
     }
+    // "there are <N or more> <type> counters on <self-ref>" where self-ref is
+    // the canonical normalized "~" token (the upstream parser rewrites
+    // self-noun phrases like "this artifact" to "~" before reaching here) or
+    // the un-normalized "this artifact" / "this enchantment" form.
     if let Some(counter_name) = tag::<_, _, VerboseError<&str>>("there are ")
         .parse(text)
         .ok()
-        .and_then(|(rest, _)| rest.strip_suffix(" counters on this artifact"))
+        .and_then(|(rest, _)| {
+            rest.strip_suffix(" counters on ~") // allow-noncombinator: structural suffix on tokenized condition text
+                .or_else(|| rest.strip_suffix(" counters on this artifact")) // allow-noncombinator: structural suffix on tokenized condition text
+                .or_else(|| rest.strip_suffix(" counters on this enchantment")) // allow-noncombinator: structural suffix on tokenized condition text
+        })
     {
         let (count_text, counter_name) = counter_name.split_once(" or more ")?;
         return Some((
@@ -712,7 +746,11 @@ fn parse_counter_absence_requirement(text: &str) -> Option<CounterType> {
     tag::<_, _, VerboseError<&str>>("there are no ")
         .parse(text)
         .ok()
-        .and_then(|(rest, _)| rest.strip_suffix(" counters on this artifact"))
+        .and_then(|(rest, _)| {
+            rest.strip_suffix(" counters on ~") // allow-noncombinator: structural suffix on tokenized condition text
+                .or_else(|| rest.strip_suffix(" counters on this artifact")) // allow-noncombinator: structural suffix on tokenized condition text
+                .or_else(|| rest.strip_suffix(" counters on this enchantment")) // allow-noncombinator: structural suffix on tokenized condition text
+        })
         .map(parse_counter_type)
 }
 
@@ -793,7 +831,7 @@ mod tests {
     fn parses_source_conditions() {
         assert_eq!(
             parse_restriction_condition("~ is attacking"),
-            None, // self-ref not in condition text form
+            Some(ParsedCondition::SourceIsAttacking),
         );
         assert_eq!(
             parse_restriction_condition("this creature is attacking"),
@@ -811,6 +849,36 @@ mod tests {
                 zone: Zone::Graveyard
             }),
         );
+    }
+
+    #[test]
+    fn parses_counter_threshold_conditions() {
+        // Both the canonical ~ form (post-self-noun-normalization) and the
+        // un-normalized "this artifact" form must parse to the same shape.
+        // Production input arrives as ~ after the upstream rewrite.
+        for input in [
+            "there are three or more brick counters on ~",
+            "there are three or more brick counters on this artifact",
+        ] {
+            let result = parse_restriction_condition(input);
+            assert!(
+                matches!(
+                    result,
+                    Some(ParsedCondition::SourceHasCounterAtLeast { count: 3, .. })
+                ),
+                "input={input:?}, got: {result:?}",
+            );
+        }
+        for input in [
+            "there are no charge counters on ~",
+            "there are no charge counters on this artifact",
+        ] {
+            let result = parse_restriction_condition(input);
+            assert!(
+                matches!(result, Some(ParsedCondition::SourceHasNoCounter { .. })),
+                "input={input:?}, got: {result:?}",
+            );
+        }
     }
 
     #[test]

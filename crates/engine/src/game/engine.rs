@@ -1592,6 +1592,7 @@ fn apply_action(
             WaitingFor::MulliganDecision {
                 player,
                 mulligan_count,
+                ..
             },
             GameAction::MulliganDecision { keep },
         ) => {
@@ -5326,6 +5327,7 @@ mod tests {
             WaitingFor::MulliganDecision {
                 player: PlayerId(0),
                 mulligan_count: 0,
+                ..
             }
         ));
 
@@ -5341,6 +5343,7 @@ mod tests {
             WaitingFor::MulliganDecision {
                 player: PlayerId(1),
                 mulligan_count: 0,
+                ..
             }
         ));
 

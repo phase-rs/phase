@@ -496,6 +496,13 @@ fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> O
         QuantityExpr::Multiply { factor, inner } => {
             Some(factor * resolve_draw_replacement_quantity(inner, event_count)?)
         }
+        QuantityExpr::Sum { exprs } => {
+            let mut total = 0i32;
+            for inner in exprs {
+                total += resolve_draw_replacement_quantity(inner, event_count)?;
+            }
+            Some(total)
+        }
         QuantityExpr::Ref { .. } => None,
     }
 }
@@ -1533,6 +1540,24 @@ fn evaluate_replacement_condition(
             .objects
             .get(&source_id)
             .is_some_and(|o| o.cast_from_zone == Some(Zone::Graveyard)),
+        // CR 603.4: "if you cast it from [zone]" — applies only when the source
+        // permanent was cast from the gated zone. Equivalent to CastViaEscape
+        // for arbitrary zones (Hand for Myojin, Exile for foretell-style, etc.).
+        ReplacementCondition::CastFromZone { zone } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|o| o.cast_from_zone == Some(*zone)),
+        // CR 207.2c (Raid): "if you attacked this turn" — applies only when
+        // the controller's `creatures_attacked_this_turn` set is non-empty
+        // for any owned creature. Tracked on GameState and reset each turn.
+        ReplacementCondition::YouAttackedThisTurn => {
+            state.creatures_attacked_this_turn.iter().any(|oid| {
+                state
+                    .objects
+                    .get(oid)
+                    .is_some_and(|o| o.controller == controller)
+            })
+        }
         // CR 702.33d: "if was kicked" — applies only when the kicker cost was paid.
         // TODO: Propagate additional_cost_paid to GameObject for precise evaluation.
         // For now, conservatively apply the replacement (counters always placed).

@@ -621,10 +621,13 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     // CR 701.19b: Regeneration shields expire at cleanup.
     // CR 615: Prevention effects also expire.
+    // CR 514.2: Resolution-time replacements with `expires_at_eot` (e.g., the
+    // "if [target] would die this turn, exile it instead" rider on damage
+    // spells) also expire here regardless of whether they fired.
     // Also prune any consumed shields from earlier this turn.
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions
-            .retain(|r| !r.shield_kind.is_shield());
+            .retain(|r| !(r.shield_kind.is_shield() || r.expires_at_eot));
     }
     // CR 615.3: Clear game-state-level prevention shields (fog-like spells).
     state.pending_damage_prevention.clear();

@@ -497,6 +497,10 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
         QuantityExpr::Multiply { factor, inner } => {
             format!("{}*{}", factor, fmt_quantity(inner))
         }
+        QuantityExpr::Sum { exprs } => {
+            let parts: Vec<String> = exprs.iter().map(fmt_quantity).collect();
+            format!("({})", parts.join(" + "))
+        }
     }
 }
 
@@ -1318,6 +1322,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("when".into(), fmt_delayed_condition(condition)));
             if *uses_tracked_set {
                 d.push(("tracked".into(), "yes".into()));
+            }
+        }
+        Effect::AddTargetReplacement { replacement } => {
+            d.push(("event".into(), format!("{:?}", replacement.event)));
+            if let Some(zone) = replacement.destination_zone {
+                d.push(("destination".into(), format!("{zone:?}")));
+            }
+            if replacement.expires_at_eot {
+                d.push(("expires_at_eot".into(), "yes".into()));
             }
         }
         Effect::GenericEffect {
@@ -3976,6 +3989,11 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
         }
         QuantityExpr::HalfRounded { inner, .. } => {
             extract_quantity_features(inner, features);
+        }
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                extract_quantity_features(inner, features);
+            }
         }
     }
 }

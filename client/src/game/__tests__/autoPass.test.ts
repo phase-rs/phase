@@ -43,7 +43,7 @@ describe("shouldAutoPass", () => {
   it("does not auto-pass for non-Priority waiting states", () => {
     const mulligan: WaitingFor = {
       type: "MulliganDecision",
-      data: { player: 0, mulligan_count: 0 },
+      data: { player: 0, mulligan_count: 0, free_first_mulligan: false },
     } as WaitingFor;
     expect(shouldAutoPass(createState(), mulligan, false, true)).toBe(false);
   });
