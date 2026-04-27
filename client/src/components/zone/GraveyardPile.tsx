@@ -1,7 +1,7 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
-import type { TargetRef } from "../../adapter/types.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
+import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 
 const EMPTY: readonly number[] = [];
 
@@ -43,16 +43,13 @@ export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
     return state.objects[gy[gy.length - 1]]?.name ?? null;
   });
 
-  // Check if any graveyard card is a valid target during targeting
-  const currentPlayerId = usePlayerId();
+  // Check if any graveyard card is selectable for the current engine prompt.
+  const canActForWaitingState = useCanActForWaitingState();
   const hasTargetableCards = useGameStore((s) => {
-    const wf = s.gameState?.waiting_for;
-    if (!wf) return false;
-    if (wf.type !== "TargetSelection" && wf.type !== "TriggerTargetSelection") return false;
-    if (wf.data.player !== currentPlayerId) return false;
-    const legalTargets: TargetRef[] = wf.data.selection.current_legal_targets;
+    if (!canActForWaitingState) return false;
+    const objectChoiceIds = new Set(getWaitingForObjectChoiceIds(s.waitingFor));
     const gy = s.gameState?.players[playerId]?.graveyard ?? [];
-    return gy.some((id) => legalTargets.some((t) => "Object" in t && t.Object === id));
+    return gy.some((id) => objectChoiceIds.has(id));
   });
 
   const count = graveyard.length;
