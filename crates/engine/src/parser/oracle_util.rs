@@ -327,7 +327,22 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
             ));
         }
     }
-    // CR 107.3a: "X" in Oracle text represents a variable determined at cast time.
+    // CR 107.1b: "equal to <quantity ref>" — composes the existing
+    // QuantityRef parser into the count-position. The "equal to " prefix
+    // dispatch uses a nom tag combinator; the remainder is then handed to
+    // the shared `parse_quantity_ref` building block.
+    if let Ok((rest_lower, _)) =
+        nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>("equal to ")
+            .parse(lower.as_str())
+    {
+        let rest_text = &text["equal to ".len()..];
+        let trimmed_for_ref = rest_lower.trim_end_matches('.').trim_end();
+        if let Some(qty) = super::oracle_quantity::parse_quantity_ref(trimmed_for_ref) {
+            return Some((QuantityExpr::Ref { qty }, &rest_text[rest_text.len()..]));
+        }
+    }
+
+// CR 107.3a: "X" in Oracle text represents a variable determined at cast time.
     // Accept X followed by whitespace, comma, period, or end-of-string — all valid
     // Oracle text boundaries (e.g., "X cards", "X, rounded up", "X.").
     if let Some(rest_lower) = lower.strip_prefix('x') {

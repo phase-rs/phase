@@ -199,6 +199,37 @@ pub(super) fn parse_numeric_imperative_ast(
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
     {
+        // CR 121.1: "draw cards equal to <quantity>" — dynamic count form.
+        // Take Inventory, Accumulated Knowledge, Heed the Mists, Hordewing
+        // Skaab, etc.
+        let rest_lower = rest.to_ascii_lowercase();
+        if let Ok((qty_tail, _)) = alt((
+            tag::<_, _, VerboseError<&str>>("cards equal to "),
+            tag("a card equal to "),
+        ))
+        .parse(rest_lower.as_str())
+        {
+            let qty_text = qty_tail.trim_end_matches('.').trim();
+            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+                return Some(NumericImperativeAst::Draw {
+                    count: QuantityExpr::Ref { qty },
+                });
+            }
+        }
+        // CR 609.3 + CR 121.1: "draw that many cards" — chained-effect amount.
+        if alt((
+            tag::<_, _, VerboseError<&str>>("that many cards"),
+            tag("that many"),
+        ))
+        .parse(rest_lower.as_str())
+        .is_ok()
+        {
+            return Some(NumericImperativeAst::Draw {
+                count: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::PreviousEffectAmount,
+                },
+            });
+        }
         // CR 119.1 / CR 121.1: When the verb committed but the quantity phrase
         // can't be classified, return None so the line surfaces as
         // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
@@ -217,6 +248,14 @@ pub(super) fn parse_numeric_imperative_ast(
                 crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
             {
                 return Some(NumericImperativeAst::GainLife { amount: qty });
+            }
+            // CR 119.1: target-relative quantity refs ("target creature's
+            // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
+            // Heron's Grace Champion, Lifeblood Hydra, etc.
+            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+                return Some(NumericImperativeAst::GainLife {
+                    amount: QuantityExpr::Ref { qty },
+                });
             }
         }
         let after_gain = nom_on_lower(text, lower, |input| {
@@ -262,6 +301,15 @@ pub(super) fn parse_numeric_imperative_ast(
                 crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
             {
                 return Some(NumericImperativeAst::LoseLife { amount: qty });
+            }
+            // CR 119.3: target-relative quantity refs ("target creature's
+            // power/toughness/mana value", etc.) — Final Punishment, Tomb
+            // Blade-class drain, Genesis of the Daleks. Delegates to the
+            // shared `parse_quantity_ref` building block.
+            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+                return Some(NumericImperativeAst::LoseLife {
+                    amount: QuantityExpr::Ref { qty },
+                });
             }
         }
         // CR 603.7c + CR 119.3: "lose that much life" / "lose that many life" —
@@ -328,6 +376,43 @@ pub(super) fn parse_numeric_imperative_ast(
         ))
         .parse(input)
     }) {
+        // CR 701.13a: "mill cards equal to <ref>" — Captain N'ghathrod,
+        // Towering-Wave Mystic, Crosstown Courier, Mindcrank, etc. Same shape
+        // as Draw's "cards equal to" branch.
+        let rest_lower = rest.to_ascii_lowercase();
+        let dynamic_count: Option<QuantityExpr> = if let Ok((qty_tail, _)) = alt((
+            tag::<_, _, VerboseError<&str>>("cards equal to "),
+            tag("a card equal to "),
+        ))
+        .parse(rest_lower.as_str())
+        {
+            let qty_text = qty_tail.trim_end_matches('.').trim();
+            crate::parser::oracle_quantity::parse_quantity_ref(qty_text)
+                .map(|qty| QuantityExpr::Ref { qty })
+        } else if alt((
+            tag::<_, _, VerboseError<&str>>("that many cards"),
+            tag("that many"),
+        ))
+        .parse(rest_lower.as_str())
+        .is_ok()
+        {
+            // CR 609.3 + CR 701.13a: "mill that many cards" — chained-effect
+            // amount (Barrowgoyf, Memory Vampire).
+            Some(QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::PreviousEffectAmount,
+            })
+        } else {
+            None
+        };
+        if let Some(count) = dynamic_count {
+            // allow-noncombinator: dispatch on already-parsed verb tag (combinator output, not Oracle text)
+            return match verb {
+                "scry" => Some(NumericImperativeAst::Scry { count }), // allow-noncombinator: combinator-output dispatch
+                "surveil" => Some(NumericImperativeAst::Surveil { count }), // allow-noncombinator: combinator-output dispatch
+                "mill" => Some(NumericImperativeAst::Mill { count }), // allow-noncombinator: combinator-output dispatch
+                _ => unreachable!(),
+            };
+        }
         // CR 701.22a / CR 701.25a / CR 701.13a: Scry/Surveil/Mill verbs always
         // require a count. If the count phrase doesn't parse, return None so the
         // line surfaces as Unimplemented rather than silently scrying/milling 1.
@@ -679,6 +764,50 @@ pub(super) fn parse_targeted_action_ast(
             parse_discard_unless_filter(after_discard, original_after);
         // Re-derive original_after for the narrowed (unless-stripped) text.
         let original_after = &original_after[..after_discard.len()];
+        // CR 701.8a: "discard cards equal to <ref>" — Fervent Mastery class.
+        // Discard's dynamic-count form mirrors Draw/Mill above.
+        let after_discard_lower = after_discard.to_ascii_lowercase();
+        if let Ok((qty_tail, _)) = alt((
+            tag::<_, _, VerboseError<&str>>("cards equal to "),
+            tag("a card equal to "),
+        ))
+        .parse(after_discard_lower.as_str())
+        {
+            let qty_text = qty_tail.trim_end_matches('.').trim();
+            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+                let filter = parse_discard_card_filter(after_discard);
+                return Some(TargetedImperativeAst::Discard {
+                    count: QuantityExpr::Ref { qty },
+                    random,
+                    up_to,
+                    unless_filter,
+                    filter,
+                });
+            }
+        }
+        // CR 609.3 + CR 701.8a: "discard that many cards" — count sourced from
+        // the parent effect's amount (Hordewing Skaab "draw cards…, discard
+        // that many cards"; Indentured Djinn-class chain effects).
+        if let Ok((rest, _)) = alt((
+            tag::<_, _, VerboseError<&str>>("that many cards"),
+            tag("that many"),
+        ))
+        .parse(after_discard_lower.as_str())
+        {
+            let rest = rest.trim_start_matches('.').trim();
+            if rest.is_empty() {
+                let filter = parse_discard_card_filter(after_discard);
+                return Some(TargetedImperativeAst::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::PreviousEffectAmount,
+                    },
+                    random,
+                    up_to,
+                    unless_filter,
+                    filter,
+                });
+            }
+        }
         // CR 701.8a: Discard count must be explicit (or the implicit 1 from
         // "a/an" inside `parse_count_expr`). If the count phrase doesn't parse,
         // return None so the line surfaces as Unimplemented.
