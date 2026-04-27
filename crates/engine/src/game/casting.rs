@@ -4620,7 +4620,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: crate::types::ability::TargetFilter::Controller,
-                up_to: false,
             },
         ));
         obj.mana_cost = ManaCost::Cost {
@@ -4681,7 +4680,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         ));
 
@@ -4714,7 +4712,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         ));
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
@@ -4748,7 +4745,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -4960,7 +4956,6 @@ mod tests {
                         },
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -5065,7 +5060,6 @@ mod tests {
                         },
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -5229,7 +5223,6 @@ mod tests {
                         },
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -5284,7 +5277,6 @@ mod tests {
                         },
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -5348,7 +5340,6 @@ mod tests {
                         },
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
                 Vec::new(),
                 ObjectId(123),
@@ -5412,7 +5403,6 @@ mod tests {
                             },
                         },
                         target: TargetFilter::Controller,
-                        up_to: false,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -5505,7 +5495,6 @@ mod tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
-                        up_to: false,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -5597,7 +5586,6 @@ mod tests {
                             },
                         },
                         target: TargetFilter::Controller,
-                        up_to: false,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -5764,7 +5752,6 @@ mod tests {
                         },
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -5829,7 +5816,6 @@ mod tests {
                         },
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -5882,7 +5868,6 @@ mod tests {
                         },
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -6188,7 +6173,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -6313,7 +6297,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             )
             .activation_restrictions(vec![
@@ -6478,7 +6461,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             spell.mana_cost = ManaCost::Cost {
@@ -6527,7 +6509,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             spell.mana_cost = ManaCost::Cost {
@@ -6823,7 +6804,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
         }
@@ -7298,7 +7278,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             // Mode 2: Gain 3 life
@@ -8943,7 +8922,6 @@ mod tests {
             crate::types::ability::Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: crate::types::ability::TargetFilter::Controller,
-                up_to: false,
             },
         );
         Arc::make_mut(&mut obj.abilities).push(ability.clone());
@@ -9036,7 +9014,6 @@ mod tests {
             crate::types::ability::Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: crate::types::ability::TargetFilter::Controller,
-                up_to: false,
             },
         );
         Arc::make_mut(&mut obj.abilities).push(ability.clone());
@@ -9605,7 +9582,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -9697,7 +9673,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
         }
@@ -9918,7 +9893,6 @@ mod tests {
                 crate::types::ability::Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: crate::types::ability::TargetFilter::Controller,
-                    up_to: false,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap),
@@ -10047,7 +10021,6 @@ mod tests {
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
-                        up_to: false,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -10168,7 +10141,6 @@ mod tests {
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
-                        up_to: false,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -10238,7 +10210,6 @@ mod tests {
                 crate::types::ability::Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: crate::types::ability::TargetFilter::Controller,
-                    up_to: false,
                 },
             )
             .cost(AbilityCost::PayLife {
@@ -10311,7 +10282,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         ));
         obj.mana_cost = ManaCost::Cost { shards, generic };
@@ -11197,7 +11167,6 @@ mod tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
-                        up_to: false,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -11268,7 +11237,6 @@ mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
-                            up_to: false,
                         },
                     )
                     .cost(AbilityCost::Tap),
@@ -11306,7 +11274,6 @@ mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
-                            up_to: false,
                         },
                     )
                     .cost(AbilityCost::Tap),
@@ -11344,7 +11311,6 @@ mod tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
-                            up_to: false,
                         },
                     )
                     .cost(AbilityCost::Untap),
@@ -11819,7 +11785,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             )
             .cost(AbilityCost::Loyalty { amount });

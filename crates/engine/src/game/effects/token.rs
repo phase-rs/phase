@@ -679,7 +679,6 @@ pub fn apply_create_token_after_replacement(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,
                         count: QuantityExpr::Fixed { value: 1 },
-                        up_to: false,
                     },
                     vec![TargetRef::Object(obj_id)],
                     spec.source_id,
@@ -864,7 +863,6 @@ fn clue_ability() -> AbilityDefinition {
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
-            up_to: false,
         },
     )
     .cost(AbilityCost::Composite {
@@ -890,7 +888,6 @@ fn blood_ability() -> AbilityDefinition {
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
-            up_to: false,
         },
     )
     .cost(AbilityCost::Composite {

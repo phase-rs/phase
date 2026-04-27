@@ -161,7 +161,6 @@ fn setup_kaito_on_battlefield(phase: Phase) -> (GameRunner, ObjectId) {
                     },
                 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         let surveil_ability = AbilityDefinition::new(

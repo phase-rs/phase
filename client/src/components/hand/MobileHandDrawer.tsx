@@ -41,6 +41,15 @@ export function MobileHandDrawer() {
     }
   }, [waitingForType, setOpen]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isOpen, setOpen]);
+
   const playableObjectIds = useMemo(() => {
     const ids = new Set<number>();
     for (const action of legalActions) {
@@ -114,6 +123,14 @@ export function MobileHandDrawer() {
             animate={{ y: 0 }}
             exit={{ y: "100%" }}
             transition={{ type: "spring", damping: 28, stiffness: 300 }}
+            drag="y"
+            dragConstraints={{ top: 0, bottom: 0 }}
+            dragElastic={{ top: 0, bottom: 0.4 }}
+            onDragEnd={(_, info) => {
+              if (info.offset.y > 120 || info.velocity.y > 600) {
+                setOpen(false);
+              }
+            }}
           >
             <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
               <span className="text-sm font-semibold text-white/80">

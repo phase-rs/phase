@@ -436,7 +436,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
-                up_to: false,
             },
         );
         ability.cost = Some(AbilityCost::Composite {
@@ -486,7 +485,6 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
-            up_to: false,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
@@ -524,7 +522,6 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
-            up_to: false,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
@@ -989,7 +986,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: engine::types::ability::TargetFilter::Controller,
-                up_to: false,
             },
         ));
         let deck = vec![entry(face, 1)];

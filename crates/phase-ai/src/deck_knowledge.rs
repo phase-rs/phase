@@ -225,7 +225,6 @@ mod tests {
                     engine::types::ability::Effect::Draw {
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                         target: engine::types::ability::TargetFilter::Controller,
-                        up_to: false,
                     },
                     Vec::new(),
                     token,
@@ -264,7 +263,6 @@ mod tests {
                     engine::types::ability::Effect::Draw {
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                         target: engine::types::ability::TargetFilter::Controller,
-                        up_to: false,
                     },
                     Vec::new(),
                     spell,

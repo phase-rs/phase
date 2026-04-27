@@ -89,7 +89,6 @@ fn make_fetch_ability() -> AbilityDefinition {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
-            up_to: false,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         },
     );

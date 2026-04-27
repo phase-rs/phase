@@ -501,6 +501,7 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
             let parts: Vec<String> = exprs.iter().map(fmt_quantity).collect();
             format!("({})", parts.join(" + "))
         }
+        QuantityExpr::UpTo { max } => format!("up to {}", fmt_quantity(max)),
     }
 }
 
@@ -940,16 +941,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::Draw {
-            count,
-            target,
-            up_to,
-        } => {
+        Effect::Draw { count, target } => {
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
                 d.push(("count".into(), fmt_quantity(count)));
-            }
-            if *up_to {
-                d.push(("up_to".into(), "true".into()));
             }
             if !matches!(target, TargetFilter::Controller) {
                 d.push(("target".into(), fmt_target(target)));
@@ -4002,6 +3996,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
                 extract_quantity_features(inner, features);
             }
         }
+        QuantityExpr::UpTo { max } => extract_quantity_features(max, features),
     }
 }
 
@@ -7554,7 +7549,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             )
             .condition(AbilityCondition::QuantityCheck {

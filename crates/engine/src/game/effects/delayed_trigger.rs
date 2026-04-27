@@ -202,7 +202,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         let ability = ResolvedAbility::new(
@@ -354,7 +353,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         // Cast by PlayerId(1), with the placeholder PlayerId(0) in the

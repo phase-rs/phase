@@ -36,7 +36,6 @@ fn gran_gran_chain(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
             random: false,
-            up_to: false,
             unless_filter: None,
             filter: None,
         },
@@ -50,7 +49,6 @@ fn gran_gran_chain(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
-            up_to: false,
         },
         vec![],
         source_id,
@@ -179,7 +177,6 @@ fn abandon_attachments_chain(source_id: ObjectId, controller: PlayerId) -> Resol
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Controller,
-            up_to: false,
         },
         vec![],
         source_id,
@@ -193,7 +190,6 @@ fn abandon_attachments_chain(source_id: ObjectId, controller: PlayerId) -> Resol
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
             random: false,
-            up_to: false,
             unless_filter: None,
             filter: None,
         },

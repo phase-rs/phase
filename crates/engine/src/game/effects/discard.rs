@@ -27,19 +27,25 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 701.9b + CR 608.2d: Peel `UpTo` from the count expression to derive
+    // the upper-bound expression and the may-pick-fewer flag. Plain
+    // `QuantityExpr` means a mandatory count; wrapped in `UpTo` means the
+    // player may discard 0..=count.
     let (num_cards, up_to, unless_filter) = match &ability.effect {
         Effect::DiscardCard { count, .. } => (*count, false, None),
         Effect::Discard {
             count,
-            up_to,
             unless_filter,
             ..
-        } => (
-            // CR 107.1b: Use ability context so X resolves against the caster's chosen value.
-            resolve_quantity_with_targets(state, count, ability) as u32,
-            *up_to,
-            unless_filter.clone(),
-        ),
+        } => {
+            let (inner, up_to) = count.peel_up_to();
+            (
+                // CR 107.1b: Use ability context so X resolves against the caster's chosen value.
+                resolve_quantity_with_targets(state, inner, ability) as u32,
+                up_to,
+                unless_filter.clone(),
+            )
+        }
         _ => (1, false, None),
     };
 
@@ -418,7 +424,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -461,7 +466,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -495,7 +499,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -731,10 +734,9 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Discard {
-                count: QuantityExpr::Fixed { value: 2 },
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
                 random: false,
-                up_to: true,
                 unless_filter: None,
                 filter: None,
             },
@@ -813,7 +815,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -841,10 +842,9 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Discard {
-                count: QuantityExpr::Fixed { value: 2 },
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
                 random: false,
-                up_to: true,
                 unless_filter: None,
                 filter: None,
             },

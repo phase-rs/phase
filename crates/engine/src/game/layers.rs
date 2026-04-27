@@ -1075,6 +1075,7 @@ fn quantity_expr_uses_recipient(expr: &crate::types::ability::QuantityExpr) -> b
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
+        QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
     }
 }
 

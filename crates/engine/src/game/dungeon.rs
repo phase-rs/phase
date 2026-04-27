@@ -254,7 +254,6 @@ pub fn room_effects(
                 Effect::Draw {
                     count: fixed(1),
                     target: TargetFilter::Controller,
-                            up_to: false,
                 },
                 source_id,
                 controller,
@@ -415,7 +414,6 @@ pub fn room_effects(
                 Effect::Sacrifice {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     count: QuantityExpr::Fixed { value: 1 },
-                    up_to: false,
                 },
                 source_id,
                 controller,
@@ -547,7 +545,6 @@ pub fn room_effects(
                 Effect::Draw {
                     count: fixed(1),
                     target: TargetFilter::Controller,
-                            up_to: false,
                 },
                 source_id,
                 controller,
@@ -625,7 +622,6 @@ pub fn room_effects(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
                     count: QuantityExpr::Fixed { value: 1 },
-                    up_to: false,
                 },
                 source_id,
                 controller,
@@ -636,7 +632,6 @@ pub fn room_effects(
                 Effect::Draw {
                     count: fixed(1),
                     target: TargetFilter::Controller,
-                            up_to: false,
                 },
                 vec![],
                 source_id,
@@ -722,7 +717,6 @@ pub fn room_effects(
                 Effect::Draw {
                     count: fixed(2),
                     target: TargetFilter::Controller,
-                            up_to: false,
                 },
                 source_id,
                 controller,
@@ -960,7 +954,6 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             count: fixed(1),
             reveal: true,
             target_player: None,
-            up_to: false,
             selection_constraint: SearchSelectionConstraint::None,
         },
         source_id,
@@ -1482,7 +1475,6 @@ mod tests {
                 Effect::SearchLibrary {
                     count: QuantityExpr::Fixed { value: 1 },
                     reveal: true,
-                    up_to: false,
                     ..
                 }
             ),

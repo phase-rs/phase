@@ -1321,7 +1321,6 @@ fn miracle_first_draw_surfaces_reveal_prompt() {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         Arc::make_mut(&mut obj.abilities).push(ability.clone());
@@ -1344,7 +1343,6 @@ fn miracle_first_draw_surfaces_reveal_prompt() {
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
-            up_to: false,
         },
         Vec::new(),
         miracle_obj,
@@ -1494,7 +1492,6 @@ fn miracle_accept_casts_for_miracle_cost() {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         Arc::make_mut(&mut obj.abilities).push(ability.clone());
@@ -1635,7 +1632,6 @@ fn miracle_sorcery_casts_during_draw_step() {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         Arc::make_mut(&mut obj.abilities).push(ability.clone());

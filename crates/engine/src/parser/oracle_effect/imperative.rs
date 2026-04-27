@@ -456,10 +456,17 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
         // path doesn't see the subject, which is later threaded via
         // `inject_subject_target` for "target player draws ..." patterns
         // (CR 601.2c per-mode targeting).
+        // CR 121.1 + CR 608.2d: Lower the AST `up_to: bool` into the typed
+        // `count: QuantityExpr::UpTo { max }` wrapper. Plain `up_to: false`
+        // leaves the count expression unchanged; `up_to: true` wraps it so
+        // the resolver peels it back at runtime.
         NumericImperativeAst::Draw { count, up_to } => Effect::Draw {
-            count,
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             target: TargetFilter::Controller,
-            up_to,
         },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
             amount,
@@ -566,17 +573,23 @@ fn parse_discard_unless_filter<'a>(
 /// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
 /// Dokuchi Silencer ("you may discard a creature card") preserves the same
 /// filter data as cost-form discards like "Discard a creature card:".
-fn parse_discard_card_filter(lower: &str) -> Option<TargetFilter> {
-    // Consume the article / quantifier prefix ("a ", "an ", "N ", "X "). The
-    // count itself was already parsed upstream; we only need to reach the
-    // type-word portion.
-    let after_article = strip_article(lower);
-    // Find the " card" / " cards" suffix — the type phrase lies between the
-    // article and that suffix. Without a suffix, there is no type qualifier
-    // (e.g. plain "a card" → `None`).
-    let type_phrase = after_article
+/// Extract the type qualifier from the post-count tail of a discard noun phrase.
+///
+/// Caller contract: `tail` is the text **after** the count token has already
+/// been consumed by `parse_count_expr`. So for "discard two creature cards"
+/// the count parser eats "two " and hands "creature cards" here. For "a card"
+/// (count = 1, no type qualifier) the count parser eats "a " and hands
+/// "card" here, which has no leading type word and returns `None`.
+///
+/// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
+/// Dokuchi Silencer ("you may discard a creature card") preserves the same
+/// filter data as cost-form discards like "Discard a creature card:".
+fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
+    // Find the " card" / " cards" suffix — the type phrase lies before it.
+    // No suffix or empty before-suffix → no type qualifier.
+    let type_phrase = tail
         .strip_suffix(" cards") // allow-noncombinator: structural suffix cleanup on pre-chunked sub-phrase (PATTERNS.md §9)
-        .or_else(|| after_article.strip_suffix(" card"))? // allow-noncombinator: see line above
+        .or_else(|| tail.strip_suffix(" card"))? // allow-noncombinator: see line above
         .trim();
     if type_phrase.is_empty() {
         return None;
@@ -800,13 +813,16 @@ pub(super) fn parse_targeted_action_ast(
         // CR 701.8a: Discard count must be explicit (or the implicit 1 from
         // "a/an" inside `parse_count_expr`). If the count phrase doesn't parse,
         // return None so the line surfaces as Unimplemented.
-        let count = parse_count_expr(original_after).map(|(q, _)| q)?;
+        // Forward the post-count remainder to the filter probe so it never
+        // re-sees the count token — the type qualifier (if any) is whatever
+        // is left after the count was eaten.
+        let (count, after_count) = parse_count_expr(original_after)?;
         // CR 701.9a + CR 608.2c: Extract card-type filter from phrases like
         // "a creature card" / "an artifact card". Mirrors the filter slot on
         // `AbilityCost::Discard` so trigger-effect discards carry the same
         // restriction data as cost discards (Dokuchi Silencer's "you may
         // discard a creature card").
-        let filter = parse_discard_card_filter(after_discard);
+        let filter = parse_discard_card_filter(after_count.trim_start());
         return Some(TargetedImperativeAst::Discard {
             count,
             random,
@@ -971,11 +987,9 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
         TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
-        TargetedImperativeAst::Sacrifice { target, count } => Effect::Sacrifice {
-            target,
-            count,
-            up_to: false,
-        },
+        TargetedImperativeAst::Sacrifice { target, count } => Effect::Sacrifice { target, count },
+        // CR 701.9b + CR 608.2d: Lower the AST `up_to: bool` into the typed
+        // `count: QuantityExpr::UpTo { max }` wrapper.
         TargetedImperativeAst::Discard {
             count,
             random,
@@ -983,12 +997,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             unless_filter,
             filter,
         } => Effect::Discard {
-            count,
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             // CR 701.9a: "Discard" with no subject defaults to the controller.
             // Subject injection overrides this for "target player discards" patterns.
             target: TargetFilter::Controller,
             random,
-            up_to,
             unless_filter,
             filter,
         },
@@ -1300,10 +1317,15 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             multi_enter_tapped: _,
         } => Effect::SearchLibrary {
             filter,
-            count,
+            // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
+            // typed `count: QuantityExpr::UpTo { max }` wrapper.
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             reveal,
             target_player,
-            up_to,
             selection_constraint,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
@@ -2634,6 +2656,15 @@ pub(super) fn lower_multi_filter_search_library(
         enter_with_counters: vec![],
     };
 
+    // CR 107.1c + CR 701.23d: Wrap the count in `UpTo` once at the helper's
+    // entrance — every search in the chain shares the same `up_to` semantic,
+    // so the per-arm constructions below all read the wrapped form.
+    let chain_count = if up_to {
+        QuantityExpr::up_to(count)
+    } else {
+        count
+    };
+
     let mut tail: Option<Box<AbilityDefinition>> = None;
     for extra_filter in extra_filters.into_iter().rev() {
         // Append `Search(extra)` first (it is the successor of the ChangeZone
@@ -2642,10 +2673,9 @@ pub(super) fn lower_multi_filter_search_library(
             AbilityKind::Spell,
             Effect::SearchLibrary {
                 filter: extra_filter,
-                count: count.clone(),
+                count: chain_count.clone(),
                 reveal,
                 target_player: target_player.clone(),
-                up_to,
                 selection_constraint: selection_constraint.clone(),
             },
         );
@@ -2660,10 +2690,9 @@ pub(super) fn lower_multi_filter_search_library(
 
     let mut clause = parsed_clause(Effect::SearchLibrary {
         filter: primary_filter,
-        count,
+        count: chain_count,
         reveal,
         target_player,
-        up_to,
         selection_constraint,
     });
     clause.sub_ability = tail;
@@ -3197,7 +3226,6 @@ pub(super) fn parse_imperative_family_ast(
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::Controller,
-                up_to: false,
             }))
         }
         "draw" => parse_numeric_imperative_ast(text, lower)

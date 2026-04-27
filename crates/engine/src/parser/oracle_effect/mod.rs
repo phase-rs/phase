@@ -2433,7 +2433,6 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
         EqualToQtyVerb::Draw => Some(parsed_clause(Effect::Draw {
             count: qty,
             target: TargetFilter::Controller,
-            up_to: false,
         })),
     }
 }
@@ -5896,6 +5895,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                     rewrite_quantity_expr(inner);
                 }
             }
+            QuantityExpr::UpTo { max } => rewrite_quantity_expr(max),
             QuantityExpr::Fixed { .. } => {}
         }
     }
@@ -5932,6 +5932,7 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
                     rewrite_quantity_expr(inner, mode);
                 }
             }
+            QuantityExpr::UpTo { max } => rewrite_quantity_expr(max, mode),
             QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
         }
     }
@@ -14819,7 +14820,9 @@ mod tests {
         else {
             panic!("Expected SearchLibrary, got {effect:?}");
         };
-        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+        // CR 107.1c + CR 701.23d: Brightglass Gearhulk searches "up to two cards" — the
+        // count is wrapped in `UpTo` so the searcher may select 0..=2.
+        assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }));
         assert!(reveal);
         let TargetFilter::Or { filters } = filter else {
             panic!("Expected Or filter, got {filter:?}");

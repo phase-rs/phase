@@ -1235,6 +1235,7 @@ pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
                 rewrite_variable_x_to_cost_x_paid(inner);
             }
         }
+        QuantityExpr::UpTo { max } => rewrite_variable_x_to_cost_x_paid(max),
     }
 }
 
@@ -2504,7 +2505,6 @@ fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<Replace
                         offset,
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ))
             .description(text.to_string()),
@@ -3439,7 +3439,6 @@ mod tests {
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::ParentTargetController,
-                up_to: false,
             },
         );
         rewrite_parent_target_controller_to_post_replacement_source(&mut def);
@@ -3471,7 +3470,6 @@ mod tests {
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::ParentTargetController,
-                up_to: false,
             },
         )));
         rewrite_parent_target_controller_to_post_replacement_source(&mut def);

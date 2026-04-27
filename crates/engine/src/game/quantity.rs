@@ -133,6 +133,15 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
         QuantityExpr::Multiply { factor, inner } => factor * recurse(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
+        // CR 107.1c + CR 608.2d: Generic resolvers see UpTo transparently as
+        // its upper bound — the 4 effect-specific resolvers (Draw,
+        // Sacrifice, Discard, SearchLibrary) peel the wrapper via
+        // `QuantityExpr::peel_up_to` to extract the "may pick fewer" flag
+        // before reaching arithmetic. Treating it transparently here keeps
+        // legacy serde round-trips correct and makes accidental composition
+        // (e.g., `HalfRounded { inner: UpTo { max: ... } }`) collapse to a
+        // sensible bound rather than panicking.
+        QuantityExpr::UpTo { max } => recurse(max),
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
             unreachable!("fold_compose called on leaf variant — caller must dispatch leaves first")
         }

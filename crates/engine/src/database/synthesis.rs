@@ -650,7 +650,6 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
-                        up_to: false,
                     },
                 )
                 .cost(composite_cost);
@@ -700,7 +699,6 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         count: QuantityExpr::Fixed { value: 1 },
                         reveal: true,
                         target_player: None,
-                        up_to: false,
                         selection_constraint: SearchSelectionConstraint::None,
                     },
                 )
@@ -1000,7 +998,6 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
             count: QuantityExpr::Fixed { value: 1 },
-            up_to: false,
         },
     );
     let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)

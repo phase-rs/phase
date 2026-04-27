@@ -1881,10 +1881,9 @@ mod tests {
         let mut mode2 = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Discard {
-                count: QuantityExpr::Fixed { value: 2 },
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
                 random: false,
-                up_to: true,
                 unless_filter: None,
                 filter: None,
             },
@@ -1896,7 +1895,6 @@ mod tests {
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         )));
 
@@ -1951,7 +1949,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         let mode_discard = AbilityDefinition::new(
@@ -1960,7 +1957,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -2005,7 +2001,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Player,
-                up_to: false,
             },
         );
         let mode_damageall = AbilityDefinition::new(

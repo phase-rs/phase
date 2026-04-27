@@ -245,7 +245,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: engine::types::ability::TargetFilter::Controller,
-                    up_to: false,
                 },
             ))
     }
@@ -261,7 +260,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: engine::types::ability::TargetFilter::Controller,
-                    up_to: false,
                 },
             ))
     }
@@ -272,7 +270,6 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             reveal: false,
             target_player: None,
-            up_to: false,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         };
         let put_in_play = AbilityDefinition::new(

@@ -62,13 +62,16 @@ pub fn resolve(
     // player refs (HandSize, ObjectCount{you-control}) resolve against the
     // rebound controller. A missing Sacrifice effect falls back to 1 so the
     // compatibility branch below preserves existing behavior.
+    // CR 701.21a + CR 608.2d: Peel `UpTo` from the count expression to derive
+    // the upper-bound expression and the may-pick-fewer flag. Plain
+    // `QuantityExpr` (Fixed/Ref/HalfRounded/...) means a mandatory count;
+    // wrapped in `UpTo` means the player may select 0..=count.
     let default_count = QuantityExpr::Fixed { value: 1 };
     let (filter, count_expr, up_to) = match &ability.effect {
-        Effect::Sacrifice {
-            target,
-            count,
-            up_to,
-        } => (target, count, *up_to),
+        Effect::Sacrifice { target, count } => {
+            let (inner, up_to) = count.peel_up_to();
+            (target, inner, up_to)
+        }
         _ => (&TargetFilter::Any, &default_count, false),
     };
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
@@ -244,7 +247,6 @@ mod tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             vec![TargetRef::Object(target)],
             ObjectId(100),
@@ -253,11 +255,15 @@ mod tests {
     }
 
     fn make_choice_sacrifice_ability(up_to: bool) -> ResolvedAbility {
+        let count = if up_to {
+            QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 })
+        } else {
+            QuantityExpr::Fixed { value: 1 }
+        };
         ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: QuantityExpr::Fixed { value: 1 },
-                up_to,
+                count,
             },
             vec![],
             ObjectId(100),
@@ -392,7 +398,6 @@ mod tests {
             Effect::Sacrifice {
                 target: TargetFilter::Typed(typed),
                 count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             targets,
             ObjectId(100),

@@ -503,6 +503,11 @@ fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> O
             }
             Some(total)
         }
+        // CR 107.1c + CR 608.2d: For replacement quantity resolution, treat
+        // `UpTo` transparently as its upper bound — the replacement-effect
+        // pipeline does not honor "may pick fewer" semantics (the choice
+        // already happened at effect resolution before the replacement fires).
+        QuantityExpr::UpTo { max } => resolve_draw_replacement_quantity(max, event_count),
         QuantityExpr::Ref { .. } => None,
     }
 }
@@ -2730,7 +2735,6 @@ mod tests {
                         offset: 1,
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -2772,7 +2776,6 @@ mod tests {
                         offset: 1,
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -2807,7 +2810,6 @@ mod tests {
                         offset: 1,
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -4402,7 +4404,6 @@ mod tests {
                         offset: 1,
                     },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);

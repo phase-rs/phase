@@ -3817,7 +3817,6 @@ mod tests {
                     value: num_cards as i32,
                 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         )
     }
@@ -7541,7 +7540,6 @@ mod trigger_target_tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
-                        up_to: false,
                     },
                 ),
             ],
@@ -7571,7 +7569,6 @@ mod trigger_target_tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
-                        up_to: false,
                     },
                 ),
             ],
@@ -8652,7 +8649,6 @@ mod phase_trigger_regression_tests {
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             source_id,
@@ -9011,7 +9007,6 @@ mod phase_trigger_regression_tests {
                         Effect::Draw {
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::Controller,
-                            up_to: false,
                         },
                     ),
                 ));
@@ -9468,7 +9463,6 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             vec![],
             source_id,
@@ -9642,7 +9636,6 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             vec![TargetRef::Player(PlayerId(0))],
             source_id,
@@ -9782,7 +9775,6 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             vec![],
             source_id,
@@ -10066,7 +10058,6 @@ mod phase_trigger_regression_tests {
                 Effect::Draw {
                     count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             )]);
         }

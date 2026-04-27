@@ -2137,6 +2137,61 @@ pub enum QuantityExpr {
     /// `TargetFilter::Or` (e.g., Alrund's "+1/+1 for each card in your
     /// hand and each foretold card you own in exile").
     Sum { exprs: Vec<QuantityExpr> },
+    /// CR 107.1c + CR 608.2d: "Up to N" — the affected player chooses any
+    /// integer in `0..=resolve(max)` at resolution time. Used by
+    /// `Effect::Draw`, `Effect::Sacrifice`, `Effect::Discard`, and
+    /// `Effect::SearchLibrary` for the "draw / sacrifice / discard / search
+    /// for up to N" Oracle text class. The 4 specific resolvers peel this
+    /// wrapper via `QuantityExpr::peel_up_to` and propagate the bool to
+    /// their `WaitingFor::*Choice` runtime state.
+    ///
+    /// Layered above `QuantityExpr::Ref`/`Fixed`/`HalfRounded`/etc. so the
+    /// upper bound itself can be a dynamic game-state quantity (e.g. "draw
+    /// up to your hand size cards" → `UpTo { max: Ref { qty: HandSize } }`,
+    /// "sacrifice up to half your creatures" → `UpTo { max: HalfRounded {
+    /// inner: Ref { qty: ObjectCount {..} }, rounding: Down } }`).
+    ///
+    /// Generic quantity resolvers (`resolve_quantity`,
+    /// `resolve_quantity_with_targets`, etc.) treat `UpTo` transparently —
+    /// they resolve to the upper bound as if the `UpTo` wrapper were not
+    /// present. This is safe because the only places where the
+    /// "may pick fewer" semantics matter are the 4 specific effect
+    /// resolvers, which extract the flag explicitly via `peel_up_to`.
+    ///
+    /// Invariant: `max` MUST NOT itself be `UpTo` — nesting is meaningless
+    /// ("up to up to N" is just "up to N"). Always construct via the
+    /// `QuantityExpr::up_to` helper which debug-asserts this invariant.
+    UpTo { max: Box<QuantityExpr> },
+}
+
+impl QuantityExpr {
+    /// Construct an `UpTo { max }` expression, debug-asserting the
+    /// non-nesting invariant. Always use this rather than the raw struct
+    /// literal.
+    pub fn up_to(max: QuantityExpr) -> Self {
+        debug_assert!(
+            !matches!(max, QuantityExpr::UpTo { .. }),
+            "QuantityExpr::UpTo cannot wrap another UpTo — \"up to up to N\" is meaningless",
+        );
+        QuantityExpr::UpTo { max: Box::new(max) }
+    }
+
+    /// Peel an outer `UpTo` wrapper, returning `(inner_max, true)` if this
+    /// expression was an `UpTo`, otherwise `(self, false)`. The 4 effect
+    /// resolvers (Draw, Sacrifice, Discard, SearchLibrary) all call this to
+    /// derive the upper-bound expression and the "may pick fewer" flag they
+    /// propagate to their `WaitingFor` state.
+    pub fn peel_up_to(&self) -> (&QuantityExpr, bool) {
+        match self {
+            QuantityExpr::UpTo { max } => (max.as_ref(), true),
+            other => (other, false),
+        }
+    }
+
+    /// Returns true if this expression is an `UpTo` wrapper.
+    pub fn is_up_to(&self) -> bool {
+        matches!(self, QuantityExpr::UpTo { .. })
+    }
 }
 
 /// Comparison operator used in static conditions.
@@ -3023,17 +3078,15 @@ pub enum Effect {
     /// historical "controller draws" semantics for `"draw a card"` /
     /// `"you draw a card"` patterns where no `target` field appears in the
     /// serialized AST.
+    /// CR 121.1 + CR 608.2d: "Draw up to N cards" is encoded as
+    /// `count: QuantityExpr::UpTo { max: <former count> }`. The drawing
+    /// player chooses any 0..=resolve(max) at resolution time via the
+    /// `engine_resolution_choices` flow.
     Draw {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
-        /// CR 121.1 + CR 608.2d: When true, the drawing player may choose any
-        /// number of cards from 0..count to actually draw. Mirrors
-        /// `Effect::Sacrifice.up_to`. "Draw up to N cards" — Arcane Denial,
-        /// Diminishing Returns, Indentured Djinn, Truce, etc.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
     },
     Pump {
         #[serde(default = "default_pt_value_zero")]
@@ -3175,12 +3228,11 @@ pub enum Effect {
         /// ("sacrifice half the permanents they control") resolve per-iteration
         /// via `resolve_quantity_with_targets`, which honors `player_scope`
         /// controller rebinding.
+        /// CR 701.21a + CR 608.2d: "Sacrifice up to N permanents" is encoded
+        /// as `count: QuantityExpr::UpTo { max: <former count> }`. Distinct
+        /// from `optional: true` on the ability ("you may sacrifice").
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
-        /// CR 608.2d: When true, the player may select fewer than the required count
-        /// ("sacrifice up to N"). Distinct from `optional: true` on the ability ("you may sacrifice").
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
     },
     DiscardCard {
         #[serde(default = "default_one")]
@@ -3619,9 +3671,8 @@ pub enum Effect {
         /// CR 701.9a: When true, the discard is random (e.g., "discard a card at random").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         random: bool,
-        /// CR 701.9b: When true, the player may discard 0..=count cards ("discard up to N").
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
+        /// CR 701.9b + CR 608.2d: "Discard up to N cards" is encoded as
+        /// `count: QuantityExpr::UpTo { max: <former count> }`.
         /// CR 608.2c: "discard N cards unless you discard a [type] card" — when set,
         /// the player may discard 1 card matching this filter instead of `count` cards.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3658,12 +3709,11 @@ pub enum Effect {
         /// Used by Bribery, Acquire, Praetor's Grasp, etc.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_player: Option<TargetFilter>,
-        /// CR 107.1c + CR 701.23d: When true, the searcher may find up to `count`
-        /// matching cards (including zero). When false, they must find exactly
-        /// `count` matching cards (or as many as possible if fewer exist). Set
-        /// by "any number of ..." and "up to N ..." Oracle phrasings.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
+        // CR 107.1c + CR 701.23d: "search for up to N" / "search for any
+        // number of" is encoded as `count: QuantityExpr::UpTo { max:
+        // <former count> }`. Plain "search for N" leaves count as a
+        // non-UpTo expression and the searcher must find exactly N (or as
+        // many as possible if fewer exist).
         /// CR 608.2c: Printed-text restriction on the chosen set (e.g., "with
         /// different names"). Defaults to `None` so the existing card-data.json
         /// deserializes without churn; the parser populates it for tutors that
@@ -7141,6 +7191,85 @@ mod tests {
         assert_ne!(t, TargetRef::Object(ObjectId(6)));
     }
 
+    /// CR 107.1c + CR 608.2d: `QuantityExpr::up_to(max)` constructs the
+    /// wrapper variant; `peel_up_to` recovers (max, true).
+    #[test]
+    fn quantity_expr_up_to_constructor_and_peel_round_trip() {
+        let inner = QuantityExpr::Fixed { value: 3 };
+        let wrapped = QuantityExpr::up_to(inner.clone());
+        assert!(wrapped.is_up_to());
+        let (peeled, was_up_to) = wrapped.peel_up_to();
+        assert!(was_up_to);
+        assert_eq!(peeled, &inner);
+    }
+
+    /// CR 107.1c: `peel_up_to` on a non-UpTo expression returns the
+    /// expression unchanged with `false`. Resolvers depend on this so they
+    /// can call `peel_up_to` unconditionally.
+    #[test]
+    fn quantity_expr_peel_up_to_passes_through_non_up_to() {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize,
+        };
+        assert!(!expr.is_up_to());
+        let (peeled, was_up_to) = expr.peel_up_to();
+        assert!(!was_up_to);
+        assert_eq!(peeled, &expr);
+    }
+
+    /// Demonstrates the new compositional power: "up to your hand size cards"
+    /// composes `UpTo` over a dynamic `Ref` quantity, which was structurally
+    /// inexpressible under the old `up_to: bool` field layout.
+    #[test]
+    fn quantity_expr_up_to_composes_with_ref_for_hand_size() {
+        let expr = QuantityExpr::up_to(QuantityExpr::Ref {
+            qty: QuantityRef::HandSize,
+        });
+        let (max, up_to) = expr.peel_up_to();
+        assert!(up_to);
+        match max {
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize,
+            } => {}
+            other => panic!("expected Ref {{ HandSize }}, got {other:?}"),
+        }
+    }
+
+    /// Demonstrates the second new compositional axis: "up to half the
+    /// creatures they control" stacks `UpTo` over `HalfRounded` over
+    /// `ObjectCount`. Each layer is an existing primitive — the refactor
+    /// only added the outer wrapper.
+    #[test]
+    fn quantity_expr_up_to_composes_with_half_rounded_object_count() {
+        let creatures_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let expr = QuantityExpr::up_to(QuantityExpr::HalfRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: creatures_filter,
+                },
+            }),
+            rounding: RoundingMode::Down,
+        });
+        let (max, up_to) = expr.peel_up_to();
+        assert!(up_to);
+        assert!(matches!(max, QuantityExpr::HalfRounded { .. }));
+    }
+
+    /// CR 107.1c: Nesting `UpTo` inside `UpTo` is meaningless ("up to up to N"
+    /// is just "up to N"). The constructor `up_to()` debug-asserts against
+    /// this. Wrapped only in `cfg(debug_assertions)` because `debug_assert!`
+    /// is a no-op in release builds.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "QuantityExpr::UpTo cannot wrap another UpTo")]
+    fn quantity_expr_up_to_rejects_nested_up_to() {
+        let inner = QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 });
+        let _ = QuantityExpr::up_to(inner);
+    }
+
     #[test]
     fn target_ref_player_variant() {
         let t = TargetRef::Player(PlayerId(1));
@@ -7178,7 +7307,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -7255,7 +7383,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ))),
             valid_card: Some(TargetFilter::SelfRef),
@@ -7368,7 +7495,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         ))
         .duration(Duration::UntilEndOfTurn)
@@ -7688,7 +7814,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(1),
@@ -7977,7 +8102,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             );
             assert!(def.cost_categories().is_empty());
@@ -7990,7 +8114,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             )
             .cost(AbilityCost::Sacrifice {
@@ -8016,7 +8139,6 @@ mod modal_ability_tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         let mode2 = AbilityDefinition::new(

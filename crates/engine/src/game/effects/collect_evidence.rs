@@ -239,7 +239,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
                 vec![],
                 ObjectId(100),
@@ -273,7 +272,6 @@ mod tests {
                     count: QuantityExpr::Fixed { value: 1 },
                     reveal: true,
                     target_player: None,
-                    up_to: false,
                     selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                 },
                 vec![],
@@ -411,7 +409,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: true,
                 target_player: None,
-                up_to: false,
                 selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],

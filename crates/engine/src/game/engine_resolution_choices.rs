@@ -204,7 +204,6 @@ pub(super) fn handle_resolution_choice(
                             crate::types::ability::Effect::Draw {
                                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                                 target: crate::types::ability::TargetFilter::Controller,
-                                up_to: false,
                             },
                             vec![],
                             ObjectId(0),
@@ -229,7 +228,6 @@ pub(super) fn handle_resolution_choice(
                         crate::types::ability::Effect::Draw {
                             count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                             target: crate::types::ability::TargetFilter::Controller,
-                            up_to: false,
                         },
                         vec![],
                         ObjectId(0),

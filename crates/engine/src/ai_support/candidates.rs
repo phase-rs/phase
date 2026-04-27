@@ -3147,7 +3147,6 @@ mod tests {
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
-                        up_to: false,
                     },
                 )
                 .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
