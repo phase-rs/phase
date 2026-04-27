@@ -49,11 +49,19 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
   const isHumanTargetSelection =
-    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
+    (waitingFor?.type === "TargetSelection"
+      || waitingFor?.type === "TriggerTargetSelection"
+      || waitingFor?.type === "CopyTargetChoice")
     && canActForWaitingState;
   const currentLegalTargets = useMemo(() => {
     const targets = new Set<number>();
     if (!isHumanTargetSelection) return targets;
+    if (waitingFor.type === "CopyTargetChoice") {
+      for (const objectId of waitingFor.data.valid_targets) {
+        targets.add(objectId);
+      }
+      return targets;
+    }
     for (const target of waitingFor.data.selection.current_legal_targets) {
       if ("Object" in target) {
         targets.add(target.Object);
