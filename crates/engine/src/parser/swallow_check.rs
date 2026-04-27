@@ -815,6 +815,16 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
         // CR 117.3a: TopOfLibraryCastPermission with `alt_cost` IS the "if
         // you cast a spell this way, pay X" gate (Bolas's Citadel etc.).
         "TopOfLibraryCastPermission",
+        // CR 705: FlipCoin / FlipCoins / RollDie variants encode the
+        // "if you win the flip" / "if you lose" / die-result branches as
+        // structured win_effect/lose_effect/results sub-trees. Their
+        // presence IS the conditional gate (Aleatory, Chaotic Strike,
+        // Boompile, Bottle of Suleiman, etc.).
+        "\"win_effect\":{",
+        "\"lose_effect\":{",
+        "\"type\":\"FlipCoin\"",
+        "\"type\":\"FlipCoins\"",
+        "\"type\":\"RollDie\"",
     ];
     if json_has_any(ast_json, cond_markers) {
         return;
