@@ -1,4 +1,9 @@
 interface ScryfallDataEntry {
+  oracle_id: string;
+  /** Lowercased face names in Scryfall's `card_faces` order; one entry for
+   * single-faced cards. Used to resolve `faceIndex` from an engine-reported
+   * `printed_ref.face_name`. */
+  face_names: string[];
   faces: Array<{ normal: string; art_crop: string }>;
   name: string;
   mana_cost: string;
@@ -220,10 +225,51 @@ export async function fetchCardImageUrl(
   if (!entry) {
     throw new Error(`Card image not in local data: "${name}"`);
   }
+  return resolveImageUrl(entry, faceIndex, size, name);
+}
+
+/**
+ * Canonical image lookup by Scryfall `oracle_id` + face name.
+ *
+ * Used for battlefield game objects, which carry `printed_ref` from the
+ * engine. This path is preferred over name-based lookup because:
+ *   - oracle_id is unambiguous (no front/back-face name asymmetry)
+ *   - it resolves images correctly for MDFCs played as Scryfall's back face
+ *     (e.g. Mystic Peak from Pinnacle Monk // Mystic Peak)
+ *   - it sidesteps the entire class of name-collision bugs
+ *
+ * `faceIndex` is resolved by matching `faceName` (case-insensitive) against
+ * the entry's `face_names` array. If no match (defensive — should not happen
+ * if scryfall-data.json was generated alongside the engine's printed_ref),
+ * we fall back to face 0.
+ */
+export async function fetchCardImageByOracleId(
+  oracleId: string,
+  faceName: string | undefined,
+  size: ImageSize = "normal",
+): Promise<string> {
+  const data = await loadScryfallData();
+  const key = oracleId.toLowerCase();
+  const entry = data?.[key];
+  if (!entry) {
+    throw new Error(`Card image not in local data: oracle_id "${key}"`);
+  }
+  const faceIndex = faceName
+    ? Math.max(0, entry.face_names.indexOf(faceName.toLowerCase()))
+    : 0;
+  return resolveImageUrl(entry, faceIndex, size, entry.name);
+}
+
+function resolveImageUrl(
+  entry: ScryfallDataEntry,
+  faceIndex: number,
+  size: ImageSize,
+  diagnosticName: string,
+): string {
   const face = entry.faces[faceIndex] ?? entry.faces[0];
   const url = face?.[size === "small" || size === "large" ? "normal" : size];
   if (!url) {
-    throw new Error(`No ${size} image for "${name}"`);
+    throw new Error(`No ${size} image for "${diagnosticName}"`);
   }
   return url;
 }

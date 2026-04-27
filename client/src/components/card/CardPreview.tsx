@@ -95,11 +95,15 @@ function CardPreviewInner({
   // 0=front, 1=back regardless of search name — so we must flip the index.
   const isTransformed = obj?.transformed ?? false;
   const defaultFaceIndex = faceIndex ?? (isTransformed ? 1 : 0);
+  // Battlefield path: route through oracle_id when the engine attached one.
+  // Deck-builder path: `obj` is null, so we keep the name-based fallback.
   const { src, isLoading } = useCardImage(cardName, {
     size: "normal",
     faceIndex: defaultFaceIndex,
     isToken,
     tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
+    oracleId: obj?.printed_ref?.oracle_id,
+    faceName: obj?.printed_ref?.face_name,
   });
   const classLevel = obj?.class_level;
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -131,11 +135,18 @@ function CardPreviewInner({
   // On desktop, Ctrl swaps to the other face (back face normally, front face if transformed)
   const showOtherFace = !isMobile && ctrlHeld && backFaceName != null;
   // Fetch other face image when Ctrl is held (hook must always be called, but with empty
-  // string when not needed so useCardImage short-circuits without a network request)
+  // string when not needed so useCardImage short-circuits without a network request).
+  // Battlefield path: the back_face's printed_ref carries the other face's
+  // oracle_id (same as front for DFC/MDFC) and the other face's name. Deck-
+  // builder path falls back to name + flipped faceIndex.
   const otherFaceIndex = isTransformed ? 0 : 1;
+  const otherFaceOracleId = obj?.back_face?.printed_ref?.oracle_id;
+  const otherFaceName = obj?.back_face?.printed_ref?.face_name;
   const otherFaceImgResult = useCardImage(showOtherFace ? backFaceName! : "", {
     size: "normal",
     faceIndex: otherFaceIndex,
+    oracleId: showOtherFace ? otherFaceOracleId : undefined,
+    faceName: showOtherFace ? otherFaceName : undefined,
   });
 
   const activeSrc = showOtherFace ? otherFaceImgResult.src : src;
@@ -273,6 +284,7 @@ function CardPreviewInner({
 function MobilePreviewOverlay({
   cardName,
   faceIndex,
+  obj,
   onDismiss,
 }: {
   cardName: string;
@@ -281,7 +293,12 @@ function MobilePreviewOverlay({
   obj: GameObject | null;
   onDismiss: () => void;
 }) {
-  const { src } = useCardImage(cardName, { size: "normal", faceIndex });
+  const { src } = useCardImage(cardName, {
+    size: "normal",
+    faceIndex,
+    oracleId: obj?.printed_ref?.oracle_id,
+    faceName: obj?.printed_ref?.face_name,
+  });
 
   // pointerdown (not click): the touch-release that opened this overlay fires
   // pointerup, not pointerdown, so a fresh tap is required to dismiss.
