@@ -95,8 +95,8 @@ fn main() -> Result<()> {
         let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
         sources.push(rel.display().to_string());
 
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let content =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let file = match syn::parse_file(&content) {
             Ok(f) => f,
             Err(_) => continue, // skip unparseable files (likely WIP)
@@ -169,12 +169,7 @@ fn is_pub(vis: &syn::Visibility) -> bool {
     matches!(vis, syn::Visibility::Public(_))
 }
 
-fn build_enum_entry(
-    e: &ItemEnum,
-    _source: &str,
-    rel_path: &Path,
-    cr_re: &Regex,
-) -> EnumEntry {
+fn build_enum_entry(e: &ItemEnum, _source: &str, rel_path: &Path, cr_re: &Regex) -> EnumEntry {
     let line = e.ident.span().start().line;
     let doc = extract_docs(&e.attrs);
     let cr_refs = extract_crs(&doc, cr_re);
@@ -249,10 +244,7 @@ fn detect_clusters(variants: &[VariantEntry]) -> Vec<SiblingCluster> {
     for v in variants {
         let stripped = strip_qualifiers(&v.name, &scope_qualifiers);
         if !stripped.is_empty() && stripped != v.name {
-            groups
-                .entry(stripped)
-                .or_default()
-                .push(v.name.clone());
+            groups.entry(stripped).or_default().push(v.name.clone());
         }
     }
     // Also include variants whose unstripped name matches a stripped form
@@ -326,7 +318,9 @@ fn extract_docs(attrs: &[Attribute]) -> String {
             continue;
         }
         if let Meta::NameValue(MetaNameValue {
-            value: Expr::Lit(ExprLit { lit: Lit::Str(s), .. }),
+            value: Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }),
             ..
         }) = &a.meta
         {
@@ -342,9 +336,11 @@ fn extract_docs(attrs: &[Attribute]) -> String {
 }
 
 fn extract_crs(doc: &str, cr_re: &Regex) -> Vec<String> {
-    let mut out: Vec<String> = cr_re.find_iter(doc).map(|m| m.as_str().to_string()).collect();
+    let mut out: Vec<String> = cr_re
+        .find_iter(doc)
+        .map(|m| m.as_str().to_string())
+        .collect();
     out.sort();
     out.dedup();
     out
 }
-
