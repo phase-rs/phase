@@ -474,6 +474,13 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
             Some(crate::types::ability::AdditionalCost::Optional(_)
                 | crate::types::ability::AdditionalCost::Choice(_, _))
         )
+        // CR 117.6 + 117.9 + 702.8 + 715.3a: Every variant of
+        // `SpellCastingOption` is an opt-in player choice — alternative
+        // casts, free casts, flash permission, Adventure casts. Their
+        // presence in `parsed.casting_options` IS the "you may" capture
+        // for the corresponding Oracle clause (Force of Will, Misdirection,
+        // Borderpost cycle, Mastery cycle, Pact cycle, Expertise cycle, etc.)
+        || !parsed.casting_options.is_empty()
 }
 
 /// Recursive walk: does any def in the tree have a non-None duration?
