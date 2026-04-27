@@ -9050,17 +9050,16 @@ pub(crate) fn normalize_verb_token(token: &str) -> String {
         // verbs ending in /ʃ/, /tʃ/, /s/, /z/, /ks/ take "-es" instead of "-s"
         // for third-person singular (search→searches, wash→washes,
         // watch→watches, fix→fixes, buzz→buzzes). Strip "es" only when the
-        // resulting stem ends in `ch`/`sh`/`x`/`z` or is already an `-ss`
-        // stem (kiss→kisses). Without this branch, "searches" normalizes to
-        // "searche", which fails the PREDICATE_VERBS lookup and routes "its
-        // controller searches their library" to the Unimplemented fallback.
+        // resulting stem is a known predicate verb — without this validator
+        // the rule over-strips real `-eze`/`-eeze` words like "freezes",
+        // "breezes", "sneezes" into nonsense stems ("freez", "breez", "sneez")
+        // that no downstream lookup recognizes. The PREDICATE_VERBS guard
+        // ensures unknown words pass through unchanged ("parser must not
+        // swallow"); only registered verbs are de-conjugated.
         // allow-noncombinator: verb-morphology suffix check on pre-tokenized word
         _ if token.ends_with("es") && token.len() > 2 && {
             let stem = &token[..token.len() - 2];
-            // allow-noncombinator: structural suffix check on pre-tokenized stem
-            ["ch", "sh", "ss"].iter().any(|s| stem.ends_with(s))
-                || stem.ends_with('x')
-                || stem.ends_with('z')
+            crate::parser::oracle_effect::subject::PREDICATE_VERBS.contains(&stem)
         } =>
         {
             token[..token.len() - 2].to_string()
@@ -9231,6 +9230,38 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
+
+    /// Parser must not invent verb stems for unknown words. The "-es" stripping
+    /// rule in `normalize_verb_token` was previously triggered purely by
+    /// orthographic suffix (stem ends in `ch`/`sh`/`ss`/`x`/`z`), which
+    /// produced nonsense stems like `freez`/`breez`/`sneez` for the `-eze`/
+    /// `-eeze` family. The narrowed rule only strips when the result is a
+    /// known `PREDICATE_VERBS` member, so unrecognized verbs pass through
+    /// unchanged ("parser must not swallow").
+    #[test]
+    fn normalize_verb_token_does_not_invent_stems_for_unknown_verbs() {
+        // -eze / -eeze words must NOT be over-stripped. The actual stem
+        // ("freeze", "breeze", "sneeze") is not in PREDICATE_VERBS, so the
+        // -es branch must reject the strip and fall through to the -s branch
+        // (which strips a single trailing 's' but only if the word doesn't
+        // end in 'ss' — these end in 'es', not 'ss', so 's' strip applies and
+        // yields "freeze"/"breeze"/"sneeze"). The critical assertion is the
+        // negative: we never produce "freez"/"breez"/"sneez".
+        for token in ["freezes", "breezes", "sneezes"] {
+            let normalized = normalize_verb_token(token);
+            assert_ne!(
+                normalized,
+                &token[..token.len() - 2],
+                "normalize_verb_token({token:?}) must not produce the invented stem {:?}",
+                &token[..token.len() - 2]
+            );
+        }
+
+        // Sanity check: the registered "search" verb still de-conjugates so
+        // the Winds of Abandon-class chain ("its controller searches their
+        // library") continues to dispatch through the predicate path.
+        assert_eq!(normalize_verb_token("searches"), "search");
+    }
 
     /// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among>" must produce
     /// a conditional Dig alternative where the `else_ability` is the base Dig
