@@ -3630,26 +3630,26 @@ mod tests {
         );
     }
 
-    /// CR 609.3 + CR 109.5: Regression — `drain_pending_repeat_iteration` must
-    /// detect a synchronously-installed `pending_continuation` mid-iteration
-    /// and re-stash the remaining iterations. Without this, an iteration that
-    /// completes synchronously (no `waiting_for` transition) but stashes a
-    /// continuation would let subsequent iterations run with the prior
-    /// continuation still pending — clobbering it — or, in the trailing-break
-    /// case, silently drop subsequent iterations entirely.
+    /// CR 609.3 + CR 109.5: Direct unit test of the synchronous-continuation
+    /// re-stash predicate inside `drain_pending_repeat_iteration`. Constructs
+    /// a multi-iteration resume whose iterations install a `pending_continuation`
+    /// without changing `waiting_for`, then verifies the drain detects the
+    /// continuation transition and re-stashes the remaining iterations rather
+    /// than letting them be silently dropped.
     ///
-    /// We construct a synthetic resume by hand: stage a
-    /// `PendingRepeatIteration` whose ability has a sub_ability chain that
-    /// completes synchronously but whose parent effect installs a continuation
-    /// after the FIRST resumed iteration. The drain must observe the
-    /// continuation transition and re-stash for iteration 2.
+    /// Strategy: use `ConditionInstead` with `else_ability` set. When the
+    /// instead condition is NOT met, line 1486-1487 of `resolve_ability_chain`
+    /// stashes the `else_ability` chain into `pending_continuation` whenever
+    /// `waiting_for != Priority`. We pre-set `waiting_for` to a non-Priority
+    /// state so the stash fires synchronously without any waiting_for change,
+    /// directly exercising the new `installed_continuation` predicate.
     #[test]
     fn drain_pending_repeat_iteration_restashes_on_synchronous_continuation() {
+        use crate::types::ability::AbilityCondition;
         use crate::types::game_state::PendingRepeatIteration;
 
         let mut state = GameState::new_two_player(42);
-        // Seed P0's library so Draw has cards to draw.
-        for i in 0..5 {
+        for i in 0..10 {
             create_object(
                 &mut state,
                 CardId(i + 10),
@@ -3659,24 +3659,27 @@ mod tests {
             );
         }
 
-        // Build a Draw ability with a chained sub_ability (also Draw). A pure
-        // Draw resolves synchronously — no waiting_for transition — but the
-        // sub_ability chain stashes through the line-1461 wiring on
-        // `pending_continuation` only when the parent transitions to a choice
-        // state. To force the synchronous-continuation path we install a
-        // pre-existing continuation manually before the drain runs the second
-        // iteration: the drain must see the unchanged continuation from
-        // iteration N's resolve and re-stash for N+1.
-        //
-        // Simpler isolation: install a `pending_continuation` between
-        // iterations by setting it as the initial state, then asserting the
-        // drain re-stashes when it sees the continuation present at install
-        // time NOT match an iteration's installation. Use the
-        // `installed_continuation` predicate by starting with no continuation
-        // and forcing the inner resolve to produce one. We achieve that by
-        // chaining a sub_ability under the iterated ability so each iteration
-        // wires it through line-1461.
-        let inner_draw = ResolvedAbility::new(
+        // Pre-seed waiting_for to a non-Priority state so the
+        // `ConditionInstead` else-branch stash path fires synchronously
+        // (line 1486 requires `waiting_for != Priority`). The drain's
+        // `entered_choice` predicate compares against this initial value, so
+        // the same waiting_for at end-of-iteration registers as "no
+        // transition" — only `installed_continuation` can fire the re-stash.
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            cards: vec![],
+            count: 0,
+            reveal: false,
+            up_to: true,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+        };
+
+        // Build a Draw ability (synchronous, no waiting_for change) with a
+        // sub_ability whose condition is `ConditionInstead` carrying an
+        // `else_ability`. When the inner condition evaluates to false, the
+        // else branch is stashed synchronously into pending_continuation
+        // via line 1486.
+        let else_branch = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
@@ -3685,6 +3688,22 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
+        let mut sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::ConditionInstead {
+            // Pick a condition that evaluates to false in this state so the
+            // swap does NOT fire and the else branch stash path runs.
+            inner: Box::new(AbilityCondition::IsYourTurn { negated: true }),
+        });
+        sub.else_ability = Some(Box::new(else_branch));
+
         let mut iter_ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -3694,11 +3713,10 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .sub_ability(inner_draw);
-        // repeat_for is cleared on the resume copy by stash-time logic; mirror that.
+        .sub_ability(sub);
         iter_ability.repeat_for = None;
 
-        // Stage a synthetic resume: 3 total iterations starting from iteration 1.
+        // Stage a resume of 3 iterations starting at iteration 1.
         state.pending_repeat_iteration = Some(PendingRepeatIteration {
             ability: Box::new(iter_ability),
             tracked_members: vec![],
@@ -3709,18 +3727,34 @@ mod tests {
         let mut events = Vec::new();
         super::drain_pending_repeat_iteration(&mut state, &mut events);
 
-        // All three iterations completed synchronously (Draw + sub Draw).
-        // pending_repeat_iteration must be cleared, no iterations dropped.
-        // P0 should have drawn 2 cards per iteration × 2 iterations (1 + 2)
-        // = 4 cards (iteration 1 = parent draw + sub draw, iteration 2 = same).
+        // Iteration 1 ran: parent Draw fired (1 card), then the
+        // ConditionInstead sub stashed its else_ability into
+        // pending_continuation synchronously (no waiting_for change). The
+        // drain's `installed_continuation` predicate must observe this
+        // transition and re-stash iteration 2 for the next drain pass.
         assert!(
-            state.pending_repeat_iteration.is_none(),
-            "pending_repeat_iteration must clear once all iterations complete"
+            state.pending_continuation.is_some(),
+            "iteration 1 must have installed a synchronous pending_continuation \
+             (else_ability of ConditionInstead)"
+        );
+        let pending = state.pending_repeat_iteration.as_ref().expect(
+            "iteration 2 must be re-stashed — without the synchronous-continuation \
+             predicate, this would be None and iteration 2 would be silently dropped",
         );
         assert_eq!(
+            pending.next_iteration, 2,
+            "re-stash must advance to iteration 2"
+        );
+        assert_eq!(pending.total_iterations, 3);
+
+        // Exactly one iteration's worth of effects fired before the break:
+        // iteration 1's parent Draw (1 card). The else_ability chain has not
+        // run yet — it is stashed in pending_continuation, awaiting the next
+        // drain_pending_continuation call.
+        assert_eq!(
             state.players[0].hand.len(),
-            4,
-            "two synchronous iterations × (parent Draw + sub Draw) = 4 cards"
+            1,
+            "only iteration 1's parent Draw should have fired before the re-stash break"
         );
     }
 
