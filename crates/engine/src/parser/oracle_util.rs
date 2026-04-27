@@ -342,6 +342,22 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
 
+    // CR 121.1: "another" — implicit count of 1 in chained-effect contexts
+    // ("draw another card", "create another token"). Distinct from "a/an"
+    // which the article-number combinator handles, because parse_number
+    // explicitly excludes "another" to avoid the "a"-prefix false match.
+    if let Ok((rest_lower, _)) = nom::bytes::complete::tag::<
+        _,
+        _,
+        nom_language::error::VerboseError<&str>,
+    >("another ")
+    .parse(lower.as_str())
+    {
+        let rest_text = &text["another ".len()..];
+        let _ = rest_lower; // unused; the offset comes from the original text
+        return Some((QuantityExpr::Fixed { value: 1 }, rest_text.trim_start()));
+    }
+
 // CR 107.3a: "X" in Oracle text represents a variable determined at cast time.
     // Accept X followed by whitespace, comma, period, or end-of-string — all valid
     // Oracle text boundaries (e.g., "X cards", "X, rounded up", "X.").
