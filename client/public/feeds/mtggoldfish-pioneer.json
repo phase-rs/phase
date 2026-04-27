@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-10T00:00:00Z",
+  "updated": "2026-05-11T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1245,60 +1245,16 @@
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Lightning Axe"
-        },
-        {
-          "count": 1,
-          "name": "Spikefield Hazard"
-        },
-        {
-          "count": 4,
-          "name": "Treasure Cruise"
-        },
-        {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Impulse"
-        },
-        {
-          "count": 1,
-          "name": "Galvanic Iteration"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 3,
-          "name": "Picklock Prankster"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 4,
-          "name": "Ledger Shredder"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Academic Dispute"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
-        },
-        {
           "count": 2,
           "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Vibrant Outburst"
+        },
+        {
+          "count": 4,
+          "name": "Traumatic Critique"
         },
         {
           "count": 4,
@@ -1306,11 +1262,11 @@
         },
         {
           "count": 4,
-          "name": "Spirebluff Canal"
+          "name": "Picklock Prankster"
         },
         {
-          "count": 4,
-          "name": "Arclight Phoenix"
+          "count": 1,
+          "name": "Otawara, Soaring City"
         },
         {
           "count": 2,
@@ -1318,29 +1274,77 @@
         },
         {
           "count": 4,
+          "name": "Consider"
+        },
+        {
+          "count": 4,
+          "name": "Academic Dispute"
+        },
+        {
+          "count": 4,
+          "name": "Arclight Phoenix"
+        },
+        {
+          "count": 4,
           "name": "Steam Vents"
         },
         {
-          "count": 1,
-          "name": "Temporal Trespass"
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 4,
+          "name": "Treasure Cruise"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
         },
         {
           "count": 1,
-          "name": "Hall of Storm Giants"
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 1,
+          "name": "Island"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Spell Pierce"
+          "count": 1,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 1,
+          "name": "Combustion Technique"
         },
         {
           "count": 1,
           "name": "Octopus Form"
-        },
-        {
-          "count": 1,
-          "name": "Negate"
         },
         {
           "count": 1,
@@ -1351,36 +1355,20 @@
           "name": "Boomerang Basics"
         },
         {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Brazen Borrower"
         },
         {
           "count": 1,
-          "name": "Disdainful Stroke"
+          "name": "Negate"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
         },
         {
           "count": 1,
-          "name": "Saheeli, Sublime Artificer"
+          "name": "Disdainful Stroke"
         }
       ]
     },
