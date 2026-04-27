@@ -111,7 +111,18 @@ fn transform_effect_in_place(effect: &mut Effect) {
             origin,
             destination,
             target,
-            ..
+            // Single-target-only modifiers — `ChangeZoneAll` carries no
+            // equivalents and the overload corpus uses ChangeZone only for
+            // hidden-zone exile where these have no semantics. Bind each
+            // field by name (no `..`) so any new `ChangeZone` field added
+            // upstream forces a deliberate decision here.
+            owner_library: _, // dropped: ChangeZoneAll always uses target's library scope
+            enter_transformed: _, // dropped: hidden-zone exile, no battlefield-side effect
+            under_your_control: _, // dropped: hidden-zone exile, no controller swap
+            enter_tapped: _,  // dropped: hidden-zone exile, tap state irrelevant
+            enters_attacking: _, // dropped: hidden-zone exile, combat irrelevant
+            up_to: _,         // dropped: ChangeZoneAll has no count semantics
+            enter_with_counters: _, // dropped: hidden-zone exile, no counters
         } => Effect::ChangeZoneAll {
             origin,
             destination,
