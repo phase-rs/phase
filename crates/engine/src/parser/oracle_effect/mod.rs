@@ -1282,7 +1282,13 @@ fn try_parse_choose_one_of_inline(
         return None;
     }
 
-    // Attempt to parse each branch independently as a clause.
+    // Attempt to parse each branch independently as a clause. Snapshot the
+    // warnings buffer so we can roll back any side-effect warnings emitted
+    // during these trial parses if the split is rejected — otherwise a
+    // failed trial pollutes the committed warnings buffer with spurious
+    // gaps from a malformed branch (e.g., "return a red" left half from
+    // splitting "return a red or green creature" at the wrong " or ").
+    let warnings_snapshot = super::oracle_warnings::snapshot_warnings();
     let left_clause = parse_effect_clause(left_orig, ctx);
     let right_clause = parse_effect_clause(right_orig, ctx);
 
@@ -1292,6 +1298,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::Unimplemented { .. })
         || matches!(right_clause.effect, Effect::Unimplemented { .. })
     {
+        super::oracle_warnings::truncate_warnings(warnings_snapshot);
         return None;
     }
 
@@ -1301,6 +1308,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::TargetOnly { .. })
         || matches!(right_clause.effect, Effect::TargetOnly { .. })
     {
+        super::oracle_warnings::truncate_warnings(warnings_snapshot);
         return None;
     }
 
