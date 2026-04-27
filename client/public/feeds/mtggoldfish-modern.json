@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-05-10T00:00:00Z",
+  "updated": "2026-05-11T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -585,148 +585,6 @@
       ]
     },
     {
-      "name": "Eldrazi Tron",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Karn, the Great Creator"
-        },
-        {
-          "count": 4,
-          "name": "Devourer of Destiny"
-        },
-        {
-          "count": 4,
-          "name": "Mind Stone"
-        },
-        {
-          "count": 4,
-          "name": "Ugin's Labyrinth"
-        },
-        {
-          "count": 4,
-          "name": "Glaring Fleshraker"
-        },
-        {
-          "count": 4,
-          "name": "Kozilek's Command"
-        },
-        {
-          "count": 1,
-          "name": "Wastes"
-        },
-        {
-          "count": 4,
-          "name": "Ugin, Eye of the Storms"
-        },
-        {
-          "count": 2,
-          "name": "Chalice of the Void"
-        },
-        {
-          "count": 2,
-          "name": "Sire of Seven Deaths"
-        },
-        {
-          "count": 4,
-          "name": "Thought-Knot Seer"
-        },
-        {
-          "count": 4,
-          "name": "Eldrazi Temple"
-        },
-        {
-          "count": 4,
-          "name": "Expedition Map"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Mine"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Power Plant"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Tower"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Dismember"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Trinisphere"
-        },
-        {
-          "count": 1,
-          "name": "Cityscape Leveler"
-        },
-        {
-          "count": 1,
-          "name": "The Stone Brain"
-        },
-        {
-          "count": 1,
-          "name": "Ensnaring Bridge"
-        },
-        {
-          "count": 1,
-          "name": "Torpor Orb"
-        },
-        {
-          "count": 1,
-          "name": "Liquimetal Coating"
-        },
-        {
-          "count": 1,
-          "name": "Tormod's Crypt"
-        },
-        {
-          "count": 1,
-          "name": "Walking Ballista"
-        },
-        {
-          "count": 1,
-          "name": "Chalice of the Void"
-        },
-        {
-          "count": 1,
-          "name": "The Filigree Sylex"
-        },
-        {
-          "count": 1,
-          "name": "Extinguisher Battleship"
-        },
-        {
-          "count": 1,
-          "name": "Disruptor Flute"
-        },
-        {
-          "count": 1,
-          "name": "Soulless Jailer"
-        },
-        {
-          "count": 1,
-          "name": "Vexing Bauble"
-        }
-      ]
-    },
-    {
       "name": "Ruby Storm",
       "author": "MTGGoldfish",
       "colors": [
@@ -865,6 +723,148 @@
         {
           "count": 1,
           "name": "Wear // Tear"
+        }
+      ]
+    },
+    {
+      "name": "Eldrazi Tron",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Karn, the Great Creator"
+        },
+        {
+          "count": 4,
+          "name": "Devourer of Destiny"
+        },
+        {
+          "count": 4,
+          "name": "Mind Stone"
+        },
+        {
+          "count": 4,
+          "name": "Ugin's Labyrinth"
+        },
+        {
+          "count": 4,
+          "name": "Glaring Fleshraker"
+        },
+        {
+          "count": 4,
+          "name": "Kozilek's Command"
+        },
+        {
+          "count": 1,
+          "name": "Wastes"
+        },
+        {
+          "count": 4,
+          "name": "Ugin, Eye of the Storms"
+        },
+        {
+          "count": 2,
+          "name": "Chalice of the Void"
+        },
+        {
+          "count": 2,
+          "name": "Sire of Seven Deaths"
+        },
+        {
+          "count": 4,
+          "name": "Thought-Knot Seer"
+        },
+        {
+          "count": 4,
+          "name": "Eldrazi Temple"
+        },
+        {
+          "count": 4,
+          "name": "Expedition Map"
+        },
+        {
+          "count": 4,
+          "name": "Urza's Mine"
+        },
+        {
+          "count": 4,
+          "name": "Urza's Power Plant"
+        },
+        {
+          "count": 4,
+          "name": "Urza's Tower"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Dismember"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Trinisphere"
+        },
+        {
+          "count": 1,
+          "name": "Cityscape Leveler"
+        },
+        {
+          "count": 1,
+          "name": "The Stone Brain"
+        },
+        {
+          "count": 1,
+          "name": "Ensnaring Bridge"
+        },
+        {
+          "count": 1,
+          "name": "Torpor Orb"
+        },
+        {
+          "count": 1,
+          "name": "Liquimetal Coating"
+        },
+        {
+          "count": 1,
+          "name": "Tormod's Crypt"
+        },
+        {
+          "count": 1,
+          "name": "Walking Ballista"
+        },
+        {
+          "count": 1,
+          "name": "Chalice of the Void"
+        },
+        {
+          "count": 1,
+          "name": "The Filigree Sylex"
+        },
+        {
+          "count": 1,
+          "name": "Extinguisher Battleship"
+        },
+        {
+          "count": 1,
+          "name": "Disruptor Flute"
+        },
+        {
+          "count": 1,
+          "name": "Soulless Jailer"
+        },
+        {
+          "count": 1,
+          "name": "Vexing Bauble"
         }
       ]
     },
@@ -1176,142 +1176,6 @@
       ]
     },
     {
-      "name": "Belcher",
-      "author": "MTGGoldfish",
-      "colors": [],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Disrupting Shoal"
-        },
-        {
-          "count": 3,
-          "name": "Fallaji Archaeologist"
-        },
-        {
-          "count": 4,
-          "name": "Tameshi, Reality Architect"
-        },
-        {
-          "count": 4,
-          "name": "Hydroelectric Specimen"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 3,
-          "name": "Jwari Disruption"
-        },
-        {
-          "count": 3,
-          "name": "Flare of Denial"
-        },
-        {
-          "count": 4,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 4,
-          "name": "Whir of Invention"
-        },
-        {
-          "count": 4,
-          "name": "Suppression Ray"
-        },
-        {
-          "count": 4,
-          "name": "Lotus Bloom"
-        },
-        {
-          "count": 1,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 4,
-          "name": "Sea Gate Restoration"
-        },
-        {
-          "count": 3,
-          "name": "Waterlogged Teachings"
-        },
-        {
-          "count": 2,
-          "name": "Stern Scolding"
-        },
-        {
-          "count": 4,
-          "name": "Goblin Charbelcher"
-        },
-        {
-          "count": 1,
-          "name": "Strix Serenade"
-        },
-        {
-          "count": 1,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 1,
-          "name": "Beyeen Veil"
-        },
-        {
-          "count": 4,
-          "name": "Thundertrap Trainer"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Harbinger of the Seas"
-        },
-        {
-          "count": 1,
-          "name": "Tezzeret the Seeker"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 1,
-          "name": "Grafdigger's Cage"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Unable to Scream"
-        },
-        {
-          "count": 2,
-          "name": "Engineered Explosives"
-        }
-      ]
-    },
-    {
       "name": "Domain Zoo",
       "author": "MTGGoldfish",
       "colors": [
@@ -1450,6 +1314,142 @@
         {
           "count": 1,
           "name": "Wear // Tear"
+        }
+      ]
+    },
+    {
+      "name": "Belcher",
+      "author": "MTGGoldfish",
+      "colors": [],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Disrupting Shoal"
+        },
+        {
+          "count": 3,
+          "name": "Fallaji Archaeologist"
+        },
+        {
+          "count": 4,
+          "name": "Tameshi, Reality Architect"
+        },
+        {
+          "count": 4,
+          "name": "Hydroelectric Specimen"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 3,
+          "name": "Jwari Disruption"
+        },
+        {
+          "count": 3,
+          "name": "Flare of Denial"
+        },
+        {
+          "count": 4,
+          "name": "Sink into Stupor"
+        },
+        {
+          "count": 4,
+          "name": "Whir of Invention"
+        },
+        {
+          "count": 4,
+          "name": "Suppression Ray"
+        },
+        {
+          "count": 4,
+          "name": "Lotus Bloom"
+        },
+        {
+          "count": 1,
+          "name": "Force of Negation"
+        },
+        {
+          "count": 4,
+          "name": "Sea Gate Restoration"
+        },
+        {
+          "count": 3,
+          "name": "Waterlogged Teachings"
+        },
+        {
+          "count": 2,
+          "name": "Stern Scolding"
+        },
+        {
+          "count": 4,
+          "name": "Goblin Charbelcher"
+        },
+        {
+          "count": 1,
+          "name": "Strix Serenade"
+        },
+        {
+          "count": 1,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 1,
+          "name": "Beyeen Veil"
+        },
+        {
+          "count": 4,
+          "name": "Thundertrap Trainer"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 3,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "Harbinger of the Seas"
+        },
+        {
+          "count": 1,
+          "name": "Tezzeret the Seeker"
+        },
+        {
+          "count": 2,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 1,
+          "name": "Grafdigger's Cage"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Unable to Scream"
+        },
+        {
+          "count": 2,
+          "name": "Engineered Explosives"
         }
       ]
     }
