@@ -547,6 +547,30 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
     })
 }
 
+/// CR 609.3 + CR 122.1: Detect "counter[s] removed this way" — the for-each
+/// quantifier shape produced by cards that drain self-counters and reference
+/// the count in a downstream effect (Coalition Relic, Storage Counter cycle).
+///
+/// We accept the singular and plural forms with or without a leading
+/// counter-type word. The combinator is run at every word boundary so the
+/// surrounding clause can be either "counter removed this way",
+/// "counters removed this way", or "<type> counter[s] removed this way".
+/// The counter-type word, when present, is intentionally NOT extracted —
+/// the resolved quantity is whatever the parent `Effect::RemoveCounter`
+/// removed, and the parent already restricts by counter type.
+fn try_parse_counters_removed_this_way(lower: &str) -> bool {
+    crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
+        let (rest, _) = alt((
+            value((), tag::<_, _, VerboseError<&str>>("counters")),
+            value((), tag::<_, _, VerboseError<&str>>("counter")),
+        ))
+        .parse(input)?;
+        let (rest, _) = tag(" removed this way").parse(rest)?;
+        Ok((rest, ()))
+    })
+    .is_some()
+}
+
 /// Parse the clause after "for each" into a `QuantityExpr`, supporting
 /// the conjunction form "X and each Y" by emitting `QuantityExpr::Sum`.
 /// A single-segment clause delegates to `parse_for_each_clause` and
@@ -622,6 +646,26 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         // Phyrexian Hydra, Vigor, Stormwild Capridor, Hostility.
         if lower == "1 damage prevented this way" || lower == "damage prevented this way" {
             return Some(QuantityRef::EventContextAmount);
+        }
+        // CR 609.3 + CR 122.1: "[counter-type] counter[s] removed this way" — the
+        // numeric amount of counters removed by the preceding `Effect::RemoveCounter`
+        // in the sub-ability chain. The events-scan in `effects/mod.rs` sums
+        // `GameEvent::CounterRemoved` events emitted by the parent and stamps
+        // `state.last_effect_amount`, which `PreviousEffectAmount` reads.
+        //
+        // Class: Coalition Relic ("you may remove all charge counters from ~. If
+        // you do, add one mana of any color for each charge counter removed this
+        // way."), the Ice Age Storage Counter cycle (Saprazzan Cove, Dwarven
+        // Hold, Hollow Trees, Mercadian Bazaar), and any future card that
+        // references the count of counters removed by a preceding effect.
+        //
+        // We intentionally do NOT extract the counter-type word: `last_effect_amount`
+        // is the count of whatever counter type the parent removed. The English
+        // restatement of the type is a redundant gloss, not a quantity-shape
+        // distinction. If a future card needs type-discriminated "removed this
+        // way" quantities, this is the right place to extend.
+        if try_parse_counters_removed_this_way(&lower) {
+            return Some(QuantityRef::PreviousEffectAmount);
         }
         return Some(QuantityRef::TrackedSetSize);
     }
@@ -821,6 +865,41 @@ mod tests {
     fn for_each_this_way_produces_tracked_set_size() {
         let qty = parse_for_each_clause("card put into a graveyard this way").unwrap();
         assert_eq!(qty, QuantityRef::TrackedSetSize);
+    }
+
+    /// CR 609.3 + CR 122.1: "[type] counter[s] removed this way" must dispatch
+    /// to `PreviousEffectAmount` so the resolver picks up the actual count of
+    /// counters removed by the parent `Effect::RemoveCounter`. Coalition Relic
+    /// and the Storage Counter cycle depend on this dispatch — without it, the
+    /// generic `TrackedSetSize` fallback returns the count of *objects* affected
+    /// (always 1 for a self-counter-removal), which is wrong.
+    #[test]
+    fn for_each_charge_counter_removed_this_way_is_previous_effect_amount() {
+        let qty = parse_for_each_clause("charge counter removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_charge_counters_removed_this_way_is_previous_effect_amount() {
+        // Plural variant — same dispatch.
+        let qty = parse_for_each_clause("charge counters removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_counter_removed_this_way_is_previous_effect_amount() {
+        // Untyped (no leading counter-type word). The runtime amount is whatever
+        // the parent removed; the omitted English type word is informational.
+        let qty = parse_for_each_clause("counter removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_storage_counter_removed_this_way_is_previous_effect_amount() {
+        // Storage Counter cycle (Saprazzan Cove etc.) — same shape, different
+        // counter type. Must produce the same dispatch.
+        let qty = parse_for_each_clause("storage counter removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
     }
 
     #[test]

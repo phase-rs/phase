@@ -1362,8 +1362,17 @@ pub fn resolve_ability_chain(
     }
 
     // CR 609.3: Extract numeric result from events emitted by this effect for
-    // PreviousEffectAmount in sub_abilities ("gain life equal to the life lost this way").
-    // Sum all LifeChanged (negative = loss) and DamageDealt events from this effect.
+    // PreviousEffectAmount in sub_abilities ("gain life equal to the life lost
+    // this way", "for each counter removed this way", etc.). Sum LifeChanged
+    // (life lost — taken as the absolute value), DamageDealt, and CR 122.1
+    // CounterRemoved events from this effect.
+    //
+    // Counter removal joins the same primitive because the conceptual shape is
+    // identical: "amount produced by the parent effect" — Coalition Relic and
+    // the Storage Counter cycle ("add one mana of any color for each charge
+    // counter removed this way") read the count of counters the parent
+    // `Effect::RemoveCounter` removed. The events-scan is the single source
+    // of truth that turns event traffic into a numeric "this way" amount.
     {
         let mut amount_sum: i32 = 0;
         for event in &events[events_before..] {
@@ -1374,6 +1383,12 @@ pub fn resolve_ability_chain(
                 }
                 GameEvent::DamageDealt { amount, .. } => {
                     amount_sum += *amount as i32;
+                }
+                // CR 122.1 + CR 609.3: Count of counters removed by the
+                // preceding effect. Used by "for each counter removed this way"
+                // sub-abilities (Coalition Relic, Storage Counter cycle).
+                GameEvent::CounterRemoved { count, .. } => {
+                    amount_sum += *count as i32;
                 }
                 _ => {}
             }
