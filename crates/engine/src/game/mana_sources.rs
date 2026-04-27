@@ -1782,7 +1782,9 @@ mod tests {
     #[test]
     fn variable_damage_pain_land_uses_none_amount() {
         let ability = mana_ability_with_damage(QuantityExpr::Ref {
-            qty: crate::types::ability::QuantityRef::HandSize,
+            qty: crate::types::ability::QuantityRef::HandSize {
+                player: crate::types::ability::PlayerScope::Controller,
+            },
         });
         let penalty = mana_ability_penalty(&ability);
         assert_eq!(

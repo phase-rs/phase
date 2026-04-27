@@ -37,9 +37,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, ConjureCard, ContinuousModification, ControllerRef, DamageSource,
     DelayedTriggerCondition, Duration, Effect, FilterProp, GameRestriction, MultiTargetSpec,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
-    TypedFilter, UnlessCost,
+    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -5899,9 +5899,19 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
         match expr {
             QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::TargetLifeTotal => *qty = QuantityRef::LifeTotal,
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Target,
+                } => {
+                    *qty = QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    }
+                }
                 QuantityRef::TargetZoneCardCount { zone } => match zone {
-                    crate::types::ability::ZoneRef::Hand => *qty = QuantityRef::HandSize,
+                    crate::types::ability::ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        }
+                    }
                     crate::types::ability::ZoneRef::Graveyard => *qty = QuantityRef::GraveyardSize,
                     crate::types::ability::ZoneRef::Library => {
                         *qty = QuantityRef::ZoneCardCount {
@@ -14316,7 +14326,9 @@ mod tests {
                     *amount,
                     QuantityExpr::HalfRounded {
                         inner: Box::new(QuantityExpr::Ref {
-                            qty: QuantityRef::TargetLifeTotal,
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::Target
+                            },
                         }),
                         rounding: RoundingMode::Up,
                     },
@@ -15974,7 +15986,9 @@ mod tests {
         assert!(matches!(
             rhs,
             QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller
+                }
             }
         ));
     }
@@ -15996,7 +16010,9 @@ mod tests {
             cond,
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller
+                    }
                 },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Ref {
@@ -16092,7 +16108,10 @@ mod tests {
             Some(AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeTotal,
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
                     },
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 5 },
@@ -16108,7 +16127,10 @@ mod tests {
             Some(AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::HandSize,
+                        qty:
+                            QuantityRef::HandSize {
+                                player: PlayerScope::Controller,
+                            },
                     },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },

@@ -1726,14 +1726,48 @@ pub enum TargetFilter {
     Owner,
 }
 
+/// CR 102 + CR 119 + CR 402: Player axis for player-scoped quantity references.
+///
+/// Parameterizes the player whose hand size, life total, or other per-player
+/// scalar is being read. Replaces sibling enum variants like
+/// `LifeTotal` / `TargetLifeTotal` / `OpponentLifeTotal` and
+/// `HandSize` / `OpponentHandSize` with a single parameterized form.
+///
+/// Categorical-boundary check (per the "Parameterize, don't proliferate"
+/// principle): every variant is a player-relativity choice within a single
+/// CR section. Aggregate scopes (`Opponent`, `AllPlayers`) compose
+/// `AggregateFunction` to express max/min/sum across a population — they do
+/// not introduce a new abstraction layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PlayerScope {
+    /// CR 109.5 / CR 113.6: The controller of the source ability or effect.
+    Controller,
+    /// CR 109.4 + CR 113.6 + CR 115.1: The first player target of the
+    /// resolving ability (read from `ability.targets`).
+    Target,
+    /// CR 102.2 + CR 102.3: All opponents of the controller, aggregated by
+    /// `aggregate`. Existing `OpponentLifeTotal` / `OpponentHandSize`
+    /// semantics correspond to `aggregate = Max`.
+    Opponent { aggregate: AggregateFunction },
+    /// CR 102.1: All players in the game (controller + opponents),
+    /// aggregated by `aggregate`. Reserved for future cards that read
+    /// "the highest life total among players" or similar cross-player
+    /// extrema that include the controller.
+    AllPlayers { aggregate: AggregateFunction },
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QuantityRef {
-    /// Number of cards in the controller's hand.
-    HandSize,
-    /// Controller's current life total.
-    LifeTotal,
+    /// CR 402: Number of cards in `player`'s hand. `PlayerScope::Controller`
+    /// is the default reading; `Target`, `Opponent { .. }`, and `AllPlayers`
+    /// cover targeted-player and cross-player aggregate variants.
+    HandSize { player: PlayerScope },
+    /// CR 119: `player`'s current life total. See `HandSize` for player-axis
+    /// semantics.
+    LifeTotal { player: PlayerScope },
     /// Number of cards in the controller's graveyard.
     GraveyardSize,
     /// Controller's life total minus the format's starting life total.
@@ -1824,8 +1858,6 @@ pub enum QuantityRef {
     },
     /// The power of the targeted permanent. Used for "equal to target's power".
     TargetPower,
-    /// CR 119.3 + CR 107.2: The life total of the targeted player.
-    TargetLifeTotal,
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
@@ -1983,12 +2015,6 @@ pub enum QuantityRef {
     /// clauses like "if an opponent discarded a card this turn" (Tinybones,
     /// Trinket Thief and similar).
     OpponentDiscardedCardThisTurn,
-    /// CR 119: Maximum life total among the controller's opponents.
-    /// Used for "an opponent has more life than you" cross-player comparisons.
-    OpponentLifeTotal,
-    /// CR 402: Maximum hand count among the controller's opponents.
-    /// Used for "an opponent has more cards in hand than you" cross-player comparisons.
-    OpponentHandSize,
     /// CR 309.7: Number of dungeons the controller has completed.
     DungeonsCompleted,
     /// CR 107.3m: The value of X paid for the spell that produced the source
@@ -3657,7 +3683,8 @@ pub enum Effect {
         /// produced amount references a player target (e.g., Jeska's Will mode 1
         /// "Add {R} for each card in target opponent's hand"). When set, the
         /// player target is surfaced as a target slot at cast time and
-        /// `TargetZoneCardCount`/`TargetLifeTotal` quantities resolve against it.
+        /// `TargetZoneCardCount` and `LifeTotal { player: Target }` quantities
+        /// resolve against it.
         /// `None` for the common case of mana abilities with no player target
         /// (Cabal Coffers, Reflecting Pool, fixed mana, etc.).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7209,7 +7236,9 @@ mod tests {
     #[test]
     fn quantity_expr_peel_up_to_passes_through_non_up_to() {
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::HandSize,
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
         };
         assert!(!expr.is_up_to());
         let (peeled, was_up_to) = expr.peel_up_to();
@@ -7223,13 +7252,18 @@ mod tests {
     #[test]
     fn quantity_expr_up_to_composes_with_ref_for_hand_size() {
         let expr = QuantityExpr::up_to(QuantityExpr::Ref {
-            qty: QuantityRef::HandSize,
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
         });
         let (max, up_to) = expr.peel_up_to();
         assert!(up_to);
         match max {
             QuantityExpr::Ref {
-                qty: QuantityRef::HandSize,
+                qty:
+                    QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
             } => {}
             other => panic!("expected Ref {{ HandSize }}, got {other:?}"),
         }

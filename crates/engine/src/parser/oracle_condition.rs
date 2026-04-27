@@ -9,8 +9,8 @@ use nom_language::error::{VerboseError, VerboseErrorKind};
 
 use super::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    Comparator, ControllerRef, ParsedCondition, PlayerFilter, QuantityRef, TargetFilter,
-    TypedFilter,
+    Comparator, ControllerRef, ParsedCondition, PlayerFilter, PlayerScope, QuantityRef,
+    TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{parse_counter_type, CounterType};
@@ -369,9 +369,13 @@ fn parse_hand_condition(text: &str) -> Option<ParsedCondition> {
         .is_ok()
     {
         return Some(ParsedCondition::QuantityVsEachOpponent {
-            lhs: QuantityRef::HandSize,
+            lhs: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
             comparator: Comparator::GT,
-            rhs: QuantityRef::HandSize,
+            rhs: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
         });
     }
     // "you have exactly N or M cards in hand"
@@ -924,9 +928,13 @@ mod tests {
         assert!(matches!(
             parse_restriction_condition("you have more cards in hand than each opponent"),
             Some(ParsedCondition::QuantityVsEachOpponent {
-                lhs: QuantityRef::HandSize,
+                lhs: QuantityRef::HandSize {
+                    player: PlayerScope::Controller
+                },
                 comparator: Comparator::GT,
-                rhs: QuantityRef::HandSize,
+                rhs: QuantityRef::HandSize {
+                    player: PlayerScope::Controller
+                },
             })
         ));
     }

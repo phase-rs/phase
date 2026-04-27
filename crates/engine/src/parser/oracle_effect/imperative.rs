@@ -24,8 +24,9 @@ use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, Duration, Effect, GainLifePlayer, LibraryPosition,
-    MultiTargetSpec, PaymentCost, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter,
+    MultiTargetSpec, PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtValue,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::player::PlayerCounterKind;
@@ -762,7 +763,9 @@ pub(super) fn parse_targeted_action_ast(
         {
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 random,
                 up_to,
@@ -781,7 +784,9 @@ pub(super) fn parse_targeted_action_ast(
             let filter = parse_discard_card_filter(rest);
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 random,
                 up_to: true,
@@ -5390,7 +5395,9 @@ mod tests {
                     matches!(
                         count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::HandSize
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller
+                            }
                         }
                     ),
                     "Expected HandSize ref, got {count:?}"
@@ -5411,7 +5418,9 @@ mod tests {
                     matches!(
                         count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::HandSize
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller
+                            }
                         }
                     ),
                     "Expected HandSize ref, got {count:?}"

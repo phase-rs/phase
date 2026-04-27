@@ -2760,7 +2760,9 @@ mod tests {
         let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
             .condition(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
-                    qty: crate::types::ability::QuantityRef::HandSize,
+                    qty: crate::types::ability::QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
                 },
                 comparator: crate::types::ability::Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -4364,7 +4366,9 @@ mod tests {
         }
         let cond = ReplacementCondition::OnlyIfQuantity {
             lhs: QuantityExpr::Ref {
-                qty: crate::types::ability::QuantityRef::HandSize,
+                qty: crate::types::ability::QuantityRef::HandSize {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
             },
             comparator: crate::types::ability::Comparator::LE,
             rhs: QuantityExpr::Fixed { value: 1 },
@@ -4388,7 +4392,9 @@ mod tests {
         let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
             .condition(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
-                    qty: crate::types::ability::QuantityRef::HandSize,
+                    qty: crate::types::ability::QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
                 },
                 comparator: crate::types::ability::Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 1 },

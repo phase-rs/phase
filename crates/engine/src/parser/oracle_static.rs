@@ -7941,11 +7941,15 @@ mod tests {
             def.condition,
             Some(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller
+                    }
                 },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal
+                    qty: QuantityRef::LifeTotal {
+                        player: crate::types::ability::PlayerScope::Controller
+                    }
                 },
             })
         ));

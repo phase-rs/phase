@@ -9707,7 +9707,9 @@ mod tests {
             cond,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: crate::types::ability::PlayerScope::Controller
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 40 },
@@ -9724,7 +9726,9 @@ mod tests {
                 cond,
                 Some(TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::LifeTotal,
+                        qty: QuantityRef::LifeTotal {
+                            player: crate::types::ability::PlayerScope::Controller
+                        },
                     },
                     comparator: Comparator::GE,
                     ..
@@ -9846,7 +9850,9 @@ mod tests {
     fn bridge_quantity_comparison() {
         let sc = StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::HandSize,
+                qty: QuantityRef::HandSize {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },
@@ -9922,7 +9928,9 @@ mod tests {
         let sc = StaticCondition::Not {
             condition: Box::new(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },
@@ -9958,7 +9966,9 @@ mod tests {
                 StaticCondition::HasMaxSpeed,
                 StaticCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::HandSize,
+                        qty: QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 3 },
@@ -10109,7 +10119,9 @@ mod tests {
             cond.unwrap(),
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: crate::types::ability::PlayerScope::Controller
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },
