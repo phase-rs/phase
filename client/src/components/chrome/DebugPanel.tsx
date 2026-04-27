@@ -1,9 +1,11 @@
 import { zipSync, strToU8 } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { GameState } from "../../adapter/types";
+import type { GameState, Zone } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
+import { injectCard } from "../../dev/injectCard";
 import { restoreGameState } from "../../game/dispatch";
+import { getPlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
 
@@ -52,6 +54,9 @@ export function DebugPanel() {
   const gameState = useGameStore((s) => s.gameState);
   const gameMode = useGameStore((s) => s.gameMode);
   const [importText, setImportText] = useState("");
+  const [injectCardName, setInjectCardName] = useState("");
+  const [injectZone, setInjectZone] = useState<Zone>("Hand");
+  const [injectCount, setInjectCount] = useState(5);
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [consoleSnapshot, setConsoleSnapshot] = useState<ConsoleEntry[]>([]);
@@ -111,6 +116,27 @@ export function DebugPanel() {
       setImportText("");
     }
   }, [importText]);
+
+  const handleInject = useCallback(
+    async (cardName: string, zone: Zone, count: number) => {
+      setStatus(null);
+      const trimmed = cardName.trim();
+      if (!trimmed) {
+        setStatus({ type: "error", message: "Enter a card name" });
+        return;
+      }
+      const result = await injectCard(trimmed, getPlayerId(), zone, count);
+      if (result.ok) {
+        setStatus({
+          type: "success",
+          message: `Added ${result.added}× ${trimmed} to ${zone}`,
+        });
+      } else {
+        setStatus({ type: "error", message: result.error });
+      }
+    },
+    [],
+  );
 
   const handleCopyState = useCallback(() => {
     if (!gameState) return;
@@ -290,6 +316,71 @@ export function DebugPanel() {
             >
               Restore
             </button>
+          </section>
+        )}
+
+        {/* Inject specific cards / basic lands into the running game state.
+            Round-trips through restore_game_state so the engine's rehydration
+            fills in abilities/triggers from the card database. */}
+        {canRestoreCheckpoints && (
+          <section className="border-b border-gray-800 px-3 py-2">
+            <h3 className="mb-1 font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
+              Inject Cards
+            </h3>
+            <div className="flex flex-col gap-1">
+              <input
+                type="text"
+                value={injectCardName}
+                onChange={(e) => setInjectCardName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    void handleInject(injectCardName, injectZone, injectCount);
+                  }
+                }}
+                placeholder="Card name (e.g. Polluted Delta)"
+                className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1 font-mono text-xs text-gray-300 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+              />
+              <div className="flex gap-1">
+                <select
+                  value={injectZone}
+                  onChange={(e) => setInjectZone(e.target.value as Zone)}
+                  className="flex-1 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-300 focus:border-blue-500 focus:outline-none"
+                >
+                  <option value="Hand">Hand</option>
+                  <option value="Battlefield">Battlefield</option>
+                  <option value="Graveyard">Graveyard</option>
+                  <option value="Library">Library (top)</option>
+                </select>
+                <input
+                  type="number"
+                  min={1}
+                  max={99}
+                  value={injectCount}
+                  onChange={(e) => setInjectCount(Math.max(1, Number(e.target.value) || 1))}
+                  className="w-14 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-center text-xs text-gray-300 focus:border-blue-500 focus:outline-none"
+                  title="How many copies"
+                />
+                <button
+                  onClick={() => void handleInject(injectCardName, injectZone, injectCount)}
+                  disabled={!injectCardName.trim()}
+                  className="rounded bg-blue-700 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Add
+                </button>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {(["Plains", "Island", "Swamp", "Mountain", "Forest"] as const).map((basic) => (
+                  <button
+                    key={basic}
+                    onClick={() => void handleInject(basic, "Battlefield", injectCount)}
+                    className="flex-1 rounded bg-gray-800 px-2 py-1 text-[11px] text-gray-300 transition-colors hover:bg-gray-700"
+                    title={`Add ${injectCount} ${basic}${injectCount === 1 ? "" : "s"} to your battlefield`}
+                  >
+                    +{injectCount} {basic}
+                  </button>
+                ))}
+              </div>
+            </div>
           </section>
         )}
 
