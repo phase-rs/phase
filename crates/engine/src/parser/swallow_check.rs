@@ -908,6 +908,12 @@ fn detect_condition_as_long_as(cleaned: &str, original: &str, ast_json: &str) {
         "\"AsLongAs\"",
         "AsLongAs",
         "ConditionalStatic",
+        // CR 611.3a: A `Duration::UntilHostLeavesPlay` IS the "as long as
+        // you control this creature" / "as long as ~ remains on the
+        // battlefield" gate (Aegis Angel, Hostage Taker, Gonti, etc.).
+        // The duration's lifetime equates to a perpetual conditional
+        // static on the host's controllership.
+        "UntilHostLeavesPlay",
     ];
     if json_has_any(ast_json, markers) {
         return;
