@@ -870,14 +870,20 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse "target creature's power" / "the power of target creature".
+/// Parse target-creature power refs:
+///   - Saxon-genitive: "target creature's power" / "the target creature's power"
+///   - Of-form: "the power of target creature [you control|an opponent controls]?"
+///
+/// All variants resolve to the same `QuantityRef::TargetPower`. CR 107.1.
+/// Longest-first ordering: the controller-qualified of-form variants must come
+/// before the bare of-form so `alt`'s short-circuit doesn't strand the
+/// "you control" / "an opponent controls" suffix as un-consumed remainder
+/// (which would cause `parse_quantity_ref`'s `rest.is_empty()` check to fail).
+/// Soul's Majesty, Predator's Rapport, and similar.
 fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::TargetPower, tag("target creature's power")),
         value(QuantityRef::TargetPower, tag("the target creature's power")),
-        // CR 107.1: of-form variants with controller suffixes — same
-        // TargetPower resolution. Soul's Majesty ('Draw cards equal to
-        // the power of target creature you control'), Predator's Rapport.
         value(
             QuantityRef::TargetPower,
             tag("the power of target creature you control"),

@@ -150,6 +150,13 @@ pub fn apply_draw_after_replacement(
         }
     }
 
+    // CR 609.3: Record the actually-drawn count so chained sub-abilities like
+    // "draw cards equal to N, then discard that many" can resolve their
+    // dynamic count via `EventContextAmount`'s `last_effect_count` fallback.
+    // Mirrors the convention used by `change_zone.rs`, `sacrifice.rs`, etc.
+    let drawn_count = cards_to_draw.len() as i32;
+    state.last_effect_count = Some(drawn_count);
+
     for obj_id in cards_to_draw {
         zones::move_to_zone(state, obj_id, Zone::Hand, events);
         // CR 121.1 + CR 504.1: Increment per-step + per-turn counters BEFORE

@@ -216,16 +216,19 @@ fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
             return Some(QuantityExpr::Ref { qty });
         }
     }
-    if alt((
+    if let Ok((rest, _)) = alt((
         tag::<_, _, VerboseError<&str>>("that many cards"),
         tag("that many"),
     ))
     .parse(lower)
-    .is_ok()
     {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
-        });
+        // M3 guard: only match when the tail is empty/punctuation. Avoids
+        // false positives like "that many cards from the top of their library".
+        if rest.trim_start_matches('.').trim().is_empty() {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            });
+        }
     }
     None
 }

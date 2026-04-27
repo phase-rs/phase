@@ -343,6 +343,31 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
 
+    // CR 609.3: "that many" / "that much" — chained-effect amount referring
+    // to the previous effect's count. Resolves to `EventContextAmount` (which
+    // falls back to `state.last_effect_count` for chained sub-ability
+    // continuations). Composes with the "twice"/"three times" multipliers
+    // above so "twice that many cards" parses as Multiply{2, EventContextAmount}.
+    if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::combinator::value(
+            (),
+            nom::branch::alt((
+                nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>(
+                    "that many",
+                ),
+                nom::bytes::complete::tag("that much"),
+            )),
+        )
+        .parse(i)
+    }) {
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            rest.trim_start(),
+        ));
+    }
+
     // CR 121.1: "another" — implicit count of 1 in chained-effect contexts
     // ("draw another card", "create another token"). Distinct from "a/an"
     // which `parse_number` explicitly excludes to avoid the "a"-prefix
