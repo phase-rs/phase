@@ -953,6 +953,62 @@ fn detect_duration_this_turn(cleaned: &str, original: &str, ast_json: &str) {
     if cleaned.contains("earlier this turn") || cleaned.contains("before this turn") {
         return;
     }
+    // CR 700.4 + CR 700.5 (turn-history quantities and counters):
+    // "this turn" is used pervasively as a SUFFIX on count/quantity
+    // references rather than as a duration on an effect. The detector
+    // should only fire when "this turn" plausibly denotes a forward-
+    // looking duration. These past-participle / verb-phrase suffixes
+    // are quantity/count contexts and must not warn:
+    //   - "<verb-past> this turn"  e.g. died/cast/drawn/lost/gained/
+    //     dealt/attacked/blocked/entered/warped/controlled/sacrificed/
+    //     discarded/exiled/played/revealed/spent this turn
+    //   - "you/they/X has/have <verb-past> ... this turn"  same shape,
+    //     present-perfect form, also count.
+    // Two scans cover both: a present-perfect prefix scan and a list
+    // of past-participle suffix collocations. The exemption is
+    // conservative — when "this turn" really IS a duration, none of
+    // these phrasings appear (the duration form is "[modification]
+    // until end of turn" or "[modification] this turn", not
+    // "[verb-past] this turn").
+    // allow-noncombinator: swallow detector marker scan on classified text
+    const QUANTITY_CONTEXT_SUFFIXES: &[&str] = &[
+        "died this turn",
+        "cast this turn",
+        "drawn this turn",
+        "lost this turn",
+        "gained this turn",
+        "dealt this turn",
+        "attacked this turn",
+        "blocked this turn",
+        "entered this turn",
+        "warped this turn",
+        "controlled this turn",
+        "sacrificed this turn",
+        "discarded this turn",
+        "exiled this turn",
+        "played this turn",
+        "revealed this turn",
+        "spent this turn",
+        "milled this turn",
+        "tapped this turn",
+        "untapped this turn",
+        "destroyed this turn",
+        "regenerated this turn",
+        "scryed this turn",
+        "surveiled this turn",
+    ];
+    // Only exempt when EVERY occurrence of "this turn" is part of a quantity
+    // context. Counting occurrences ensures we still fire on cards that have
+    // BOTH a quantity-context phrase AND a real duration (the duration could
+    // be the swallow). The marker check below handles the all-captured case.
+    let total_this_turn = cleaned.matches(" this turn").count();
+    let quantity_this_turn: usize = QUANTITY_CONTEXT_SUFFIXES
+        .iter()
+        .map(|s| cleaned.matches(s).count())
+        .sum();
+    if total_this_turn > 0 && total_this_turn == quantity_this_turn {
+        return;
+    }
     let markers: &[&str] = &[
         "\"duration\":\"",
         "UntilEndOfTurn",

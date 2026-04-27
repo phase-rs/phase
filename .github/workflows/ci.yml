@@ -58,6 +58,11 @@ jobs:
           ./scripts/check-parser-combinators.sh "$BASE"
 
       - name: Run tests
+        # PROPTEST_CASES split: PRs run a smaller case count for fast feedback;
+        # pushes to main run the default (256) so any property regression is
+        # caught before it lands on the branch that feeds staging/preview.
+        env:
+          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
         run: cargo nextest run --workspace --exclude phase-tauri --features engine/proptest
 
       - name: Set cache keys
@@ -107,18 +112,19 @@ jobs:
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards
         # that parse cleanly but disagree semantically with their Oracle text.
-        # Mirrors the staging deploy step (deploy.yml) so PR-tracked freshness
-        # never diverges from main. Consumed by docs/AI-CONTRIBUTOR.md's
-        # pre-flight gate.
+        # Only runs on push-to-main because the only consumer is the R2 upload
+        # below (also main-only) — on a PR the JSON is written and discarded.
         # Pass data/ explicitly — the binary's default lookup is
         # `client/public/card-data.json` which doesn't exist on the ci.yml
         # path (card-data is generated directly into data/ above).
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo semantic-audit data/
 
       - name: Stamp shared card_data_hash on coverage + audit JSONs
         # Embed the same card-data hash in both files so downstream consumers
-        # can verify they're reading a consistent R2 snapshot. Mirrors the
-        # equivalent step in deploy.yml.
+        # can verify they're reading a consistent R2 snapshot. Gated to main
+        # because the only consumer is the R2 upload below.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           HASH=$(sha256sum data/card-data.json | awk '{print substr($1, 1, 16)}')
           jq --arg h "$HASH" '. + {card_data_hash: $h}' data/semantic-audit.json > data/semantic-audit.json.tmp
