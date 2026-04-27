@@ -756,6 +756,14 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
     let stripped = strip_cr_implicit_if_phrases(cleaned);
+    // CR 117.6 / 702.8: A `SpellCastingOption` with `cost: Some(_)` encodes
+    // the "if you pay [cost]" surcharge gate inline (Ghitu Fire, Rout-class
+    // "as though it had flash if you pay X" cycle). The "if" is a cost
+    // payment trigger, not a conditional check on game state.
+    let has_pay_phrase = stripped.contains("if you pay "); // allow-noncombinator: swallow detector marker scan on classified text
+    if parsed.casting_options.iter().any(|o| o.cost.is_some()) && has_pay_phrase {
+        return;
+    }
     // Bare " if " — covers prefix conditional ("if X, do Y") and suffix
     // conditional ("do Y if X"). Excluded: "as if", "even if" — modifiers,
     // not conditions. Also "if able" (CR 701.27) — must-attack/must-block
