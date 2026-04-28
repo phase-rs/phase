@@ -2087,6 +2087,15 @@ pub enum PlayerFilter {
     /// "each player who [verb]ed a card this way" — scoped to players who owned objects
     /// that changed zones in the preceding effect (tracked via `last_zone_changed_ids`).
     ZoneChangedThisWay,
+    /// CR 608.2c + CR 109.5: "each opponent who [verb]ed [a/their] library this way"
+    /// — opponent of the controller who owned an object whose zone changed during the
+    /// preceding logical step (tracked via `players_zone_changed_this_way`, which
+    /// accumulates across `player_scope` iterations so all accepting opponents in
+    /// "each opponent may search…" are counted, not just the last iteration).
+    /// Used by the Tempting Offer cycle (Tempt with Discovery, Glory, Immortality,
+    /// Reflections, Vengeance) — "for each opponent who searches their library this
+    /// way" and analogous phrasings.
+    OpponentZoneChangedThisWay,
     /// Each owner of a card currently exiled with the ability's source.
     /// Used by linked-exile follow-ups like Skyclave Apparition's leaves trigger.
     OwnersOfCardsExiledBySource,

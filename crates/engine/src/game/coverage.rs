@@ -717,6 +717,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::All => "each player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
+        PlayerFilter::OpponentZoneChangedThisWay => "each opponent who changed a card this way",
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
@@ -4177,6 +4178,10 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         // Previously emitted via Debug formatting; never appeared in the handled set.
         PlayerFilter::Controller => ("Controller", Unhandled),
         PlayerFilter::ZoneChangedThisWay => ("ZoneChangedThisWay", Unhandled),
+        // Resolved through `players_zone_changed_this_way` accumulator; consumed
+        // by `matches_player_scope` and `resolve_player_count` for Tempting Offer
+        // cycle and analogous "for each opponent who [verbed] this way" patterns.
+        PlayerFilter::OpponentZoneChangedThisWay => ("OpponentZoneChangedThisWay", Handled),
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),

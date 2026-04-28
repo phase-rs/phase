@@ -683,6 +683,12 @@ fn collect_matching_players(
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    // CR 608.2c + CR 109.5: Opponent-restricted variant; reads the
+                    // chain-accumulating set across player_scope iterations.
+                    PlayerFilter::OpponentZoneChangedThisWay => {
+                        p.id != source_controller
+                            && state.players_zone_changed_this_way.contains(&p.id)
+                    }
                     PlayerFilter::OwnersOfCardsExiledBySource => {
                         crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
                     }
@@ -761,6 +767,12 @@ pub fn resolve_each_player(
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    // CR 608.2c + CR 109.5: Opponent-restricted variant; reads the
+                    // chain-accumulating set across player_scope iterations.
+                    PlayerFilter::OpponentZoneChangedThisWay => {
+                        p.id != ability.controller
+                            && state.players_zone_changed_this_way.contains(&p.id)
+                    }
                     PlayerFilter::OwnersOfCardsExiledBySource => {
                         crate::game::players::owns_card_exiled_by_source(
                             state,

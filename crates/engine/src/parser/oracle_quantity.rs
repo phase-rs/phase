@@ -585,6 +585,64 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
     Some(QuantityExpr::Sum { exprs })
 }
 
+/// CR 608.2c + CR 109.5: Recognize "opponent who [verb] [object] this way" for
+/// zone-changing actions in the Tempting Offer cycle (and any future "for each
+/// opponent who [zone-changed-an-object] this way" siblings). The runtime
+/// accumulator `players_zone_changed_this_way` is populated for *any* effect
+/// emitting `GameEvent::ZoneChanged`; the parser must therefore recognize the
+/// full set of zone-changing verbs so cycle members beyond Tempt with
+/// Discovery (search→library) reach the same typed quantity:
+///
+///   - Tempt with Discovery: "opponent who searches their library this way"
+///   - Tempt with Reflections: "opponent who creates a token this way"
+///   - Tempt with Immortality: "opponent who returns a card to the battlefield this way"
+///
+/// Composes per-axis `alt()` calls (one per grammatical dimension) instead of
+/// enumerating the cartesian product, so adding a new verb pair or article
+/// extends one combinator rather than N tag arms.
+///
+/// Tempt with Glory (attacks) and Tempt with Vengeance (delayed-trigger
+/// damage choice) are NOT covered — they use non-zone-changing actions and
+/// require a different accumulator (e.g. `players_attacked_this_way`).
+fn parse_opponent_searched_library_this_way(
+    input: &str,
+) -> nom::IResult<&str, (), VerboseError<&str>> {
+    let (input, _) = tag("opponent who ").parse(input)?;
+    // Verb axis — zone-changing actions only. Each pair is (present, past).
+    let (input, _) = alt((
+        tag("searches"),
+        tag("searched"),
+        tag("creates"),
+        tag("created"),
+        tag("returns"),
+        tag("returned"),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    // Article axis — covers "a", "an", "their". "an" is required for "an
+    // opponent who creates an artifact token", though the surrounding "for
+    // each opponent" stripping has already removed the leading article from
+    // the player noun.
+    let (input, _) = alt((tag("a "), tag("an "), tag("their "))).parse(input)?;
+    // Object axis — the noun that received the zone change. Each is followed
+    // by an optional positional clause ("to the battlefield" for returns)
+    // and the fixed "this way" suffix.
+    let (input, _) = alt((
+        // "library this way"
+        tag("library this way"),
+        // "token this way"
+        tag("token this way"),
+        // "card to the battlefield this way" (Tempt with Immortality —
+        // graveyard recursion)
+        tag("card to the battlefield this way"),
+        // "card this way" — generic catch-all for "returned a card this way"
+        // shapes (Reflections variants and any future card with this body).
+        tag("card this way"),
+    ))
+    .parse(input)?;
+    Ok((input, ()))
+}
+
 /// Parse the clause after "for each" into a QuantityRef.
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
@@ -622,6 +680,20 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         // Phyrexian Hydra, Vigor, Stormwild Capridor, Hostility.
         if lower == "1 damage prevented this way" || lower == "damage prevented this way" {
             return Some(QuantityRef::EventContextAmount);
+        }
+        // CR 608.2c + CR 109.5: "opponent who searches/searched [a/their] library
+        // this way" — Tempting Offer cycle's bonus-tutor-per-accepting-opponent
+        // step. A single nom combinator handles all four (verb tense × article)
+        // permutations, returning a player-count quantity rather than the
+        // object-count `TrackedSetSize` fallback below. Must be tried before that
+        // fallback because every "opponent who … this way" clause does contain
+        // "this way".
+        if let Ok((rest, ())) = parse_opponent_searched_library_this_way(lower.as_str()) {
+            if rest.is_empty() {
+                return Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentZoneChangedThisWay,
+                });
+            }
         }
         return Some(QuantityRef::TrackedSetSize);
     }
@@ -1288,6 +1360,102 @@ mod tests {
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
         );
+    }
+
+    /// CR 608.2c + CR 109.5: Tempting Offer cycle's bonus-tutor-per-accepting-opponent
+    /// step parses as `PlayerCount { OpponentZoneChangedThisWay }`. All four grammatical
+    /// variants — verb tense (searches/searched) × article (a/their) — must produce the
+    /// same typed quantity ref so the entire cycle (Tempt with Discovery, Glory,
+    /// Immortality, Reflections, Vengeance) and any future "for each opponent who
+    /// [verbed] [a|their] library this way" siblings parse correctly.
+    #[test]
+    fn for_each_opponent_who_searched_library_this_way_present_their() {
+        let qty = parse_for_each_clause("opponent who searches their library this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentZoneChangedThisWay,
+            }
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_searched_library_this_way_past_a() {
+        let qty = parse_for_each_clause("opponent who searched a library this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentZoneChangedThisWay,
+            }
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_searched_library_this_way_past_their() {
+        let qty = parse_for_each_clause("opponent who searched their library this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentZoneChangedThisWay,
+            }
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_searched_library_this_way_present_a() {
+        let qty = parse_for_each_clause("opponent who searches a library this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentZoneChangedThisWay,
+            }
+        );
+    }
+
+    /// CR 608.2c + CR 109.5: Tempt with Reflections (Commander 2013) — "for
+    /// each opponent who creates a token this way, ...". The zone-changing
+    /// verb axis covers token creation in addition to library search so the
+    /// full cycle is parser-recognized.
+    #[test]
+    fn for_each_opponent_who_creates_token_this_way() {
+        for variant in [
+            "opponent who creates a token this way",
+            "opponent who created a token this way",
+        ] {
+            let qty = parse_for_each_clause(variant)
+                .unwrap_or_else(|| panic!("variant must parse: {variant:?}"));
+            assert_eq!(
+                qty,
+                QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentZoneChangedThisWay,
+                },
+                "{variant:?}"
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 109.5: Tempt with Immortality (Commander 2013) — "for
+    /// each opponent who returned a card to the battlefield this way, ...".
+    /// The verb axis covers `returns/returned`; the object axis covers the
+    /// "card to the battlefield" positional phrase.
+    #[test]
+    fn for_each_opponent_who_returned_card_this_way() {
+        for variant in [
+            "opponent who returns a card to the battlefield this way",
+            "opponent who returned a card to the battlefield this way",
+            "opponent who returns a card this way",
+            "opponent who returned a card this way",
+        ] {
+            let qty = parse_for_each_clause(variant)
+                .unwrap_or_else(|| panic!("variant must parse: {variant:?}"));
+            assert_eq!(
+                qty,
+                QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentZoneChangedThisWay,
+                },
+                "{variant:?}"
+            );
+        }
     }
 
     /// CR 106.1 + CR 109.1: "for each color among permanents you control" must

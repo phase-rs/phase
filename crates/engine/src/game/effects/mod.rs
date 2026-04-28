@@ -155,6 +155,15 @@ fn matches_player_scope(
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    // CR 608.2c + CR 109.5: Opponent of the controller whose zones changed
+                    // at any point during the current top-level resolution. Reads the
+                    // chain-accumulating `players_zone_changed_this_way` set (vs
+                    // per-effect `last_zone_changed_ids`) so all accepting opponents in
+                    // a `player_scope` iteration are visible — used by the Tempting
+                    // Offer cycle for the bonus-tutor-per-accepting-opponent step.
+                    PlayerFilter::OpponentZoneChangedThisWay => {
+                        p.id != controller && state.players_zone_changed_this_way.contains(&p.id)
+                    }
                     PlayerFilter::OwnersOfCardsExiledBySource => {
                         crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
                     }
@@ -975,6 +984,14 @@ pub fn resolve_ability_chain(
         // coalesce into a single tracked set, while unrelated resolutions
         // stay isolated.
         state.chain_tracked_set_id = None;
+        // CR 608.2c + CR 109.5: Owners-of-zone-changed accumulator resets per
+        // top-level chain so "each opponent who [verbed] this way" only sees
+        // players who acted in the current resolution. Distinct from
+        // `last_zone_changed_ids` (per-effect) — this set accumulates across
+        // every effect AND every player_scope iteration in the chain so all
+        // accepting opponents in "each opponent may search" are visible to a
+        // downstream "for each opponent who searched this way" reference.
+        state.players_zone_changed_this_way.clear();
     }
 
     // BeginGame abilities are handled at game-start setup, not during stack resolution
@@ -1392,6 +1409,17 @@ pub fn resolve_ability_chain(
             _ => None,
         })
         .collect();
+    // CR 608.2c + CR 109.5: Accumulate owners of zone-changed objects across the
+    // chain for `PlayerFilter::OpponentZoneChangedThisWay`. Unlike
+    // `last_zone_changed_ids` (overwritten per effect), this set keeps every
+    // player who has acted in the current top-level resolution so the Tempting
+    // Offer cycle's "for each opponent who searches their library this way" sees
+    // every accepting opponent — not just the last `player_scope` iteration's.
+    for &id in &state.last_zone_changed_ids {
+        if let Some(obj) = state.objects.get(&id) {
+            state.players_zone_changed_this_way.insert(obj.owner);
+        }
+    }
 
     // CR 603.7: Record the objects affected by this effect as a tracked set so
     // downstream sub-abilities can resolve "this way" references (pronouns,
@@ -4057,6 +4085,162 @@ mod tests {
         // Both players owned zone-changed objects, so both draw
         assert_eq!(state.players[0].hand.len(), 1, "player 0 should have drawn");
         assert_eq!(state.players[1].hand.len(), 1, "player 1 should have drawn");
+    }
+
+    /// CR 608.2c + CR 109.5: Tempting Offer cycle's "for each opponent who
+    /// searches their library this way" relies on
+    /// `players_zone_changed_this_way` accumulating across player_scope
+    /// iterations. With three players, when each opponent independently moves
+    /// a card during a `player_scope: Opponent` ability, all opponents must
+    /// appear in the accumulator — not just the last iteration's owner — so
+    /// the downstream `PlayerCount { OpponentZoneChangedThisWay }` returns the
+    /// correct count.
+    #[test]
+    fn players_zone_changed_this_way_accumulates_across_player_scope_iterations() {
+        use crate::types::format::FormatConfig;
+
+        // 3-player game: P0 (controller), P1, P2 (opponents).
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+
+        // Each opponent owns one library card to mill (mill = library → graveyard
+        // emits ZoneChanged events the accumulator picks up).
+        for (owner, card_id) in [(PlayerId(1), CardId(20)), (PlayerId(2), CardId(21))] {
+            create_object(
+                &mut state,
+                card_id,
+                owner,
+                format!("Lib {owner:?}"),
+                Zone::Library,
+            );
+        }
+
+        // Mill 1 with player_scope: Opponent — P1 mills 1 of P1's library, then
+        // P2 mills 1 of P2's library. Each iteration emits a ZoneChanged event;
+        // the accumulator should contain BOTH opponents after the loop.
+        let mut ability = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Both opponents milled their own library card — both must appear in
+        // the chain accumulator.
+        assert!(
+            state.players_zone_changed_this_way.contains(&PlayerId(1)),
+            "P1 milled a card and must be in players_zone_changed_this_way"
+        );
+        assert!(
+            state.players_zone_changed_this_way.contains(&PlayerId(2)),
+            "P2 milled a card and must be in players_zone_changed_this_way \
+             — failure means accumulation across player_scope iterations is broken \
+             (the LAST iteration's overwrite of last_zone_changed_ids was \
+             previously the bug pattern for the Tempting Offer cycle)"
+        );
+    }
+
+    /// CR 608.2c + CR 109.5: `PlayerCount { OpponentZoneChangedThisWay }`
+    /// resolves to the count of opponents in the accumulator (excludes
+    /// controller). Direct unit test of the quantity resolver — proves Tempt's
+    /// bonus-tutor step gets the right repeat count.
+    #[test]
+    fn opponent_zone_changed_this_way_player_count_excludes_controller() {
+        use crate::game::quantity::resolve_quantity;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+
+        // Simulate the Tempt step-2 outcome: P0 (controller) searched for
+        // step 1, P1 took the offer, P2 declined. Set the accumulator
+        // directly to bypass the player_scope iteration mechanics.
+        state.players_zone_changed_this_way.insert(PlayerId(0));
+        state.players_zone_changed_this_way.insert(PlayerId(1));
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentZoneChangedThisWay,
+            },
+        };
+        let count = resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0));
+
+        // Only P1 counts: P0 is the controller (excluded), P2 is not in the
+        // accumulator (declined the offer).
+        assert_eq!(
+            count, 1,
+            "OpponentZoneChangedThisWay must exclude controller and count only \
+             opponents in players_zone_changed_this_way (P0 controller, P1 took \
+             offer, P2 declined → 1)"
+        );
+
+        // All three accept: count = 2 (P1 + P2, excluding P0).
+        state.players_zone_changed_this_way.insert(PlayerId(2));
+        let count_all = resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0));
+        assert_eq!(
+            count_all, 2,
+            "All opponents in accumulator → count of opponents (excl controller) is 2"
+        );
+
+        // No opponents acted: count = 0 (only controller in set).
+        state.players_zone_changed_this_way.remove(&PlayerId(1));
+        state.players_zone_changed_this_way.remove(&PlayerId(2));
+        let count_none = resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0));
+        assert_eq!(
+            count_none, 0,
+            "No opponents in accumulator → count is 0 (controller is excluded)"
+        );
+    }
+
+    /// CR 608.2c + CR 109.5: `players_zone_changed_this_way` clears at depth=0
+    /// chain entry — does NOT leak across unrelated top-level resolutions.
+    #[test]
+    fn players_zone_changed_this_way_clears_at_top_level_chain_entry() {
+        let mut state = GameState::new_two_player(42);
+
+        // Pre-pollute the accumulator with stale state from a "previous"
+        // resolution.
+        state.players_zone_changed_this_way.insert(PlayerId(0));
+        state.players_zone_changed_this_way.insert(PlayerId(1));
+
+        // Add one library card so Draw has something to draw — Draw itself
+        // emits no ZoneChanged events (cards moving from library to hand DO
+        // emit ZoneChanged, so use a no-zone-change effect to make the test
+        // assertion cleaner).
+        create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Lib".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Shuffle emits no ZoneChanged events; the accumulator must be EMPTY
+        // (cleared at depth=0 entry, not extended by stale state).
+        assert!(
+            state.players_zone_changed_this_way.is_empty(),
+            "depth=0 chain entry must clear players_zone_changed_this_way; \
+             leaking across top-level resolutions would cause spurious counts \
+             in 'opponent who [verbed] this way' references on subsequent spells"
+        );
     }
 
     #[test]

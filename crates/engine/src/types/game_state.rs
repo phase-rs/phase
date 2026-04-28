@@ -2570,6 +2570,19 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_zone_changed_ids: Vec<ObjectId>,
 
+    /// CR 608.2c + CR 109.5: Owners of objects whose zones changed at any point
+    /// during the current top-level ability resolution. Distinct from
+    /// `last_zone_changed_ids` (which tracks the most recent effect's moved objects
+    /// and is overwritten per effect): this set ACCUMULATES across the chain so
+    /// that `player_scope` iterations (e.g., "each opponent may search") correctly
+    /// expose every accepting opponent to a downstream "each opponent who [verbed]
+    /// a library this way" reference. Without accumulation, only the last
+    /// iteration's owner survives because each iteration overwrites
+    /// `last_zone_changed_ids`. Cleared at depth 0 in `resolve_ability_chain`.
+    /// Populated by `PlayerFilter::OpponentZoneChangedThisWay` (Tempting Offer cycle).
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub players_zone_changed_this_way: HashSet<PlayerId>,
+
     /// CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
     /// Set after resolve_effect for effects producing a numeric result (LoseLife, DealDamage).
     /// Read by QuantityRef::PreviousEffectAmount ("gain life equal to the life lost this way").
@@ -2864,6 +2877,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             last_zone_changed_ids: Vec::new(),
+            players_zone_changed_this_way: HashSet::new(),
             last_effect_amount: None,
             last_effect_count: None,
             exiled_from_hand_this_resolution: 0,
@@ -3028,6 +3042,7 @@ impl PartialEq for GameState {
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
             && self.last_zone_changed_ids == other.last_zone_changed_ids
+            && self.players_zone_changed_this_way == other.players_zone_changed_this_way
             && self.last_effect_count == other.last_effect_count
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             && self.lki_cache == other.lki_cache
