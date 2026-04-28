@@ -941,37 +941,66 @@ fn parse_life_gained_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         nom::combinator::opt(alt((tag("the amount of "), tag("amount of ")))).parse(input)?;
     alt((
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("total life you gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("total life you've gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you've gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("life you've gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("life you gained this turn"),
         ),
         // Duration-stripped forms
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you've gained"),
         ),
-        value(QuantityRef::LifeGainedThisTurn, tag("the life you gained")),
-        value(QuantityRef::LifeGainedThisTurn, tag("life you've gained")),
-        value(QuantityRef::LifeGainedThisTurn, tag("life you gained")),
+        value(
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("the life you gained"),
+        ),
+        value(
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("life you've gained"),
+        ),
+        value(
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("life you gained"),
+        ),
     ))
     .parse(input)
 }
@@ -1699,7 +1728,12 @@ mod tests {
     fn test_parse_quantity_ref_amount_of_life_gained() {
         // CR 119.3: Hope Estheim class — "the amount of life you gained this turn".
         let (rest, q) = parse_quantity_ref("the amount of life you gained this turn").unwrap();
-        assert_eq!(q, QuantityRef::LifeGainedThisTurn);
+        assert_eq!(
+            q,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller
+            }
+        );
         assert_eq!(rest, "");
     }
 

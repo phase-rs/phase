@@ -2003,8 +2003,12 @@ pub enum QuantityRef {
     EnteredThisTurn { filter: TargetFilter },
     /// CR 710.2: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
-    /// Amount of life the controller has gained this turn.
-    LifeGainedThisTurn,
+    /// CR 119.4: Amount of life gained this turn, scoped by `player` per the
+    /// workspace "Parameterize, don't proliferate" principle (Round Π-4 — mirrors
+    /// `LifeLostThisTurn`'s Π-3 lift). `Controller` reads
+    /// `p.life_gained_this_turn` directly; `Opponent { Sum }` totals across
+    /// opponents (Needlebite Trap "if an opponent gained life this turn").
+    LifeGainedThisTurn { player: PlayerScope },
     /// CR 500: Number of turns this player has taken so far in the game.
     /// Resolved against the controller/scope player.
     TurnsTaken,

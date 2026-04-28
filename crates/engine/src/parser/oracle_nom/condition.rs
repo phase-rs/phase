@@ -918,7 +918,12 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
             tag("committed a crime this turn"),
         ),
         value(
-            make_quantity_ge(QuantityRef::LifeGainedThisTurn, 1),
+            make_quantity_ge(
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                1,
+            ),
             tag("gained life this turn"),
         ),
         value(
@@ -1000,6 +1005,23 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
             alt((
                 tag("an opponent lost life this turn"),
                 tag("that player lost life this turn"),
+            )),
+        ),
+        // CR 119.4 + CR 603.4: "an opponent gained life this turn" — sum across
+        // opponents, mirroring the lost-life sibling. Unlocks Needlebite Trap
+        // alt-cost gate and any future opponent-gain-gated trap/condition.
+        value(
+            make_quantity_ge(
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Sum,
+                    },
+                },
+                1,
+            ),
+            alt((
+                tag("an opponent gained life this turn"),
+                tag("that player gained life this turn"),
             )),
         ),
         // CR 119.3 + CR 603.4: "a player lost N or more life this turn"
@@ -1207,7 +1229,12 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
     fn life_verb(v: &str) -> Option<QuantityRef> {
         let result: nom::IResult<&str, QuantityRef, nom_language::error::VerboseError<&str>> =
             alt((
-                value(QuantityRef::LifeGainedThisTurn, tag("gained")),
+                value(
+                    QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                    tag("gained"),
+                ),
                 value(
                     QuantityRef::LifeLostThisTurn {
                         player: PlayerScope::Controller,
@@ -1257,12 +1284,28 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
             tag::<_, _, nom_language::error::VerboseError<&str>>("or more life this turn")
                 .parse(after_n)
         {
-            return Ok((rest, make_quantity_ge(QuantityRef::LifeGainedThisTurn, n)));
+            return Ok((
+                rest,
+                make_quantity_ge(
+                    QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                    n,
+                ),
+            ));
         }
     }
     // "life this turn" (minimum 1)
     let (rest, _) = tag("life this turn").parse(rest)?;
-    Ok((rest, make_quantity_ge(QuantityRef::LifeGainedThisTurn, 1)))
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            1,
+        ),
+    ))
 }
 
 /// CR 119.3 + CR 603.4: Parse "a player lost N or more life this turn".
@@ -2400,13 +2443,37 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeGainedThisTurn,
+                        qty: QuantityRef::LifeGainedThisTurn { .. },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
             } => {}
             other => panic!("expected LifeGainedThisTurn GE 1, got {other:?}"),
         }
+    }
+
+    /// CR 119.4 + CR 603.4 (Π-4): "an opponent gained life this turn" must
+    /// parse to `LifeGainedThisTurn { Opponent { Sum } } ≥ 1` — the
+    /// opponent-axis dual to the existing `you've gained` controller-axis
+    /// reading. Unlocks Needlebite Trap class.
+    #[test]
+    fn test_parse_condition_an_opponent_gained_life_this_turn() {
+        let (rest, c) = parse_inner_condition("an opponent gained life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
     }
 
     #[test]

@@ -685,7 +685,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("{} entered this turn", fmt_target(filter))
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
-        QuantityRef::LifeGainedThisTurn => "life gained this turn".into(),
+        QuantityRef::LifeGainedThisTurn { player } => {
+            format!("life gained this turn ({})", fmt_player_scope(*player))
+        }
         QuantityRef::PermanentsLeftBattlefieldThisTurn => {
             "permanents left battlefield this turn".into()
         }
@@ -4153,7 +4155,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
-        QuantityRef::LifeGainedThisTurn => ("LifeGainedThisTurn", Handled),
+        QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::PermanentsLeftBattlefieldThisTurn => {
             ("PermanentsLeftBattlefieldThisTurn", Unhandled)
         }

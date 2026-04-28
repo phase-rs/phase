@@ -9612,7 +9612,7 @@ mod tests {
         assert!(matches!(
             lhs,
             QuantityExpr::Ref {
-                qty: QuantityRef::LifeGainedThisTurn
+                qty: QuantityRef::LifeGainedThisTurn { .. }
             }
         ));
         assert_eq!(*comparator, Comparator::GE);

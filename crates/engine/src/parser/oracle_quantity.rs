@@ -1282,7 +1282,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you gained this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeGainedThisTurn
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
     }
@@ -1450,13 +1452,17 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've gained this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeGainedThisTurn
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
         assert_eq!(
             parse_event_context_quantity("the life you've gained"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeGainedThisTurn
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
     }

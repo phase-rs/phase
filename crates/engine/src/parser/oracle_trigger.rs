@@ -5749,8 +5749,8 @@ mod tests {
     use super::*;
     use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
     use crate::types::ability::{
-        Comparator, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PtValue,
-        QuantityExpr, QuantityRef, TypedFilter, UnlessCost,
+        Comparator, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PlayerScope,
+        PtValue, QuantityExpr, QuantityRef, TypedFilter, UnlessCost,
     };
 
     #[test]
@@ -6415,7 +6415,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
@@ -6435,7 +6437,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -6474,7 +6478,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },
@@ -6500,7 +6506,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
@@ -6523,7 +6531,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -6544,7 +6554,9 @@ mod tests {
             cond,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
@@ -9412,7 +9424,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -10194,7 +10208,9 @@ mod tests {
             cond,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -10528,7 +10544,9 @@ mod tests {
             cond.unwrap(),
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },

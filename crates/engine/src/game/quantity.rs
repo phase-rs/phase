@@ -1048,9 +1048,11 @@ fn resolve_ref(
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
-        // Life gained this turn — uses tracked counter on player.
-        QuantityRef::LifeGainedThisTurn => {
-            player.map_or(0, |p| u32_to_i32_saturating(p.life_gained_this_turn))
+        // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
+        QuantityRef::LifeGainedThisTurn { player } => {
+            resolve_per_player_scalar(state, *player, controller, targets, |p| {
+                u32_to_i32_saturating(p.life_gained_this_turn)
+            })
         }
         // CR 400.7: Count of permanents controlled by player that left the battlefield this turn.
         QuantityRef::PermanentsLeftBattlefieldThisTurn => usize_to_i32_saturating(
@@ -2442,6 +2444,35 @@ mod tests {
             qty: QuantityRef::AnyCountersOnSelf,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
+    }
+
+    /// CR 119.4 (Π-4): `LifeGainedThisTurn { Opponent { Sum } }` sums life
+    /// gained across opponents, excluding the controller. Locks in the
+    /// opponent-axis semantic introduced by Π-4 (no pre-Π-4 equivalent —
+    /// `LifeGainedThisTurn` was unit-variant controller-only before).
+    #[test]
+    fn resolve_quantity_opponent_life_gained_this_turn_sum() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].life_gained_this_turn = 4;
+        state.players[1].life_gained_this_turn = 7;
+        state.players[2].life_gained_this_turn = 2;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+        };
+        // Controller = player 0: opponents are 1 and 2 → 7 + 2 = 9.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 9);
+        // Controller = player 2: opponents are 0 and 1 → 4 + 7 = 11.
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(2), ObjectId(1)),
+            11
+        );
     }
 
     #[test]
