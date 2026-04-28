@@ -4767,7 +4767,7 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: crate::types::ability::QuantityRef::LifeLostThisTurn
+                            qty: crate::types::ability::QuantityRef::LifeLostThisTurn { .. }
                         }
                     ),
                     "Expected LifeLostThisTurn, got {amount:?}"

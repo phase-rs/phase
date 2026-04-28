@@ -669,7 +669,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
-        QuantityRef::LifeLostThisTurn => "life lost this turn".into(),
+        QuantityRef::LifeLostThisTurn { player } => {
+            format!("life lost this turn ({})", fmt_player_scope(*player))
+        }
         QuantityRef::EventContextAmount => "event amount".into(),
         QuantityRef::EventContextSourcePower => "source's power".into(),
         QuantityRef::EventContextSourceToughness => "source's toughness".into(),
@@ -696,10 +698,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::AttackedThisTurn => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
-        QuantityRef::OpponentLifeLostThisTurn => "opponent life lost this turn".into(),
-        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => {
-            "max life lost this turn across players".into()
-        }
         QuantityRef::CounterAddedThisTurn => "counter added this turn".into(),
         QuantityRef::OpponentDiscardedCardThisTurn => "opponent discarded card this turn".into(),
         QuantityRef::DungeonsCompleted => "dungeons completed".into(),
@@ -729,6 +727,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 CountScope::All => "each player has",
             };
             format!("# of {kind} counters {scope_s}")
+        }
+        QuantityRef::PartySize { player } => {
+            format!("party size ({})", fmt_player_scope(*player))
         }
     }
 }
@@ -4143,7 +4144,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
-        QuantityRef::LifeLostThisTurn => ("LifeLostThisTurn", Handled),
+        QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
         QuantityRef::EventContextSourcePower => ("EventContextSourcePower", Handled),
         QuantityRef::EventContextSourceToughness => ("EventContextSourceToughness", Handled),
@@ -4165,10 +4166,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Unhandled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
-        QuantityRef::OpponentLifeLostThisTurn => ("OpponentLifeLostThisTurn", Unhandled),
-        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => {
-            ("MaxLifeLostThisTurnAcrossPlayers", Handled)
-        }
         QuantityRef::CounterAddedThisTurn => ("CounterAddedThisTurn", Unhandled),
         QuantityRef::OpponentDiscardedCardThisTurn => ("OpponentDiscardedCardThisTurn", Handled),
         QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
@@ -4183,6 +4180,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
+        QuantityRef::PartySize { .. } => ("PartySize", Handled),
     }
 }
 

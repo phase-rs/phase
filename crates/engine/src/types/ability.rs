@@ -1918,9 +1918,30 @@ pub enum QuantityRef {
     /// Used for patterns where a sub_ability references the parent effect's numeric
     /// result (life lost, damage dealt, counters removed).
     PreviousEffectAmount,
-    /// CR 118.4: Amount of life the controller has lost this turn.
-    /// Used for "as long as you've lost life this turn" static conditions.
-    LifeLostThisTurn,
+    /// CR 118.4 + CR 119.3: Amount of life lost this turn, scoped by `player`
+    /// per the workspace "Parameterize, don't proliferate" principle (Round Π-3).
+    ///
+    /// - `Controller`: controller's life lost this turn (`p.life_lost_this_turn`).
+    ///   Used by "as long as you've lost life this turn".
+    /// - `Opponent { aggregate: Sum }`: total life lost across opponents
+    ///   (legacy `OpponentLifeLostThisTurn`). Used by "if an opponent lost life
+    ///   this turn".
+    /// - `AllPlayers { aggregate: Max }`: maximum life lost by any single player
+    ///   (legacy `MaxLifeLostThisTurnAcrossPlayers`). Used by "if a player lost
+    ///   N or more life this turn" (Y'shtola, Knight of the Ebon Legion).
+    /// - `Target`: reserved — no current cards reference a targeted player's
+    ///   life-lost-this-turn, but the slot exists for symmetry with `LifeTotal`
+    ///   / `HandSize`.
+    LifeLostThisTurn { player: PlayerScope },
+    /// CR 700.8: Number of creatures in `player`'s party. A party consists of
+    /// up to one Cleric, one Rogue, one Warrior, and one Wizard creature
+    /// `player` controls; the resolver maximizes the count when creatures have
+    /// multiple party-relevant types (CR 700.8b). The result is bounded
+    /// `0..=4`. `PlayerScope::Controller` is the default reading
+    /// ("your party"); `Target`/`Opponent { .. }`/`AllPlayers { .. }` cover
+    /// targeted-player and cross-player aggregate variants per the same axis
+    /// used by `LifeTotal`/`HandSize`.
+    PartySize { player: PlayerScope },
     /// CR 702.179f: The controller's current speed, treating no speed as 0.
     Speed,
     /// CR 603.7c: Numeric value from the triggering event.
@@ -2007,24 +2028,6 @@ pub enum QuantityRef {
     /// CR 117.1: Number of spells cast last turn (by any player).
     /// Used for werewolf transform conditions.
     SpellsCastLastTurn,
-    /// CR 119.3: Amount of life any opponent has lost this turn.
-    /// Used for "if an opponent lost life this turn" conditions.
-    OpponentLifeLostThisTurn,
-    /// CR 119.3 + CR 603.4: Maximum amount of life lost this turn by any single
-    /// player (controller or opponent). Resolves to
-    /// `state.players.iter().map(|p| p.life_lost_this_turn).max()`.
-    ///
-    /// Used for the intervening-if clause "if a player lost N or more life this
-    /// turn" — semantically "any single player has individually lost ≥ N", not
-    /// "the sum of life lost across all players is ≥ N". Y'shtola, Night's
-    /// Blessed and Knight of the Ebon Legion both use this idiom with N=4.
-    ///
-    /// Distinct from `OpponentLifeLostThisTurn` because:
-    /// - The "a player" quantifier covers controller + opponents (not just
-    ///   opponents).
-    /// - The semantic is per-player max (one player crossed the threshold), not
-    ///   cross-player sum.
-    MaxLifeLostThisTurnAcrossPlayers,
     /// CR 122.1: Whether the controller added any counter to any permanent this turn.
     CounterAddedThisTurn,
     /// CR 701.9 + CR 603.4: Whether any opponent of the controller discarded a

@@ -1270,7 +1270,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
     }
@@ -1427,14 +1429,18 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
         // Without "this turn" suffix (after duration stripping)
         assert_eq!(
             parse_event_context_quantity("the life you've lost"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
     }
@@ -1459,7 +1465,9 @@ mod tests {
     fn parse_quantity_ref_life_lost() {
         assert_eq!(
             parse_quantity_ref("life you've lost"),
-            Some(QuantityRef::LifeLostThisTurn)
+            Some(QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller
+            })
         );
     }
 
