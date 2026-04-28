@@ -460,8 +460,11 @@ fn apply_pending_spell_resolution(
 
     // CR 603.4: Propagate cast_from_zone so ETB triggers can evaluate
     // conditions like "if you cast it from your hand".
+    // CR 702.33d + CR 702.33f: Propagate kicker payments so ETB
+    // replacement / triggered abilities can gate on which kickers were paid.
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
+        obj.kickers_paid.clone_from(&ctx.kickers_paid);
     }
 
     // CR 303.4f: Aura resolving to battlefield attaches to its target.

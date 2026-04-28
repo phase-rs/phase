@@ -337,6 +337,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     if let Some(ref ability) = ability {
                         if let Some(obj) = state.objects.get_mut(&entry.id) {
                             obj.cast_from_zone = ability.context.cast_from_zone;
+                            // CR 702.33d + CR 702.33f: Propagate kicker payments
+                            // from the resolving spell's `SpellContext` to the
+                            // resulting permanent so post-resolution gates
+                            // (`ReplacementCondition::CastViaKicker` and ETB
+                            // `AbilityCondition::AdditionalCostPaid` on triggered
+                            // abilities) can evaluate.
+                            obj.kickers_paid.clone_from(&ability.context.kickers_paid);
                         }
                     }
                     // CR 614.12a: Drain mandatory replacement post-effects (e.g., the
@@ -369,6 +376,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         .as_ref()
                         .and_then(|a| a.context.cast_from_zone)
                         .or_else(|| state.objects.get(&entry.id).and_then(|o| o.cast_from_zone));
+                    let kickers_paid = ability
+                        .as_ref()
+                        .map(|a| a.context.kickers_paid.clone())
+                        .unwrap_or_default();
                     state.pending_spell_resolution =
                         Some(crate::types::game_state::PendingSpellResolution {
                             object_id: entry.id,
@@ -377,6 +388,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             cast_from_zone,
                             spell_targets: spell_targets.clone(),
                             actual_mana_spent,
+                            kickers_paid,
                         });
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);

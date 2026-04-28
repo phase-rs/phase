@@ -9,8 +9,11 @@ use nom_language::error::VerboseError;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_target::parse_type_phrase;
-use crate::types::ability::{AbilityCost, ControllerRef, TargetFilter, TypeFilter, TypedFilter};
+use crate::types::ability::{
+    AbilityCost, AdditionalCost, ControllerRef, TargetFilter, TypeFilter, TypedFilter,
+};
 use crate::types::keywords::{BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost};
+use crate::types::mana::ManaCost;
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
 /// Handles both "protection from X and from Y" and "hexproof from X and from Y"
@@ -76,6 +79,53 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
         }
     }
     expanded
+}
+
+/// CR 702.33a-c: Parse a kicker or multikicker keyword line into the casting
+/// cost declaration used by the engine. This lives with keyword parsing because
+/// Oracle prints kicker as a keyword line, while runtime casting consumes it as
+/// `AdditionalCost`.
+pub(crate) fn parse_kicker_additional_cost_line(raw: &str, lower: &str) -> Option<AdditionalCost> {
+    let (lower_after_prefix, repeatable) = alt((
+        value(true, tag::<_, _, VerboseError<&str>>("multikicker ")),
+        value(false, tag("kicker ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let raw_after_prefix = &raw[raw.len() - lower_after_prefix.len()..];
+    let (raw_after_first, first) = parse_raw_mana_cost(raw_after_prefix)?;
+
+    if repeatable {
+        return Some(AdditionalCost::Kicker {
+            costs: vec![AbilityCost::Mana { cost: first }],
+            repeatable: true,
+        });
+    }
+
+    let lower_after_first = &lower[raw.len() - raw_after_first.len()..];
+    let costs =
+        if let Ok((lower_after_separator, _)) = tag::<_, _, VerboseError<&str>>(" and/or ")
+            .parse(lower_after_first)
+        {
+            let raw_second = &raw[raw.len() - lower_after_separator.len()..];
+            let (_, second) = parse_raw_mana_cost(raw_second)?;
+            vec![
+                AbilityCost::Mana { cost: first },
+                AbilityCost::Mana { cost: second },
+            ]
+        } else {
+            vec![AbilityCost::Mana { cost: first }]
+        };
+
+    Some(AdditionalCost::Kicker {
+        costs,
+        repeatable: false,
+    })
+}
+
+fn parse_raw_mana_cost(input: &str) -> Option<(&str, ManaCost)> {
+    nom_primitives::parse_mana_cost.parse(input.trim_start()).ok()
 }
 
 /// Try to extract keywords from a keyword-only line (comma-separated).

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ContinuousModification, DelayedTriggerCondition, Duration,
-    EffectKind, GameRestriction, KeywordAction, ModalChoice, ResolvedAbility,
+    EffectKind, GameRestriction, KeywordAction, KickerVariant, ModalChoice, ResolvedAbility,
     SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef, TriggerCondition,
     UnlessCost,
 };
@@ -505,6 +505,17 @@ pub struct PendingCast {
     /// need updating.
     #[serde(default = "default_origin_zone")]
     pub origin_zone: Zone,
+    /// CR 601.2b + CR 702.33b/c: Additional-cost declaration still being
+    /// walked after one sub-cost has been accepted. Used for independent
+    /// kicker costs and multikicker loops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_cost_flow: Option<AdditionalCost>,
+    /// CR 702.33f: Non-repeatable kicker options the player has declined in
+    /// the current casting announcement. Paid options are tracked on
+    /// `ability.context.kickers_paid`; this list only prevents re-prompting
+    /// declined sibling kickers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declined_kickers: Vec<KickerVariant>,
 }
 
 fn default_origin_zone() -> Zone {
@@ -529,6 +540,8 @@ impl PendingCast {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         }
     }
 }
@@ -2693,6 +2706,12 @@ pub struct PendingSpellResolution {
     pub spell_targets: Vec<crate::types::ability::TargetRef>,
     #[serde(default)]
     pub actual_mana_spent: u32,
+    /// CR 702.33d + CR 702.33f: Carry kicker payment data through the
+    /// pending-spell-resolution detour (replacement-needs-choice path) so the
+    /// permanent ends up with the same `kickers_paid` as the direct resolution
+    /// path in `stack.rs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

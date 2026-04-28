@@ -302,6 +302,17 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_x_paid: Option<u32>,
 
+    /// CR 702.33d + CR 702.33f: Kicker payments declared while casting the
+    /// spell that produced this permanent, in payment order. Mirrors
+    /// `SpellContext.kickers_paid`; copied at cast resolution from the
+    /// resolving spell's ability context so ETB replacement effects
+    /// (`ReplacementCondition::CastViaKicker`) and ETB triggered abilities
+    /// (`AbilityCondition::AdditionalCostPaid` with kicker variant or
+    /// `min_count >= 2`) can evaluate against the paid kicker(s) after the
+    /// spell has left the stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+
     // Coverage: lists unimplemented mechanics (computed for serialization, not persisted)
     #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
     pub unimplemented_mechanics: Vec<String>,
@@ -635,6 +646,7 @@ impl GameObject {
             summoning_sick: false,
             cast_variant_paid: None,
             cost_x_paid: None,
+            kickers_paid: Vec::new(),
             unimplemented_mechanics: Vec::new(),
             has_summoning_sickness: false,
             has_mana_ability: false,
@@ -700,6 +712,11 @@ impl GameObject {
         self.is_saddled = false;
         self.chosen_attributes.clear();
         self.cast_variant_paid = None;
+        // CR 400.7 + CR 702.33d: kicker payments are bound to the casting
+        // event that produced this object. A re-entering permanent has no
+        // memory of prior kicker payments — clear before the cast resolution
+        // path repopulates from the resolving spell's `SpellContext`.
+        self.kickers_paid.clear();
         self.goaded_by.clear();
         self.detained_by.clear();
 

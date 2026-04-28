@@ -301,6 +301,21 @@ export function additionalCostChoices(cost: AdditionalCost): { title: string; pa
         payLabel: `Pay ${formatAbilityCost(cost.data)}`,
         skipLabel: "Skip",
       };
+    case "Kicker": {
+      const first = cost.data.costs[0];
+      const label = first ? formatAbilityCost(first) : "kicker";
+      return {
+        title: `Pay kicker cost: ${label}?`,
+        payLabel: `Pay ${label}`,
+        skipLabel: cost.data.repeatable ? "Done" : "Skip",
+      };
+    }
+    case "Required":
+      return {
+        title: `Pay additional cost: ${formatAbilityCost(cost.data)}`,
+        payLabel: `Pay ${formatAbilityCost(cost.data)}`,
+        skipLabel: "Cancel",
+      };
     case "Choice":
       return {
         title: "Choose additional cost",

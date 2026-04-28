@@ -1572,7 +1572,19 @@ fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondi
         Ok(_) => {
             // Reconstruct the enters-with text for downstream parsing.
             let enters_start = norm_lower.len() - after_kicker_clause.len() + 2; // skip ", "
-            let condition = ReplacementCondition::CastViaKicker { cost_text };
+                                                                                 // CR 702.33d + CR 702.33f: The replacement applies when the spell
+                                                                                 // was kicked. The optional `with its [A]/[B] kicker` clause narrows
+                                                                                 // to a specific kicker position; resolving the parsed cost text
+                                                                                 // (e.g. "{1}{r}") into a `KickerVariant` requires the card's
+                                                                                 // `Keyword::Kicker` list, which is not available at this parser
+                                                                                 // layer. For now we emit `variant: None` (any kicker payment
+                                                                                 // satisfies the gate) and accept the over-trigger — the runtime
+                                                                                 // still gates on "was kicked at all", which is strictly more
+                                                                                 // correct than the previous unconditional `true` stub. Per-variant
+                                                                                 // resolution is a follow-up at the synthesis layer where card
+                                                                                 // keywords are visible.
+            let _ = cost_text; // reserved for future synthesis-time resolution
+            let condition = ReplacementCondition::CastViaKicker { variant: None };
             (Some(condition), &norm_lower[enters_start..])
         }
         Err(_) => (None, norm_lower),
@@ -4503,7 +4515,7 @@ mod tests {
         ));
         assert!(matches!(
             def.condition,
-            Some(ReplacementCondition::CastViaKicker { cost_text: None })
+            Some(ReplacementCondition::CastViaKicker { variant: None })
         ));
     }
 
@@ -4525,11 +4537,14 @@ mod tests {
                 ..
             } if counter_type == "P1P1"
         ));
+        // CR 702.33d + CR 702.33f: per-variant resolution is deferred (the
+        // parser layer cannot see the card's `Keyword::Kicker` list, so the
+        // {1}{R} cost text cannot be mapped to `KickerVariant::First` /
+        // `Second` here). The replacement still applies for any kicker
+        // payment — strictly more correct than the prior unconditional stub.
         match &def.condition {
-            Some(ReplacementCondition::CastViaKicker { cost_text }) => {
-                assert_eq!(cost_text.as_deref(), Some("{1}{r}"));
-            }
-            other => panic!("Expected CastViaKicker, got {other:?}"),
+            Some(ReplacementCondition::CastViaKicker { variant: None }) => {}
+            other => panic!("Expected CastViaKicker {{ variant: None }}, got {other:?}"),
         }
     }
 

@@ -797,6 +797,7 @@ pub(crate) fn deterministic_choice(
                 life > resolved * 3
             }
             engine::types::ability::AdditionalCost::Optional(_) => true,
+            engine::types::ability::AdditionalCost::Kicker { .. } => true,
             engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
         };

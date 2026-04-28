@@ -2172,6 +2172,11 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
             AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
                 build_cost_item(cost, items);
             }
+            AdditionalCost::Kicker { costs, .. } => {
+                for cost in costs {
+                    build_cost_item(cost, items);
+                }
+            }
             AdditionalCost::Choice(first, second) => {
                 build_cost_item(first, items);
                 build_cost_item(second, items);
@@ -2182,6 +2187,13 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 
     let label = match additional_cost {
         AdditionalCost::Optional(_) => "AdditionalCost:Optional",
+        AdditionalCost::Kicker { repeatable, .. } => {
+            if *repeatable {
+                "AdditionalCost:Multikicker"
+            } else {
+                "AdditionalCost:Kicker"
+            }
+        }
         AdditionalCost::Required(_) => "AdditionalCost:Required",
         AdditionalCost::Choice(_, _) => "AdditionalCost:Choice",
     };
@@ -2201,6 +2213,7 @@ fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
         AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
             ability_cost_has_unimplemented(cost)
         }
+        AdditionalCost::Kicker { costs, .. } => costs.iter().any(ability_cost_has_unimplemented),
         AdditionalCost::Choice(first, second) => {
             ability_cost_has_unimplemented(first) || ability_cost_has_unimplemented(second)
         }
@@ -3223,6 +3236,9 @@ fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> 
         AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
             ability_cost_has_unimplemented_parts(cost)
         }
+        AdditionalCost::Kicker { costs, .. } => {
+            costs.iter().any(ability_cost_has_unimplemented_parts)
+        }
         AdditionalCost::Choice(first, second) => {
             ability_cost_has_unimplemented_parts(first)
                 || ability_cost_has_unimplemented_parts(second)
@@ -3266,6 +3282,11 @@ fn collect_additional_cost_missing_parts(
     match additional_cost {
         AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
             collect_ability_cost_missing_parts(cost, missing);
+        }
+        AdditionalCost::Kicker { costs, .. } => {
+            for cost in costs {
+                collect_ability_cost_missing_parts(cost, missing);
+            }
         }
         AdditionalCost::Choice(first, second) => {
             collect_ability_cost_missing_parts(first, missing);
@@ -4090,7 +4111,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
     match cond {
         // Handled by `evaluate_condition` / `resolve_ability_chain`
         // (crates/engine/src/game/effects/mod.rs).
-        AbilityCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
+        AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
         AbilityCondition::IfYouDo => ("IfYouDo", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),

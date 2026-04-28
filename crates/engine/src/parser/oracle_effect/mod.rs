@@ -14299,7 +14299,7 @@ mod tests {
         let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
         assert_eq!(
             sub.condition,
-            Some(AbilityCondition::AdditionalCostPaid),
+            Some(AbilityCondition::additional_cost_paid_any()),
             "Expected AdditionalCostPaid condition"
         );
     }
@@ -14344,7 +14344,7 @@ mod tests {
         assert_eq!(
             sub.condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::AdditionalCostPaid),
+                condition: Box::new(AbilityCondition::additional_cost_paid_any()),
             }),
             "Expected Not(AdditionalCostPaid) condition"
         );

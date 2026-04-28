@@ -1,14 +1,21 @@
 use std::str::FromStr;
 
+use nom::bytes::complete::{tag, take_until};
+use nom::Parser;
+use nom_language::error::VerboseError;
+
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
+use crate::parser::oracle_classifier::has_trigger_prefix;
+use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastVariantPaid, ChoiceType, ContinuousModification, ControllerRef, CounterTriggerFilter,
-    Duration, Effect, FilterProp, ManaContribution, ManaProduction, NinjutsuVariant, PtValue,
-    QuantityExpr, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction,
+    NinjutsuVariant, PtValue, QuantityExpr, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -433,17 +440,132 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
 ///
 /// If the card has Kicker and no additional_cost was already parsed from Oracle text
 /// (blight takes precedence since it's parsed from the "as an additional cost" line),
-/// set `additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }))`.
+/// set `additional_cost = Some(AdditionalCost::Kicker { ... })`.
 pub fn synthesize_kicker(face: &mut CardFace) {
     if face.additional_cost.is_some() {
         return;
     }
-    if let Some(cost) = face.keywords.iter().find_map(|k| match k {
-        Keyword::Kicker(cost) => Some(cost.clone()),
-        _ => None,
-    }) {
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana { cost }));
+    let costs: Vec<AbilityCost> = face
+        .keywords
+        .iter()
+        .filter_map(|k| match k {
+            Keyword::Kicker(cost) => Some(AbilityCost::Mana { cost: cost.clone() }),
+            _ => None,
+        })
+        .collect();
+    if !costs.is_empty() {
+        face.additional_cost = Some(AdditionalCost::Kicker {
+            costs,
+            repeatable: false,
+        });
     }
+}
+
+/// CR 702.33f: Conditions of the form "if it was kicked with its [A] kicker"
+/// are linked to the first or second kicker cost printed on the card. The
+/// parser can see the condition text before card-level additional-cost
+/// synthesis is complete, so this synthesis pass resolves the printed mana
+/// cost back to the positional `KickerVariant`.
+pub fn resolve_kicker_condition_variants(face: &mut CardFace) {
+    let Some(oracle_text) = &face.oracle_text else {
+        return;
+    };
+    let Some(additional_cost) = &face.additional_cost else {
+        return;
+    };
+
+    let mut trigger_index = 0;
+    for line in oracle_text.lines() {
+        let lower = line.to_lowercase();
+        if !has_trigger_prefix(&lower) {
+            continue;
+        }
+
+        if let Some(cost) = parse_specific_kicker_condition_cost(line, &lower) {
+            if let Some(variant) = kicker_variant_for_cost(additional_cost, &cost) {
+                if let Some(trigger) = face.triggers.get_mut(trigger_index) {
+                    if let Some(execute) = trigger.execute.as_mut() {
+                        replace_first_default_kicker_condition(execute, variant);
+                    }
+                }
+            }
+        }
+        trigger_index += 1;
+    }
+}
+
+fn parse_specific_kicker_condition_cost(raw: &str, lower: &str) -> Option<ManaCost> {
+    let (lower_after_anchor, _) =
+        take_until::<_, _, VerboseError<&str>>(" was kicked with its ")
+            .parse(lower)
+            .ok()?;
+    let (lower_cost, _) = tag::<_, _, VerboseError<&str>>(" was kicked with its ")
+        .parse(lower_after_anchor)
+        .ok()?;
+    let raw_cost = &raw[raw.len() - lower_cost.len()..];
+    let (raw_after_cost, cost) = nom_primitives::parse_mana_cost.parse(raw_cost).ok()?;
+    let lower_after_cost = &lower[raw.len() - raw_after_cost.len()..];
+    tag::<_, _, VerboseError<&str>>(" kicker")
+        .parse(lower_after_cost)
+        .ok()?;
+    Some(cost)
+}
+
+fn kicker_variant_for_cost(
+    additional_cost: &AdditionalCost,
+    target_cost: &ManaCost,
+) -> Option<KickerVariant> {
+    let AdditionalCost::Kicker { costs, .. } = additional_cost else {
+        return None;
+    };
+    costs.iter().enumerate().find_map(|(index, cost)| {
+        let AbilityCost::Mana { cost } = cost else {
+            return None;
+        };
+        if cost != target_cost {
+            return None;
+        }
+        match index {
+            0 => Some(KickerVariant::First),
+            1 => Some(KickerVariant::Second),
+            _ => None,
+        }
+    })
+}
+
+fn replace_first_default_kicker_condition(
+    ability: &mut AbilityDefinition,
+    variant: KickerVariant,
+) -> bool {
+    if ability
+        .condition
+        .as_ref()
+        .is_some_and(is_default_additional_cost_paid_condition)
+    {
+        ability.condition = Some(AbilityCondition::additional_cost_paid_kicker(variant));
+        return true;
+    }
+
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        if replace_first_default_kicker_condition(sub_ability, variant) {
+            return true;
+        }
+    }
+
+    ability
+        .mode_abilities
+        .iter_mut()
+        .any(|mode| replace_first_default_kicker_condition(mode, variant))
+}
+
+fn is_default_additional_cost_paid_condition(condition: &AbilityCondition) -> bool {
+    matches!(
+        condition,
+        AbilityCondition::AdditionalCostPaid {
+            variant: None,
+            min_count: 1
+        }
+    )
 }
 
 /// CR 702.27a: Synthesize `additional_cost` from `Keyword::Buyback(BuybackCost)`.
@@ -848,7 +970,7 @@ pub fn synthesize_casualty(face: &mut CardFace) {
             target: TargetFilter::SelfRef,
         },
     )
-    .condition(AbilityCondition::AdditionalCostPaid);
+    .condition(AbilityCondition::additional_cost_paid_any());
 
     face.triggers.push(
         TriggerDefinition::new(TriggerMode::SpellCast)
@@ -1306,6 +1428,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_kicker(face);
     synthesize_buyback(face);
     synthesize_gift(face);
+    resolve_kicker_condition_variants(face);
     synthesize_case_solve(face);
     // Warp: no synthesis needed — runtime handled by Keyword::Warp directly
     synthesize_mobilize(face);

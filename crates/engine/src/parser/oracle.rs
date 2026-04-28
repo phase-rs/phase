@@ -37,7 +37,8 @@ use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
 use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
-    extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
+    extract_keyword_line, is_keyword_cost_line, parse_kicker_additional_cost_line,
+    parse_keyword_from_oracle,
 };
 use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{
@@ -93,6 +94,29 @@ pub struct ParsedAbilities {
     /// Diagnostic warnings from silent fallback patterns during parsing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parse_warnings: Vec<String>,
+}
+
+fn merge_kicker_additional_cost(slot: &mut Option<AdditionalCost>, incoming: AdditionalCost) {
+    match incoming {
+        AdditionalCost::Kicker {
+            costs: incoming_costs,
+            repeatable: false,
+        } => {
+            if let Some(AdditionalCost::Kicker {
+                costs,
+                repeatable: false,
+            }) = slot.as_mut()
+            {
+                costs.extend(incoming_costs);
+            } else {
+                *slot = Some(AdditionalCost::Kicker {
+                    costs: incoming_costs,
+                    repeatable: false,
+                });
+            }
+        }
+        incoming => *slot = Some(incoming),
+    }
 }
 
 fn definition_grants_flashback(def: &AbilityDefinition) -> bool {
@@ -1423,6 +1447,9 @@ pub fn parse_oracle_text(
         .parse(lower.as_str())
         .is_ok()
         {
+            if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
+                merge_kicker_additional_cost(&mut result.additional_cost, cost);
+            }
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
                 result.extracted_keywords.push(kw);
             }

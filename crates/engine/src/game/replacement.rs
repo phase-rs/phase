@@ -1563,10 +1563,18 @@ fn evaluate_replacement_condition(
                     .is_some_and(|o| o.controller == controller)
             })
         }
-        // CR 702.33d: "if was kicked" — applies only when the kicker cost was paid.
-        // TODO: Propagate additional_cost_paid to GameObject for precise evaluation.
-        // For now, conservatively apply the replacement (counters always placed).
-        ReplacementCondition::CastViaKicker { .. } => true,
+        // CR 702.33d + CR 702.33f: "if was kicked" — applies only when the
+        // source permanent's spell was kicked. `kickers_paid` is populated at
+        // cast resolution from `SpellContext.kickers_paid`. When `variant` is
+        // `Some`, narrow to that specific kicker position; when `None`, any
+        // kicker payment satisfies the gate.
+        ReplacementCondition::CastViaKicker { variant } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|o| match variant {
+                Some(v) => o.kickers_paid.contains(v),
+                None => !o.kickers_paid.is_empty(),
+            }),
         ReplacementCondition::SourceTappedState { tapped } => state
             .objects
             .get(&source_id)

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::types::ability::{AbilityCost, AdditionalCost, ResolvedAbility};
+use crate::types::ability::{AbilityCost, AdditionalCost, KickerVariant, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast, StackEntry,
@@ -38,6 +38,18 @@ pub(crate) fn handle_decide_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if matches!(
+        pending.additional_cost_flow,
+        Some(AdditionalCost::Kicker { .. })
+    ) {
+        return handle_decide_kicker_cost(state, player, pending, pay, events);
+    }
+    if matches!(additional_cost, AdditionalCost::Kicker { .. }) {
+        let mut pending = pending;
+        pending.additional_cost_flow = Some(additional_cost.clone());
+        return handle_decide_kicker_cost(state, player, pending, pay, events);
+    }
+
     let mut ability = pending.ability;
 
     let cost_to_pay = match additional_cost {
@@ -50,6 +62,7 @@ pub(crate) fn handle_decide_additional_cost(
                 None
             }
         }
+        AdditionalCost::Kicker { .. } => unreachable!("kicker costs are handled before generic optional costs"),
         AdditionalCost::Choice(preferred, fallback) => {
             if pay {
                 ability.context.additional_cost_paid = true;
@@ -71,19 +84,115 @@ pub(crate) fn handle_decide_additional_cost(
     if let Some(cost) = cost_to_pay {
         pay_additional_cost(state, player, cost, updated_pending, events)
     } else {
-        pay_and_push(
+        finish_pending_cost_or_cast(state, player, updated_pending, events)
+    }
+}
+
+fn handle_decide_kicker_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some((variant, cost, repeatable)) = next_kicker_option(state, player, &pending) else {
+        pending.additional_cost_flow = None;
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    };
+
+    if !pay {
+        if repeatable {
+            pending.additional_cost_flow = None;
+        } else if !pending.declined_kickers.contains(&variant) {
+            pending.declined_kickers.push(variant);
+        }
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+
+    pending.ability.context.additional_cost_paid = true;
+    pending.ability.context.kickers_paid.push(variant);
+    pay_additional_cost(state, player, cost, pending, events)
+}
+
+fn next_kicker_option(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+) -> Option<(KickerVariant, AbilityCost, bool)> {
+    let Some(AdditionalCost::Kicker { costs, repeatable }) = &pending.additional_cost_flow else {
+        return None;
+    };
+
+    if *repeatable {
+        let cost = costs.first()?.clone();
+        return cost
+            .is_payable(state, player, pending.object_id)
+            .then_some((KickerVariant::First, cost, true));
+    }
+
+    for (index, cost) in costs.iter().enumerate() {
+        let variant = match index {
+            0 => KickerVariant::First,
+            1 => KickerVariant::Second,
+            _ => break,
+        };
+        if pending.ability.context.kickers_paid.contains(&variant)
+            || pending.declined_kickers.contains(&variant)
+        {
+            continue;
+        }
+        if cost.is_payable(state, player, pending.object_id) {
+            return Some((variant, cost.clone(), false));
+        }
+    }
+
+    None
+}
+
+fn finish_pending_cost_or_cast(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(ability_index) = pending.activation_ability_index {
+        return push_activated_ability_to_stack(
             state,
             player,
-            updated_pending.object_id,
-            updated_pending.card_id,
-            updated_pending.ability,
-            &updated_pending.cost,
-            updated_pending.casting_variant,
-            updated_pending.distribute,
-            updated_pending.origin_zone,
+            pending.object_id,
+            ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
             events,
-        )
+        );
     }
+
+    if matches!(
+        pending.additional_cost_flow,
+        Some(AdditionalCost::Kicker { .. })
+    ) {
+        if let Some((_, current_cost, _)) = next_kicker_option(state, player, &pending) {
+            return Ok(WaitingFor::OptionalCostChoice {
+                player,
+                cost: AdditionalCost::Optional(current_cost),
+                pending_cast: Box::new(pending),
+            });
+        }
+        pending.additional_cost_flow = None;
+    }
+
+    pay_and_push(
+        state,
+        player,
+        pending.object_id,
+        pending.card_id,
+        pending.ability,
+        &pending.cost,
+        pending.casting_variant,
+        pending.distribute,
+        pending.origin_zone,
+        events,
+    )
 }
 
 /// Complete the discard-for-cost flow: discard selected cards, then continue casting.
@@ -141,30 +250,7 @@ pub(crate) fn handle_discard_for_cost(
         }
     }
 
-    if let Some(ability_index) = pending.activation_ability_index {
-        push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            events,
-        )
-    } else {
-        pay_and_push(
-            state,
-            player,
-            pending.object_id,
-            pending.card_id,
-            pending.ability,
-            &pending.cost,
-            pending.casting_variant,
-            pending.distribute,
-            pending.origin_zone,
-            events,
-        )
-    }
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 /// CR 118.3 + CR 601.2b: Complete sacrifice-as-cost after player selection.
@@ -215,31 +301,7 @@ pub(crate) fn handle_sacrifice_for_cost(
             .map_err(|e| EngineError::InvalidAction(format!("{e}")))?;
     }
 
-    // Resume path depends on whether this is a spell or activated ability
-    if let Some(ability_index) = pending.activation_ability_index {
-        push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            events,
-        )
-    } else {
-        pay_and_push(
-            state,
-            player,
-            pending.object_id,
-            pending.card_id,
-            pending.ability,
-            &pending.cost,
-            pending.casting_variant,
-            pending.distribute,
-            pending.origin_zone,
-            events,
-        )
-    }
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 /// CR 118.3 + CR 601.2b: Complete return-to-hand-as-cost after player selection.
@@ -271,30 +333,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
         super::zones::move_to_zone(state, id, Zone::Hand, events);
     }
 
-    if let Some(ability_index) = pending.activation_ability_index {
-        push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            events,
-        )
-    } else {
-        pay_and_push(
-            state,
-            player,
-            pending.object_id,
-            pending.card_id,
-            pending.ability,
-            &pending.cost,
-            pending.casting_variant,
-            pending.distribute,
-            pending.origin_zone,
-            events,
-        )
-    }
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 /// Blight cost — put -1/-1 counters on chosen creatures after player selection.
@@ -331,31 +370,7 @@ pub(crate) fn handle_blight_choice(
         }
     }
 
-    // Resume casting
-    if let Some(ability_index) = pending.activation_ability_index {
-        push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            events,
-        )
-    } else {
-        pay_and_push(
-            state,
-            player,
-            pending.object_id,
-            pending.card_id,
-            pending.ability,
-            &pending.cost,
-            pending.casting_variant,
-            pending.distribute,
-            pending.origin_zone,
-            events,
-        )
-    }
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 /// CR 702.34a: Tap creatures cost — complete the tap-creatures cost after player selection.
@@ -394,31 +409,7 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
         });
     }
 
-    // Resume path depends on whether this is a spell or activated ability
-    if let Some(ability_index) = pending.activation_ability_index {
-        push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            events,
-        )
-    } else {
-        pay_and_push(
-            state,
-            player,
-            pending.object_id,
-            pending.card_id,
-            pending.ability,
-            &pending.cost,
-            pending.casting_variant,
-            pending.distribute,
-            pending.origin_zone,
-            events,
-        )
-    }
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 /// CR 118.9a + CR 601.2b + CR 601.2h: Complete the exile-for-cost cost after
@@ -474,18 +465,7 @@ pub(crate) fn handle_exile_for_cost(
         super::zones::move_to_zone(state, id, Zone::Exile, events);
     }
 
-    pay_and_push(
-        state,
-        player,
-        pending.object_id,
-        pending.card_id,
-        pending.ability,
-        &pending.cost,
-        pending.casting_variant,
-        pending.distribute,
-        pending.origin_zone,
-        events,
-    )
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 /// Push an activated ability to the stack after costs are paid.
@@ -692,9 +672,24 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.origin_zone = origin_zone;
                 return pay_additional_cost(state, player, req_cost.clone(), pending, events);
             }
+            AdditionalCost::Kicker { costs, repeatable } => {
+                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                pending.casting_variant = casting_variant;
+                pending.distribute = distribute.clone();
+                pending.origin_zone = origin_zone;
+                if costs.is_empty() {
+                    return finish_pending_cost_or_cast(state, player, pending, events);
+                }
+                pending.additional_cost_flow = Some(AdditionalCost::Kicker {
+                    costs: costs.clone(),
+                    repeatable: *repeatable,
+                });
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
             AdditionalCost::Optional(opt_cost) => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
+                pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
                 // CR 601.2b: If the optional additional cost requires a choice
                 // of object and no legal object exists, skip the prompt and
@@ -722,6 +717,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             AdditionalCost::Choice(preferred, fallback) => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
+                pending.distribute = distribute;
                 pending.origin_zone = origin_zone;
                 // CR 601.2b: If the preferred branch is unpayable, fall through
                 // to the fallback without prompting. If both are unpayable, the
@@ -1108,16 +1104,13 @@ fn pay_additional_cost(
         AbilityCost::Mana { cost: mana_cost } => {
             // Add mana cost to the pending payment (handled by pay_and_push → pay_mana_cost)
             let combined = super::restrictions::add_mana_cost(&pending.cost, &mana_cost);
-            return pay_and_push(
+            return finish_pending_cost_or_cast(
                 state,
                 player,
-                pending.object_id,
-                pending.card_id,
-                pending.ability,
-                &combined,
-                pending.casting_variant,
-                pending.distribute,
-                pending.origin_zone,
+                PendingCast {
+                    cost: combined,
+                    ..pending
+                },
                 events,
             );
         }
@@ -1267,18 +1260,7 @@ fn pay_additional_cost(
         }
     }
 
-    pay_and_push(
-        state,
-        player,
-        pending.object_id,
-        pending.card_id,
-        pending.ability,
-        &pending.cost,
-        pending.casting_variant,
-        pending.distribute,
-        pending.origin_zone,
-        events,
-    )
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 #[allow(clippy::too_many_arguments)]

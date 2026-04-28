@@ -1824,7 +1824,23 @@ fn evaluate_condition(
     ability: &ResolvedAbility,
 ) -> bool {
     match condition {
-        AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
+        // CR 702.33d + CR 702.33f + CR 608.2c: Parameterized additional-cost
+        // gating. The default shape (`variant: None`, `min_count: 1`) reads the
+        // legacy single-bool flag used by Gift / Buyback / Bargain / Evidence /
+        // plain "if it was kicked". Specific kicker variants and multi-kicker
+        // counts read `kickers_paid` (populated by the casting flow, copied to
+        // GameObject at cast resolution, and propagated back into the trigger's
+        // resolved-ability context for ETB triggers).
+        AbilityCondition::AdditionalCostPaid { variant, min_count } => match variant {
+            Some(kicker) => ability.context.kickers_paid.contains(kicker),
+            None => {
+                if *min_count <= 1 {
+                    ability.context.additional_cost_paid
+                } else {
+                    ability.context.kickers_paid.len() >= *min_count as usize
+                }
+            }
+        },
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
         }
@@ -4430,6 +4446,92 @@ mod tests {
                 (PlayerId(1), PlayerId(1), Some(4), Some(4)),
             ]
         );
+    }
+
+    /// CR 702.33d + CR 702.33f + CR 608.2c: Default-shape `AdditionalCostPaid`
+    /// (variant=None, min_count=1) reads `additional_cost_paid` so legacy
+    /// Gift / Buyback / Bargain / Evidence / plain "if it was kicked" gating
+    /// stays correct.
+    #[test]
+    fn additional_cost_paid_default_shape_reads_legacy_bool() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let cond = AbilityCondition::additional_cost_paid_any();
+        assert!(!evaluate_condition(&cond, &state, &ability));
+        ability.context.additional_cost_paid = true;
+        assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    /// CR 702.33f: variant gating reads `kickers_paid` membership. Mirrors
+    /// Ana Battlemage's per-kicker triggers.
+    #[test]
+    fn additional_cost_paid_variant_reads_kickers_paid() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let first = AbilityCondition::additional_cost_paid_kicker(
+            crate::types::ability::KickerVariant::First,
+        );
+        let second = AbilityCondition::additional_cost_paid_kicker(
+            crate::types::ability::KickerVariant::Second,
+        );
+        assert!(!evaluate_condition(&first, &state, &ability));
+        assert!(!evaluate_condition(&second, &state, &ability));
+        ability
+            .context
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::First);
+        assert!(evaluate_condition(&first, &state, &ability));
+        assert!(!evaluate_condition(&second, &state, &ability));
+        ability
+            .context
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::Second);
+        assert!(evaluate_condition(&first, &state, &ability));
+        assert!(evaluate_condition(&second, &state, &ability));
+    }
+
+    /// CR 702.33b/c: `min_count >= 2` reads `kickers_paid.len()`. Mirrors
+    /// Archangel of Wrath's "kicked twice" trigger.
+    #[test]
+    fn additional_cost_paid_min_count_reads_kickers_paid_len() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let twice = AbilityCondition::additional_cost_paid_n_times(2);
+        assert!(!evaluate_condition(&twice, &state, &ability));
+        ability
+            .context
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::First);
+        assert!(!evaluate_condition(&twice, &state, &ability));
+        ability
+            .context
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::Second);
+        assert!(evaluate_condition(&twice, &state, &ability));
     }
 
     #[test]

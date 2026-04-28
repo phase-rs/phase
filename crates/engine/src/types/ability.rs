@@ -2995,6 +2995,16 @@ pub enum AdditionalCost {
     /// "you may [cost]" — player decides whether to pay.
     /// If paid, `SpellContext::additional_cost_paid` is set to true.
     Optional(AbilityCost),
+    /// CR 702.33a-c + CR 601.2b/f: Kicker costs announced during spell
+    /// casting. `costs.len() == 1` is ordinary kicker, `costs.len() == 2`
+    /// represents "Kicker [cost 1] and/or [cost 2]" (CR 702.33b), and
+    /// `repeatable == true` represents multikicker (CR 702.33c), where the
+    /// single listed cost may be paid any number of times.
+    Kicker {
+        costs: Vec<AbilityCost>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        repeatable: bool,
+    },
     /// "[cost A] or [cost B]" — player must pay exactly one.
     /// Choosing the first cost sets `additional_cost_paid = true`.
     Choice(AbilityCost, AbilityCost),
@@ -5704,8 +5714,29 @@ impl AbilityDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AbilityCondition {
-    /// CR 702.33d: Kicker — optional additional cost; paid/unpaid state stored in SpellContext.
-    AdditionalCostPaid,
+    /// CR 702.33d + CR 702.33f + CR 608.2c: An optional additional cost was paid
+    /// during casting. Parameterized for kicker variant gating:
+    ///
+    ///   - `variant: None`, `min_count: 1` (default) — "if it was kicked" / "if
+    ///     the gift was promised" / "if its buyback cost was paid" / "if
+    ///     evidence was collected" / "if it was bargained". Evaluates against
+    ///     `SpellContext.additional_cost_paid` (the legacy single-bool flag,
+    ///     used by all non-kicker optional-additional-cost mechanics).
+    ///   - `variant: Some(KickerVariant)`, `min_count: 1` — "if it was kicked
+    ///     with its [A]/[B] kicker" (CR 702.33f). Evaluates against
+    ///     `SpellContext.kickers_paid` membership.
+    ///   - `variant: None`, `min_count: N` (N >= 2) — "if it was kicked twice"
+    ///     / "if it was kicked N times" (CR 702.33b/c). Evaluates against
+    ///     `SpellContext.kickers_paid.len() >= N`.
+    AdditionalCostPaid {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<KickerVariant>,
+        #[serde(
+            default = "AbilityCondition::default_min_count",
+            skip_serializing_if = "AbilityCondition::is_default_min_count"
+        )]
+        min_count: u32,
+    },
     /// CR 608.2e: "Instead" clause — replaces the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
@@ -5827,6 +5858,71 @@ pub enum AbilityCondition {
     NthResolutionThisTurn { n: u32 },
 }
 
+impl AbilityCondition {
+    /// Default `min_count` for `AdditionalCostPaid` is 1 (any single payment).
+    /// Used by serde `#[serde(default = ...)]`.
+    pub(crate) fn default_min_count() -> u32 {
+        1
+    }
+
+    /// Skip-serialization predicate: omit `min_count` from JSON when it equals
+    /// the default value (1). Keeps card-data.json compact for the common case.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_default_min_count(value: &u32) -> bool {
+        *value == 1
+    }
+
+    /// Construct the default-shape `AdditionalCostPaid` condition: any single
+    /// optional-additional-cost payment was made. Equivalent to the legacy
+    /// nullary `AdditionalCostPaid` variant; preserves call sites in
+    /// `parser/oracle_effect/conditions.rs` (Gift, Buyback, Bargain, plain
+    /// "if it was kicked"), `database/synthesis.rs` (Bargain), and
+    /// `game/effects/change_zone.rs` (Collect Evidence).
+    pub fn additional_cost_paid_any() -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            variant: None,
+            min_count: 1,
+        }
+    }
+
+    /// CR 702.33f: "if it was kicked with its [A/B] kicker" — gates on a
+    /// specific kicker variant being paid.
+    pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            variant: Some(variant),
+            min_count: 1,
+        }
+    }
+
+    /// CR 702.33b/c: "if it was kicked N times" — gates on the total kicker
+    /// payment count meeting a minimum.
+    pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            variant: None,
+            min_count,
+        }
+    }
+}
+
+/// CR 702.33f: Discriminator for which kicker cost was paid on a spell that has
+/// more than one kicker cost ("Kicker {A} and/or {B}"). Per CR 702.33f, the
+/// abilities that gate on a specific kicker reference the kickers by *position*
+/// on the card ("its [A] kicker" / "its [B] kicker"), so the discriminator is
+/// the position, not the cost text.
+///
+/// For single-kicker spells (CR 702.33a) and multikicker (CR 702.33c), only
+/// `First` is meaningful — there is no second kicker cost. Multikicker count is
+/// expressed via `Vec<KickerVariant>` length on `SpellContext.kickers_paid`
+/// (each repeated payment pushes another `First` entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KickerVariant {
+    /// CR 702.33f: First kicker cost as listed on the card.
+    First,
+    /// CR 702.33f: Second kicker cost as listed on the card. Only present when
+    /// the card has "Kicker {A} and/or {B}" (CR 702.33b).
+    Second,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -5834,6 +5930,21 @@ pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
+    /// CR 702.33d + CR 702.33f: The list of kicker payments declared during
+    /// casting, in payment order. For "Kicker {A} and/or {B}" cards (CR 702.33b),
+    /// each chosen kicker pushes a corresponding `KickerVariant` entry. For
+    /// multikicker (CR 702.33c), each repeated payment pushes another `First`.
+    /// Single-kicker spells push at most one `First` entry. Empty when no
+    /// kicker was paid.
+    ///
+    /// Linked to (and a strict superset of the information in)
+    /// `additional_cost_paid` for kicker-bearing spells:
+    ///   - empty                       ⇔ kicker not paid
+    ///   - non-empty                   ⇔ kicker paid
+    ///   - contains `KickerVariant::X` ⇔ that specific kicker variant was paid
+    ///   - `len() >= n`                ⇔ kicker was paid at least N times
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kickers_paid: Vec<KickerVariant>,
     /// Whether an optional "you may" effect was performed during resolution.
     /// Used by AbilityCondition::IfYouDo to gate dependent sub_abilities.
     #[serde(default)]
@@ -6121,12 +6232,15 @@ pub enum ReplacementCondition {
     /// creature earlier this turn. Evaluated against
     /// `state.creatures_attacked_this_turn` for the controller.
     YouAttackedThisTurn,
-    /// CR 702.33d: "if was kicked" — replacement applies only when the creature
-    /// was cast with its kicker cost paid. Optional `cost_text` narrows to a specific
-    /// kicker variant (e.g., "its {1}{R} kicker").
+    /// CR 702.33d + CR 702.33f: "if was kicked" — replacement applies only when
+    /// the source permanent's spell was cast with at least one kicker cost paid.
+    /// Optional `variant` narrows to a specific kicker position (CR 702.33f:
+    /// "with its [A]/[B] kicker"). Evaluated against
+    /// `GameObject.kickers_paid` (populated at cast resolution from
+    /// `SpellContext.kickers_paid`).
     CastViaKicker {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost_text: Option<String>,
+        variant: Option<KickerVariant>,
     },
     /// "as long as ~ is tapped/untapped" — replacement applies only while the
     /// source object is in the required tapped state.

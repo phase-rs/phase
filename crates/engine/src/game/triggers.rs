@@ -2087,6 +2087,20 @@ fn build_triggered_ability(
         if let Some(zone) = state.objects.get(&source_id).and_then(|o| o.cast_from_zone) {
             resolved.context.cast_from_zone = Some(zone);
         }
+        // CR 702.33d + CR 702.33f: Propagate kicker payments from the source
+        // object's `kickers_paid` (set at cast resolution) into the
+        // triggered ability's context so `AbilityCondition::AdditionalCostPaid`
+        // (with kicker variant or multikicker count) can evaluate.
+        if let Some(obj) = state.objects.get(&source_id) {
+            if !obj.kickers_paid.is_empty() {
+                resolved.context.kickers_paid.clone_from(&obj.kickers_paid);
+                // Maintain the legacy single-bool flag for "if it was kicked"
+                // (no variant, min_count=1) so the default-shape evaluator
+                // remains correct on triggered abilities (the bool reads
+                // `additional_cost_paid` directly per the evaluator contract).
+                resolved.context.additional_cost_paid = true;
+            }
+        }
         // CR 118.12: Carry unless_pay modifier from trigger definition.
         if trig_def.unless_pay.is_some() {
             resolved.unless_pay = trig_def.unless_pay.clone();
