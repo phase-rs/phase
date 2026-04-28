@@ -866,17 +866,35 @@ pub enum ManaSpendRestriction {
 }
 
 /// Duration for temporary effects.
+///
+/// Player-axis variants (`UntilNextTurnOf`, `UntilNextUntapStepOf`) are
+/// parameterized by `PlayerScope` per the workspace "Parameterize, don't
+/// proliferate" principle. `PlayerScope::Controller` recovers the legacy
+/// "until your next turn" / "controller's next untap step" semantics; future
+/// `Target` / `Opponent` / `AllPlayers` readings unblock cards whose duration
+/// is bound to a non-controller player.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Duration {
+    /// CR 514.2: Effect expires at end of turn (cleanup step).
     UntilEndOfTurn,
     /// CR 514.2: Effect expires at end of combat phase.
     UntilEndOfCombat,
-    UntilYourNextTurn,
+    /// CR 514.2 + CR 611.2a: Effect expires at the beginning of `player`'s
+    /// next turn. `PlayerScope::Controller` corresponds to the legacy
+    /// "until your next turn" reading.
+    UntilNextTurnOf {
+        player: PlayerScope,
+    },
+    /// CR 611.2a: Effect expires when the source object leaves the
+    /// battlefield.
     UntilHostLeavesPlay,
-    /// CR 502.3: Effect expires at the beginning of the affected permanent's
-    /// controller's next untap step. Used for "doesn't untap during its
-    /// controller's next untap step" effects.
-    UntilControllerNextUntapStep,
+    /// CR 502.3 + CR 611.2a: Effect expires at the beginning of `player`'s
+    /// next untap step. `PlayerScope::Controller` corresponds to the legacy
+    /// "controller's next untap step" reading used by exert / "doesn't
+    /// untap" effects.
+    UntilNextUntapStepOf {
+        player: PlayerScope,
+    },
     /// CR 611.2b: "for as long as [condition]" — effect persists while condition holds.
     ForAsLongAs {
         condition: StaticCondition,
@@ -976,7 +994,7 @@ pub enum CastingPermission {
     ///
     /// `granted_to` records the player the permission was granted to — i.e. the
     /// controller of the effect that created it (CR 611.2a/b). This is required
-    /// to correctly expire `Duration::UntilYourNextTurn` permissions at the
+    /// to correctly expire `Duration::UntilNextTurnOf` permissions at the
     /// grantee's next untap step and `Duration::UntilEndOfTurn` permissions at
     /// cleanup (CR 514.2). Cast-permission checks (`has_exile_cast_permission`)
     /// do not consult this field — it governs duration pruning only.
@@ -1026,7 +1044,7 @@ pub enum CastingPermission {
 /// to at resolution time. Resolved to a concrete `PlayerId` by
 /// `grant_permission::resolve` before the permission is written to the target
 /// `GameObject`. Drives both `granted_to` binding and, for durations scoped to
-/// that player (e.g., `UntilYourNextTurn`), the prune step in `layers.rs`.
+/// that player (e.g., `UntilNextTurnOf`), the prune step in `layers.rs`.
 ///
 /// Default is `AbilityController` for all pre-existing parser call sites.
 /// Additional variants support compound-exile patterns where multiple objects
@@ -1726,14 +1744,48 @@ pub enum TargetFilter {
     Owner,
 }
 
+/// CR 102 + CR 119 + CR 402: Player axis for player-scoped quantity references.
+///
+/// Parameterizes the player whose hand size, life total, or other per-player
+/// scalar is being read. Replaces sibling enum variants like
+/// `LifeTotal` / `TargetLifeTotal` / `OpponentLifeTotal` and
+/// `HandSize` / `OpponentHandSize` with a single parameterized form.
+///
+/// Categorical-boundary check (per the "Parameterize, don't proliferate"
+/// principle): every variant is a player-relativity choice within a single
+/// CR section. Aggregate scopes (`Opponent`, `AllPlayers`) compose
+/// `AggregateFunction` to express max/min/sum across a population — they do
+/// not introduce a new abstraction layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PlayerScope {
+    /// CR 109.5 / CR 113.6: The controller of the source ability or effect.
+    Controller,
+    /// CR 109.4 + CR 113.6 + CR 115.1: The first player target of the
+    /// resolving ability (read from `ability.targets`).
+    Target,
+    /// CR 102.2 + CR 102.3: All opponents of the controller, aggregated by
+    /// `aggregate`. Existing `OpponentLifeTotal` / `OpponentHandSize`
+    /// semantics correspond to `aggregate = Max`.
+    Opponent { aggregate: AggregateFunction },
+    /// CR 102.1: All players in the game (controller + opponents),
+    /// aggregated by `aggregate`. Reserved for future cards that read
+    /// "the highest life total among players" or similar cross-player
+    /// extrema that include the controller.
+    AllPlayers { aggregate: AggregateFunction },
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QuantityRef {
-    /// Number of cards in the controller's hand.
-    HandSize,
-    /// Controller's current life total.
-    LifeTotal,
+    /// CR 402: Number of cards in `player`'s hand. `PlayerScope::Controller`
+    /// is the default reading; `Target`, `Opponent { .. }`, and `AllPlayers`
+    /// cover targeted-player and cross-player aggregate variants.
+    HandSize { player: PlayerScope },
+    /// CR 119: `player`'s current life total. See `HandSize` for player-axis
+    /// semantics.
+    LifeTotal { player: PlayerScope },
     /// Number of cards in the controller's graveyard.
     GraveyardSize,
     /// Controller's life total minus the format's starting life total.
@@ -1824,8 +1876,6 @@ pub enum QuantityRef {
     },
     /// The power of the targeted permanent. Used for "equal to target's power".
     TargetPower,
-    /// CR 119.3 + CR 107.2: The life total of the targeted player.
-    TargetLifeTotal,
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
@@ -1983,12 +2033,6 @@ pub enum QuantityRef {
     /// clauses like "if an opponent discarded a card this turn" (Tinybones,
     /// Trinket Thief and similar).
     OpponentDiscardedCardThisTurn,
-    /// CR 119: Maximum life total among the controller's opponents.
-    /// Used for "an opponent has more life than you" cross-player comparisons.
-    OpponentLifeTotal,
-    /// CR 402: Maximum hand count among the controller's opponents.
-    /// Used for "an opponent has more cards in hand than you" cross-player comparisons.
-    OpponentHandSize,
     /// CR 309.7: Number of dungeons the controller has completed.
     DungeonsCompleted,
     /// CR 107.3m: The value of X paid for the spell that produced the source
@@ -2131,6 +2175,67 @@ pub enum QuantityExpr {
         factor: i32,
         inner: Box<QuantityExpr>,
     },
+    /// Sum of N independent quantity expressions. Used for conjunctive
+    /// "for each X and each Y" patterns where the two filters span
+    /// disjoint zones or axes that cannot be expressed as a single
+    /// `TargetFilter::Or` (e.g., Alrund's "+1/+1 for each card in your
+    /// hand and each foretold card you own in exile").
+    Sum { exprs: Vec<QuantityExpr> },
+    /// CR 107.1c + CR 608.2d: "Up to N" — the affected player chooses any
+    /// integer in `0..=resolve(max)` at resolution time. Used by
+    /// `Effect::Draw`, `Effect::Sacrifice`, `Effect::Discard`, and
+    /// `Effect::SearchLibrary` for the "draw / sacrifice / discard / search
+    /// for up to N" Oracle text class. The 4 specific resolvers peel this
+    /// wrapper via `QuantityExpr::peel_up_to` and propagate the bool to
+    /// their `WaitingFor::*Choice` runtime state.
+    ///
+    /// Layered above `QuantityExpr::Ref`/`Fixed`/`HalfRounded`/etc. so the
+    /// upper bound itself can be a dynamic game-state quantity (e.g. "draw
+    /// up to your hand size cards" → `UpTo { max: Ref { qty: HandSize } }`,
+    /// "sacrifice up to half your creatures" → `UpTo { max: HalfRounded {
+    /// inner: Ref { qty: ObjectCount {..} }, rounding: Down } }`).
+    ///
+    /// Generic quantity resolvers (`resolve_quantity`,
+    /// `resolve_quantity_with_targets`, etc.) treat `UpTo` transparently —
+    /// they resolve to the upper bound as if the `UpTo` wrapper were not
+    /// present. This is safe because the only places where the
+    /// "may pick fewer" semantics matter are the 4 specific effect
+    /// resolvers, which extract the flag explicitly via `peel_up_to`.
+    ///
+    /// Invariant: `max` MUST NOT itself be `UpTo` — nesting is meaningless
+    /// ("up to up to N" is just "up to N"). Always construct via the
+    /// `QuantityExpr::up_to` helper which debug-asserts this invariant.
+    UpTo { max: Box<QuantityExpr> },
+}
+
+impl QuantityExpr {
+    /// Construct an `UpTo { max }` expression, debug-asserting the
+    /// non-nesting invariant. Always use this rather than the raw struct
+    /// literal.
+    pub fn up_to(max: QuantityExpr) -> Self {
+        debug_assert!(
+            !matches!(max, QuantityExpr::UpTo { .. }),
+            "QuantityExpr::UpTo cannot wrap another UpTo — \"up to up to N\" is meaningless",
+        );
+        QuantityExpr::UpTo { max: Box::new(max) }
+    }
+
+    /// Peel an outer `UpTo` wrapper, returning `(inner_max, true)` if this
+    /// expression was an `UpTo`, otherwise `(self, false)`. The 4 effect
+    /// resolvers (Draw, Sacrifice, Discard, SearchLibrary) all call this to
+    /// derive the upper-bound expression and the "may pick fewer" flag they
+    /// propagate to their `WaitingFor` state.
+    pub fn peel_up_to(&self) -> (&QuantityExpr, bool) {
+        match self {
+            QuantityExpr::UpTo { max } => (max.as_ref(), true),
+            other => (other, false),
+        }
+    }
+
+    /// Returns true if this expression is an `UpTo` wrapper.
+    pub fn is_up_to(&self) -> bool {
+        matches!(self, QuantityExpr::UpTo { .. })
+    }
 }
 
 /// Comparison operator used in static conditions.
@@ -3017,6 +3122,10 @@ pub enum Effect {
     /// historical "controller draws" semantics for `"draw a card"` /
     /// `"you draw a card"` patterns where no `target` field appears in the
     /// serialized AST.
+    /// CR 121.1 + CR 608.2d: "Draw up to N cards" is encoded as
+    /// `count: QuantityExpr::UpTo { max: <former count> }`. The drawing
+    /// player chooses any 0..=resolve(max) at resolution time via the
+    /// `engine_resolution_choices` flow.
     Draw {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
@@ -3163,12 +3272,11 @@ pub enum Effect {
         /// ("sacrifice half the permanents they control") resolve per-iteration
         /// via `resolve_quantity_with_targets`, which honors `player_scope`
         /// controller rebinding.
+        /// CR 701.21a + CR 608.2d: "Sacrifice up to N permanents" is encoded
+        /// as `count: QuantityExpr::UpTo { max: <former count> }`. Distinct
+        /// from `optional: true` on the ability ("you may sacrifice").
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
-        /// CR 608.2d: When true, the player may select fewer than the required count
-        /// ("sacrifice up to N"). Distinct from `optional: true` on the ability ("you may sacrifice").
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
     },
     DiscardCard {
         #[serde(default = "default_one")]
@@ -3593,7 +3701,8 @@ pub enum Effect {
         /// produced amount references a player target (e.g., Jeska's Will mode 1
         /// "Add {R} for each card in target opponent's hand"). When set, the
         /// player target is surfaced as a target slot at cast time and
-        /// `TargetZoneCardCount`/`TargetLifeTotal` quantities resolve against it.
+        /// `TargetZoneCardCount` and `LifeTotal { player: Target }` quantities
+        /// resolve against it.
         /// `None` for the common case of mana abilities with no player target
         /// (Cabal Coffers, Reflecting Pool, fixed mana, etc.).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3607,9 +3716,8 @@ pub enum Effect {
         /// CR 701.9a: When true, the discard is random (e.g., "discard a card at random").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         random: bool,
-        /// CR 701.9b: When true, the player may discard 0..=count cards ("discard up to N").
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
+        /// CR 701.9b + CR 608.2d: "Discard up to N cards" is encoded as
+        /// `count: QuantityExpr::UpTo { max: <former count> }`.
         /// CR 608.2c: "discard N cards unless you discard a [type] card" — when set,
         /// the player may discard 1 card matching this filter instead of `count` cards.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3646,12 +3754,11 @@ pub enum Effect {
         /// Used by Bribery, Acquire, Praetor's Grasp, etc.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_player: Option<TargetFilter>,
-        /// CR 107.1c + CR 701.23d: When true, the searcher may find up to `count`
-        /// matching cards (including zero). When false, they must find exactly
-        /// `count` matching cards (or as many as possible if fewer exist). Set
-        /// by "any number of ..." and "up to N ..." Oracle phrasings.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
+        // CR 107.1c + CR 701.23d: "search for up to N" / "search for any
+        // number of" is encoded as `count: QuantityExpr::UpTo { max:
+        // <former count> }`. Plain "search for N" leaves count as a
+        // non-UpTo expression and the searcher must find exactly N (or as
+        // many as possible if fewer exist).
         /// CR 608.2c: Printed-text restriction on the chosen set (e.g., "with
         /// different names"). Defaults to `None` so the existing card-data.json
         /// deserializes without churn; the parser populates it for tutors that
@@ -3793,6 +3900,18 @@ pub enum Effect {
         /// If true, resolve the effect against the tracked object set from the parent.
         #[serde(default)]
         uses_tracked_set: bool,
+    },
+    /// CR 614.1a + CR 514.2: Register a one-shot replacement effect on the parent
+    /// ability's target object at resolution time. Used by riders like
+    /// "If that creature would die this turn, exile it instead." attached to
+    /// damage-dealing spells/abilities. The replacement is appended to the
+    /// target object's `replacement_definitions`; `valid_card: SelfRef`
+    /// inside the carried definition naturally binds to *that* object since
+    /// SelfRef on a replacement resolves against the carrying object.
+    /// Cleanup at end-of-turn relies on `expires_at_eot: true` on the
+    /// carried definition (CR 514.2).
+    AddTargetReplacement {
+        replacement: Box<ReplacementDefinition>,
     },
     /// CR 614.16: Apply a game-level restriction (e.g., disable damage prevention).
     AddRestriction {
@@ -4071,7 +4190,7 @@ pub enum Effect {
     },
     /// CR 701.15a: Goad target creature — it must attack each combat if able and must
     /// attack a player other than the goading player if able. Duration is until the
-    /// goading player's next turn (UntilYourNextTurn).
+    /// goading player's next turn (UntilNextTurnOf).
     Goad {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -4601,6 +4720,7 @@ impl Effect {
             | Effect::SolveCase
             | Effect::SetClassLevel { .. }
             | Effect::CreateDelayedTrigger { .. }
+            | Effect::AddTargetReplacement { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
             | Effect::GrantNextSpellAbility { .. }
@@ -4746,6 +4866,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BecomeUnprepared { .. } => "BecomeUnprepared",
         Effect::SetClassLevel { .. } => "SetClassLevel",
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
+        Effect::AddTargetReplacement { .. } => "AddTargetReplacement",
         Effect::AddRestriction { .. } => "AddRestriction",
         Effect::ReduceNextSpellCost { .. } => "ReduceNextSpellCost",
         Effect::GrantNextSpellAbility { .. } => "GrantNextSpellAbility",
@@ -4905,6 +5026,7 @@ pub enum EffectKind {
     BecomeUnprepared,
     SetClassLevel,
     CreateDelayedTrigger,
+    AddTargetReplacement,
     AddRestriction,
     ReduceNextSpellCost,
     GrantNextSpellAbility,
@@ -5070,6 +5192,7 @@ impl From<&Effect> for EffectKind {
             Effect::BecomeUnprepared { .. } => EffectKind::BecomeUnprepared,
             Effect::SetClassLevel { .. } => EffectKind::SetClassLevel,
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
+            Effect::AddTargetReplacement { .. } => EffectKind::AddTargetReplacement,
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::ReduceNextSpellCost { .. } => EffectKind::ReduceNextSpellCost,
             Effect::GrantNextSpellAbility { .. } => EffectKind::GrantNextSpellAbility,
@@ -5715,8 +5838,6 @@ pub enum TriggerCondition {
     TwoOrMoreSpellsCastLastTurn,
     /// CR 603.4: "if it's your turn" — intervening-if requiring the controller's turn.
     DuringYourTurn,
-    /// CR 603.4: "if it's not your turn" / "if it isn't your turn"
-    NotYourTurn,
     /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
@@ -5730,27 +5851,18 @@ pub enum TriggerCondition {
 
     /// "if you cast it" — zoneless cast check (unlike CastFromZone which requires a specific zone).
     /// CR 701.57a: Used by Discover ETB triggers.
+    /// Negation ("if it wasn't cast") is expressed via `Not { Box::new(WasCast) }`.
     WasCast,
-
-    /// "if none of them were cast" / "if it wasn't cast" — true when the entering
-    /// creature was NOT cast (entered via ninjutsu, reanimation, flicker, etc.).
-    /// CR 601.2: Negation of WasCast — checks that `cast_from_zone` is `None`.
-    WasNotCast,
 
     /// "if it's attacking" — true when the trigger source object is currently an attacker.
     /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).
     SourceIsAttacking,
 
     /// CR 702.49 + CR 702.190a + CR 603.4 + CR 702.138b: "if its sneak/ninjutsu
-    /// cost was paid this turn" / "unless it escaped". True when the source
-    /// permanent entered via the specified cast/activation variant this turn.
-    /// When `negated` is true, the condition inverts — e.g. "sacrifice it unless
-    /// it escaped" gates the sacrifice on `cast_variant_paid != Some(Escape)`.
-    CastVariantPaid {
-        variant: CastVariantPaid,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        negated: bool,
-    },
+    /// cost was paid this turn". True when the source permanent entered via the
+    /// specified cast/activation variant this turn. Negation ("unless it escaped")
+    /// is expressed via `Not { Box::new(CastVariantPaid { variant }) }`.
+    CastVariantPaid { variant: CastVariantPaid },
 
     /// CR 601.2: "during each opponent's turn" — the trigger only fires when it is
     /// currently an opponent's turn. Used in conjunction with NthSpellThisTurn constraint.
@@ -5797,16 +5909,17 @@ pub enum TriggerCondition {
     IsMonarch,
     /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
     HasCityBlessing,
-    /// CR 309.7: True when the controller has completed at least one dungeon.
-    CompletedADungeon,
-    /// CR 309.7: True when the controller has NOT completed a specific dungeon.
-    /// Used by Acererak: "if you haven't completed Tomb of Annihilation"
-    NotCompletedDungeon {
-        dungeon: crate::game::dungeon::DungeonId,
+    /// CR 309.7: True when the controller has completed a dungeon.
+    /// `specific: None` matches "have you completed any dungeon"; `specific: Some(d)`
+    /// matches "have you completed `d`". Negation ("haven't completed Tomb of
+    /// Annihilation") is expressed via `Not { Box::new(CompletedDungeon { specific }) }`.
+    CompletedDungeon {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        specific: Option<crate::game::dungeon::DungeonId>,
     },
-    /// CR 611.2b: "if this [permanent] is tapped/untapped" — checks the source's tapped status.
-    /// When `negated` is true, condition is met when the source is *untapped*.
-    SourceIsTapped { negated: bool },
+    /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
+    /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
+    SourceIsTapped,
     /// CR 113.6b: "if this card is in [zone]" — true when the trigger source is in the given zone.
     SourceInZone { zone: crate::types::zones::Zone },
     /// CR 122.1: "if you put a counter on a permanent this turn" — true when the controller
@@ -5880,6 +5993,13 @@ pub enum TriggerCondition {
     And { conditions: Vec<TriggerCondition> },
     /// Any condition must be true
     Or { conditions: Vec<TriggerCondition> },
+    /// CR 603.4: True when the inner predicate is false. Used for "unless [phrase]"
+    /// intervening-if patterns ("you lose 4 life unless you attacked this turn"
+    /// → `Not { Box::new(AttackedThisTurn) }`). Mirrors `TargetFilter::Not` and
+    /// `StaticCondition::Not` so trigger-side negation composes uniformly with
+    /// `And`/`Or`. Replaces the prior per-leaf `negated: bool` fields and the
+    /// `NotYourTurn` / `WasNotCast` / `NotCompletedDungeon` sibling-pair variants.
+    Not { condition: Box<TriggerCondition> },
 }
 
 /// Condition that gates whether a replacement effect applies.
@@ -5948,6 +6068,16 @@ pub enum ReplacementCondition {
     /// CR 702.138c: "escapes with" — replacement applies only when the creature
     /// entered the battlefield via escape.
     CastViaEscape,
+    /// CR 603.4: "if you cast it from [zone]" — replacement applies only when
+    /// the source object was cast from the specified zone (e.g., Myojin's
+    /// "enters with an indestructible counter on it if you cast it from your
+    /// hand"). Evaluated against `GameObject.cast_from_zone`.
+    CastFromZone { zone: Zone },
+    /// CR 207.2c (Raid ability word) + CR 614.1c: "if you attacked this turn"
+    /// — replacement applies only when the controller attacked with a
+    /// creature earlier this turn. Evaluated against
+    /// `state.creatures_attacked_this_turn` for the controller.
+    YouAttackedThisTurn,
     /// CR 702.33d: "if was kicked" — replacement applies only when the creature
     /// was cast with its kicker cost paid. Optional `cost_text` narrows to a specific
     /// kicker variant (e.g., "its {1}{R} kicker").
@@ -6437,6 +6567,14 @@ pub struct ReplacementDefinition {
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
+    /// CR 514.2 + CR 614.1a: When true, this replacement is removed at the end-of-turn
+    /// cleanup step regardless of whether it fired. Used by resolution-time replacement
+    /// registrations like "If [target] would die this turn, exile it instead." (CR 614.1a).
+    /// Orthogonal to `shield_kind`: shields imply EOT expiry via `is_shield()`, but this
+    /// flag covers non-shield replacements (e.g., zone-redirection riders) that also need
+    /// EOT cleanup. Cleanup logic ORs both signals.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expires_at_eot: bool,
     /// CR 615.1a: Damage redirection target filter — when present, prevented damage is
     /// redirected to matching target instead (e.g., Pariah: "all damage that would be dealt
     /// to you is dealt to ~ instead" → SelfRef, meaning the enchanted permanent/source).
@@ -6494,6 +6632,7 @@ impl ReplacementDefinition {
             token_owner_scope: None,
             valid_player: None,
             is_consumed: false,
+            expires_at_eot: false,
             redirect_target: None,
             mana_modification: None,
             additional_token_spec: None,
@@ -7094,6 +7233,92 @@ mod tests {
         assert_ne!(t, TargetRef::Object(ObjectId(6)));
     }
 
+    /// CR 107.1c + CR 608.2d: `QuantityExpr::up_to(max)` constructs the
+    /// wrapper variant; `peel_up_to` recovers (max, true).
+    #[test]
+    fn quantity_expr_up_to_constructor_and_peel_round_trip() {
+        let inner = QuantityExpr::Fixed { value: 3 };
+        let wrapped = QuantityExpr::up_to(inner.clone());
+        assert!(wrapped.is_up_to());
+        let (peeled, was_up_to) = wrapped.peel_up_to();
+        assert!(was_up_to);
+        assert_eq!(peeled, &inner);
+    }
+
+    /// CR 107.1c: `peel_up_to` on a non-UpTo expression returns the
+    /// expression unchanged with `false`. Resolvers depend on this so they
+    /// can call `peel_up_to` unconditionally.
+    #[test]
+    fn quantity_expr_peel_up_to_passes_through_non_up_to() {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        };
+        assert!(!expr.is_up_to());
+        let (peeled, was_up_to) = expr.peel_up_to();
+        assert!(!was_up_to);
+        assert_eq!(peeled, &expr);
+    }
+
+    /// Demonstrates the new compositional power: "up to your hand size cards"
+    /// composes `UpTo` over a dynamic `Ref` quantity, which was structurally
+    /// inexpressible under the old `up_to: bool` field layout.
+    #[test]
+    fn quantity_expr_up_to_composes_with_ref_for_hand_size() {
+        let expr = QuantityExpr::up_to(QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        });
+        let (max, up_to) = expr.peel_up_to();
+        assert!(up_to);
+        match max {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+            } => {}
+            other => panic!("expected Ref {{ HandSize }}, got {other:?}"),
+        }
+    }
+
+    /// Demonstrates the second new compositional axis: "up to half the
+    /// creatures they control" stacks `UpTo` over `HalfRounded` over
+    /// `ObjectCount`. Each layer is an existing primitive — the refactor
+    /// only added the outer wrapper.
+    #[test]
+    fn quantity_expr_up_to_composes_with_half_rounded_object_count() {
+        let creatures_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let expr = QuantityExpr::up_to(QuantityExpr::HalfRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: creatures_filter,
+                },
+            }),
+            rounding: RoundingMode::Down,
+        });
+        let (max, up_to) = expr.peel_up_to();
+        assert!(up_to);
+        assert!(matches!(max, QuantityExpr::HalfRounded { .. }));
+    }
+
+    /// CR 107.1c: Nesting `UpTo` inside `UpTo` is meaningless ("up to up to N"
+    /// is just "up to N"). The constructor `up_to()` debug-asserts against
+    /// this. Wrapped only in `cfg(debug_assertions)` because `debug_assert!`
+    /// is a no-op in release builds.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "QuantityExpr::UpTo cannot wrap another UpTo")]
+    fn quantity_expr_up_to_rejects_nested_up_to() {
+        let inner = QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 });
+        let _ = QuantityExpr::up_to(inner);
+    }
+
     #[test]
     fn target_ref_player_variant() {
         let t = TargetRef::Player(PlayerId(1));
@@ -7535,7 +7760,12 @@ mod tests {
         let durations = vec![
             Duration::UntilEndOfTurn,
             Duration::UntilEndOfCombat,
-            Duration::UntilYourNextTurn,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller,
+            },
             Duration::UntilHostLeavesPlay,
             Duration::Permanent,
         ];

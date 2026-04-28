@@ -15,6 +15,36 @@ use crate::types::ability::{
 };
 use crate::types::zones::Zone;
 
+/// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
+/// continuation chunk so the absorption matcher sees the bare verb form. Used
+/// by the SearchDestination follow-up absorber to handle iterated-search
+/// variants (Winds of Abandon: "those players put those cards onto the
+/// battlefield tapped") whose subject was demoted from a top-level subject
+/// because the put-step has already been folded into the search continuation.
+///
+/// Single nom `alt()` over the player-subject prefixes — extend by adding new
+/// arms here, never by adding more enumerated `matches!` arms downstream.
+///
+/// Intentionally does NOT delegate to `subject::parse_subject_application`:
+/// that function is a full subject parser that returns a `SubjectApplication`
+/// (filter + targeting + multi-target spec) for use at clause boundaries.
+/// Here we only need to peel a known set of player-pronoun prefixes from a
+/// continuation chunk before re-tokenizing — there is no filter to derive,
+/// no target to attach, and no multi-target structure. The simpler local form
+/// keeps the search-continuation absorber decoupled from the subject parser's
+/// richer return type and avoids constructing/then-discarding a
+/// `SubjectApplication` on the hot continuation path.
+fn strip_search_result_subject(lower: &str) -> &str {
+    alt((
+        tag::<_, _, VerboseError<&str>>("those players "),
+        tag("that player "),
+        tag("each player "),
+    ))
+    .parse(lower)
+    .map(|(rest, _)| rest)
+    .unwrap_or(lower)
+}
+
 /// Parse count from "choose one/two/three/N of them/those" text using nom combinator.
 /// Handles all chooser prefix forms: "choose ", "you choose ", "an opponent chooses ",
 /// "target opponent chooses ".
@@ -477,16 +507,44 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     if has_verb_prefix {
         return true;
     }
-    // "gain N" / "lose N" — imperative with numeric argument (e.g., "gain 3 life",
-    // "lose 2 life") is a clause start, but conjugated "gains"/"loses" is NOT.
-    if (tag::<_, _, VerboseError<&str>>("gain ").parse(s).is_ok()
-        && tag::<_, _, VerboseError<&str>>("gains ").parse(s).is_err())
-        || (tag::<_, _, VerboseError<&str>>("lose ").parse(s).is_ok()
-            && tag::<_, _, VerboseError<&str>>("loses ").parse(s).is_err())
-    {
-        return true;
+    // "gain N <noun>" / "lose N <noun>" — imperative with numeric/X argument
+    // (e.g., "gain 3 life", "lose 2 life") is a clause start. Bare "gain
+    // <keyword>" / "gain a <keyword>" is a continuous-modification rider on
+    // the previous pump clause and must NOT split (Heron's Grace, Sorin
+    // Solemn Visitor, Soul of Theros, Jeskai Charm, ~14 cards). Discriminator:
+    // the token after the verb must be a count expression (digits or "X"
+    // followed by a word boundary), not a keyword name.
+    if let Ok((rest, _)) = alt((tag::<_, _, VerboseError<&str>>("gain "), tag("lose "))).parse(s) {
+        // Reject conjugated "gains"/"loses" (handled separately above).
+        let conjugated = tag::<_, _, VerboseError<&str>>("gains ").parse(s).is_ok()
+            || tag::<_, _, VerboseError<&str>>("loses ").parse(s).is_ok();
+        if !conjugated && next_token_is_count(rest) {
+            return true;
+        }
     }
     starts_with_damage_clause(s)
+}
+
+/// CR 121.1 / CR 119.1: Returns true when the token immediately following a
+/// `gain `/`lose ` prefix is a count expression — i.e. digits, or `X`/`x`
+/// terminated by a non-alphanumeric boundary so we don't false-match "x" inside
+/// "x-cost" (only `X ` / `X,` / `X.` / end-of-string). Distinguishes imperative
+/// "gain 3 life" / "lose X life" from continuous-modification "gain lifelink".
+fn next_token_is_count(s: &str) -> bool {
+    let trimmed = s.trim_start();
+    let first_char = match trimmed.chars().next() {
+        Some(c) => c,
+        None => return false,
+    };
+    if first_char.is_ascii_digit() {
+        return true;
+    }
+    if first_char == 'x' || first_char == 'X' {
+        let after = &trimmed[first_char.len_utf8()..];
+        let next = after.chars().next();
+        return next.map(|c| !c.is_alphanumeric()).unwrap_or(true);
+    }
+    false
 }
 
 /// Checks if text starts with a subject-prefixed damage verb.
@@ -1411,19 +1469,33 @@ pub(super) fn parse_followup_continuation_ast(
         // (e.g., Assassin's Trophy / Ranging Raptors / Harrow compound), the
         // explicit "put it onto the battlefield" chunk in the same sentence is
         // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
+        //
+        // CR 701.23i + CR 609.3: Iterated-search variants (Winds of Abandon class)
+        // surface a plural subject ("those players put those cards onto the
+        // battlefield tapped") because the search step has `repeat_for:
+        // TrackedSetSize`. The compound has already been folded by the
+        // SearchDestination intrinsic continuation; the standalone restatement
+        // here would duplicate the ChangeZone if not absorbed. Use a structural
+        // prefix-strip on the player-subject so all (subject × pronoun × tapped)
+        // permutations match without N! enumerated arms.
         Effect::ChangeZone {
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             ..
-        } if matches!(
-            lower.trim().trim_end_matches('.'),
-            "put that card onto the battlefield"
-                | "put it onto the battlefield"
-                | "put them onto the battlefield"
-                | "put those cards onto the battlefield"
-                | "put that card onto the battlefield tapped"
-                | "put it onto the battlefield tapped"
-        ) =>
+        } if {
+            let bare = strip_search_result_subject(lower.trim().trim_end_matches('.'));
+            matches!(
+                bare,
+                "put that card onto the battlefield"
+                    | "put it onto the battlefield"
+                    | "put them onto the battlefield"
+                    | "put those cards onto the battlefield"
+                    | "put that card onto the battlefield tapped"
+                    | "put it onto the battlefield tapped"
+                    | "put them onto the battlefield tapped"
+                    | "put those cards onto the battlefield tapped"
+            )
+        } =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)
         }

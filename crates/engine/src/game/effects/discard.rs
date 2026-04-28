@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -27,20 +29,28 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_cards, up_to, unless_filter) = match &ability.effect {
-        Effect::DiscardCard { count, .. } => (*count, false, None),
+    // CR 701.9b + CR 608.2d: Peel `UpTo` from the count expression to derive
+    // the upper-bound expression and the may-pick-fewer flag. Plain
+    // `QuantityExpr` means a mandatory count; wrapped in `UpTo` means the
+    // player may discard 0..=count.
+    let (num_cards, up_to, unless_filter, target_filter) = match &ability.effect {
+        Effect::DiscardCard { count, target } => (*count, false, None, target.clone()),
         Effect::Discard {
             count,
-            up_to,
             unless_filter,
+            target,
             ..
-        } => (
-            // CR 107.1b: Use ability context so X resolves against the caster's chosen value.
-            resolve_quantity_with_targets(state, count, ability) as u32,
-            *up_to,
-            unless_filter.clone(),
-        ),
-        _ => (1, false, None),
+        } => {
+            let (inner, up_to) = count.peel_up_to();
+            (
+                // CR 107.1b: Use ability context so X resolves against the caster's chosen value.
+                resolve_quantity_with_targets(state, inner, ability) as u32,
+                up_to,
+                unless_filter.clone(),
+                target.clone(),
+            )
+        }
+        _ => (1, false, None, TargetFilter::Any),
     };
 
     // Check if targets specify specific cards to discard
@@ -114,8 +124,14 @@ pub fn resolve(
             }
         }
     } else {
-        // CR 701.9a: Find discard player — first TargetRef::Player, or default to controller.
-        let discard_player = ability.target_player();
+        // CR 701.9a + CR 115.1: Mirror Draw/Mill/Scry/Surveil — context-ref target
+        // filters (Controller, etc.) must consult state slots, not `ability.targets`,
+        // so a Discard sub-ability chained off a Player-targeted parent (e.g.
+        // Traumatic Critique: damage to any target → "Draw two cards, then discard
+        // a card") does not inherit the parent's chosen player and discard from
+        // the wrong hand. `resolve_player_for_context_ref` skips `ability.targets`
+        // when the filter is a context-ref and falls back to `ability.controller`.
+        let discard_player = super::resolve_player_for_context_ref(state, ability, &target_filter);
 
         // CR 701.9b: Player chooses which card(s) to discard (not "at random").
         let hand_cards: Vec<ObjectId> = state
@@ -418,7 +434,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -461,7 +476,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -495,7 +509,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -731,10 +744,9 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Discard {
-                count: QuantityExpr::Fixed { value: 2 },
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
                 random: false,
-                up_to: true,
                 unless_filter: None,
                 filter: None,
             },
@@ -813,7 +825,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -833,6 +844,59 @@ mod tests {
     }
 
     #[test]
+    fn controller_filter_does_not_inherit_parent_player_target() {
+        // CR 115.1 regression — Traumatic Critique:
+        // "Deals X damage to any target. Draw two cards, then discard a card."
+        // The sub Discard's `target: Controller` must NOT inherit the parent's
+        // Player target (the damage victim) — the controller of the spell discards.
+        use crate::types::ability::QuantityExpr;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        // Controller is P0 (the AI). Damage victim is P1 (the user).
+        // Give P0 a hand to discard from; give P1 a hand to confirm we don't discard theirs.
+        let p0_card = create_object(&mut state, CardId(1), PlayerId(0), "AI".into(), Zone::Hand);
+        let _p1_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "User".into(),
+            Zone::Hand,
+        );
+
+        // Sub-ability inherits parent target (P1) per resolve_ability_chain semantics.
+        let ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))], // inherited parent target
+            ObjectId(100),
+            PlayerId(0), // spell controller = P0
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // P0 (controller) has exactly one card → auto-discard, no choice prompt.
+        // The bug would have triggered an interactive choice on P1's hand instead.
+        assert!(
+            !state.players[0].hand.contains(&p0_card),
+            "controller (P0) should have discarded their card"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&p0_card),
+            "P0's card should be in graveyard"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DiscardChoice { player, .. } if player == PlayerId(1)),
+            "must not prompt P1 (parent target) for discard — Controller filter must resolve to spell controller"
+        );
+    }
+
+    #[test]
     fn empty_hand_up_to_discard_does_not_set_failed_flag() {
         use crate::types::ability::QuantityExpr;
 
@@ -841,10 +905,9 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Discard {
-                count: QuantityExpr::Fixed { value: 2 },
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
                 random: false,
-                up_to: true,
                 unless_filter: None,
                 filter: None,
             },

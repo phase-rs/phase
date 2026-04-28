@@ -737,6 +737,30 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         }
     }
 
+    // CR 903.3: Possessive commander reference ("your commander" /
+    // "their commander" / "your commanders"). The commander is identified by
+    // the IsCommander flag, not by a creature subtype. Effects like Command
+    // Beacon's "Put your commander into your hand from the command zone" need
+    // a typed target carrying IsCommander + the controller scope so the
+    // resolver can locate the right card.
+    if let Some((_poss, rest)) = strip_possessive(&lower) {
+        for word in &["commanders", "commander"] {
+            if let Ok((after, _)) =
+                tag::<_, _, nom_language::error::VerboseError<&str>>(*word).parse(rest)
+            {
+                let consumed = lower.len() - after.len();
+                return (
+                    TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::You),
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                    &text[consumed..],
+                );
+            }
+        }
+    }
+
     // Bare type phrase fallback: try parse_type_phrase before giving up.
     // Handles "other nonland permanents you own and control" after quantifier stripping.
     let (filter, rest) = parse_type_phrase(text);
@@ -1901,17 +1925,38 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
         } else {
             (false, a)
         };
-        let (a, _) = tag::<_, _, Vbe>("that ").parse(a).ok()?;
-        // CR 120.3: "that damage" — the damage amount captured by the trigger
-        // (DamageDone events stamp `EventContextAmount`).
-        let (qty, after) = if let Ok((a2, _)) = tag::<_, _, Vbe>("damage").parse(a) {
-            (QuantityRef::EventContextAmount, a2)
+        // CR 120.3: Anaphoric "that <noun>" forms — bind to the trigger context.
+        // CR 119.3: Non-anaphoric quantity-ref forms — bind to a static or
+        // game-state quantity ("the number of lands you control",
+        // "the number of cards in your graveyard", "the amount of life you
+        // gained this turn", etc.). The two forms are mutually exclusive at
+        // this position; try anaphoric first, then fall through.
+        let (qty, after) = if let Ok((a2, _)) = tag::<_, _, Vbe>("that ").parse(a) {
+            // CR 120.3: "that damage" — the damage amount captured by the trigger
+            // (DamageDone events stamp `EventContextAmount`).
+            if let Ok((a3, _)) = tag::<_, _, Vbe>("damage").parse(a2) {
+                (QuantityRef::EventContextAmount, a3)
+            } else {
+                // Fall back to the type-word arm — "that <type>" where <type> is any
+                // single word terminating at punctuation/space (e.g., "creature",
+                // "spell"). Uses the source object's mana value.
+                let after = a2.find([',', '.', ' ']).map_or(a2, |i| &a2[i..]);
+                (QuantityRef::EventContextSourceManaValue, after)
+            }
         } else {
-            // Fall back to the type-word arm — "that <type>" where <type> is any
-            // single word terminating at punctuation/space (e.g., "creature",
-            // "spell"). Uses the source object's mana value.
-            let after = a.find([',', '.', ' ']).map_or(a, |i| &a[i..]);
-            (QuantityRef::EventContextSourceManaValue, after)
+            // CR 119.3: Generic quantity-ref RHS — extract the phrase up to the
+            // next sentence-terminating punctuation and delegate to the shared
+            // `parse_quantity_ref` building block. Unlocks Vhal's "the number
+            // of study counters removed this way", Beseech the Queen's "the
+            // number of lands you control", Bring to Light's "the number of
+            // colors of mana spent to cast this spell", etc. The terminator
+            // boundary (comma / period / end-of-input) prevents over-consuming
+            // into trailing search-and-shuffle clauses ("…, reveal it, put it
+            // into your hand" on Beseech the Queen).
+            let phrase_end = a.find([',', '.']).unwrap_or(a.len());
+            let phrase = &a[..phrase_end];
+            let qty = crate::parser::oracle_quantity::parse_quantity_ref(phrase)?;
+            (qty, &a[phrase_end..])
         };
         let make_value = |off: i32| {
             if off == 0 {

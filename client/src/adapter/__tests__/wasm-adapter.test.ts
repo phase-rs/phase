@@ -19,8 +19,8 @@ const mockWorkerClient = {
     active_player: 0,
     phase: "Untap",
     players: [
-      { id: 0, life: 20, mana_pool: { mana: [] } },
-      { id: 1, life: 20, mana_pool: { mana: [] } },
+      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] } },
+      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] } },
     ],
     priority_player: 0,
   } as unknown as GameState),

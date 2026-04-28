@@ -15,8 +15,8 @@ use super::primitives::parse_number;
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, FilterProp, ObjectProperty, QuantityExpr,
-    QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, FilterProp, ObjectProperty, PlayerScope,
+    QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::player::PlayerCounterKind;
 
@@ -154,8 +154,18 @@ fn parse_their_tail(input: &str) -> OracleResult<'_, QuantityRef> {
             tag("graveyard"),
         ),
         // Life total before bare "life" (longer tag first).
-        value(QuantityRef::TargetLifeTotal, tag("life total")),
-        value(QuantityRef::TargetLifeTotal, tag("life")),
+        value(
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
+            tag("life total"),
+        ),
+        value(
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
+            tag("life"),
+        ),
     ))
     .parse(input)
 }
@@ -166,8 +176,18 @@ fn parse_his_or_her_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     preceded(
         tag("his or her "),
         alt((
-            value(QuantityRef::TargetLifeTotal, tag("life total")),
-            value(QuantityRef::TargetLifeTotal, tag("life")),
+            value(
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Target,
+                },
+                tag("life total"),
+            ),
+            value(
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Target,
+                },
+                tag("life"),
+            ),
         )),
     )
     .parse(input)
@@ -208,8 +228,18 @@ fn parse_your_tail(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("graveyard"),
         ),
-        value(QuantityRef::LifeTotal, tag("life total")),
-        value(QuantityRef::LifeTotal, tag("life")),
+        value(
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Controller,
+            },
+            tag("life total"),
+        ),
+        value(
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Controller,
+            },
+            tag("life"),
+        ),
     ))
     .parse(input)
 }
@@ -602,7 +632,13 @@ fn parse_number_of_opponents(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// Parse "your life total".
 fn parse_life_total_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    value(QuantityRef::LifeTotal, tag("your life total")).parse(input)
+    value(
+        QuantityRef::LifeTotal {
+            player: PlayerScope::Controller,
+        },
+        tag("your life total"),
+    )
+    .parse(input)
 }
 
 fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
@@ -755,6 +791,31 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         value(QuantityRef::LifeLostThisTurn, tag("the life you lost")),
         value(QuantityRef::LifeLostThisTurn, tag("life you've lost")),
         value(QuantityRef::LifeLostThisTurn, tag("life you lost")),
+        // CR 119.3 + CR 608.2k: Third-person variants resolve against the
+        // per-target player during effect iteration. The runtime's
+        // `LifeLostThisTurn` reads `player.life_lost_this_turn` where
+        // `player` is the resolution context's bound player — for
+        // `LoseLife { target: EachOpponent }` this rebinds per-opponent,
+        // so "they lost" / "that player lost" resolve correctly without
+        // a new typed variant. Archfiend of Despair, Wound Reflection,
+        // Astarion (Feed mode), Blitzwing, Warlock Class.
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life that player lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life they lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the amount of life they lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life that player lost"),
+        ),
+        value(QuantityRef::LifeLostThisTurn, tag("the life they lost")),
     ))
     .parse(input)
 }
@@ -870,11 +931,32 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse "target creature's power" / "that player's life total".
+/// Parse target-creature power refs:
+///   - Saxon-genitive: "target creature's power" / "the target creature's power"
+///   - Of-form: "the power of target creature [you control|an opponent controls]?"
+///
+/// All variants resolve to the same `QuantityRef::TargetPower`. CR 107.1.
+/// Longest-first ordering: the controller-qualified of-form variants must come
+/// before the bare of-form so `alt`'s short-circuit doesn't strand the
+/// "you control" / "an opponent controls" suffix as un-consumed remainder
+/// (which would cause `parse_quantity_ref`'s `rest.is_empty()` check to fail).
+/// Soul's Majesty, Predator's Rapport, and similar.
 fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::TargetPower, tag("target creature's power")),
         value(QuantityRef::TargetPower, tag("the target creature's power")),
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature you control"),
+        ),
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature an opponent controls"),
+        ),
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature"),
+        ),
     ))
     .parse(input)
 }
@@ -883,11 +965,15 @@ fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 fn parse_target_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(
-            QuantityRef::TargetLifeTotal,
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
             tag("target player's life total"),
         ),
         value(
-            QuantityRef::TargetLifeTotal,
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
             tag("that player's life total"),
         ),
     ))
@@ -1220,7 +1306,9 @@ mod tests {
         assert_eq!(
             q,
             QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller
+                }
             }
         );
         assert_eq!(rest, "");
@@ -1640,7 +1728,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::TargetLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Target
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }
@@ -1655,7 +1745,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::TargetLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Target
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }
@@ -1687,7 +1779,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }
@@ -1704,7 +1798,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::TargetLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Target
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }
@@ -1739,7 +1835,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::TargetLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Target
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }

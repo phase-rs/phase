@@ -24,8 +24,9 @@ use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, Duration, Effect, GainLifePlayer, LibraryPosition,
-    MultiTargetSpec, PaymentCost, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter,
+    MultiTargetSpec, PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtValue,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::player::PlayerCounterKind;
@@ -193,16 +194,73 @@ fn resolve_earthbend_target(
     }
 }
 
+/// Parse a dynamic count phrase that begins with "cards"/"a card" or "that
+/// many" against an already-lowercased tail. Returns the resolved
+/// `QuantityExpr` or `None` if no recognized shape matches.
+///
+/// Covers the cross-verb dynamic-count idioms shared by Draw/Mill/Discard:
+/// - "cards equal to <ref>"  / "a card equal to <ref>"  → Ref{<ref>}
+/// - "that many cards"       / "that many"              → Ref{EventContextAmount}
+///
+/// CR 121.1 / CR 701.13a / CR 701.8a — chained-effect amounts and target-
+/// relative quantity refs route through one combinator instead of being
+/// re-implemented per verb.
+fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
+    if let Ok((qty_tail, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("cards equal to "),
+        tag("a card equal to "),
+    ))
+    .parse(lower)
+    {
+        let qty_text = qty_tail.trim_end_matches('.').trim();
+        if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+            return Some(QuantityExpr::Ref { qty });
+        }
+    }
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("that many cards"),
+        tag("that many"),
+    ))
+    .parse(lower)
+    {
+        // M3 guard: only match when the tail is empty/punctuation. Avoids
+        // false positives like "that many cards from the top of their library".
+        if rest.trim_start_matches('.').trim().is_empty() {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            });
+        }
+    }
+    None
+}
+
 pub(super) fn parse_numeric_imperative_ast(
     text: &str,
     lower: &str,
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
     {
-        let count = parse_count_expr(rest)
-            .map(|(q, _)| q)
-            .unwrap_or(QuantityExpr::Fixed { value: 1 });
-        return Some(NumericImperativeAst::Draw { count });
+        // CR 608.2d + CR 121.1: "draw up to N cards" — opt-choice draw,
+        // mirrors the up_to pattern on Discard / Sacrifice. Strip the prefix
+        // before count parsing so "up to two cards" → count=Fixed{2}, up_to=true.
+        let (rest, up_to) = match nom_on_lower(rest, &rest.to_ascii_lowercase(), |i| {
+            value((), tag("up to ")).parse(i)
+        }) {
+            Some((_, after)) => (after, true),
+            None => (rest, false),
+        };
+        // CR 121.1 / CR 609.3: dynamic-count tails — "cards equal to <ref>",
+        // "a card equal to <ref>", "that many cards", "that many".
+        let rest_lower = rest.to_ascii_lowercase();
+        if let Some(count) = parse_dynamic_count_phrase(rest_lower.as_str()) {
+            return Some(NumericImperativeAst::Draw { count, up_to });
+        }
+        // CR 119.1 / CR 121.1: When the verb committed but the quantity phrase
+        // can't be classified, return None so the line surfaces as
+        // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
+        // dynamic-quantity gaps from the coverage report.
+        let count = parse_count_expr(rest).map(|(q, _)| q)?;
+        return Some(NumericImperativeAst::Draw { count, up_to });
     }
 
     if nom_primitives::scan_contains(lower, "gain") && nom_primitives::scan_contains(lower, "life")
@@ -215,6 +273,14 @@ pub(super) fn parse_numeric_imperative_ast(
                 crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
             {
                 return Some(NumericImperativeAst::GainLife { amount: qty });
+            }
+            // CR 119.1: target-relative quantity refs ("target creature's
+            // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
+            // Heron's Grace Champion, Lifeblood Hydra, etc.
+            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+                return Some(NumericImperativeAst::GainLife {
+                    amount: QuantityExpr::Ref { qty },
+                });
             }
         }
         let after_gain = nom_on_lower(text, lower, |input| {
@@ -240,9 +306,9 @@ pub(super) fn parse_numeric_imperative_ast(
             {
                 return Some(NumericImperativeAst::GainLife { amount: qty });
             }
-            let amount = parse_count_expr(after_gain)
-                .map(|(q, _)| q)
-                .unwrap_or(QuantityExpr::Fixed { value: 1 });
+            // CR 119.1: GainLife committed but quantity phrase unclassified —
+            // surface as Unimplemented rather than fabricating Fixed{1}.
+            let amount = parse_count_expr(after_gain).map(|(q, _)| q)?;
             return Some(NumericImperativeAst::GainLife { amount });
         }
     }
@@ -260,6 +326,15 @@ pub(super) fn parse_numeric_imperative_ast(
                 crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
             {
                 return Some(NumericImperativeAst::LoseLife { amount: qty });
+            }
+            // CR 119.3: target-relative quantity refs ("target creature's
+            // power/toughness/mana value", etc.) — Final Punishment, Tomb
+            // Blade-class drain, Genesis of the Daleks. Delegates to the
+            // shared `parse_quantity_ref` building block.
+            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+                return Some(NumericImperativeAst::LoseLife {
+                    amount: QuantityExpr::Ref { qty },
+                });
             }
         }
         // CR 603.7c + CR 119.3: "lose that much life" / "lose that many life" —
@@ -285,16 +360,16 @@ pub(super) fn parse_numeric_imperative_ast(
                     return Some(NumericImperativeAst::LoseLife { amount: qty });
                 }
             }
+            // CR 119.3: LoseLife committed but neither the event-context phrase
+            // nor a numeric tail parsed — return None so the line lands in
+            // `Effect::Unimplemented` upstream instead of fabricating Fixed{1}.
+            // (This is the Keen Duelist class: "lose life equal to <unparsed>".)
             let before_life = before_life.trim();
             let last_word = before_life.split_whitespace().next_back().unwrap_or("");
-            let amount = parse_count_expr(last_word)
-                .map(|(q, _)| q)
-                .unwrap_or(QuantityExpr::Fixed { value: 1 });
+            let amount = parse_count_expr(last_word).map(|(q, _)| q)?;
             return Some(NumericImperativeAst::LoseLife { amount });
         }
-        return Some(NumericImperativeAst::LoseLife {
-            amount: QuantityExpr::Fixed { value: 1 },
-        });
+        return None;
     }
 
     if nom_primitives::scan_contains(lower, "gets +")
@@ -326,9 +401,22 @@ pub(super) fn parse_numeric_imperative_ast(
         ))
         .parse(input)
     }) {
-        let count = parse_count_expr(rest)
-            .map(|(q, _)| q)
-            .unwrap_or(QuantityExpr::Fixed { value: 1 });
+        // CR 121.1 / CR 609.3 / CR 701.13a: dynamic-count tails for the
+        // shared mill/scry/surveil family.
+        let rest_lower = rest.to_ascii_lowercase();
+        if let Some(count) = parse_dynamic_count_phrase(rest_lower.as_str()) {
+            // allow-noncombinator: dispatch on already-parsed verb tag (combinator output, not Oracle text)
+            return match verb {
+                "scry" => Some(NumericImperativeAst::Scry { count }), // allow-noncombinator: combinator-output dispatch
+                "surveil" => Some(NumericImperativeAst::Surveil { count }), // allow-noncombinator: combinator-output dispatch
+                "mill" => Some(NumericImperativeAst::Mill { count }), // allow-noncombinator: combinator-output dispatch
+                _ => unreachable!(),
+            };
+        }
+        // CR 701.22a / CR 701.25a / CR 701.13a: Scry/Surveil/Mill verbs always
+        // require a count. If the count phrase doesn't parse, return None so the
+        // line surfaces as Unimplemented rather than silently scrying/milling 1.
+        let count = parse_count_expr(rest).map(|(q, _)| q)?;
         return match verb {
             "scry" => Some(NumericImperativeAst::Scry { count }),
             "surveil" => Some(NumericImperativeAst::Surveil { count }),
@@ -369,8 +457,16 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
         // path doesn't see the subject, which is later threaded via
         // `inject_subject_target` for "target player draws ..." patterns
         // (CR 601.2c per-mode targeting).
-        NumericImperativeAst::Draw { count } => Effect::Draw {
-            count,
+        // CR 121.1 + CR 608.2d: Lower the AST `up_to: bool` into the typed
+        // `count: QuantityExpr::UpTo { max }` wrapper. Plain `up_to: false`
+        // leaves the count expression unchanged; `up_to: true` wraps it so
+        // the resolver peels it back at runtime.
+        NumericImperativeAst::Draw { count, up_to } => Effect::Draw {
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             target: TargetFilter::Controller,
         },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
@@ -478,17 +574,23 @@ fn parse_discard_unless_filter<'a>(
 /// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
 /// Dokuchi Silencer ("you may discard a creature card") preserves the same
 /// filter data as cost-form discards like "Discard a creature card:".
-fn parse_discard_card_filter(lower: &str) -> Option<TargetFilter> {
-    // Consume the article / quantifier prefix ("a ", "an ", "N ", "X "). The
-    // count itself was already parsed upstream; we only need to reach the
-    // type-word portion.
-    let after_article = strip_article(lower);
-    // Find the " card" / " cards" suffix — the type phrase lies between the
-    // article and that suffix. Without a suffix, there is no type qualifier
-    // (e.g. plain "a card" → `None`).
-    let type_phrase = after_article
+/// Extract the type qualifier from the post-count tail of a discard noun phrase.
+///
+/// Caller contract: `tail` is the text **after** the count token has already
+/// been consumed by `parse_count_expr`. So for "discard two creature cards"
+/// the count parser eats "two " and hands "creature cards" here. For "a card"
+/// (count = 1, no type qualifier) the count parser eats "a " and hands
+/// "card" here, which has no leading type word and returns `None`.
+///
+/// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
+/// Dokuchi Silencer ("you may discard a creature card") preserves the same
+/// filter data as cost-form discards like "Discard a creature card:".
+fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
+    // Find the " card" / " cards" suffix — the type phrase lies before it.
+    // No suffix or empty before-suffix → no type qualifier.
+    let type_phrase = tail
         .strip_suffix(" cards") // allow-noncombinator: structural suffix cleanup on pre-chunked sub-phrase (PATTERNS.md §9)
-        .or_else(|| after_article.strip_suffix(" card"))? // allow-noncombinator: see line above
+        .or_else(|| tail.strip_suffix(" card"))? // allow-noncombinator: see line above
         .trim();
     if type_phrase.is_empty() {
         return None;
@@ -661,12 +763,35 @@ pub(super) fn parse_targeted_action_ast(
         {
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 random,
                 up_to,
                 unless_filter: None,
                 filter: None,
+            });
+        }
+        // CR 701.8a: "discard any number of [filter] cards" — opt-choice
+        // discard where the player picks any 0..hand-size. Encoded as
+        // count = HandSize with up_to = true so the controller chooses how
+        // many to actually discard. Mind Maggots ("discard any number of
+        // creature cards"), Fervent Mastery, Sirocco-class chains.
+        if let Ok((rest, _)) =
+            tag::<_, _, VerboseError<&str>>("any number of ").parse(after_discard)
+        {
+            let filter = parse_discard_card_filter(rest);
+            return Some(TargetedImperativeAst::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                random,
+                up_to: true,
+                unless_filter: None,
+                filter,
             });
         }
         // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
@@ -676,15 +801,33 @@ pub(super) fn parse_targeted_action_ast(
             parse_discard_unless_filter(after_discard, original_after);
         // Re-derive original_after for the narrowed (unless-stripped) text.
         let original_after = &original_after[..after_discard.len()];
-        let count = parse_count_expr(original_after)
-            .map(|(q, _)| q)
-            .unwrap_or(QuantityExpr::Fixed { value: 1 });
+        // CR 121.1 / CR 609.3 / CR 701.8a: dynamic-count tails for Discard
+        // — Fervent Mastery, Hordewing Skaab discard sub-ability, Sirocco
+        // chains, etc.
+        let after_discard_lower = after_discard.to_ascii_lowercase();
+        if let Some(count) = parse_dynamic_count_phrase(after_discard_lower.as_str()) {
+            let filter = parse_discard_card_filter(after_discard);
+            return Some(TargetedImperativeAst::Discard {
+                count,
+                random,
+                up_to,
+                unless_filter,
+                filter,
+            });
+        }
+        // CR 701.8a: Discard count must be explicit (or the implicit 1 from
+        // "a/an" inside `parse_count_expr`). If the count phrase doesn't parse,
+        // return None so the line surfaces as Unimplemented.
+        // Forward the post-count remainder to the filter probe so it never
+        // re-sees the count token — the type qualifier (if any) is whatever
+        // is left after the count was eaten.
+        let (count, after_count) = parse_count_expr(original_after)?;
         // CR 701.9a + CR 608.2c: Extract card-type filter from phrases like
         // "a creature card" / "an artifact card". Mirrors the filter slot on
         // `AbilityCost::Discard` so trigger-effect discards carry the same
         // restriction data as cost discards (Dokuchi Silencer's "you may
         // discard a creature card").
-        let filter = parse_discard_card_filter(after_discard);
+        let filter = parse_discard_card_filter(after_count.trim_start());
         return Some(TargetedImperativeAst::Discard {
             count,
             random,
@@ -849,11 +992,9 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
         TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
-        TargetedImperativeAst::Sacrifice { target, count } => Effect::Sacrifice {
-            target,
-            count,
-            up_to: false,
-        },
+        TargetedImperativeAst::Sacrifice { target, count } => Effect::Sacrifice { target, count },
+        // CR 701.9b + CR 608.2d: Lower the AST `up_to: bool` into the typed
+        // `count: QuantityExpr::UpTo { max }` wrapper.
         TargetedImperativeAst::Discard {
             count,
             random,
@@ -861,12 +1002,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             unless_filter,
             filter,
         } => Effect::Discard {
-            count,
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             // CR 701.9a: "Discard" with no subject defaults to the controller.
             // Subject injection overrides this for "target player discards" patterns.
             target: TargetFilter::Controller,
             random,
-            up_to,
             unless_filter,
             filter,
         },
@@ -1178,10 +1322,15 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             multi_enter_tapped: _,
         } => Effect::SearchLibrary {
             filter,
-            count,
+            // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
+            // typed `count: QuantityExpr::UpTo { max }` wrapper.
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             reveal,
             target_player,
-            up_to,
             selection_constraint,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
@@ -2512,6 +2661,15 @@ pub(super) fn lower_multi_filter_search_library(
         enter_with_counters: vec![],
     };
 
+    // CR 107.1c + CR 701.23d: Wrap the count in `UpTo` once at the helper's
+    // entrance — every search in the chain shares the same `up_to` semantic,
+    // so the per-arm constructions below all read the wrapped form.
+    let chain_count = if up_to {
+        QuantityExpr::up_to(count)
+    } else {
+        count
+    };
+
     let mut tail: Option<Box<AbilityDefinition>> = None;
     for extra_filter in extra_filters.into_iter().rev() {
         // Append `Search(extra)` first (it is the successor of the ChangeZone
@@ -2520,10 +2678,9 @@ pub(super) fn lower_multi_filter_search_library(
             AbilityKind::Spell,
             Effect::SearchLibrary {
                 filter: extra_filter,
-                count: count.clone(),
+                count: chain_count.clone(),
                 reveal,
                 target_player: target_player.clone(),
-                up_to,
                 selection_constraint: selection_constraint.clone(),
             },
         );
@@ -2538,10 +2695,9 @@ pub(super) fn lower_multi_filter_search_library(
 
     let mut clause = parsed_clause(Effect::SearchLibrary {
         filter: primary_filter,
-        count,
+        count: chain_count,
         reveal,
         target_player,
-        up_to,
         selection_constraint,
     });
     clause.sub_ability = tail;
@@ -4380,9 +4536,10 @@ fn try_parse_incubate(lower: &str) -> Option<Effect> {
         return None;
     }
 
-    let count = parse_count_expr(rest)
-        .map(|(q, _)| q)
-        .unwrap_or(QuantityExpr::Fixed { value: 1 });
+    // CR 716.1: Incubate's count is part of the keyword action; if it doesn't
+    // parse, return None so the line lands in Unimplemented rather than
+    // fabricating "incubate 1".
+    let count = parse_count_expr(rest).map(|(q, _)| q)?;
 
     Some(Effect::Incubate { count })
 }
@@ -4405,10 +4562,9 @@ fn try_parse_amass(text: &str, lower: &str) -> Option<Effect> {
     let (subtype, consumed) = crate::parser::oracle_util::parse_subtype(original_rest)?;
     let remainder = rest[consumed..].trim();
 
-    // Parse count: numeric or "X" via shared helper.
-    let count = parse_count_expr(remainder)
-        .map(|(q, _)| q)
-        .unwrap_or(QuantityExpr::Fixed { value: 1 });
+    // CR 701.47a: Amass requires an explicit count after the subtype. If it
+    // doesn't parse, surface as Unimplemented rather than amassing 1.
+    let count = parse_count_expr(remainder).map(|(q, _)| q)?;
 
     Some(Effect::Amass { subtype, count })
 }
@@ -5239,7 +5395,9 @@ mod tests {
                     matches!(
                         count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::HandSize
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller
+                            }
                         }
                     ),
                     "Expected HandSize ref, got {count:?}"
@@ -5260,7 +5418,9 @@ mod tests {
                     matches!(
                         count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::HandSize
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller
+                            }
                         }
                     ),
                     "Expected HandSize ref, got {count:?}"

@@ -160,6 +160,7 @@ mod tests {
                 &WaitingFor::MulliganDecision {
                     player: PlayerId(0),
                     mulligan_count: 0,
+                    free_first_mulligan: false,
                 },
                 &dummy_action
             ),

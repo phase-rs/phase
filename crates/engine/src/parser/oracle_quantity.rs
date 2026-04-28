@@ -19,8 +19,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, CountScope, ObjectProperty, PlayerFilter, QuantityExpr, QuantityRef,
-    TargetFilter, ZoneRef,
+    AggregateFunction, CountScope, ObjectProperty, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, TargetFilter, ZoneRef,
 };
 use crate::types::mana::ManaColor;
 
@@ -170,7 +170,9 @@ pub(crate) fn canonicalize_quantity_ref(qty: QuantityRef) -> QuantityRef {
             zone: ZoneRef::Hand,
             card_types,
             scope: CountScope::Controller,
-        } if card_types.is_empty() => QuantityRef::HandSize,
+        } if card_types.is_empty() => QuantityRef::HandSize {
+            player: PlayerScope::Controller,
+        },
         QuantityRef::ZoneCardCount {
             zone: ZoneRef::Graveyard,
             card_types,
@@ -358,10 +360,21 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     }
 
     match lower {
+        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
         "that much" | "that many" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             })
+        }
+        // CR 706.2: "the result" of a coin flip / die roll — the result amount
+        // is exposed via the same EventContextAmount channel that "that much" /
+        // "that many" use (Adorable Kitten "You gain life equal to the result"
+        // after roll-a-die). Both compile to the same runtime resolver.
+        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
+        "the result" => {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            });
         }
         "its power" => {
             return Some(QuantityExpr::Ref {
@@ -426,7 +439,13 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         .parse(lower)
         .map_or(lower, |(r, _)| r);
     if let Some(qty) = parse_quantity_ref(stripped) {
-        if !matches!(qty, QuantityRef::TargetPower | QuantityRef::TargetLifeTotal) {
+        if !matches!(
+            qty,
+            QuantityRef::TargetPower
+                | QuantityRef::LifeTotal {
+                    player: PlayerScope::Target
+                }
+        ) {
             return Some(QuantityExpr::Ref { qty });
         }
     }
@@ -534,6 +553,44 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
         .parse(rest)?;
         Ok((rest, ()))
     })
+}
+
+/// Parse the clause after "for each" into a `QuantityExpr`, supporting
+/// the conjunction form "X and each Y" by emitting `QuantityExpr::Sum`.
+/// A single-segment clause delegates to `parse_for_each_clause` and
+/// returns a bare `Ref` to avoid a degenerate `Sum` with one element.
+///
+/// Class: A-Alrund ("+1/+1 for each card in your hand and each foretold
+/// card you own in exile") and ~21 similar cards in the database.
+pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
+    use nom::branch::alt;
+    use nom::bytes::complete::{tag, take_until};
+    use nom::combinator::rest;
+    use nom::multi::separated_list1;
+
+    let clause = clause.trim().trim_end_matches('.');
+
+    fn segment(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+        alt((take_until(" and each "), rest)).parse(i)
+    }
+    let mut split = separated_list1(tag::<_, _, VerboseError<&str>>(" and each "), segment);
+    let segments: Vec<&str> = split
+        .parse(clause)
+        .map(|(_, v)| v)
+        .unwrap_or_else(|_| vec![clause]);
+
+    let refs: Option<Vec<QuantityRef>> = segments
+        .iter()
+        .map(|s| parse_for_each_clause(s.trim()))
+        .collect();
+    let mut exprs: Vec<QuantityExpr> = refs?
+        .into_iter()
+        .map(|qty| QuantityExpr::Ref { qty })
+        .collect();
+    if exprs.len() == 1 {
+        return exprs.pop();
+    }
+    Some(QuantityExpr::Sum { exprs })
 }
 
 /// Parse the clause after "for each" into a QuantityRef.
@@ -1412,5 +1469,72 @@ mod tests {
                 qty: QuantityRef::ManaSpentOnSelf
             })
         );
+    }
+
+    // ── parse_for_each_clause_expr — conjunction support ──────────────────
+
+    #[test]
+    fn for_each_single_segment_returns_bare_ref() {
+        let result = parse_for_each_clause_expr("card in your hand");
+        assert!(
+            matches!(
+                result,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    }
+                })
+            ),
+            "expected bare Ref{{ZoneCardCount{{Hand,..}}}}, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn for_each_conjunction_returns_sum_of_refs() {
+        // Conjunction infrastructure: two segments that BOTH parse on their
+        // own should compose into a Sum. We use two zone-card-count refs to
+        // exercise the join path without depending on more exotic filters
+        // like "foretold card you own in exile" (which has its own gap).
+        let result =
+            parse_for_each_clause_expr("card in your hand and each card in your graveyard");
+        let Some(QuantityExpr::Sum { exprs }) = result else {
+            panic!("expected Sum, got {result:?}");
+        };
+        assert_eq!(exprs.len(), 2, "expected two summed exprs, got {exprs:?}");
+        assert!(
+            matches!(
+                exprs[0],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    }
+                }
+            ),
+            "expected ZoneCardCount{{Hand}} for first segment, got {:?}",
+            exprs[0]
+        );
+        assert!(
+            matches!(
+                exprs[1],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        ..
+                    }
+                }
+            ),
+            "expected ZoneCardCount{{Graveyard}} for second segment, got {:?}",
+            exprs[1]
+        );
+    }
+
+    #[test]
+    fn for_each_conjunction_with_unparseable_segment_returns_none() {
+        // If either side fails to parse, the whole conjunction must fail —
+        // no partial-credit Sum that would silently undercount.
+        let result = parse_for_each_clause_expr("card in your hand and each blorgon you control");
+        assert_eq!(result, None);
     }
 }

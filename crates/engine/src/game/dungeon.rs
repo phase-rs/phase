@@ -149,8 +149,8 @@ pub fn dungeon_sentinel_id(player: PlayerId) -> crate::types::identifiers::Objec
 
 use crate::types::ability::{
     AbilityCondition, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, ResolvedAbility,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::game_state::TargetSelectionConstraint;
@@ -307,7 +307,9 @@ pub fn room_effects(
                 source_id,
                 controller,
             )
-            .duration(Duration::UntilYourNextTurn);
+            .duration(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            });
             (ability, vec![])
         }
         // 4: Lost Level — "Destroy target creature of an opponent's choice"
@@ -414,7 +416,6 @@ pub fn room_effects(
                 Effect::Sacrifice {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     count: QuantityExpr::Fixed { value: 1 },
-                    up_to: false,
                 },
                 source_id,
                 controller,
@@ -623,7 +624,6 @@ pub fn room_effects(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
                     count: QuantityExpr::Fixed { value: 1 },
-                    up_to: false,
                 },
                 source_id,
                 controller,
@@ -956,7 +956,6 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             count: fixed(1),
             reveal: true,
             target_player: None,
-            up_to: false,
             selection_constraint: SearchSelectionConstraint::None,
         },
         source_id,
@@ -1478,7 +1477,6 @@ mod tests {
                 Effect::SearchLibrary {
                     count: QuantityExpr::Fixed { value: 1 },
                     reveal: true,
-                    up_to: false,
                     ..
                 }
             ),

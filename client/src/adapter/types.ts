@@ -397,6 +397,17 @@ export interface GameObject {
   display_source?: "Card" | "Token";
   is_commander?: boolean;
   commander_tax?: number;
+  /**
+   * Stable identity of the printed card this object was instantiated from.
+   * `oracle_id` is Scryfall's per-card identifier (shared across both faces
+   * of a DFC/MDFC); `face_name` distinguishes which face the engine is
+   * currently presenting. The frontend uses this pair as the canonical key
+   * for image lookup — it sidesteps engine-vs-Scryfall front/back-face
+   * naming asymmetry that would otherwise hide MDFCs played as their
+   * Scryfall-back face. Optional because synthesized objects (emblems,
+   * generic tokens) may not carry a printed identity.
+   */
+  printed_ref?: PrintedRef | null;
   back_face?: {
     name: string;
     power: number | null;
@@ -406,7 +417,13 @@ export interface GameObject {
     keywords: Keyword[];
     abilities: SerializedAbility[];
     color: ManaColor[];
+    printed_ref?: PrintedRef | null;
   } | null;
+}
+
+export interface PrintedRef {
+  oracle_id: string;
+  face_name: string;
 }
 
 // ── Companion ────────────────────────────────────────────────────────────
@@ -436,6 +453,7 @@ export type PlayerStatus =
 export interface Player {
   id: PlayerId;
   life: number;
+  poison_counters: number;
   speed?: number | null;
   mana_pool: ManaPool;
   library: ObjectId[];
@@ -443,6 +461,8 @@ export interface Player {
   graveyard: ObjectId[];
   has_drawn_this_turn: boolean;
   lands_played_this_turn: number;
+  /** CR 500: per-player turn count, excluding skipped turns. */
+  turns_taken: number;
   can_look_at_top_of_library?: boolean;
   is_eliminated?: boolean;
   companion?: CompanionInfo;
@@ -605,7 +625,10 @@ export interface ModalChoice {
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
-  | { type: "MulliganDecision"; data: { player: PlayerId; mulligan_count: number } }
+  | {
+      type: "MulliganDecision";
+      data: { player: PlayerId; mulligan_count: number; free_first_mulligan: boolean };
+    }
   | { type: "MulliganBottomCards"; data: { player: PlayerId; count: number } }
   | { type: "ManaPayment"; data: { player: PlayerId } }
   | { type: "ChooseXValue"; data: { player: PlayerId; max: number; pending_cast: PendingCast } }

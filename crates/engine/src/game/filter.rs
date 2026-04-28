@@ -3271,7 +3271,6 @@ mod tests {
             count: QuantityExpr::Fixed { value: 2 },
             reveal: true,
             target_player: None,
-            up_to: false,
             selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         let json = serde_json::to_string(&search).unwrap();

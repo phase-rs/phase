@@ -1,4 +1,4 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -12,20 +12,16 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let count = match &ability.effect {
-        Effect::RevealTop { count, .. } => *count as usize,
+    let (count, player_filter) = match &ability.effect {
+        Effect::RevealTop { count, player } => (*count as usize, player.clone()),
         _ => return Err(EffectError::MissingParam("RevealTop count".to_string())),
     };
 
-    // Resolve target player from the ability's resolved targets
-    let target_player = ability
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            _ => None,
-        })
-        .unwrap_or(ability.controller);
+    // CR 115.1: Mirror Draw/Mill/Discard — context-ref filters (Controller,
+    // DefendingPlayer, etc.) must consult state slots, not `ability.targets`,
+    // so a chained "reveal top of your library" sub-ability does not inherit
+    // the parent's Player target and reveal from the wrong library.
+    let target_player = super::resolve_player_for_context_ref(state, ability, &player_filter);
 
     let library = &state.players[target_player.0 as usize].library;
     if library.is_empty() {
@@ -71,7 +67,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -81,9 +77,12 @@ mod tests {
         target_player: PlayerId,
         count: u32,
     ) -> ResolvedAbility {
+        // Non-context-ref filter so the explicit `TargetRef::Player` in
+        // `ability.targets` legitimately wins (mirrors "target player reveals
+        // the top card of their library" cards).
         ResolvedAbility::new(
             Effect::RevealTop {
-                player: TargetFilter::DefendingPlayer,
+                player: TargetFilter::Any,
                 count,
             },
             vec![TargetRef::Player(target_player)],
@@ -181,5 +180,48 @@ mod tests {
         assert!(state.revealed_cards.contains(&card1));
         assert!(state.revealed_cards.contains(&card2));
         assert_eq!(state.revealed_cards.len(), 2);
+    }
+
+    #[test]
+    fn reveal_top_controller_filter_does_not_inherit_parent_player_target() {
+        // CR 115.1 regression: a chained RevealTop with `player: Controller`
+        // must reveal the spell controller's library, not the parent's
+        // inherited Player target.
+        let mut state = GameState::new_two_player(42);
+        let p0_top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 Top".to_string(),
+            Zone::Library,
+        );
+        let p1_top = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Top".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealTop {
+                player: TargetFilter::Controller,
+                count: 1,
+            },
+            vec![TargetRef::Player(PlayerId(1))], // inherited parent target
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.revealed_cards.contains(&p0_top),
+            "P0's library top should be revealed (Controller filter resolves to caster)"
+        );
+        assert!(
+            !state.revealed_cards.contains(&p1_top),
+            "P1's library top must NOT be revealed — inherited parent target must not override Controller filter"
+        );
     }
 }

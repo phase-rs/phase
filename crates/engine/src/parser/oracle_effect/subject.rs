@@ -10,8 +10,8 @@ use super::types::*;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, GainLifePlayer, MultiTargetSpec, PtValue, QuantityExpr, QuantityRef, RoundingMode,
-    StaticDefinition, TargetFilter, TypedFilter,
+    FilterProp, GainLifePlayer, MultiTargetSpec, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::statics::StaticMode;
@@ -1074,15 +1074,29 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
             value(Duration::UntilEndOfTurn, tag(" until end of turn")),
             value(Duration::UntilEndOfTurn, tag(" this turn")),
             value(
-                Duration::UntilYourNextTurn,
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
                 tag(" until the end of your next turn"),
             ),
-            value(Duration::UntilYourNextTurn, tag(" until your next turn")),
             value(
-                Duration::UntilYourNextTurn,
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                tag(" until your next turn"),
+            ),
+            value(
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
                 tag(" until the end of their next turn"),
             ),
-            value(Duration::UntilYourNextTurn, tag(" until their next turn")),
+            value(
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                tag(" until their next turn"),
+            ),
         ))
         .parse(i)
     };
@@ -1470,7 +1484,9 @@ fn build_restriction_clause(
     let has_next_untap = normalized.to_lowercase().contains("next untap step")
         || predicate.to_lowercase().contains("next untap step");
     let duration = if has_next_untap && modes.iter().any(|m| matches!(m, StaticMode::CantUntap)) {
-        Some(Duration::UntilControllerNextUntapStep)
+        Some(Duration::UntilNextUntapStepOf {
+            player: PlayerScope::Controller,
+        })
     } else {
         duration
     };

@@ -27,26 +27,48 @@ mkdir -p "$(dirname "$OUTPUT")"
 
 # Build a combined image + card metadata map from oracle-cards bulk data.
 #
-# Keys: lowercased card name + front face name when it differs (e.g. so the
-# engine can look up "Delver of Secrets" and get the correct DFC entry).
-# Only the FRONT face is indexed — back faces are never passed as lookup keys
-# by the engine (it always uses the front-face name + faceIndex for the back).
-# Indexing back faces causes collisions with standalone card names (e.g. an
-# art_series "Forest // Forest" would overwrite the basic Forest entry).
+# Keys (all lowercased):
+#   1. The card's `oracle_id` (Scryfall's stable per-card identifier). This is
+#      the *canonical* lookup path — the engine carries `printed_ref.oracle_id`
+#      on every battlefield object and the frontend resolves images by it.
+#      Keying by oracle_id sidesteps the name-asymmetry trap that breaks
+#      MDFCs played as their Scryfall-back face (e.g. Mystic Peak, the back
+#      face of "Pinnacle Monk // Mystic Peak", was unreachable when keyed by
+#      `card_faces[0].name` alone).
+#   2. The card's display name (`$card.name`). Retained for legacy callers
+#      that only have a card name in scope (lobby, deck builder, hand UI for
+#      face-down cards) and for cards loaded into the engine without a
+#      printed_ref (synthesized objects, future paths).
+#   3. The front-face name (`$card.card_faces[0].name`) when it differs from
+#      `$card.name`. Same legacy rationale.
+#
+# Back-face names are NOT keys — they would collide across cards (e.g. an
+# art_series "Forest // Forest" overwriting basic Forest). The oracle_id
+# path supersedes the back-face-name use case anyway.
 #
 # Non-playable layouts (token, emblem, art_series, etc.) are excluded entirely
-# to prevent name collisions with real cards (e.g. a token named "Llanowar Elves"
-# overwriting the actual Llanowar Elves).
+# to prevent name collisions with real cards.
 #
-# Each entry contains:
-#   - faces: array of {normal, art_crop} per face (image URLs)
-#   - name, mana_cost, cmc, type_line, colors, color_identity, keywords (card metadata)
+# Each entry value contains:
+#   - oracle_id        — Scryfall's stable per-card id (mirrors the key path)
+#   - face_names       — lowercased face names in Scryfall's card_faces order;
+#                        single-element when the card has no `card_faces`.
+#                        Used by the frontend to resolve `faceIndex` from the
+#                        engine-reported `printed_ref.face_name`.
+#   - faces            — array of {normal, art_crop} per face (image URLs)
+#   - name, mana_cost, cmc, type_line, colors, color_identity, keywords
 NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
 
 jq -c --argjson exclude "$NON_PLAYABLE" '[.[] |
   select(.layout as $l | $exclude | index($l) | not) |
   . as $card |
   {
+    oracle_id: $card.oracle_id,
+    face_names: (if $card.card_faces then
+      [$card.card_faces[] | .name | ascii_downcase]
+    else
+      [$card.name | ascii_downcase]
+    end),
     faces: (if $card.card_faces then
       [$card.card_faces[] | {
         normal: (.image_uris.normal // $card.image_uris.normal),
@@ -64,6 +86,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" '[.[] |
     keywords: ($card.keywords // [])
   } as $entry |
   (
+    [$card.oracle_id | ascii_downcase] +
     [$card.name | ascii_downcase] +
     if $card.card_faces and ($card.card_faces[0].name != $card.name)
     then [$card.card_faces[0].name | ascii_downcase]

@@ -2291,8 +2291,11 @@ fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<Static
     let suffix = "assigns combat damage equal to its toughness rather than its power";
     let suffix_alt = "assign combat damage equal to their toughness rather than their power";
 
-    // CR 510.1c: Self-referential variant — "This creature assigns..."
-    if let Some(rest) = nom_tag_lower(lower, lower, "this creature ") {
+    // CR 510.1c: Self-referential variant — "This creature assigns..." or
+    // the canonical "~ assigns..." form (post-self-noun normalization).
+    if let Some(rest) =
+        nom_tag_lower(lower, lower, "this creature ").or_else(|| nom_tag_lower(lower, lower, "~ "))
+    {
         let cleaned = rest.trim_end_matches('.').trim();
         if nom_tag_lower(cleaned, cleaned, suffix).is_some_and(|r| r.is_empty()) {
             return Some(
@@ -5376,8 +5379,9 @@ fn parse_continuous_gets_has(
             .unwrap_or(&pt_lower);
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
-            if let Some(qty) = super::oracle_quantity::parse_for_each_clause(for_each_clause) {
-                let quantity = QuantityExpr::Ref { qty };
+            if let Some(quantity) =
+                super::oracle_quantity::parse_for_each_clause_expr(for_each_clause)
+            {
                 let mut modifications = Vec::new();
                 if p != 0 {
                     let value = if p.abs() == 1 {
@@ -7937,11 +7941,15 @@ mod tests {
             def.condition,
             Some(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller
+                    }
                 },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal
+                    qty: QuantityRef::LifeTotal {
+                        player: crate::types::ability::PlayerScope::Controller
+                    }
                 },
             })
         ));
@@ -9648,15 +9656,42 @@ mod tests {
         }
     }
 
-    // CR 601.2: Unqualified branch must reject filters that `parse_type_phrase`
-    // can't fully consume — Fires of Invention's dynamic-MV filter would
-    // otherwise misparse as `TargetFilter::Any` (full Omniscience). Better to
-    // decline than to silently overgrant casting permission.
+    // CR 601.2 + CR 119.3: Unqualified branch now accepts dynamic mana-value
+    // filters whose RHS is any `parse_quantity_ref` phrase (Fires of Invention
+    // class). Earlier the comparator only matched the trigger-anaphoric
+    // `that <type>` form, so this filter fell through to a partial parse and
+    // the test asserted the rejection (better-decline-than-overgrant). The
+    // comparator was extended to delegate the RHS to the shared
+    // `parse_quantity_ref` building block, so the filter now fully types as
+    // `CmcLE { value: Ref { ObjectCount { Land, You } } }` and the cast-free
+    // permission can carry it. The test is inverted: it now asserts the
+    // typed filter is preserved end-to-end.
     #[test]
-    fn cast_free_unqualified_rejects_complex_mv_filter() {
+    fn cast_free_unqualified_accepts_dynamic_mv_filter() {
+        use crate::types::ability::{FilterProp, QuantityExpr, QuantityRef, TargetFilter};
         let text = "You may cast spells with mana value less than or equal to the number of lands you control without paying their mana costs.";
         let lower = text.to_lowercase();
-        assert!(try_parse_cast_free_permission(text, &lower).is_none());
+        let def = try_parse_cast_free_permission(text, &lower)
+            .expect("dynamic-MV filter should parse end-to-end");
+        let filter = def.affected.expect("affected filter must be present");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for Fires-of-Invention class");
+        };
+        let has_dynamic_cmc_le = tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::CmcLE {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                }
+            )
+        });
+        assert!(
+            has_dynamic_cmc_le,
+            "expected CmcLE with dynamic ObjectCount RHS, got {:?}",
+            tf.properties
+        );
     }
 
     // Negative test: text without "without paying" must not match the

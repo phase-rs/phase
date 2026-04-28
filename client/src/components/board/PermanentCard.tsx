@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -152,7 +153,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     obj.available_mana_pips,
     controllerIdentity || undefined,
   );
-  const { name: imgName, faceIndex: imgFace } = cardImageLookup(obj);
+  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName } = cardImageLookup(obj);
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
 
   const ptDisplay = computePTDisplay(obj);
@@ -221,8 +222,16 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   const attackSlideMagnitude = isCompactHeight ? 12 : 30;
   const attackSlide = isAttacking ? (obj.controller === playerId ? -attackSlideMagnitude : attackSlideMagnitude) : 0;
 
-  const handleClick = () => {
+  const handleClick = (e: React.MouseEvent) => {
     if (longPressFired.current) { longPressFired.current = false; return; }
+    // Attached cards (Auras / Equipment / Fortifications) render as nested
+    // <PermanentCard> inside their host's wrapper so they get full
+    // click/hover/target handling for free. Without stopping propagation, a
+    // click on an attachment would bubble to the host and `selectObject(host)`
+    // would steal focus — preventing the player from selecting the Equipment
+    // to activate Equip and reattach it. Stop the bubble so the attachment's
+    // own intent (target / activate / select) wins cleanly.
+    if (obj.attached_to !== null) e.stopPropagation();
     // TapCreaturesForManaAbility is mid-cost resolution — check before combat mode
     // so clicks land even when DeclareAttackers combat mode is active.
     if (isSelectableForManaCost && tapCreatureCostChoice) {
@@ -388,7 +397,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       ) : (
         <>
           <div className={`relative z-10 rounded-lg overflow-hidden ${glowClass}`}>
-            <CardImage cardName={imgName} faceIndex={imgFace} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
               <KeywordStrip keywords={obj.keywords} baseKeywords={obj.base_keywords} />
@@ -514,7 +523,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
     obj.available_mana_pips,
     controllerIdentity || undefined,
   );
-  const { name: imgName, faceIndex: imgFace } = cardImageLookup(obj);
+  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName } = cardImageLookup(obj);
   const useArtCrop = battlefieldCardDisplay === "art_crop";
 
   return (
@@ -528,7 +537,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={imgName} faceIndex={imgFace} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
+        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
       )}
     </div>
   );

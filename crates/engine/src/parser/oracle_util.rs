@@ -327,6 +327,61 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
             ));
         }
     }
+    // CR 107.1b: "equal to <quantity ref>" — composes the existing
+    // QuantityRef parser into the count-position. Strips the prefix, hands
+    // the trimmed tail to the shared `parse_quantity_ref` building block.
+    if let Some(((), rest_lower)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::combinator::value(
+            (),
+            nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>("equal to "),
+        )
+        .parse(i)
+    }) {
+        let trimmed = rest_lower.trim_end_matches('.').trim_end();
+        if let Some(qty) = super::oracle_quantity::parse_quantity_ref(trimmed) {
+            return Some((QuantityExpr::Ref { qty }, ""));
+        }
+    }
+
+    // CR 609.3: "that many" / "that much" — chained-effect amount referring
+    // to the previous effect's count. Resolves to `EventContextAmount` (which
+    // falls back to `state.last_effect_count` for chained sub-ability
+    // continuations). Composes with the "twice"/"three times" multipliers
+    // above so "twice that many cards" parses as Multiply{2, EventContextAmount}.
+    if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::combinator::value(
+            (),
+            nom::branch::alt((
+                nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>(
+                    "that many",
+                ),
+                nom::bytes::complete::tag("that much"),
+            )),
+        )
+        .parse(i)
+    }) {
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            rest.trim_start(),
+        ));
+    }
+
+    // CR 121.1: "another" — implicit count of 1 in chained-effect contexts
+    // ("draw another card", "create another token"). Distinct from "a/an"
+    // which `parse_number` explicitly excludes to avoid the "a"-prefix
+    // false match on "another".
+    if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::combinator::value(
+            (),
+            nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>("another "),
+        )
+        .parse(i)
+    }) {
+        return Some((QuantityExpr::Fixed { value: 1 }, rest.trim_start()));
+    }
+
     // CR 107.3a: "X" in Oracle text represents a variable determined at cast time.
     // Accept X followed by whitespace, comma, period, or end-of-string — all valid
     // Oracle text boundaries (e.g., "X cards", "X, rounded up", "X.").
@@ -1257,14 +1312,33 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // Strip A- prefix (Alchemy rebalanced cards in MTGJSON)
     let effective_name = card_name.strip_prefix("A-").unwrap_or(card_name);
 
+    // Alchemy rebalanced cards (CR n/a — MTGJSON convention): the Oracle
+    // text often references the prefixed name literally ("Return A-~ from
+    // your graveyard"). Replace the prefixed forms first so the residual
+    // "A-" doesn't cling to a `~` placeholder when the suffix is replaced.
+    // Both case-variants ("A-…" and "a-…") show up in normalized text.
+    let mut result = text.to_string();
+    // allow-noncombinator: structural detection of MTGJSON A-/a- card-name prefix (not parsing)
+    if card_name.starts_with("A-") || card_name.starts_with("a-") {
+        let prefixed_upper = format!("A-{effective_name}");
+        let prefixed_lower = format!("a-{}", effective_name.to_lowercase());
+        if effective_name.contains(' ') {
+            result = replace_all_words(&result, &prefixed_upper, "~");
+            result = replace_all_words(&result, &prefixed_lower, "~");
+        } else {
+            result = replace_all_words_case_sensitive(&result, &prefixed_upper, "~");
+            result = replace_all_words_case_sensitive(&result, &prefixed_lower, "~");
+        }
+    }
+
     // Replace full card name (word-boundary-aware, all occurrences).
     // Use case-insensitive matching only for multi-word names (proper nouns).
     // Single-word names like "Scheme", "Contraption" are case-sensitive to avoid
     // matching generic English words in Oracle text (e.g., "this scheme in motion").
-    let mut result = if effective_name.contains(' ') {
-        replace_all_words(text, effective_name, "~")
+    result = if effective_name.contains(' ') {
+        replace_all_words(&result, effective_name, "~")
     } else {
-        replace_all_words_case_sensitive(text, effective_name, "~")
+        replace_all_words_case_sensitive(&result, effective_name, "~")
     };
 
     // Comma-based legendary short name: "Haliya, Guided by Light" → "Haliya"

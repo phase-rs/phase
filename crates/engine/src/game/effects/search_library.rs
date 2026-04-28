@@ -138,8 +138,10 @@ pub fn resolve(
 
     // CR 107.3a + CR 601.2b: Resolve the count expression against the ability so
     // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
-    // CR 107.1c + CR 701.23d: `up_to` propagates to SearchChoice so "any number
-    // of" / "up to N" searches accept 0..=count picks (vs. exactly-count).
+    // CR 107.1c + CR 701.23d: Peel `UpTo` from the count expression to derive
+    // the upper-bound expression and propagate the may-pick-fewer flag to
+    // SearchChoice. Plain `QuantityExpr` means a mandatory count; wrapped
+    // in `UpTo` means "any number of" / "up to N" — searcher picks 0..=count.
     let (filter, count, reveal, target_player, up_to, selection_constraint) = match &ability.effect
     {
         Effect::SearchLibrary {
@@ -147,16 +149,18 @@ pub fn resolve(
             count,
             reveal,
             target_player,
-            up_to,
             selection_constraint,
-        } => (
-            filter.clone(),
-            resolve_quantity_with_targets(state, count, ability).max(0) as usize,
-            *reveal,
-            target_player.clone(),
-            *up_to,
-            selection_constraint.clone(),
-        ),
+        } => {
+            let (inner, up_to) = count.peel_up_to();
+            (
+                filter.clone(),
+                resolve_quantity_with_targets(state, inner, ability).max(0) as usize,
+                *reveal,
+                target_player.clone(),
+                up_to,
+                selection_constraint.clone(),
+            )
+        }
         _ => (
             TargetFilter::Any,
             1,
@@ -256,7 +260,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: count },
                 reveal: false,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -270,10 +273,9 @@ mod tests {
         ResolvedAbility::new(
             Effect::SearchLibrary {
                 filter,
-                count: QuantityExpr::Fixed { value: count },
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: count }),
                 reveal: false,
                 target_player: None,
-                up_to: true,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -529,7 +531,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -618,7 +619,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: true,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -671,7 +671,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: true,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -736,7 +735,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -780,7 +778,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -821,7 +818,6 @@ mod tests {
                 },
                 reveal: false,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -887,7 +883,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -946,7 +941,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: None,
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
@@ -1000,7 +994,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 reveal: false,
                 target_player: Some(TargetFilter::ParentTargetController),
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![TargetRef::Object(destroyed)],
@@ -1053,7 +1046,6 @@ mod tests {
                 target_player: Some(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 )),
-                up_to: false,
                 selection_constraint: SearchSelectionConstraint::None,
             },
             vec![TargetRef::Player(PlayerId(1))],

@@ -1881,10 +1881,9 @@ mod tests {
         let mut mode2 = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Discard {
-                count: QuantityExpr::Fixed { value: 2 },
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
                 random: false,
-                up_to: true,
                 unless_filter: None,
                 filter: None,
             },
@@ -1958,7 +1957,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },

@@ -1592,6 +1592,7 @@ fn apply_action(
             WaitingFor::MulliganDecision {
                 player,
                 mulligan_count,
+                ..
             },
             GameAction::MulliganDecision { keep },
         ) => {
@@ -5326,6 +5327,7 @@ mod tests {
             WaitingFor::MulliganDecision {
                 player: PlayerId(0),
                 mulligan_count: 0,
+                ..
             }
         ));
 
@@ -5341,6 +5343,7 @@ mod tests {
             WaitingFor::MulliganDecision {
                 player: PlayerId(1),
                 mulligan_count: 0,
+                ..
             }
         ));
 
@@ -9460,7 +9463,6 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             vec![],
             source_id,
@@ -9634,7 +9636,6 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             vec![TargetRef::Player(PlayerId(0))],
             source_id,
@@ -9774,7 +9775,6 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 count: QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             vec![],
             source_id,

@@ -87,7 +87,7 @@ pub(super) fn strip_leading_instead(text: &str) -> String {
     }
 }
 
-pub(super) fn strip_leading_general_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(crate) fn strip_leading_general_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {

@@ -7,6 +7,7 @@ import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from ".
 import { sortCreaturesForBlockers } from "../../viewmodel/blockerSorting.ts";
 import {
   buildPlayerBattlefieldView,
+  getWaitingForObjectChoiceIds,
   getOpponentIds,
 } from "../../viewmodel/gameStateView.ts";
 import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
@@ -88,24 +89,11 @@ export function GameBoard() {
       }
     }
 
-    if (
-      waitingFor?.type === "TargetSelection"
-      || waitingFor?.type === "TriggerTargetSelection"
-    ) {
-      for (const target of waitingFor.data.selection.current_legal_targets) {
-        if ("Object" in target) {
-          validTargetObjectIds.add(target.Object);
-        }
-      }
-    } else if (waitingFor?.type === "CopyTargetChoice") {
-      for (const objectId of waitingFor.data.valid_targets) {
-        validTargetObjectIds.add(objectId);
-      }
-    } else if (waitingFor?.type === "ExploreChoice") {
-      for (const objectId of waitingFor.data.choosable) {
-        validTargetObjectIds.add(objectId);
-      }
-    } else if (waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost") {
+    for (const objectId of getWaitingForObjectChoiceIds(waitingFor)) {
+      validTargetObjectIds.add(objectId);
+    }
+
+    if (waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost") {
       for (const objectId of waitingFor.data.creatures) {
         selectableManaCostCreatureIds.add(objectId);
       }

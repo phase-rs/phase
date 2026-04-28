@@ -1286,25 +1286,26 @@ pub fn parse_oracle_text(
         }
 
         // Priority 8c: "If this card is in your opening hand, you may begin the game with it on the battlefield"
+        // CR 103.6: The Leyline rule — opt-in at game start, never compelled.
         if is_opening_hand_begin_game(&lower) {
-            result.abilities.push(
-                AbilityDefinition::new(
-                    AbilityKind::BeginGame,
-                    Effect::ChangeZone {
-                        destination: crate::types::zones::Zone::Battlefield,
-                        target: crate::types::ability::TargetFilter::SelfRef,
-                        origin: Some(crate::types::zones::Zone::Hand),
-                        owner_library: false,
-                        enter_transformed: false,
-                        under_your_control: false,
-                        enter_tapped: false,
-                        enters_attacking: false,
-                        up_to: false,
-                        enter_with_counters: vec![],
-                    },
-                )
-                .description(line.to_string()),
-            );
+            let mut def = AbilityDefinition::new(
+                AbilityKind::BeginGame,
+                Effect::ChangeZone {
+                    destination: crate::types::zones::Zone::Battlefield,
+                    target: crate::types::ability::TargetFilter::SelfRef,
+                    origin: Some(crate::types::zones::Zone::Hand),
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            )
+            .description(line.to_string());
+            def.optional = true;
+            result.abilities.push(def);
             i += 1;
             continue;
         }
@@ -1728,6 +1729,12 @@ pub fn parse_oracle_text(
         i += 1;
     }
 
+    // Architectural rule: the parser must never silently discard Oracle
+    // text. Run the swallow audit against the parsed result so any unrep-
+    // resented clause surfaces as a parse_warning instead of disappearing
+    // (Phase 1: observability only — see swallow_check.rs for detector
+    // catalog and Phase 2 demotion plan).
+    super::swallow_check::check_swallowed_clauses(oracle_text, &result);
     result.parse_warnings = take_warnings();
     result
 }
@@ -2700,7 +2707,7 @@ mod tests {
             &[],
         );
         assert_eq!(r.abilities.len(), 1);
-        let Effect::Draw { count, target } = &*r.abilities[0].effect else {
+        let Effect::Draw { count, target, .. } = &*r.abilities[0].effect else {
             panic!("expected Effect::Draw, got {:?}", r.abilities[0].effect);
         };
         assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
@@ -6228,7 +6235,9 @@ mod tests {
         ));
         assert_eq!(
             r.abilities[1].duration,
-            Some(crate::types::ability::Duration::UntilYourNextTurn)
+            Some(crate::types::ability::Duration::UntilNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller,
+            })
         );
 
         assert!(matches!(
@@ -7257,7 +7266,9 @@ mod tests {
                         matches!(
                             **inner,
                             QuantityExpr::Ref {
-                                qty: QuantityRef::LifeTotal
+                                qty: QuantityRef::LifeTotal {
+                                    player: crate::types::ability::PlayerScope::Controller
+                                }
                             }
                         ),
                         "expected LifeTotal, got {inner:?}"
@@ -7278,7 +7289,9 @@ mod tests {
                         matches!(
                             **inner,
                             QuantityExpr::Ref {
-                                qty: QuantityRef::HandSize
+                                qty: QuantityRef::HandSize {
+                                    player: crate::types::ability::PlayerScope::Controller
+                                }
                             }
                         ),
                         "expected HandSize, got {inner:?}"
@@ -7293,12 +7306,8 @@ mod tests {
         // as count, and the same Typed filter lifted into target.
         let sacrifice = discard.sub_ability.as_ref().expect("sacrifice sub_ability");
         match &*sacrifice.effect {
-            Effect::Sacrifice {
-                target,
-                count,
-                up_to,
-            } => {
-                assert!(!up_to);
+            Effect::Sacrifice { target, count } => {
+                assert!(!count.is_up_to(), "expected non-UpTo sacrifice count");
                 match count {
                     QuantityExpr::HalfRounded { inner, rounding } => {
                         assert_eq!(*rounding, RoundingMode::Down);

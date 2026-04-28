@@ -2126,7 +2126,9 @@ mod tests {
             costs: vec![
                 AbilityCost::Discard {
                     count: QuantityExpr::Ref {
-                        qty: crate::types::ability::QuantityRef::HandSize,
+                        qty: crate::types::ability::QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
                     },
                     filter: None,
                     random: false,

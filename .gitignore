@@ -48,6 +48,7 @@ client/coverage/
 data/*
 !data/standard-cards.txt
 !data/mtgjson/
+!data/engine-inventory.json
 data/mtgjson/AtomicCards.json
 data/mtgjson/Meta.json
 data/mtgjson/SetList.json
@@ -86,3 +87,11 @@ replay_dtypes.py
 # Scratch planning files
 parser-batch-plan.md
 parser-fallback-plan.md
+
+# External reference / scratch
+mtgish/
+mtgish*.tgz
+
+# Python bytecode cache
+__pycache__/
+*.pyc

@@ -1,7 +1,5 @@
 use crate::game::quantity;
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -34,26 +32,28 @@ pub fn resolve(
         return Ok(());
     }
 
-    // Resolve target player(s)
-    let players = match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => vec![ability.controller],
-        _ => {
-            // Targeted: resolve from ability.targets
-            let targeted: Vec<_> = ability
-                .targets
-                .iter()
-                .filter_map(|t| match t {
-                    TargetRef::Player(pid) => Some(*pid),
-                    _ => None,
-                })
-                .collect();
-            if targeted.is_empty() {
-                // No valid targets — do nothing (fizzle already handled by stack.rs)
-                return Ok(());
-            } else {
-                targeted
-            }
+    // CR 115.1: Context-ref filters (Controller, TriggeringPlayer,
+    // ParentTargetController, …) must NOT consult `ability.targets` — chain
+    // target propagation would otherwise leak the parent's Player target into
+    // a sub-ability with `target: Controller`. Mirror Draw / Mill / Discard.
+    let players = if target.is_context_ref() {
+        vec![super::resolve_player_for_context_ref(
+            state, ability, target,
+        )]
+    } else {
+        let targeted: Vec<_> = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                _ => None,
+            })
+            .collect();
+        if targeted.is_empty() {
+            // No valid targets — do nothing (fizzle already handled by stack.rs)
+            return Ok(());
         }
+        targeted
     };
 
     for player_id in &players {
@@ -97,20 +97,25 @@ pub fn resolve_lose_all(
         }
     };
 
-    // Resolve target player(s). The `player_scope` iteration layer rebinds
+    // CR 115.1 + CR 122.1: The `player_scope` iteration layer rebinds
     // `ability.controller` per matching player before this resolver runs, so
-    // `TargetFilter::Controller`/`SelfRef` already addresses the iterating
-    // player when the caller used "each opponent".
-    let players: Vec<PlayerId> = match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => vec![ability.controller],
-        _ => ability
+    // context-ref filters (Controller / SelfRef / TriggeringPlayer / …) must
+    // resolve via `resolve_player_for_context_ref` — never via
+    // `ability.targets`, which would inherit a parent's chosen Player target
+    // through chain propagation.
+    let players: Vec<PlayerId> = if target.is_context_ref() {
+        vec![super::resolve_player_for_context_ref(
+            state, ability, target,
+        )]
+    } else {
+        ability
             .targets
             .iter()
             .filter_map(|t| match t {
                 TargetRef::Player(pid) => Some(*pid),
                 _ => None,
             })
-            .collect(),
+            .collect()
     };
 
     for player_id in players {

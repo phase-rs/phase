@@ -441,7 +441,6 @@ fn translate_discard(
         count,
         target,
         random,
-        up_to: false,
         unless_filter: None,
         filter: None,
     })
@@ -457,7 +456,6 @@ fn translate_sacrifice(params: &ForgeParams) -> Result<Effect, ForgeTranslateErr
     Ok(Effect::Sacrifice {
         target,
         count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-        up_to: false,
     })
 }
 

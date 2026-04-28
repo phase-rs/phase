@@ -15,7 +15,8 @@ use super::primitives::{parse_article, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    Comparator, ControllerRef, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    AggregateFunction, Comparator, ControllerRef, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter,
 };
 use crate::types::counter::CounterMatch;
 
@@ -484,7 +485,9 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             rest,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -499,7 +502,15 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>(" or more cards in hand").parse(rest)
     {
-        return Ok((rest, make_quantity_ge(QuantityRef::HandSize, n)));
+        return Ok((
+            rest,
+            make_quantity_ge(
+                QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+                n,
+            ),
+        ));
     }
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>(" or more cards in your graveyard")
@@ -510,7 +521,15 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>(" or more life").parse(rest)
     {
-        return Ok((rest, make_quantity_ge(QuantityRef::LifeTotal, n)));
+        return Ok((
+            rest,
+            make_quantity_ge(
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+                n,
+            ),
+        ));
     }
     // "you have N or less life" → LifeTotal LE N
     if let Ok((rest, _)) =
@@ -518,7 +537,13 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     {
         return Ok((
             rest,
-            make_quantity_comparison(QuantityRef::LifeTotal, Comparator::LE, n),
+            make_quantity_comparison(
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+                Comparator::LE,
+                n,
+            ),
         ));
     }
     // "you have N or fewer cards in hand" → HandSize LE N
@@ -527,7 +552,13 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     {
         return Ok((
             rest,
-            make_quantity_comparison(QuantityRef::HandSize, Comparator::LE, n),
+            make_quantity_comparison(
+                QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+                Comparator::LE,
+                n,
+            ),
         ));
     }
 
@@ -810,7 +841,9 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             rest,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: n as i32 },
@@ -822,7 +855,9 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal,
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
@@ -1596,11 +1631,17 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
             rest2,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::OpponentLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
                 },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
                 },
             },
         ));
@@ -1615,11 +1656,17 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
             rest2,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::OpponentHandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
                 },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
             },
         ));
@@ -2418,7 +2465,10 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeTotal,
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1000 },
@@ -2644,7 +2694,10 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeTotal,
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
                     },
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 5 },
@@ -2661,7 +2714,10 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::HandSize,
+                        qty:
+                            QuantityRef::HandSize {
+                                player: PlayerScope::Controller,
+                            },
                     },
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 2 },
@@ -2701,12 +2757,21 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::OpponentLifeTotal,
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                            },
                     },
                 comparator: Comparator::GT,
                 rhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeTotal,
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
                     },
             } => {}
             other => panic!("expected OpponentLifeTotal GT LifeTotal, got {other:?}"),
@@ -2722,12 +2787,21 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::OpponentHandSize,
+                        qty:
+                            QuantityRef::HandSize {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                            },
                     },
                 comparator: Comparator::GT,
                 rhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::HandSize,
+                        qty:
+                            QuantityRef::HandSize {
+                                player: PlayerScope::Controller,
+                            },
                     },
             } => {}
             other => panic!("expected OpponentHandSize GT HandSize, got {other:?}"),

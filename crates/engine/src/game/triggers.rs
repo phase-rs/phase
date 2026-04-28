@@ -1656,6 +1656,13 @@ pub(crate) fn check_trigger_condition(
         // entering Aura — so we must check the entering object from the trigger event,
         // falling back to source_id for self-referential cases (Cascade's SpellCast
         // event, Discover ETBs where source == cast spell).
+        //
+        // Negation ("if it wasn't cast" / "if none of them were cast") wraps via
+        // `Not { Box::new(WasCast) }`. The `Not` arm inverts the result, so a
+        // missing entering-object resolves Not(WasCast) to `true` (consistent
+        // with CR 603.4's intervening-if being permissive when source state is
+        // indeterminate; the ability is removed from the stack at resolution
+        // anyway per CR 603.4 if the source has left the relevant zone).
         TriggerCondition::WasCast => {
             let checked_id = trigger_event
                 .and_then(|e| match e {
@@ -1667,23 +1674,6 @@ pub(crate) fn check_trigger_condition(
                 .and_then(|id| state.objects.get(&id))
                 .is_some_and(|obj| obj.cast_from_zone.is_some())
         }
-        // CR 601.2: "if it wasn't cast" / "if none of them were cast" — true when
-        // the entering creature was NOT cast (ninjutsu, reanimation, flicker, etc.).
-        // For batch-enters triggers (e.g., Satoru, the Infiltrator), the trigger source
-        // is the permanent with the ability, not the entering creature. We must check
-        // the entering object from the trigger event, falling back to source_id for
-        // self-referential ETB triggers where source == entering creature.
-        TriggerCondition::WasNotCast => {
-            let entering_id = trigger_event
-                .and_then(|e| match e {
-                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-                    _ => None,
-                })
-                .or(source_id);
-            entering_id
-                .and_then(|id| state.objects.get(&id))
-                .is_some_and(|obj| obj.cast_from_zone.is_none())
-        }
         // CR 508.1: "if it's attacking" — true when the trigger source is in combat.attackers.
         TriggerCondition::SourceIsAttacking => {
             let sid = source_id.unwrap_or(ObjectId(0));
@@ -1692,17 +1682,12 @@ pub(crate) fn check_trigger_condition(
                 .as_ref()
                 .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == sid))
         }
-        // CR 702.49 + CR 702.190a + CR 603.4 + CR 702.138b: "if its sneak/ninjutsu
-        // cost was paid this turn" / "unless it escaped". When `negated` is true,
-        // the match inverts so a missing or mismatched tag satisfies the condition
-        // (reanimated, hard-cast, or cast via some other variant all pass).
-        TriggerCondition::CastVariantPaid { variant, negated } => {
-            let matched = source_id
-                .and_then(|id| state.objects.get(&id))
-                .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
-                .unwrap_or(false);
-            matched ^ *negated
-        }
+        // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid
+        // this turn". Negation ("unless it escaped") wraps via `Not`.
+        TriggerCondition::CastVariantPaid { variant } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
+            .unwrap_or(false),
         // CR 601.2: True when the current turn's active player is an opponent.
         TriggerCondition::DuringOpponentsTurn => state.active_player != controller,
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
@@ -1755,10 +1740,9 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::LifeTotalGE { minimum } => {
             player_field(state, controller, |p| p.life >= *minimum)
         }
-        // CR 603.4: "if it's your turn"
+        // CR 603.4: "if it's your turn". Negation ("if it isn't your turn") wraps
+        // via `Not { Box::new(DuringYourTurn) }`.
         TriggerCondition::DuringYourTurn => state.active_player == controller,
-        // CR 603.4: "if it's not your turn"
-        TriggerCondition::NotYourTurn => state.active_player != controller,
         // CR 603.4: "if you control N or more [type]" — generalized control count.
         TriggerCondition::ControlCount { minimum, filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
@@ -1861,13 +1845,11 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::IsMonarch => state.monarch == Some(controller),
         // CR 702.131a: True when the controller has the city's blessing.
         TriggerCondition::HasCityBlessing => state.city_blessing.contains(&controller),
-        // CR 611.2b: True when the trigger source is tapped (or untapped when negated).
-        TriggerCondition::SourceIsTapped { negated } => {
-            let is_tapped = source_id
-                .and_then(|id| state.objects.get(&id))
-                .is_some_and(|obj| obj.tapped);
-            is_tapped != *negated
-        }
+        // CR 611.2b: True when the trigger source is tapped. Negation ("untapped")
+        // wraps via `Not { Box::new(SourceIsTapped) }`.
+        TriggerCondition::SourceIsTapped => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.tapped),
         // CR 113.6b: True when the trigger source is in the specified zone.
         TriggerCondition::SourceInZone { zone } => source_id
             .and_then(|id| state.objects.get(&id))
@@ -1951,16 +1933,21 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::Or { conditions } => conditions
             .iter()
             .any(|c| check_trigger_condition(state, c, controller, source_id, trigger_event)),
-        // CR 309.7: True when the controller has completed at least one dungeon.
-        TriggerCondition::CompletedADungeon => state
+        // CR 603.4: Negate the inner intervening-if predicate. Used for "unless [phrase]"
+        // patterns; mirrors `TargetFilter::Not` and `StaticCondition::Not`.
+        TriggerCondition::Not { condition } => {
+            !check_trigger_condition(state, condition, controller, source_id, trigger_event)
+        }
+        // CR 309.7: True when the controller has completed a dungeon. `specific: None`
+        // matches "any dungeon"; `specific: Some(d)` matches dungeon `d`. Negation
+        // ("haven't completed Tomb of Annihilation") wraps via `Not`.
+        TriggerCondition::CompletedDungeon { specific } => state
             .dungeon_progress
             .get(&controller)
-            .is_some_and(|p| !p.completed.is_empty()),
-        // CR 309.7: True when the controller has NOT completed a specific dungeon.
-        TriggerCondition::NotCompletedDungeon { dungeon } => !state
-            .dungeon_progress
-            .get(&controller)
-            .is_some_and(|p| p.completed.contains(dungeon)),
+            .is_some_and(|p| match specific {
+                None => !p.completed.is_empty(),
+                Some(dungeon) => p.completed.contains(dungeon),
+            }),
         // CR 903.3: True when the controller controls at least one of their commander(s).
         TriggerCondition::ControlsCommander => {
             // Commander designation is stored per-player. Check if any permanent on the
@@ -4574,7 +4561,9 @@ pub mod tests {
         );
         state.objects.get_mut(&src).unwrap().tapped = false;
 
-        let cond = TriggerCondition::SourceIsTapped { negated: true };
+        let cond = TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::SourceIsTapped),
+        };
         assert!(check_trigger_condition(
             &state,
             &cond,
@@ -4599,7 +4588,9 @@ pub mod tests {
         );
         state.objects.get_mut(&src).unwrap().tapped = true;
 
-        let cond = TriggerCondition::SourceIsTapped { negated: true };
+        let cond = TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::SourceIsTapped),
+        };
         assert!(!check_trigger_condition(
             &state,
             &cond,
@@ -4623,7 +4614,7 @@ pub mod tests {
         );
         state.objects.get_mut(&src).unwrap().tapped = true;
 
-        let cond = TriggerCondition::SourceIsTapped { negated: false };
+        let cond = TriggerCondition::SourceIsTapped;
         assert!(check_trigger_condition(
             &state,
             &cond,

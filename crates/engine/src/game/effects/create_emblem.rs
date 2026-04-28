@@ -226,7 +226,6 @@ mod tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                up_to: false,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

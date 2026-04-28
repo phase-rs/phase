@@ -12,8 +12,8 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, ObjectProperty, PlayerFilter, QuantityExpr,
-    QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, ObjectProperty, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -112,15 +112,38 @@ pub fn resolve_quantity_with_ctx(
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, ctx, &[], None, None),
-        QuantityExpr::HalfRounded { inner, rounding } => {
-            let base = resolve_quantity_with_ctx(state, inner, controller, ctx);
-            half_rounded(base, *rounding)
-        }
-        QuantityExpr::Offset { inner, offset } => {
-            resolve_quantity_with_ctx(state, inner, controller, ctx) + offset
-        }
-        QuantityExpr::Multiply { factor, inner } => {
-            factor * resolve_quantity_with_ctx(state, inner, controller, ctx)
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_ctx(state, inner, controller, ctx)
+        }),
+    }
+}
+
+/// Compose recursively-resolved inner values for the non-leaf
+/// `QuantityExpr` variants (`HalfRounded`, `Offset`, `Multiply`, `Sum`).
+/// All four resolver entry points share this logic; only the leaf arms
+/// (`Fixed`, `Ref`) differ in context handling. `recurse` is a closure
+/// the caller supplies that re-enters its own resolver with the inner
+/// expression.
+///
+/// Panics if called with a leaf variant — callers must dispatch leaves
+/// before delegating here.
+fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> i32 {
+    match expr {
+        QuantityExpr::HalfRounded { inner, rounding } => half_rounded(recurse(inner), *rounding),
+        QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
+        QuantityExpr::Multiply { factor, inner } => factor * recurse(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
+        // CR 107.1c + CR 608.2d: Generic resolvers see UpTo transparently as
+        // its upper bound — the 4 effect-specific resolvers (Draw,
+        // Sacrifice, Discard, SearchLibrary) peel the wrapper via
+        // `QuantityExpr::peel_up_to` to extract the "may pick fewer" flag
+        // before reaching arithmetic. Treating it transparently here keeps
+        // legacy serde round-trips correct and makes accidental composition
+        // (e.g., `HalfRounded { inner: UpTo { max: ... } }`) collapse to a
+        // sensible bound rather than panicking.
+        QuantityExpr::UpTo { max } => recurse(max),
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
+            unreachable!("fold_compose called on leaf variant — caller must dispatch leaves first")
         }
     }
 }
@@ -250,16 +273,9 @@ pub fn resolve_quantity_with_targets(
             ability.chosen_x,
             Some(ability),
         ),
-        QuantityExpr::HalfRounded { inner, rounding } => {
-            let base = resolve_quantity_with_targets(state, inner, ability);
-            half_rounded(base, *rounding)
-        }
-        QuantityExpr::Offset { inner, offset } => {
-            resolve_quantity_with_targets(state, inner, ability) + offset
-        }
-        QuantityExpr::Multiply { factor, inner } => {
-            factor * resolve_quantity_with_targets(state, inner, ability)
-        }
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_targets(state, inner, ability)
+        }),
     }
 }
 
@@ -290,19 +306,9 @@ pub fn resolve_quantity_with_targets_slice(
             None,
             None,
         ),
-        QuantityExpr::HalfRounded { inner, rounding } => {
-            let base =
-                resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets);
-            half_rounded(base, *rounding)
-        }
-        QuantityExpr::Offset { inner, offset } => {
+        other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets)
-                + offset
-        }
-        QuantityExpr::Multiply { factor, inner } => {
-            factor
-                * resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets)
-        }
+        }),
     }
 }
 
@@ -333,16 +339,9 @@ pub(crate) fn resolve_quantity_scoped(
             None,
             None,
         ),
-        QuantityExpr::HalfRounded { inner, rounding } => {
-            let base = resolve_quantity_scoped(state, inner, source_id, scope_player);
-            half_rounded(base, *rounding)
-        }
-        QuantityExpr::Offset { inner, offset } => {
-            resolve_quantity_scoped(state, inner, source_id, scope_player) + offset
-        }
-        QuantityExpr::Multiply { factor, inner } => {
-            factor * resolve_quantity_scoped(state, inner, source_id, scope_player)
-        }
+        other => fold_compose(other, |inner| {
+            resolve_quantity_scoped(state, inner, source_id, scope_player)
+        }),
     }
 }
 
@@ -384,8 +383,16 @@ fn resolve_ref(
     filter_ctx.recipient_id = ctx.recipient;
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
-        QuantityRef::HandSize => player.map_or(0, |p| usize_to_i32_saturating(p.hand.len())),
-        QuantityRef::LifeTotal => player.map_or(0, |p| p.life),
+        // CR 402: hand size for the scoped player(s).
+        QuantityRef::HandSize { player: scope } => {
+            resolve_per_player_scalar(state, *scope, controller, targets, |p| {
+                usize_to_i32_saturating(p.hand.len())
+            })
+        }
+        // CR 119: life total for the scoped player(s).
+        QuantityRef::LifeTotal { player: scope } => {
+            resolve_per_player_scalar(state, *scope, controller, targets, |p| p.life)
+        }
         // CR 122.1: Counter-kind lookup summed across scope players. Controller
         // scope resolves to a single player; Opponents/All may span multiple.
         // Per-player u32 is widened to u64 before summing; the i32::try_from
@@ -685,19 +692,6 @@ fn resolve_ref(
         QuantityRef::Devotion { colors } => u32_to_i32_saturating(
             crate::game::devotion::count_devotion(state, controller, colors),
         ),
-        QuantityRef::TargetLifeTotal => {
-            // CR 119.3 + CR 107.2: Find the first player target and return their life total.
-            targets
-                .iter()
-                .find_map(|t| {
-                    if let TargetRef::Player(pid) = t {
-                        state.players.iter().find(|p| p.id == *pid)
-                    } else {
-                        None
-                    }
-                })
-                .map_or(0, |p| p.life)
-        }
         QuantityRef::TargetZoneCardCount { zone } => {
             let target_player = targets.iter().find_map(|t| {
                 if let TargetRef::Player(pid) = t {
@@ -1152,22 +1146,6 @@ fn resolve_ref(
                 0
             }
         }
-        // CR 119.3: Maximum life total among opponents.
-        QuantityRef::OpponentLifeTotal => state
-            .players
-            .iter()
-            .filter(|p| p.id != controller)
-            .map(|p| p.life)
-            .max()
-            .unwrap_or(0),
-        // CR 402.1: Maximum hand size among opponents.
-        QuantityRef::OpponentHandSize => state
-            .players
-            .iter()
-            .filter(|p| p.id != controller)
-            .map(|p| usize_to_i32_saturating(p.hand.len()))
-            .max()
-            .unwrap_or(0),
         // CR 309.7: Number of dungeons the controller has completed.
         QuantityRef::DungeonsCompleted => state
             .dungeon_progress
@@ -1251,6 +1229,68 @@ fn scoped_players<'a>(
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
     })
+}
+
+/// CR 102 + CR 119 + CR 402: Resolve a per-player scalar through a `PlayerScope`.
+///
+/// Single authority for all `LifeTotal { player }` / `HandSize { player }`-style
+/// player-scoped quantity references. `extract` returns the scalar for a single
+/// player (e.g., `p.life`, `p.hand.len()`); the scope decides which players
+/// contribute and how to combine them.
+///
+/// - `Controller`: returns the controller's value, or 0 if not found.
+/// - `Target`: returns the first player target's value (CR 115.1), or 0.
+/// - `Opponent { aggregate }`: aggregates over `p.id != controller` (CR 102.2).
+/// - `AllPlayers { aggregate }`: aggregates over every player (CR 102.1).
+fn resolve_per_player_scalar<F>(
+    state: &GameState,
+    scope: PlayerScope,
+    controller: PlayerId,
+    targets: &[TargetRef],
+    mut extract: F,
+) -> i32
+where
+    F: FnMut(&crate::types::player::Player) -> i32,
+{
+    match scope {
+        PlayerScope::Controller => state
+            .players
+            .iter()
+            .find(|p| p.id == controller)
+            .map_or(0, &mut extract),
+        PlayerScope::Target => targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Player(pid) => state.players.iter().find(|p| p.id == *pid),
+                _ => None,
+            })
+            .map_or(0, &mut extract),
+        PlayerScope::Opponent { aggregate } => aggregate_over_players(
+            state.players.iter().filter(|p| p.id != controller),
+            aggregate,
+            &mut extract,
+        ),
+        PlayerScope::AllPlayers { aggregate } => {
+            aggregate_over_players(state.players.iter(), aggregate, &mut extract)
+        }
+    }
+}
+
+/// CR 107.3e: Reduce a player iterator to a single i32 by aggregate function.
+/// Returns 0 for an empty iterator (mirrors the prior `OpponentLifeTotal`
+/// `.unwrap_or(0)` semantics — there is always at least one opponent in a
+/// real game, but a 1-player test harness should not panic).
+fn aggregate_over_players<'a, I, F>(players: I, aggregate: AggregateFunction, mut extract: F) -> i32
+where
+    I: IntoIterator<Item = &'a crate::types::player::Player>,
+    F: FnMut(&crate::types::player::Player) -> i32,
+{
+    let values = players.into_iter().map(&mut extract);
+    match aggregate {
+        AggregateFunction::Max => values.max().unwrap_or(0),
+        AggregateFunction::Min => values.min().unwrap_or(0),
+        AggregateFunction::Sum => values.sum(),
+    }
 }
 
 /// Count players matching a PlayerFilter relative to the controller.
@@ -1614,7 +1654,9 @@ mod tests {
             );
         }
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::HandSize,
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
         };
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
@@ -2296,7 +2338,9 @@ mod tests {
         let state = GameState::new_two_player(42);
         // Player 1 starts at 20 life
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::TargetLifeTotal,
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
         };
         let ability = ResolvedAbility::new(
             Effect::LoseLife {
@@ -2597,6 +2641,44 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
             12
+        );
+    }
+
+    #[test]
+    fn resolve_sum_of_independent_refs_against_state() {
+        // A-Alrund pattern: hand size + count of foretold cards in exile.
+        // Validates that Sum recurses through fold_compose and that each
+        // child resolves independently against game state (not a tautology
+        // over Fixed values).
+        let mut state = GameState::new_two_player(42);
+        let player_id = state.players[0].id;
+
+        // Put 3 cards in hand. `create_object(..., Zone::Hand)` already
+        // pushes onto the player's hand vector — no second push needed.
+        for _ in 0..3 {
+            let _ = create_object(
+                &mut state,
+                CardId(0),
+                player_id,
+                "Card".to_string(),
+                Zone::Hand,
+            );
+        }
+
+        let expr = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                QuantityExpr::Fixed { value: 7 },
+            ],
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, player_id, ObjectId(1)),
+            10,
+            "expected 3 (hand) + 7 (fixed) = 10"
         );
     }
 

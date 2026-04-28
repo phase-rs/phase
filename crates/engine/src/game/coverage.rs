@@ -8,10 +8,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, ChoiceType, ContinuousModification, ControllerRef,
     CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
-    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, PlayerFilter, PtValue,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SharedQuality, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SharedQuality, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -497,20 +497,28 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
         QuantityExpr::Multiply { factor, inner } => {
             format!("{}*{}", factor, fmt_quantity(inner))
         }
+        QuantityExpr::Sum { exprs } => {
+            let parts: Vec<String> = exprs.iter().map(fmt_quantity).collect();
+            format!("({})", parts.join(" + "))
+        }
+        QuantityExpr::UpTo { max } => format!("up to {}", fmt_quantity(max)),
     }
 }
 
 fn fmt_duration(d: &Duration) -> String {
     match d {
-        Duration::UntilEndOfTurn => "until end of turn",
-        Duration::UntilEndOfCombat => "until end of combat",
-        Duration::UntilYourNextTurn => "until your next turn",
-        Duration::UntilHostLeavesPlay => "while on battlefield",
-        Duration::UntilControllerNextUntapStep => "until controller's next untap step",
-        Duration::ForAsLongAs { .. } => "for as long as condition",
-        Duration::Permanent => "permanent",
+        Duration::UntilEndOfTurn => "until end of turn".to_string(),
+        Duration::UntilEndOfCombat => "until end of combat".to_string(),
+        Duration::UntilNextTurnOf { player } => {
+            format!("until next turn ({})", fmt_player_scope(*player))
+        }
+        Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
+        Duration::UntilNextUntapStepOf { player } => {
+            format!("until next untap step ({})", fmt_player_scope(*player))
+        }
+        Duration::ForAsLongAs { .. } => "for as long as condition".to_string(),
+        Duration::Permanent => "permanent".to_string(),
     }
-    .into()
 }
 
 fn fmt_qty(q: &QuantityExpr) -> String {
@@ -543,10 +551,35 @@ fn fmt_zone_ref(z: &ZoneRef) -> &'static str {
     }
 }
 
+fn fmt_aggregate_function(f: AggregateFunction) -> &'static str {
+    match f {
+        AggregateFunction::Max => "max",
+        AggregateFunction::Min => "min",
+        AggregateFunction::Sum => "sum",
+    }
+}
+
+fn fmt_player_scope(scope: PlayerScope) -> String {
+    match scope {
+        PlayerScope::Controller => "you".to_string(),
+        PlayerScope::Target => "target player".to_string(),
+        PlayerScope::Opponent { aggregate } => {
+            format!("{} of opponents", fmt_aggregate_function(aggregate))
+        }
+        PlayerScope::AllPlayers { aggregate } => {
+            format!("{} of all players", fmt_aggregate_function(aggregate))
+        }
+    }
+}
+
 fn fmt_quantity_ref(qty: &QuantityRef) -> String {
     match qty {
-        QuantityRef::HandSize => "cards in hand".into(),
-        QuantityRef::LifeTotal => "life total".into(),
+        QuantityRef::HandSize { player } => {
+            format!("cards in hand ({})", fmt_player_scope(*player))
+        }
+        QuantityRef::LifeTotal { player } => {
+            format!("life total ({})", fmt_player_scope(*player))
+        }
         QuantityRef::GraveyardSize => "cards in graveyard".into(),
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal => "starting life total".into(),
@@ -593,7 +626,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("{func} {prop} of {}", fmt_target(filter))
         }
         QuantityRef::TargetPower => "target's power".into(),
-        QuantityRef::TargetLifeTotal => "target's life total".into(),
         QuantityRef::Devotion { colors } => {
             let c: Vec<_> = colors.iter().map(fmt_mana_color_full).collect();
             format!("devotion to {}", c.join("/"))
@@ -670,8 +702,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::CounterAddedThisTurn => "counter added this turn".into(),
         QuantityRef::OpponentDiscardedCardThisTurn => "opponent discarded card this turn".into(),
-        QuantityRef::OpponentLifeTotal => "opponent life total".into(),
-        QuantityRef::OpponentHandSize => "opponent hand size".into(),
         QuantityRef::DungeonsCompleted => "dungeons completed".into(),
         QuantityRef::TargetZoneCardCount { .. } => "target zone card count".into(),
         QuantityRef::CostXPaid => "X paid for this spell".into(),
@@ -1318,6 +1348,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("when".into(), fmt_delayed_condition(condition)));
             if *uses_tracked_set {
                 d.push(("tracked".into(), "yes".into()));
+            }
+        }
+        Effect::AddTargetReplacement { replacement } => {
+            d.push(("event".into(), format!("{:?}", replacement.event)));
+            if let Some(zone) = replacement.destination_zone {
+                d.push(("destination".into(), format!("{zone:?}")));
+            }
+            if replacement.expires_at_eot {
+                d.push(("expires_at_eot".into(), "yes".into()));
             }
         }
         Effect::GenericEffect {
@@ -3977,6 +4016,12 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
         QuantityExpr::HalfRounded { inner, .. } => {
             extract_quantity_features(inner, features);
         }
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                extract_quantity_features(inner, features);
+            }
+        }
+        QuantityExpr::UpTo { max } => extract_quantity_features(max, features),
     }
 }
 
@@ -4064,8 +4109,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
 fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
     use FeatureSupport::*;
     match qref {
-        QuantityRef::HandSize => ("HandSize", Handled),
-        QuantityRef::LifeTotal => ("LifeTotal", Handled),
+        QuantityRef::HandSize { .. } => ("HandSize", Handled),
+        QuantityRef::LifeTotal { .. } => ("LifeTotal", Handled),
         QuantityRef::GraveyardSize => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
@@ -4084,7 +4129,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
         QuantityRef::TargetPower => ("TargetPower", Handled),
-        QuantityRef::TargetLifeTotal => ("TargetLifeTotal", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypesInZone { .. } => ("DistinctCardTypesInZone", Handled),
         QuantityRef::DistinctCardTypesExiledBySource => {
@@ -4127,8 +4171,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::CounterAddedThisTurn => ("CounterAddedThisTurn", Unhandled),
         QuantityRef::OpponentDiscardedCardThisTurn => ("OpponentDiscardedCardThisTurn", Handled),
-        QuantityRef::OpponentLifeTotal => ("OpponentLifeTotal", Unhandled),
-        QuantityRef::OpponentHandSize => ("OpponentHandSize", Unhandled),
         QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
         QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Unhandled),
         QuantityRef::CostXPaid => ("CostXPaid", Handled),

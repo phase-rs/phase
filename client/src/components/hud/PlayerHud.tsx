@@ -7,13 +7,14 @@ import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { StatusBadge } from "./HudBadges.tsx";
+import { CounterBadge, StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 
 export function PlayerHud() {
   const playerId = usePerspectivePlayerId();
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
+  const poisonCounters = useGameStore((s) => s.gameState?.players[playerId]?.poison_counters ?? 0);
   const isPhasedOut = useGameStore(
     (s) => s.gameState?.players[playerId]?.status?.type === "PhasedOut",
   );
@@ -60,7 +61,8 @@ export function PlayerHud() {
         trailing={
           <>
             {isPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
-            {speed > 0 ? <StatusBadge label="Speed" value={speed} tone={speed >= 4 ? "amber" : "neutral"} /> : null}
+            {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+            {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
           </>
         }
       >

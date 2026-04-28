@@ -354,7 +354,13 @@ fn redundancy_delta(
         // CR 700.2: ChooseOneOf offers the controller a runtime choice between
         // branches — redundancy would require evaluating each branch in turn,
         // which is beyond this policy's scope. Fall through to None.
-        | Effect::ChooseOneOf { .. } => None,
+        | Effect::ChooseOneOf { .. }
+        // CR 614.1a + CR 514.2: AddTargetReplacement registers a one-shot
+        // replacement on the resolved target (e.g., "if that creature would
+        // die this turn, exile it instead"). Its value depends on whether the
+        // target later triggers the replacement event — no static redundancy
+        // signal available.
+        | Effect::AddTargetReplacement { .. } => None,
     }
 }
 
