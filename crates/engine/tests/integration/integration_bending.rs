@@ -37,10 +37,10 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
 /// `state.pending_cast` is populated. These tests bypass the cast flow and
 /// assign `waiting_for` directly, so we mirror the precondition manually.
 fn set_dummy_pending_cast(state: &mut GameState) {
-    state.pending_cast = Some(Box::new(PendingCast {
-        object_id: ObjectId(0),
-        card_id: CardId(0),
-        ability: ResolvedAbility::new(
+    state.pending_cast = Some(Box::new(PendingCast::new(
+        ObjectId(0),
+        CardId(0),
+        ResolvedAbility::new(
             Effect::Unimplemented {
                 name: "TestSpell".to_string(),
                 description: None,
@@ -49,14 +49,8 @@ fn set_dummy_pending_cast(state: &mut GameState) {
             ObjectId(0),
             P0,
         ),
-        cost: ManaCost::NoCost,
-        activation_cost: None,
-        activation_ability_index: None,
-        target_constraints: vec![],
-        casting_variant: CastingVariant::Normal,
-        distribute: None,
-        origin_zone: engine::types::zones::Zone::Hand,
-    }));
+        ManaCost::NoCost,
+    )));
 }
 
 // ---------------------------------------------------------------------------
@@ -286,21 +280,15 @@ fn test_mana_payment_finalization() {
     );
 
     // Set up the pending cast and ManaPayment state
-    runner.state_mut().pending_cast = Some(Box::new(PendingCast {
-        object_id: spell_id,
-        card_id: CardId(100),
+    runner.state_mut().pending_cast = Some(Box::new(PendingCast::new(
+        spell_id,
+        CardId(100),
         ability,
-        cost: ManaCost::Cost {
+        ManaCost::Cost {
             generic: 0,
             shards: vec![ManaCostShard::Red],
         },
-        activation_cost: None,
-        activation_ability_index: None,
-        target_constraints: vec![],
-        casting_variant: CastingVariant::Normal,
-        distribute: None,
-        origin_zone: engine::types::zones::Zone::Hand,
-    }));
+    )));
     // CR 601.2a: Simulate the announcement stack push that the production flow
     // would have performed on entering the cast pipeline.
     runner
@@ -362,18 +350,12 @@ fn test_mana_payment_cancel_clears_pending_cast() {
         P0,
     );
 
-    runner.state_mut().pending_cast = Some(Box::new(PendingCast {
-        object_id: spell_id,
-        card_id: CardId(100),
+    runner.state_mut().pending_cast = Some(Box::new(PendingCast::new(
+        spell_id,
+        CardId(100),
         ability,
-        cost: ManaCost::NoCost,
-        activation_cost: None,
-        activation_ability_index: None,
-        target_constraints: vec![],
-        casting_variant: CastingVariant::Normal,
-        distribute: None,
-        origin_zone: engine::types::zones::Zone::Hand,
-    }));
+        ManaCost::NoCost,
+    )));
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,
         convoke_mode: None,

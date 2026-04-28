@@ -510,23 +510,41 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 /// CR 608.2b: Re-validate targets on resolution — remove any that are no longer legal.
 pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> ResolvedAbility {
     let mut validated = ability.clone();
-    validated.targets = match triggers::extract_target_filter_from_effect(&validated.effect) {
-        Some(filter) => targeting::validate_targets(
-            state,
-            &validated.targets,
-            filter,
-            validated.controller,
-            validated.source_id,
-        ),
-        None => validated
-            .targets
+    validated.targets = if let Effect::Attach { attachment, target } = &validated.effect {
+        [attachment, target]
             .iter()
-            .filter(|target| match target {
-                TargetRef::Object(object_id) => state.battlefield.contains(object_id),
-                TargetRef::Player(_) => true,
+            .filter(|filter| attach_filter_needs_target_slot(filter))
+            .zip(validated.targets.iter())
+            .filter_map(|(filter, target_ref)| {
+                let legal = targeting::validate_targets(
+                    state,
+                    std::slice::from_ref(target_ref),
+                    filter,
+                    validated.controller,
+                    validated.source_id,
+                );
+                legal.into_iter().next()
             })
-            .cloned()
-            .collect(),
+            .collect()
+    } else {
+        match triggers::extract_target_filter_from_effect(&validated.effect) {
+            Some(filter) => targeting::validate_targets(
+                state,
+                &validated.targets,
+                filter,
+                validated.controller,
+                validated.source_id,
+            ),
+            None => validated
+                .targets
+                .iter()
+                .filter(|target| match target {
+                    TargetRef::Object(object_id) => state.battlefield.contains(object_id),
+                    TargetRef::Player(_) => true,
+                })
+                .cloned()
+                .collect(),
+        }
     };
     if let Some(sub_ability) = validated.sub_ability.as_mut() {
         **sub_ability = validate_targets_in_chain(state, sub_ability);
@@ -565,59 +583,77 @@ fn collect_target_slots(
         return Ok(());
     }
 
-    // CR 109.4 + CR 115.1: If the effect contains a filter referencing
-    // `ControllerRef::TargetPlayer` (e.g. "each creature target player controls"
-    // on `PutCounterAll`), surface a companion `TargetFilter::Player` slot
-    // BEFORE the effect's primary filter slot. The chosen player is read back
-    // at filter-evaluation time via `ability.targets`. Runs before the primary
-    // filter so the player is chosen first (target declaration order matches
-    // Oracle text order).
-    if effect_references_target_player(&ability.effect) {
-        let player_targets = targeting::find_legal_targets(
-            state,
-            &TargetFilter::Player,
-            ability.controller,
-            ability.source_id,
-        );
-        if player_targets.is_empty() && !ability.optional_targeting {
-            return Err(EngineError::ActionNotAllowed(
-                "No legal targets available".to_string(),
-            ));
-        }
-        slots.push(TargetSelectionSlot {
-            legal_targets: player_targets,
-            optional: ability.optional_targeting,
-        });
-    }
-    if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
-        let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
-        if legal_targets.is_empty() && !ability.optional_targeting {
-            return Err(EngineError::ActionNotAllowed(
-                "No legal targets available".to_string(),
-            ));
-        }
-        if let Some(spec) = ability.multi_target.as_ref() {
-            match spec.max {
-                Some(max_targets) => {
-                    for slot_index in 0..max_targets {
-                        slots.push(TargetSelectionSlot {
-                            legal_targets: legal_targets.clone(),
-                            optional: slot_index >= spec.min,
-                        });
-                    }
-                }
-                // CR 115.1d: "any number" (unbounded max) requires a stop-on-None UI
-                // flow not yet implemented; fall back to a single optional slot.
-                None => slots.push(TargetSelectionSlot {
-                    legal_targets,
-                    optional: true,
-                }),
+    if let Effect::Attach { attachment, target } = &ability.effect {
+        for filter in [attachment, target] {
+            if !attach_filter_needs_target_slot(filter) {
+                continue;
             }
-        } else {
+            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
             slots.push(TargetSelectionSlot {
                 legal_targets,
                 optional: ability.optional_targeting,
             });
+        }
+    } else {
+        // CR 109.4 + CR 115.1: If the effect contains a filter referencing
+        // `ControllerRef::TargetPlayer` (e.g. "each creature target player controls"
+        // on `PutCounterAll`), surface a companion `TargetFilter::Player` slot
+        // BEFORE the effect's primary filter slot. The chosen player is read back
+        // at filter-evaluation time via `ability.targets`. Runs before the primary
+        // filter so the player is chosen first (target declaration order matches
+        // Oracle text order).
+        if effect_references_target_player(&ability.effect) {
+            let player_targets = targeting::find_legal_targets(
+                state,
+                &TargetFilter::Player,
+                ability.controller,
+                ability.source_id,
+            );
+            if player_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            slots.push(TargetSelectionSlot {
+                legal_targets: player_targets,
+                optional: ability.optional_targeting,
+            });
+        }
+        if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
+            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            if let Some(spec) = ability.multi_target.as_ref() {
+                match spec.max {
+                    Some(max_targets) => {
+                        for slot_index in 0..max_targets {
+                            slots.push(TargetSelectionSlot {
+                                legal_targets: legal_targets.clone(),
+                                optional: slot_index >= spec.min,
+                            });
+                        }
+                    }
+                    // CR 115.1d: "any number" (unbounded max) requires a stop-on-None UI
+                    // flow not yet implemented; fall back to a single optional slot.
+                    None => slots.push(TargetSelectionSlot {
+                        legal_targets,
+                        optional: true,
+                    }),
+                }
+            } else {
+                slots.push(TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                });
+            }
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
@@ -641,6 +677,11 @@ fn collect_target_slots(
 /// `TargetFilter::Player` target slot for mass-placement effects like
 /// `PutCounterAll { target: Typed { controller: TargetPlayer, .. } }`.
 fn effect_references_target_player(effect: &Effect) -> bool {
+    if let Effect::Attach { attachment, target } = effect {
+        return filter_references_target_player(attachment)
+            || filter_references_target_player(target);
+    }
+
     match effect.target_filter() {
         Some(f) if filter_references_target_player(f) => return true,
         _ => {}
@@ -672,6 +713,10 @@ fn effect_references_target_player(effect: &Effect) -> bool {
         }
         _ => false,
     }
+}
+
+fn attach_filter_needs_target_slot(filter: &TargetFilter) -> bool {
+    !filter.is_context_ref() && !matches!(filter, TargetFilter::LastCreated)
 }
 
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside
@@ -706,36 +751,47 @@ fn collect_target_slot_specs(ability: &ResolvedAbility, specs: &mut Vec<TargetSl
         return;
     }
 
-    // CR 109.4 + CR 115.1: Companion TargetFilter::Player slot surfaced by
-    // `collect_target_slots` must have a matching spec here so subsequent
-    // slot recomputation treats it correctly.
-    if effect_references_target_player(&ability.effect) {
-        specs.push(TargetSlotSpec {
-            filter: TargetFilter::Player,
-            optional: ability.optional_targeting,
-        });
-    }
-    if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
-        if let Some(spec) = ability.multi_target.as_ref() {
-            match spec.max {
-                Some(max_targets) => {
-                    for slot_index in 0..max_targets {
-                        specs.push(TargetSlotSpec {
-                            filter: filter.clone(),
-                            optional: slot_index >= spec.min,
-                        });
-                    }
-                }
-                None => specs.push(TargetSlotSpec {
+    if let Effect::Attach { attachment, target } = &ability.effect {
+        for filter in [attachment, target] {
+            if attach_filter_needs_target_slot(filter) {
+                specs.push(TargetSlotSpec {
                     filter: filter.clone(),
-                    optional: true,
-                }),
+                    optional: ability.optional_targeting,
+                });
             }
-        } else {
+        }
+    } else {
+        // CR 109.4 + CR 115.1: Companion TargetFilter::Player slot surfaced by
+        // `collect_target_slots` must have a matching spec here so subsequent
+        // slot recomputation treats it correctly.
+        if effect_references_target_player(&ability.effect) {
             specs.push(TargetSlotSpec {
-                filter: filter.clone(),
+                filter: TargetFilter::Player,
                 optional: ability.optional_targeting,
             });
+        }
+        if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
+            if let Some(spec) = ability.multi_target.as_ref() {
+                match spec.max {
+                    Some(max_targets) => {
+                        for slot_index in 0..max_targets {
+                            specs.push(TargetSlotSpec {
+                                filter: filter.clone(),
+                                optional: slot_index >= spec.min,
+                            });
+                        }
+                    }
+                    None => specs.push(TargetSlotSpec {
+                        filter: filter.clone(),
+                        optional: true,
+                    }),
+                }
+            } else {
+                specs.push(TargetSlotSpec {
+                    filter: filter.clone(),
+                    optional: ability.optional_targeting,
+                });
+            }
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
@@ -1508,6 +1564,28 @@ fn assign_targets_recursive(
     targets: &[TargetRef],
     next_target: &mut usize,
 ) -> Result<(), EngineError> {
+    if let Effect::Attach { attachment, target } = &ability.effect {
+        for filter in [attachment, target] {
+            if attach_filter_needs_target_slot(filter) {
+                if let Some(target) = targets.get(*next_target) {
+                    ability.targets.push(target.clone());
+                    *next_target += 1;
+                } else if !ability.optional_targeting {
+                    return Err(EngineError::InvalidAction(
+                        "Missing required target".to_string(),
+                    ));
+                }
+            }
+        }
+        if defers_sub_ability_target_selection(&ability.effect) {
+            return Ok(());
+        }
+        if let Some(sub_ability) = ability.sub_ability.as_mut() {
+            assign_targets_recursive(sub_ability, targets, next_target)?;
+        }
+        return Ok(());
+    }
+
     // CR 109.4 + CR 115.1: Mirror the companion-player slot pushed by
     // `collect_target_slots` for effects whose filters reference
     // `ControllerRef::TargetPlayer` (DamageAll, PutCounterAll, etc.). The
@@ -1583,6 +1661,35 @@ fn assign_selected_slots_recursive(
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
 ) -> Result<(), EngineError> {
+    if let Effect::Attach { attachment, target } = &ability.effect {
+        for filter in [attachment, target] {
+            if attach_filter_needs_target_slot(filter) {
+                let Some(selected_slot) = selected_slots.get(*next_slot) else {
+                    return Err(EngineError::InvalidAction(
+                        "Missing target selection".to_string(),
+                    ));
+                };
+                match selected_slot {
+                    Some(target) => ability.targets.push(target.clone()),
+                    None if ability.optional_targeting => {}
+                    None => {
+                        return Err(EngineError::InvalidAction(
+                            "Missing required target".to_string(),
+                        ));
+                    }
+                }
+                *next_slot += 1;
+            }
+        }
+        if defers_sub_ability_target_selection(&ability.effect) {
+            return Ok(());
+        }
+        if let Some(sub_ability) = ability.sub_ability.as_mut() {
+            assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+        }
+        return Ok(());
+    }
+
     // CR 109.4 + CR 115.1: Mirror the companion-player slot pushed by
     // `collect_target_slots` for `ControllerRef::TargetPlayer` filters
     // (DamageAll, PutCounterAll, etc.). See `assign_targets_recursive`.
@@ -1700,6 +1807,15 @@ fn validate_target_constraints(
 }
 
 fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
+    if let Effect::Attach { attachment, target } = &ability.effect {
+        if [attachment, target]
+            .iter()
+            .any(|filter| attach_filter_needs_target_slot(filter))
+        {
+            return true;
+        }
+    }
+
     // CR 109.4 + CR 115.1: A node also acts as a target sink when its filter
     // references `ControllerRef::TargetPlayer` (DamageAll, PutCounterAll,
     // etc.) — `collect_target_slots` pushes a companion player slot for it,
@@ -1720,6 +1836,19 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
 }
 
 fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
+    let attach_targets = if let Effect::Attach { attachment, target } = &ability.effect {
+        if ability.optional_targeting {
+            0
+        } else {
+            [attachment, target]
+                .iter()
+                .filter(|filter| attach_filter_needs_target_slot(filter))
+                .count()
+        }
+    } else {
+        0
+    };
+
     // CR 109.4: Companion player slot for `ControllerRef::TargetPlayer` filters
     // contributes one required slot (or zero when targeting is optional).
     let player_companion =
@@ -1728,7 +1857,9 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
         } else {
             0
         };
-    let current = if triggers::extract_target_filter_from_effect(&ability.effect).is_some() {
+    let current = if matches!(&ability.effect, Effect::Attach { .. }) {
+        0
+    } else if triggers::extract_target_filter_from_effect(&ability.effect).is_some() {
         if let Some(spec) = ability
             .multi_target
             .as_ref()
@@ -1743,7 +1874,7 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     } else {
         0
     };
-    let current = player_companion + current;
+    let current = attach_targets + player_companion + current;
 
     let rest = if defers_sub_ability_target_selection(&ability.effect) {
         0

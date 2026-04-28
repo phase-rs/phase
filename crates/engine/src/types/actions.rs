@@ -234,6 +234,11 @@ pub enum GameAction {
     ChooseDungeonRoom {
         room_index: u8,
     },
+    /// CR 709.5e: Special action to pay a locked Room door's unlock cost.
+    UnlockRoomDoor {
+        object_id: ObjectId,
+        door: crate::game::game_object::RoomDoor,
+    },
     /// CR 702.51a: Tap creature/artifact for convoke or waterbend mana.
     /// CR 302.6: Summoning sickness does not apply (convoke doesn't use the tap ability mechanism).
     TapForConvoke {
@@ -440,6 +445,7 @@ impl GameAction {
             GameAction::ActivateStation { spacecraft_id, .. } => Some(*spacecraft_id),
             GameAction::SaddleMount { mount_id, .. } => Some(*mount_id),
             GameAction::Transform { object_id } => Some(*object_id),
+            GameAction::UnlockRoomDoor { object_id, .. } => Some(*object_id),
             GameAction::PlayFaceDown { object_id, .. } => Some(*object_id),
             GameAction::TurnFaceUp { object_id } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),

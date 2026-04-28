@@ -1,3 +1,8 @@
+---
+name: retrain-ai-weights
+description: Use when retraining AI evaluation weights from 17Lands replay data, adding new training datasets, updating learned weight values in phase-ai Rust code, or running CMA-ES optimization for AI profiles and evaluation parameters.
+---
+
 # Retrain AI Evaluation Weights
 
 Use when the user wants to retrain AI weights from 17Lands data, add new training datasets, update learned weight values in Rust, or run CMA-ES optimization.

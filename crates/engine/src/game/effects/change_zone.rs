@@ -2387,7 +2387,7 @@ mod tests {
                 PlayerId(0),
             )
             .sub_ability(multi_zone)
-            .condition(AbilityCondition::AdditionalCostPaid);
+            .condition(AbilityCondition::additional_cost_paid_any());
             //   Top: DestroyAll → exile_seed
             let top = ResolvedAbility::new(
                 Effect::DestroyAll {

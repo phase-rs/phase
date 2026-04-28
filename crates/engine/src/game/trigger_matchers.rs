@@ -95,6 +95,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::RingTemptsYou => match_ring_tempts_you,
         TriggerMode::DungeonCompleted => match_dungeon_completed,
         TriggerMode::RoomEntered => match_room_entered,
+        TriggerMode::UnlockDoor => match_unlock_door,
+        TriggerMode::FullyUnlock => match_fully_unlock,
         TriggerMode::TakesInitiative => match_takes_initiative,
         TriggerMode::Exploited => match_exploited,
         TriggerMode::BecomeMonstrous => match_become_monstrous,
@@ -152,7 +154,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Devoured
         | TriggerMode::Discover
         | TriggerMode::Forage
-        | TriggerMode::FullyUnlock
         | TriggerMode::GiveGift
         | TriggerMode::Mentored
         | TriggerMode::Mutates
@@ -160,7 +161,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::SetInMotion
         | TriggerMode::Specializes
         | TriggerMode::Trains
-        | TriggerMode::UnlockDoor
         | TriggerMode::VisitAttraction
         | TriggerMode::BecomesPlotted => match_unimplemented,
         // CR 603.8: State triggers are not event-based — they are checked separately
@@ -314,6 +314,8 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 309 / CR 701.49: Dungeon triggers
     r.insert(TriggerMode::DungeonCompleted, match_dungeon_completed);
     r.insert(TriggerMode::RoomEntered, match_room_entered);
+    r.insert(TriggerMode::UnlockDoor, match_unlock_door);
+    r.insert(TriggerMode::FullyUnlock, match_fully_unlock);
     // CR 725: Initiative triggers
     r.insert(TriggerMode::TakesInitiative, match_takes_initiative);
 
@@ -378,7 +380,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Devoured,
         TriggerMode::Discover,
         TriggerMode::Forage,
-        TriggerMode::FullyUnlock,
         TriggerMode::GiveGift,
         TriggerMode::Mentored,
         TriggerMode::Mutates,
@@ -387,7 +388,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Specializes,
         // TriggerMode::Stationed — moved to real matcher below
         TriggerMode::Trains,
-        TriggerMode::UnlockDoor,
         TriggerMode::VisitAttraction,
         // TriggerMode::BecomesCrewed — moved to real matcher below
         TriggerMode::BecomesPlotted,
@@ -495,6 +495,14 @@ fn player_matches_filter(
             controller: Some(ControllerRef::Opponent),
             ..
         }) => trigger_controller.is_some_and(|controller| controller != player_id),
+        TargetFilter::AttachedTo => {
+            state
+                .objects
+                .get(&source_id)
+                .and_then(|source| source.attached_to)
+                .and_then(|host| host.as_player())
+                == Some(player_id)
+        }
         _ => true,
     }
 }
@@ -2034,6 +2042,45 @@ pub(super) fn match_room_entered(
     }
 }
 
+/// CR 709.5h: Match a Room door becoming unlocked.
+pub(super) fn match_unlock_door(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::RoomDoorUnlocked {
+        player_id,
+        object_id,
+        ..
+    } = event
+    {
+        *object_id == source_id && valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 709.5i: Match a Room permanent becoming fully unlocked.
+pub(super) fn match_fully_unlock(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::RoomDoorUnlocked {
+        player_id,
+        object_id,
+        fully_unlocked: true,
+        ..
+    } = event
+    {
+        *object_id == source_id && valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
 /// CR 725.2: Match "takes the initiative" events.
 pub(super) fn match_takes_initiative(
     event: &GameEvent,
@@ -2387,6 +2434,7 @@ fn stack_entry_targets_any(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::{AttachTarget, RoomDoor};
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
@@ -2511,6 +2559,111 @@ mod tests {
             event,
             GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.len() == 1
         )));
+    }
+
+    #[test]
+    fn attacks_trigger_matches_player_host_for_attached_to_target() {
+        let mut state = setup();
+        let curse = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+
+        let attacker = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::creature()));
+        trigger.valid_target = Some(TargetFilter::AttachedTo);
+
+        let enchanted_player_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+        assert!(match_attacks(
+            &enchanted_player_event,
+            &trigger,
+            curse,
+            &state
+        ));
+
+        let other_player_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            )],
+        };
+        assert!(!match_attacks(&other_player_event, &trigger, curse, &state));
+    }
+
+    #[test]
+    fn room_door_unlock_events_match_existing_trigger_modes() {
+        let mut state = setup();
+        let room = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Test Room".to_string(),
+            Zone::Battlefield,
+        );
+
+        let unlock_trigger = make_trigger(TriggerMode::UnlockDoor);
+        let partial_unlock_event = GameEvent::RoomDoorUnlocked {
+            player_id: PlayerId(0),
+            object_id: room,
+            door: RoomDoor::Left,
+            fully_unlocked: false,
+        };
+        assert!(match_unlock_door(
+            &partial_unlock_event,
+            &unlock_trigger,
+            room,
+            &state
+        ));
+
+        let fully_unlock_trigger = make_trigger(TriggerMode::FullyUnlock);
+        assert!(!match_fully_unlock(
+            &partial_unlock_event,
+            &fully_unlock_trigger,
+            room,
+            &state
+        ));
+
+        let fully_unlock_event = GameEvent::RoomDoorUnlocked {
+            player_id: PlayerId(0),
+            object_id: room,
+            door: RoomDoor::Right,
+            fully_unlocked: true,
+        };
+        assert!(match_fully_unlock(
+            &fully_unlock_event,
+            &fully_unlock_trigger,
+            room,
+            &state
+        ));
     }
 
     fn zone_changed_event(

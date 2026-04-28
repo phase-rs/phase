@@ -163,6 +163,23 @@ pub enum KeywordKind {
     Paradigm,
     /// CR 702.94: Miracle — see `Keyword::Miracle`.
     Miracle,
+    /// CR 702.56: Replicate — see `Keyword::Replicate`.
+    Replicate,
+    /// CR 702.113: Awaken — see `Keyword::Awaken`.
+    Awaken,
+    /// CR 702.163: For Mirrodin! — see `Keyword::ForMirrodin`.
+    ForMirrodin,
+    /// CR 702.162: More Than Meets the Eye — see `Keyword::MoreThanMeetsTheEye`.
+    MoreThanMeetsTheEye,
+    /// CR 702.173: Freerunning — see `Keyword::Freerunning`.
+    Freerunning,
+    /// CR 702.191: Increment — see `Keyword::Increment`.
+    Increment,
+    /// CR ???: Specialize — not in CR text (needs manual verification).
+    /// See `Keyword::Specialize`.
+    Specialize,
+    /// CR 702.48: Offering — see `Keyword::Offering`.
+    Offering,
     Unknown,
 }
 
@@ -479,10 +496,16 @@ pub enum Keyword {
     Outlast(ManaCost),
     Scavenge(ManaCost),
     Fortify(ManaCost),
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler. CR 702.160a: Prototype — alt-cast using the
+    /// secondary P/T and mana cost characteristics.
     Prototype(ManaCost),
     Plot(ManaCost),
     Craft(ManaCost),
     Offspring(ManaCost),
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler. CR 702.176a: Impending N—{cost} — alt-cast that
+    /// enters with N time counters and is not a creature until they're gone.
     Impending(ManaCost),
     /// CR 702.87a: Level up is an activated ability that puts a level counter
     /// on this permanent. Activate only as a sorcery.
@@ -555,6 +578,10 @@ pub enum Keyword {
     Bloodthirst(u32),
     Amplify(u32),
     Graft(u32),
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (ETB-replacement sacrifice-and-counter mechanic
+    /// not wired). CR 702.82a: Devour N — as it enters, you may sacrifice any
+    /// number of creatures; it enters with N +1/+1 counters per sacrifice.
     Devour(u32),
 
     /// CR 702.164: Toxic N — when this creature deals combat damage to a player,
@@ -565,10 +592,15 @@ pub enum Keyword {
     /// CR 702.46: Soulshift N — when this creature dies, return target Spirit card
     /// with mana value N or less from your graveyard to your hand.
     Soulshift(u32),
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (ETB +1/+1 counters + ability-grant trigger not wired).
     /// CR 702.165: Backup N — when this creature enters, put N +1/+1 counters
     /// on target creature, which gains this creature's other abilities until EOT.
     Backup(u32),
 
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (variable additional cost + ETB token-per-payment
+    /// not wired).
     /// CR 702.157: Squad {cost} — as an additional cost to cast, you may pay {cost}
     /// any number of times; ETB creates that many tokens.
     Squad(ManaCost),
@@ -627,6 +659,91 @@ pub enum Keyword {
     /// activation is handled via `GameAction::ActivateStation`, not through
     /// the generic activated-ability dispatch.
     Station,
+
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (no copy-on-cast hook reads it).
+    /// CR 702.56a: Replicate {cost} — additional-cost-on-cast copy
+    /// mechanic. "As an additional cost to cast this spell, you may pay
+    /// [cost] any number of times" + "When you cast this spell, if a
+    /// replicate cost was paid for it, copy it for each time its
+    /// replicate cost was paid. If the spell has any targets, you may
+    /// choose new targets for any of the copies." Carries the per-copy
+    /// mana cost; runtime semantics are not yet implemented (no
+    /// copy-on-cast hook reads this keyword).
+    Replicate(ManaCost),
+
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (alt-cast hook + awaken-paid branch not wired).
+    /// CR 702.113a: Awaken N—{cost} — alternative cost. "You may pay
+    /// [cost] rather than pay this spell's mana cost as you cast this
+    /// spell" + "If this spell's awaken cost was paid, put N +1/+1
+    /// counters on target land you control. That land becomes a 0/0
+    /// Elemental creature with haste. It's still a land." mtgish encodes
+    /// the awaken-paid branch separately; the runtime hook for the
+    /// awaken alt-cast path is not yet wired. Stores the alt-cost mana
+    /// cost.
+    Awaken(ManaCost),
+
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (ETB token + auto-attach trigger not wired).
+    /// CR 702.163a: For Mirrodin! — Equipment-only triggered ability.
+    /// "When this Equipment enters, create a 2/2 red Rebel creature
+    /// token, then attach this Equipment to it." Bare keyword; ETB
+    /// trigger semantics are not yet wired.
+    ForMirrodin,
+
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (alt-cost cast hook not wired).
+    /// CR 702.162a: More Than Meets the Eye {cost} — alternative cost
+    /// (Transformers crossover). "You may cast this card converted by
+    /// paying [cost] rather than its mana cost." Stores the alt mana
+    /// cost; the runtime alt-cost cast hook is not yet wired.
+    MoreThanMeetsTheEye(ManaCost),
+
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (alt-cast hook + combat-damage-this-turn predicate
+    /// not wired).
+    /// CR 702.173a: Freerunning {cost} — alternative cost. "You may pay
+    /// [cost] rather than pay this spell's mana cost if a player was
+    /// dealt combat damage this turn by a creature that, at the time it
+    /// dealt that damage, was an Assassin creature or a commander under
+    /// your control." Stores the alt mana cost; runtime alt-cast hook
+    /// (combat-damage-this-turn predicate) is not yet wired.
+    Freerunning(ManaCost),
+
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (spell-cast trigger not wired).
+    /// CR 702.191a: Increment — triggered ability. "Whenever you cast a
+    /// spell, if this permanent is a creature and the amount of mana
+    /// spent to cast that spell is greater than this creature's power
+    /// or this creature's toughness, put a +1/+1 counter on this
+    /// creature." Bare keyword; ETB / spell-cast trigger is not yet
+    /// wired.
+    Increment,
+
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (choose-color + transform hooks not wired).
+    /// CR ???: Specialize {cost} — not in CR text (needs manual
+    /// verification). Strixhaven student-into-mage transformation:
+    /// activated alt-cast that turns the source into a colour-specific
+    /// version. Stores the activation mana cost; the choose-color and
+    /// transform hooks are not yet wired. mtgish encodes activation
+    /// timing modifiers and from-graveyard variants separately; this
+    /// keyword carries only the cost (the engine drops the activation
+    /// modifier and the from-graveyard hint, mirroring how `LevelUp`
+    /// drops its `Vec<Level>` payload).
+    Specialize(ManaCost),
+
+    /// RUNTIME: TODO — converter accepts this keyword but engine has no
+    /// behavioral handler (cost-reduction + cast-as-instant hooks not wired).
+    /// CR 702.48a: "[Quality] offering" — additional-cost-on-cast that
+    /// sacrifices a permanent matching `Quality`. "If you chose to pay
+    /// the additional cost, this spell's total cost is reduced by the
+    /// sacrificed permanent's mana cost, and you may cast this spell any
+    /// time you could cast an instant." Carries the canonical subtype
+    /// string (e.g. "Spirit", "Dragon"); cost-reduction and cast-as-
+    /// instant runtime hooks are not yet wired.
+    Offering(String),
 
     /// Fallback for unrecognized keywords.
     Unknown(String),
@@ -778,8 +895,86 @@ impl Keyword {
             Keyword::Undaunted => KeywordKind::Undaunted,
             Keyword::Station => KeywordKind::Station,
             Keyword::Paradigm => KeywordKind::Paradigm,
+            Keyword::Replicate(_) => KeywordKind::Replicate,
+            Keyword::Awaken(_) => KeywordKind::Awaken,
+            Keyword::ForMirrodin => KeywordKind::ForMirrodin,
+            Keyword::MoreThanMeetsTheEye(_) => KeywordKind::MoreThanMeetsTheEye,
+            Keyword::Freerunning(_) => KeywordKind::Freerunning,
+            Keyword::Increment => KeywordKind::Increment,
+            Keyword::Specialize(_) => KeywordKind::Specialize,
+            Keyword::Offering(_) => KeywordKind::Offering,
             Keyword::Unknown(_) => KeywordKind::Unknown,
-            _ => KeywordKind::Unknown,
+            // Variants whose KeywordKind axis is currently the catch-all `Unknown`
+            // because the AI/coverage layer that consumes `KeywordKind` does not
+            // need to distinguish them yet. Listed exhaustively so that adding a
+            // new `Keyword::*` variant is a compile error here — at which point
+            // the author either adds a matching `KeywordKind::*` variant or maps
+            // the new arm to `Unknown` explicitly. Do NOT replace this list with
+            // a `_ => Unknown` wildcard; that defeats the whole point.
+            Keyword::Affinity(_)
+            | Keyword::Amplify(_)
+            | Keyword::Backup(_)
+            | Keyword::Banding
+            | Keyword::Bloodthirst(_)
+            | Keyword::Buyback(_)
+            | Keyword::Casualty(_)
+            | Keyword::Compleated
+            | Keyword::Conspire
+            | Keyword::CumulativeUpkeep(_)
+            | Keyword::Daybound
+            | Keyword::Demonstrate
+            | Keyword::Dethrone
+            | Keyword::Discover(_)
+            | Keyword::Disguise(_)
+            | Keyword::DoubleTeam
+            | Keyword::Echo(_)
+            | Keyword::Emerge(_)
+            | Keyword::Encore(_)
+            | Keyword::Enlist
+            | Keyword::Entwine(_)
+            | Keyword::Epic
+            | Keyword::Evoke(_)
+            | Keyword::Firebending(_)
+            | Keyword::Fortify(_)
+            | Keyword::Fuse
+            | Keyword::Graft(_)
+            | Keyword::Gravestorm
+            | Keyword::Haunt
+            | Keyword::Hideaway(_)
+            | Keyword::Impending(_)
+            | Keyword::Improvise
+            | Keyword::Ingest
+            | Keyword::LevelUp(_)
+            | Keyword::LivingMetal
+            | Keyword::Madness(_)
+            | Keyword::Melee
+            | Keyword::Mentor
+            | Keyword::Mobilize(_)
+            | Keyword::Myriad
+            | Keyword::Nightbound
+            | Keyword::Overload(_)
+            | Keyword::Poisonous(_)
+            | Keyword::Prototype(_)
+            | Keyword::Provoke
+            | Keyword::Prowl(_)
+            | Keyword::Ravenous
+            | Keyword::ReadAhead
+            | Keyword::Rebound
+            | Keyword::Retrace
+            | Keyword::Ripple
+            | Keyword::Saddle(_)
+            | Keyword::Scavenge(_)
+            | Keyword::Soulshift(_)
+            | Keyword::Spectacle(_)
+            | Keyword::SplitSecond
+            | Keyword::Spree
+            | Keyword::Squad(_)
+            | Keyword::Storm
+            | Keyword::Surge(_)
+            | Keyword::Totem
+            | Keyword::Toxic(_)
+            | Keyword::Typecycling { .. }
+            | Keyword::WebSlinging(_) => KeywordKind::Unknown,
         }
     }
 }

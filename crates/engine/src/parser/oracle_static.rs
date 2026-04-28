@@ -7,6 +7,7 @@ use nom::character::complete::{alpha1, space1};
 use nom::combinator::{opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
+use nom_language::error::VerboseError;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
@@ -189,6 +190,8 @@ struct InvertedSplit {
     /// Canonical-form rewrite `"<effect> as long as <condition>"` ready for
     /// re-dispatch through `parse_static_line_inner`.
     canonical: String,
+    /// The effect clause in original case.
+    effect_text: String,
     /// The condition clause in original case, suitable for
     /// `StaticCondition::Unrecognized { text }` when the recursed parse fails.
     condition_text: String,
@@ -217,8 +220,41 @@ fn try_split_inverted_as_long_as(tp: &TextPair<'_>) -> Option<InvertedSplit> {
     let canonical = format!("{effect_text} as long as {condition_text}");
     Some(InvertedSplit {
         canonical,
+        effect_text: effect_text.to_string(),
         condition_text,
     })
+}
+
+fn try_parse_inverted_attached_subject_grant(
+    split: &InvertedSplit,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let condition_lower = split.condition_text.to_lowercase();
+    let condition_tp = TextPair::new(&split.condition_text, &condition_lower);
+    let affected = parse_attached_subject_is_legendary(&condition_tp)?;
+
+    let effect_lower = split.effect_text.to_lowercase();
+    let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
+    let predicate = nom_tag_tp(&effect_tp, "it ").or_else(|| nom_tag_tp(&effect_tp, "they "))?;
+
+    parse_continuous_gets_has(predicate.original, affected, description)
+}
+
+fn parse_attached_subject_is_legendary(condition: &TextPair<'_>) -> Option<TargetFilter> {
+    let rest = nom_tag_tp(condition, "equipped ")?;
+    let rest = nom_tag_tp(&rest, "creature is legendary")?;
+    if !rest.original.trim().is_empty() {
+        return None;
+    }
+
+    Some(TargetFilter::Typed(TypedFilter::creature().properties(
+        vec![
+            FilterProp::EquippedBy,
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            },
+        ],
+    )))
 }
 
 fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
@@ -242,6 +278,9 @@ fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleStaticPredicate {
     CantUntap,
+    CantAttack,
+    CantBlock,
+    CantAttackOrBlock,
     MustAttack,
     MustBlock,
     BlockOnlyCreaturesWithFlying,
@@ -384,6 +423,9 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     // impossible: the rewrite target cannot begin with "as long as ".
     if matches!(inverted, InvertedAsLongAs::Allow) {
         if let Some(split) = try_split_inverted_as_long_as(&tp) {
+            if let Some(def) = try_parse_inverted_attached_subject_grant(&split, &text) {
+                return Some(def);
+            }
             if let Some(def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip) {
                 return Some(def.description(text.to_string()));
             }
@@ -1206,6 +1248,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    if let Some(def) = parse_subject_combat_rule_static(&text) {
+        return Some(def);
+    }
+
     // --- "~ can't block" ---
     if nom_primitives::scan_contains(tp.lower, "can't block")
         && !nom_primitives::scan_contains(tp.lower, "can't be blocked")
@@ -1794,6 +1840,11 @@ pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
 fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
+
+    if let Some(defs) = parse_compound_subject_rule_static(&stripped, &lower) {
+        return defs;
+    }
+
     // Check compound must-attack/block first — may return multiple.
     if let Some(defs) = try_parse_scoped_must_attack_block(&lower, &stripped) {
         return defs;
@@ -1882,6 +1933,26 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
 
     // Fall back to the single-return parser.
     parse_static_line(text).into_iter().collect()
+}
+
+fn parse_compound_subject_rule_static(text: &str, lower: &str) -> Option<Vec<StaticDefinition>> {
+    let (subject_lower, left, after_left) =
+        nom_primitives::scan_preceded(lower, parse_rule_static_predicate_nom)?;
+    let (rest, right) = preceded(
+        tag::<_, _, VerboseError<&str>>(" and "),
+        parse_rule_static_predicate_nom,
+    )
+    .parse(after_left)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+    Some(vec![
+        lower_rule_static(left, affected.clone(), text),
+        lower_rule_static(right, affected, text),
+    ])
 }
 
 /// CR 702.3b + CR 611.3a + CR 613: Decompose `"<predicate_1> and can attack
@@ -2961,6 +3032,19 @@ fn parse_combat_tax_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
     Some(def)
 }
 
+fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (subject_lower, predicate, rest) =
+        nom_primitives::scan_preceded(&lower, parse_combat_rule_static_predicate_nom)?;
+    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+    Some(lower_rule_static(predicate, affected, text))
+}
+
 /// Result of the combat-tax nom parse.
 struct CombatTaxParse {
     mode: StaticMode,
@@ -3877,6 +3961,12 @@ fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    if let Ok((rest, predicate)) = parse_rule_static_predicate_nom(tp.lower) {
+        if rest.trim().is_empty() {
+            return Some(predicate);
+        }
+    }
+
     if nom_tag_tp(&tp, "doesn't untap during").is_some()
         || nom_tag_tp(&tp, "doesn\u{2019}t untap during").is_some()
         || nom_tag_tp(&tp, "don't untap during").is_some()
@@ -3981,6 +4071,31 @@ fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
     None
 }
 
+fn parse_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleStaticPredicate> {
+    let (rest, predicate) = alt((
+        parse_combat_rule_static_predicate_nom,
+        value(
+            RuleStaticPredicate::LoseAllAbilities,
+            alt((tag("loses all abilities"), tag("lose all abilities"))),
+        ),
+    ))
+    .parse(input)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, predicate))
+}
+
+fn parse_combat_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleStaticPredicate> {
+    alt((
+        value(
+            RuleStaticPredicate::CantAttackOrBlock,
+            tag("can't attack or block"),
+        ),
+        value(RuleStaticPredicate::CantAttack, tag("can't attack")),
+        value(RuleStaticPredicate::CantBlock, tag("can't block")),
+    ))
+    .parse(input)
+}
+
 fn lower_rule_static(
     predicate: RuleStaticPredicate,
     affected: TargetFilter,
@@ -3990,6 +4105,17 @@ fn lower_rule_static(
         RuleStaticPredicate::CantUntap => StaticDefinition::new(StaticMode::CantUntap)
             .affected(affected)
             .description(description.to_string()),
+        RuleStaticPredicate::CantAttack => StaticDefinition::new(StaticMode::CantAttack)
+            .affected(affected)
+            .description(description.to_string()),
+        RuleStaticPredicate::CantBlock => StaticDefinition::new(StaticMode::CantBlock)
+            .affected(affected)
+            .description(description.to_string()),
+        RuleStaticPredicate::CantAttackOrBlock => {
+            StaticDefinition::new(StaticMode::CantAttackOrBlock)
+                .affected(affected)
+                .description(description.to_string())
+        }
         RuleStaticPredicate::MustAttack => StaticDefinition::new(StaticMode::MustAttack)
             .affected(affected)
             .description(description.to_string()),
@@ -10013,6 +10139,33 @@ mod tests {
     }
 
     #[test]
+    fn static_as_long_as_equipped_creature_is_legendary_grants_to_equipped_creature() {
+        let def = parse_static_line("As long as equipped creature is legendary, it has hexproof.")
+            .expect("should parse attached-subject inverted grant");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![
+                    FilterProp::EquippedBy,
+                    FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    },
+                ]
+            )))
+        );
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                }),
+            "Expected AddKeyword(Hexproof), got {:?}",
+            def.modifications
+        );
+        assert_eq!(def.condition, None);
+    }
+
+    #[test]
     fn static_enchanted_creature_gets_pt_as_long_as() {
         // Conditional grant: "enchanted creature gets +1/+1 as long as you control a Wizard"
         let def =
@@ -12706,6 +12859,43 @@ mod tests {
         assert!(
             !modes.contains(&StaticMode::Other("CantBeAttached".to_string())),
             "CantBeAttached is a superset and must not be emitted"
+        );
+    }
+
+    #[test]
+    fn static_enchanted_creature_loses_abilities_and_cant_attack_or_block() {
+        let defs = parse_static_line_multi(
+            "Enchanted creature loses all abilities and can't attack or block.",
+        );
+        assert_eq!(defs.len(), 2, "expected two statics, got {defs:?}");
+        assert!(defs.iter().any(|def| {
+            def.mode == StaticMode::Continuous
+                && def
+                    .modifications
+                    .contains(&ContinuousModification::RemoveAllAbilities)
+        }));
+        assert!(defs
+            .iter()
+            .any(|def| def.mode == StaticMode::CantAttackOrBlock));
+        for def in defs {
+            assert_eq!(
+                def.affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn static_enchanted_creature_cant_attack_or_block_uses_enchanted_subject() {
+        let def = parse_static_line("Enchanted creature can't attack or block.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantAttackOrBlock);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+            ))
         );
     }
 

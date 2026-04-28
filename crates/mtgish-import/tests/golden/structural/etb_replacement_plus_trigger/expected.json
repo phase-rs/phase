@@ -1,0 +1,140 @@
+[
+  {
+    "keywords": [],
+    "abilities": [],
+    "triggers": [
+      {
+        "mode": "ChangesZone",
+        "execute": {
+          "kind": "Spell",
+          "effect": {
+            "type": "GainLife",
+            "amount": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "player": "controller"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "sorcery_speed": false,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "valid_card": {
+          "type": "And",
+          "filters": [
+            {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            },
+            {
+              "type": "Typed",
+              "type_filters": [
+                "Permanent"
+              ],
+              "controller": "Opponent",
+              "properties": []
+            }
+          ]
+        },
+        "origin": null,
+        "destination": "Battlefield",
+        "trigger_zones": [],
+        "phase": null,
+        "optional": false,
+        "damage_kind": "Any",
+        "secondary": false,
+        "valid_target": null,
+        "valid_source": null,
+        "description": null,
+        "constraint": null,
+        "condition": null,
+        "batched": false
+      }
+    ],
+    "statics": [],
+    "replacements": [
+      {
+        "event": "ChangeZone",
+        "execute": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Tap",
+            "target": {
+              "type": "And",
+              "filters": [
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": null,
+                  "properties": []
+                },
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Permanent"
+                  ],
+                  "controller": "Opponent",
+                  "properties": []
+                }
+              ]
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "sorcery_speed": false,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "mode": {
+          "type": "Mandatory"
+        },
+        "valid_card": {
+          "type": "And",
+          "filters": [
+            {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            },
+            {
+              "type": "Typed",
+              "type_filters": [
+                "Permanent"
+              ],
+              "controller": "Opponent",
+              "properties": []
+            }
+          ]
+        },
+        "description": null,
+        "condition": null,
+        "destination_zone": "Battlefield"
+      }
+    ],
+    "additional_cost": null,
+    "casting_options": [],
+    "casting_restrictions": [],
+    "strive_cost": null
+  }
+]

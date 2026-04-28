@@ -50,6 +50,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::Priority { player }, _) if *player != acting_player => true,
         (WaitingFor::Priority { .. }, GameAction::CastSpell { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::PlayLand { object_id, .. })
+        | (WaitingFor::Priority { .. }, GameAction::UnlockRoomDoor { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::Transform { object_id })
         | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id })
         | (WaitingFor::Priority { .. }, GameAction::PlayFaceDown { object_id, .. })

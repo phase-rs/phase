@@ -35,6 +35,8 @@ These rules are defined in CLAUDE.md and are enforced without exception. Violati
 
 **Nom combinator reference:** See `nom_combinators.md` in this skill directory for the complete list of nom parsers and combinators organized by module. Consult this when choosing which combinator to use.
 
+**Copy-paste patterns + the enforcement gate:** When you need to translate a string-method idiom into combinators, open `crates/engine/src/parser/oracle_nom/PATTERNS.md` — it indexes every common shape (strip prefix, strip suffix, optional trailing clause, alternatives, word-boundary scan, delimiter split, contains-check, peek-without-consume) with copy-pasteable code. The pre-commit hook `scripts/check-parser-combinators.sh` actively rejects new lines containing `.strip_prefix(...)`, `.strip_suffix(...)`, `.contains("...")`, `.starts_with("...")`, `.ends_with("...")`, `.split_once(...)`, `.find("...")`, or `.trim_end_matches("...")` against string literals inside `crates/engine/src/parser/`. If a use is genuinely structural (post-tokenization punctuation cleanup, `TextPair` dual-string stripping, runtime char scans) annotate the line `// allow-noncombinator: <one-line reason>` per PATTERNS.md §9. Existing offenders are grandfathered; new code is gated.
+
 **The only acceptable uses of `starts_with`/`strip_prefix` in parser code:**
 - `TextPair::strip_prefix` for dual-string case-bridging operations (this is structural, not dispatch)
 - Runtime array loops or char-level scanners
@@ -568,10 +570,57 @@ Cross-reference the `/add-trigger` skill. Parser-specific: add pattern in `try_p
 | Not recognizing `~` as self-reference | Self-targeting fails | `parse_target` handles both `~` and type phrases |
 | Inline `use nom::*` in function bodies | CLAUDE.md prohibition | All imports at file top |
 | `Unimplemented` with misleading `name` | Coverage miscategorizes gap | Actual verb as `name`, full text as `description` |
+| **Peek-vs-chomp** — upstream `scan_*` / detector reads marker text without consuming, downstream loop re-encounters and warns or drops it | "Swallow:*" warning emitted even though semantic was captured upstream; or qualifier text silently dropped on routing | Either single-pass read-and-chomp in the upstream helper, OR add a matching consume-without-record arm in the downstream dispatch loop. See `scan_distinct_names_clause` (peek) ↔ `parse_search_filter_suffixes` "with different name[s]" (chomp) for the canonical pair. |
 
 ---
 
-## 11. Self-Maintenance
+## 11. Diagnostics — Swallow Detectors & `parse_warnings`
+
+The parser must never silently discard Oracle text. Every clause must either be represented in the parsed AST OR cause the line to fail and yield `Effect::Unimplemented` carrying the original phrase. **Anything in between is a parser lie.**
+
+The `crates/engine/src/parser/swallow_check.rs` module audits each card's parsed `ParsedAbilities` against its original Oracle text and emits a `parse_warning` for every marker phrase that has no AST representation. Findings surface in the coverage report via `CardFace::parse_warnings` (also written into each card's entry in `client/public/card-data.json`).
+
+**Reading current swallow gaps:**
+
+```bash
+# Count total active warnings
+jq -r '[.[] | .parse_warnings // [] | .[]] | length' client/public/card-data.json
+
+# Top warning classes by frequency
+jq -r '[.[] | .parse_warnings // [] | .[]] | map(split(":")[0:2] | join(":")) |
+       group_by(.) | map({prefix: .[0], count: length}) | sort_by(.count) | reverse' \
+       client/public/card-data.json
+
+# Sample cards in a specific class
+jq -r '[.[] | .parse_warnings // [] | .[] | select(startswith("Swallow:DynamicQty"))] | .[0:5]' \
+       client/public/card-data.json
+```
+
+**Detector class prefixes** (one row per detector in `swallow_check.rs`):
+
+| Prefix | What it flags |
+|---|---|
+| `Swallow:Condition_If` | "if <condition>" present in text but no `condition`/`constraint`/`if_clause` slot in AST |
+| `Swallow:Condition_Unless` | "unless …" not bound to `unless_filter` / `unless_*` slot |
+| `Swallow:Condition_AsLongAs` | "as long as …" not bound to a conditional static |
+| `Swallow:DynamicQty` | "for each / equal to / the number of / twice / half" present but AST has only `Fixed` quantity values — the canonical **count parsed but routed downstream as Fixed** bug class |
+| `Swallow:Duration_ThisTurn` / `_UntilEndOfTurn` / `_NextTurn` | duration phrase present but no `duration` slot populated |
+| `Swallow:Optional_YouMay` / `_MayHave` | "you may …" / "may have it …" not bound to the optional flag |
+| `Swallow:Replacement_Instead` | " instead" present but no replacement definition emitted |
+| `Swallow:ActivateOnlyDuring` / `:ActivateLimit` | activation timing/limit phrase not bound to a restriction slot |
+| `Swallow:APNAP` | "starting with you" / "in turn order" not bound to order metadata |
+| `target-fallback:` | secondary class — `parse_target` couldn't classify a noun phrase, or a downstream chomping loop encountered an unmatched filter suffix |
+
+**Workflow:**
+1. When fixing a swallow, identify the dispatch site that *recognized* the marker but failed to either capture or chomp it. The fix is almost always at one of two places: the upstream recognition (route through the right `try_parse_*` interceptor) or the downstream chomping loop (add a missing arm). The peek-vs-chomp pitfall in §10 is the recurring root cause.
+2. After fixing, regenerate (`./scripts/gen-card-data.sh`) and recount; warnings should drop by exactly the affected class size.
+3. **Suppression rule** — `swallow_check.rs` skips all detectors when ANY ability on the card was already `Effect::Unimplemented` (the gap is reported there); only partial-parse cards run the full detector suite. So a "5-card drop" in `Swallow:DynamicQty` may also un-mute additional detectors on the same cards.
+
+**Companion Python audit:** `scripts/swallow_audit.py` runs the same heuristics over `coverage-data.json` independently of the Rust runtime. Use it for cross-checking, or for exploring novel detector classes before promoting them to `swallow_check.rs`.
+
+---
+
+## 12. Self-Maintenance
 
 After completing work using this skill:
 

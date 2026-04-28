@@ -61,6 +61,27 @@ cargo run --profile tool --bin parser-gap-analyzer -- data/ \
 
 Empty `/tmp/batch.txt` → the quick-win pool for this format is exhausted for this session. Stop or switch formats.
 
+### Phase 1.5 — Alternative selector: swallow-warning batching
+
+When the parser-gap-analyzer pool is thin or you want to target a specific *anti-pattern class* (rather than verb-variation cards), batch by `parse_warnings` instead. The swallow detectors in `crates/engine/src/parser/swallow_check.rs` flag cards where the AST silently dropped Oracle text — `Swallow:Condition_If`, `Swallow:DynamicQty`, `Swallow:Duration_ThisTurn`, `Swallow:Optional_YouMay`, `Swallow:Condition_Unless`, `Swallow:Replacement_Instead`, etc. Each prefix is a recognition-without-binding bug class — fix the dispatch site once and the whole class flips.
+
+```bash
+# Batch 10 cards from a specific swallow class (uses fresh card-data.json — Phase 0 already regenerated it)
+CLASS='Swallow:DynamicQty'   # or Swallow:Condition_If, Swallow:Duration_ThisTurn, etc.
+jq -r --arg ex "$(cat /tmp/velocity-flipped.txt | tr '\n' '|')" --arg cls "$CLASS" '
+  to_entries[]
+  | select(.value.parse_warnings // [] | any(startswith($cls)))
+  | .key' client/public/card-data.json \
+  | grep -vxE "${ex%|}" | head -10 > /tmp/batch.txt
+```
+
+Use this selector when:
+- A specific swallow prefix dominates the warning histogram (e.g., 750 `DynamicQty` cards) — fixing the dispatch site cascades across hundreds of cards.
+- You want to drive a metric down deliberately (e.g., "eliminate `Replacement_Instead` swallows this session").
+- The parser-gap-analyzer near-miss list is exhausted for the format.
+
+The peek-vs-chomp anti-pattern (see `/oracle-parser` §10) is the recurring root cause — an upstream `scan_*` reads the marker without consuming, downstream loop re-encounters and warns. Diagnose by tracing one card end-to-end before editing.
+
 ---
 
 ## Phase 2 — Batched inner loop (5–10 edits per compile cycle)

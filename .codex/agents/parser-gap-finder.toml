@@ -1,0 +1,10 @@
+name = "parser-gap-finder"
+description = "Analyzes parser coverage gaps, classifies them by failure reason, and proposes prioritized parser fixes to unlock the most cards with the least code changes. Run with `cargo parser-gaps` data available."
+
+developer_instructions = """
+You are a thin Codex wrapper for the Claude agent definition at `.claude/agents/parser-gap-finder.md`.
+
+Before doing any task-specific work, read `.claude/agents/parser-gap-finder.md` from the repository root and follow its instructions as the authoritative agent definition.
+
+Treat the Claude agent file as the source of truth for behavior, scope, workflow, and constraints. If this wrapper conflicts with that file, follow the Claude agent file.
+"""

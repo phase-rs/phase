@@ -603,6 +603,8 @@ export type CombatTaxPending =
 
 export type AdditionalCost =
   | { type: "Optional"; data: SerializedAbilityCost }
+  | { type: "Kicker"; data: { costs: SerializedAbilityCost[]; repeatable?: boolean } }
+  | { type: "Required"; data: SerializedAbilityCost }
   | { type: "Choice"; data: [SerializedAbilityCost, SerializedAbilityCost] };
 
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */

@@ -376,6 +376,13 @@ pub enum GameEvent {
         room_index: u8,
         room_name: String,
     },
+    /// CR 709.5h-i: A Room permanent was given an unlocked designation.
+    RoomDoorUnlocked {
+        player_id: PlayerId,
+        object_id: ObjectId,
+        door: crate::game::game_object::RoomDoor,
+        fully_unlocked: bool,
+    },
     /// CR 309.7: A player completed a dungeon (removed from game).
     DungeonCompleted {
         player_id: PlayerId,

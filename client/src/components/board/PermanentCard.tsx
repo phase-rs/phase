@@ -3,7 +3,7 @@ import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 
-import type { GameAction } from "../../adapter/types.ts";
+import type { GameAction, GameObject } from "../../adapter/types.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -24,6 +24,7 @@ import { collectObjectActions, isManaObjectAction } from "../../viewmodel/cardAc
 
 interface PermanentCardProps {
   objectId: number;
+  attachmentsLiftedByAncestor?: boolean;
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
@@ -45,6 +46,7 @@ const EXILE_GHOST_OFFSET_PX = 20;
 // via the recursive PermanentCard's existing handlers.
 const ATTACHMENT_PEEK_PX = 22;
 const ATTACHMENT_STACK_STEP_PX = 22;
+const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 
 // Subtype glyphs sit in the top-right of the peek (where the mana pips
 // would normally be) so the player can identify the attachment's role
@@ -58,8 +60,41 @@ function attachmentTypeGlyph(subtypes: string[]): string | null {
   return null;
 }
 
-export const PermanentCard = memo(function PermanentCard({ objectId }: PermanentCardProps) {
+function attachmentTreeContains(
+  objects: Record<string, GameObject> | undefined,
+  rootId: number,
+  candidateId: number | null,
+): boolean {
+  if (candidateId == null) return false;
+  const remaining = [rootId];
+  const visited = new Set<number>();
+
+  while (remaining.length > 0) {
+    const id = remaining.pop();
+    if (id == null || visited.has(id)) continue;
+    if (id === candidateId) return true;
+
+    visited.add(id);
+    const current = objects?.[id];
+    if (current) {
+      remaining.push(...current.attachments);
+    }
+  }
+
+  return false;
+}
+
+function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
+  if (!(target instanceof Element)) return null;
+  const objectEl = target.closest<HTMLElement>("[data-object-id]");
+  if (!objectEl) return null;
+  const objectId = Number(objectEl.dataset.objectId);
+  return Number.isFinite(objectId) ? objectId : null;
+}
+
+export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false }: PermanentCardProps) {
   const playerId = usePlayerId();
+  const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const tapRotation = usePreferencesStore((s) => s.tapRotation);
@@ -78,6 +113,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
 
   const {
     selectedObjectId, selectObject, hoverObject, inspectObject,
+    hoveredObjectId,
     combatMode, selectedAttackers, toggleAttacker,
     blockerAssignments, combatClickHandler, selectedCardIds, toggleSelectedCard,
   } = useUiStore(useShallow((s) => ({
@@ -85,6 +121,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     selectObject: s.selectObject,
     hoverObject: s.hoverObject,
     inspectObject: s.inspectObject,
+    hoveredObjectId: s.hoveredObjectId,
     combatMode: s.combatMode,
     selectedAttackers: s.selectedAttackers,
     toggleAttacker: s.toggleAttacker,
@@ -127,8 +164,10 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     hoverObject(objectId); inspectObject(objectId);
   }, [hoverObject, inspectObject, objectId]);
 
-  const handleMouseLeave = useCallback(() => {
-    hoverObject(null); inspectObject(null);
+  const handleMouseLeave = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
+    hoverObject(nextObjectId);
+    inspectObject(nextObjectId);
   }, [hoverObject, inspectObject]);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -158,6 +197,12 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
+  const attachmentsLifted =
+    obj.attachments.length > 0
+    && (
+      attachmentsLiftedByAncestor
+      || attachmentTreeContains(gameObjects, objectId, hoveredObjectId)
+    );
 
   // Combat state — check both UI selection and committed combat state
   const isSelectingAttacker =
@@ -313,7 +358,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer rounded-lg self-end select-none"
       style={{
-        zIndex: isAttacking ? 50 : undefined,
+        zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : isAttacking ? 50 : undefined,
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
         transformOrigin: "center center",
@@ -343,10 +388,10 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
           Card 0 (innermost) is closest to the host with the smallest peek;
           subsequent cards shift further right so each one's right edge is
           visible past the previous one. z-index counts DOWN from a value
-          below the host's z-10 so attachments stay behind the host face but
-          remain pointer-event-reachable — negative z-indexes were tried
-          first and broke hover (they pushed the wrapper out of the
-          hit-testable layer). */}
+          below the host's z-10 so attachments stay tucked behind the host
+          face. While the host or one of its attachment descendants is
+          hovered, lift only the outer permanent tree above sibling
+          permanents; internal host/attachment ordering stays unchanged. */}
       {obj.attachments.map((attachId, i) => {
         const peekPx = ATTACHMENT_PEEK_PX + i * ATTACHMENT_STACK_STEP_PX;
         return (
@@ -359,7 +404,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
               zIndex: 5 - i,
             }}
           >
-            <PermanentCard objectId={attachId} />
+            <PermanentCard objectId={attachId} attachmentsLiftedByAncestor={attachmentsLifted} />
             <AttachmentTypeBadge attachId={attachId} />
           </div>
         );

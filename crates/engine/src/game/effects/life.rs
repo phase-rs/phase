@@ -40,6 +40,11 @@ pub fn resolve_gain(
             .map(|o| o.controller)
             .unwrap_or(ability.controller),
         GainLifePlayer::Controller => ability.controller,
+        // CR 115.2 + CR 601.2c: "Target player gains N life" — the
+        // chosen player is bound on `ability.targets` via the spell-
+        // announcement target slot. `target_player()` extracts the
+        // first `TargetRef::Player` and falls back to controller.
+        GainLifePlayer::TargetPlayer => ability.target_player(),
     };
 
     // CR 119.7: "If an effect says that a player can't gain life ... a replacement
@@ -420,6 +425,7 @@ pub fn resolve_set_life_total(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         ControllerRef, QuantityExpr, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
@@ -530,6 +536,36 @@ mod tests {
 
         assert_eq!(state.players[0].life, 20);
         assert_eq!(state.players[1].life, 19);
+    }
+
+    #[test]
+    fn lose_life_attached_to_resolves_player_host() {
+        let mut state = GameState::new_two_player(42);
+        let curse = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: Some(TargetFilter::AttachedTo),
+            },
+            vec![],
+            curse,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 18);
     }
 
     #[test]

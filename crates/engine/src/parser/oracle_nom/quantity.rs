@@ -1092,6 +1092,7 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::EventContextAmount, tag("that much")),
         value(QuantityRef::EventContextAmount, tag("that many")),
+        value(QuantityRef::EventContextAmount, tag("that damage")),
         value(
             QuantityRef::EventContextSourcePower,
             tag("that creature's power"),
@@ -1176,15 +1177,20 @@ fn parse_target_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse the bare domain suffix: "basic land types among lands you control".
+/// Parse the bare domain suffix: "basic land type[s] among lands you control".
 ///
 /// Factored out so both the full "the number of ..." form (Domain quantity) and
 /// the "there are N ..." condition form (see `parse_there_are_conditions` in
-/// `oracle_nom/condition.rs`) share a single tag authority.
+/// `oracle_nom/condition.rs`) share a single tag authority. The singular form
+/// appears after "for each"; the plural form appears after "the number of".
 fn parse_basic_land_types_among_lands_you_control(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
         QuantityRef::BasicLandTypeCount,
-        tag("basic land types among lands you control"),
+        (
+            tag("basic land type"),
+            opt(tag("s")),
+            tag(" among lands you control"),
+        ),
     )
     .parse(input)
 }
@@ -1249,6 +1255,7 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // "<type> you control" arm — same reason as in
         // `parse_number_of_inner`.
         parse_creature_in_party_for_each,
+        parse_player_counter_ref_tail,
         // CR 700.4 + CR 700.7: "creature that died this turn" / "creature that
         // died under your control this turn" — event-based count of dies-events
         // tracked in `state.zone_changes_this_turn`. Must precede
@@ -1394,7 +1401,9 @@ fn parse_speed_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// downstream and no permutation-enumerated tag lists.
 fn parse_player_counter_ref_tail(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, kind) = parse_player_counter_kind(input)?;
-    let (rest, _) = tag(" counters ").parse(rest)?;
+    let (rest, _) = tag(" counter").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
     let (rest, scope) = parse_player_counter_possessor(rest)?;
     Ok((rest, QuantityRef::PlayerCounter { kind, scope }))
 }
@@ -1915,6 +1924,10 @@ mod tests {
         assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, " life");
 
+        let (rest, q) = parse_quantity_ref("that damage").unwrap();
+        assert_eq!(q, QuantityRef::EventContextAmount);
+        assert_eq!(rest, "");
+
         let (rest2, q2) = parse_quantity_ref("that creature's power").unwrap();
         assert_eq!(q2, QuantityRef::EventContextSourcePower);
         assert_eq!(rest2, "");
@@ -2028,6 +2041,13 @@ mod tests {
     fn test_parse_basic_land_type_count() {
         let (rest, q) =
             parse_quantity_ref("the number of basic land types among lands you control").unwrap();
+        assert_eq!(q, QuantityRef::BasicLandTypeCount);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_basic_land_type_count_singular_for_each_suffix() {
+        let (rest, q) = parse_quantity_ref("basic land type among lands you control").unwrap();
         assert_eq!(q, QuantityRef::BasicLandTypeCount);
         assert_eq!(rest, "");
     }
@@ -2279,6 +2299,36 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parses_player_counter_for_each_singular_and_plural() {
+        let cases: &[(&str, PlayerCounterKind, CountScope)] = &[
+            (
+                "experience counter you have",
+                PlayerCounterKind::Experience,
+                CountScope::Controller,
+            ),
+            (
+                "rad counters each opponent has",
+                PlayerCounterKind::Rad,
+                CountScope::Opponents,
+            ),
+        ];
+        for (phrase, kind, scope) in cases {
+            let (rest, q) = parse_for_each_clause_ref(phrase).unwrap_or_else(|e| {
+                panic!("for-each phrase `{phrase}` failed to parse: {e:?}");
+            });
+            assert_eq!(
+                q,
+                QuantityRef::PlayerCounter {
+                    kind: *kind,
+                    scope: scope.clone(),
+                },
+                "{phrase}"
+            );
+            assert_eq!(rest, "", "{phrase}");
+        }
     }
 
     #[test]

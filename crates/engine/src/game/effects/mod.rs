@@ -903,6 +903,14 @@ pub(crate) fn resolve_player_for_context_ref(
 /// `resolve_library_owner` logic in `search_library.rs` but applies generally
 /// to any optional effect whose embedded player-scope target is a context-ref.
 fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+    if let Effect::PayCost { payer, .. } = &ability.effect {
+        if let Some(player) =
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        {
+            return player;
+        }
+    }
+
     // Subject-anchored SearchLibrary: prompt the library owner / searcher.
     if let Effect::SearchLibrary {
         target_player: Some(TargetFilter::ParentTargetController),
@@ -1856,7 +1864,33 @@ fn evaluate_condition(
     ability: &ResolvedAbility,
 ) -> bool {
     match condition {
-        AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
+        // CR 702.33d + CR 702.33f + CR 608.2c: Parameterized additional-cost
+        // gating. The default shape (`variant: None`, `min_count: 1`) reads the
+        // legacy single-bool flag used by Gift / Buyback / Bargain / Evidence /
+        // plain "if it was kicked". Specific kicker variants and multi-kicker
+        // counts read `kickers_paid` (populated by the casting flow, copied to
+        // GameObject at cast resolution, and propagated back into the trigger's
+        // resolved-ability context for ETB triggers).
+        AbilityCondition::AdditionalCostPaid {
+            variant,
+            kicker_cost,
+            min_count,
+        } => {
+            if kicker_cost.is_some() && variant.is_none() {
+                false
+            } else {
+                match variant {
+                    Some(kicker) => ability.context.kickers_paid.contains(kicker),
+                    None => {
+                        if *min_count <= 1 {
+                            ability.context.additional_cost_paid
+                        } else {
+                            ability.context.kickers_paid.len() >= *min_count as usize
+                        }
+                    }
+                }
+            }
+        }
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
         }
@@ -2041,6 +2075,20 @@ fn evaluate_condition(
                 &crate::game::filter::FilterContext::from_ability(ability),
             )
         }
+        AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin,
+            destination,
+            filter,
+        } => state.current_trigger_event.as_ref().is_some_and(|event| {
+            crate::game::filter::matches_zone_change_event_object_filter(
+                state,
+                event,
+                *origin,
+                *destination,
+                filter,
+                &crate::game::filter::FilterContext::from_ability(ability),
+            )
+        }),
         // CR 608.2c + CR 614.1d: "if you control a/no [filter]" — scan the battlefield
         // for any other permanent owned/controlled by the ability controller matching
         // `filter`. Excludes the source itself so a Soldier-typed land doesn't satisfy
@@ -2080,6 +2128,10 @@ fn evaluate_condition(
         AbilityCondition::And { conditions } => conditions
             .iter()
             .all(|c| evaluate_condition(c, state, ability)),
+        // CR 608.2c: Compound condition — at least one inner condition must be true.
+        AbilityCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| evaluate_condition(c, state, ability)),
         // CR 608.2c: Logical negation — true when the inner condition is false.
         AbilityCondition::Not { condition } => !evaluate_condition(condition, state, ability),
         // CR 730.2a: True when it's neither day nor night (no designation set yet).
@@ -2462,6 +2514,7 @@ mod tests {
                 cost: crate::types::ability::PaymentCost::Life {
                     amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 },
+                payer: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -4600,6 +4653,156 @@ mod tests {
                 (PlayerId(1), PlayerId(1), Some(4), Some(4)),
             ]
         );
+    }
+
+    /// CR 702.33d + CR 702.33f + CR 608.2c: Default-shape `AdditionalCostPaid`
+    /// (variant=None, min_count=1) reads `additional_cost_paid` so legacy
+    /// Gift / Buyback / Bargain / Evidence / plain "if it was kicked" gating
+    /// stays correct.
+    #[test]
+    fn additional_cost_paid_default_shape_reads_legacy_bool() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let cond = AbilityCondition::additional_cost_paid_any();
+        assert!(!evaluate_condition(&cond, &state, &ability));
+        ability.context.additional_cost_paid = true;
+        assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    /// CR 702.33f: variant gating reads `kickers_paid` membership. Mirrors
+    /// Ana Battlemage's per-kicker triggers.
+    #[test]
+    fn additional_cost_paid_variant_reads_kickers_paid() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let first = AbilityCondition::additional_cost_paid_kicker(
+            crate::types::ability::KickerVariant::First,
+        );
+        let second = AbilityCondition::additional_cost_paid_kicker(
+            crate::types::ability::KickerVariant::Second,
+        );
+        assert!(!evaluate_condition(&first, &state, &ability));
+        assert!(!evaluate_condition(&second, &state, &ability));
+        ability
+            .context
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::First);
+        assert!(evaluate_condition(&first, &state, &ability));
+        assert!(!evaluate_condition(&second, &state, &ability));
+        ability
+            .context
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::Second);
+        assert!(evaluate_condition(&first, &state, &ability));
+        assert!(evaluate_condition(&second, &state, &ability));
+    }
+
+    /// CR 702.33b/c: `min_count >= 2` reads `kickers_paid.len()`. Mirrors
+    /// Archangel of Wrath's "kicked twice" trigger.
+    #[test]
+    fn additional_cost_paid_min_count_reads_kickers_paid_len() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let twice = AbilityCondition::additional_cost_paid_n_times(2);
+        assert!(!evaluate_condition(&twice, &state, &ability));
+        ability
+            .context
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::First);
+        assert!(!evaluate_condition(&twice, &state, &ability));
+        ability
+            .context
+            .kickers_paid
+            .push(crate::types::ability::KickerVariant::Second);
+        assert!(evaluate_condition(&twice, &state, &ability));
+    }
+
+    #[test]
+    fn zone_change_object_ability_condition_checks_current_trigger_event_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(210),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(211),
+            PlayerId(0),
+            "Countered Entry".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                ..crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    entering,
+                    Some(Zone::Hand),
+                    Zone::Battlefield,
+                )
+            }),
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let condition = AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter: TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
+            ),
+        };
+
+        assert!(evaluate_condition(&condition, &state, &ability));
     }
 
     #[test]

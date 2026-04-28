@@ -5836,6 +5836,15 @@ fn append_to_deepest_sub_ability(
     cursor.sub_ability = Some(tail);
 }
 
+fn intrinsic_continuation_effect(def: &AbilityDefinition) -> &Effect {
+    if matches!(*def.effect, Effect::TargetOnly { .. }) {
+        if let Some(sub_ability) = def.sub_ability.as_deref() {
+            return &sub_ability.effect;
+        }
+    }
+    &def.effect
+}
+
 /// CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
 /// sentence from a chain of Oracle text, returning the stripped text and the
 /// captured rounding mode. Used by `parse_effect_chain_impl` to consume the
@@ -6839,8 +6848,11 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             continue;
         }
 
-        let intrinsic_continuation =
-            parse_intrinsic_continuation_ast(normalized_text, &current_defs[0].effect, full_text);
+        let intrinsic_continuation = parse_intrinsic_continuation_ast(
+            normalized_text,
+            intrinsic_continuation_effect(&current_defs[0]),
+            full_text,
+        );
 
         // Phase 1.5: cascade-vs-AST structural diff. Captures cases where
         // the chunk loop's linear strippers populated a slot but
@@ -9337,10 +9349,39 @@ fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
         return None;
     }
     let cost = parse_mtgjson_mana_cost(cost_text);
+    if let Some(unless_cost) = parse_unless_for_each_payment(&cost_str[cost_end..], &cost) {
+        return Some(unless_cost);
+    }
     if cost == ManaCost::NoCost || cost == ManaCost::zero() {
         return None;
     }
     Some(UnlessCost::Fixed { cost })
+}
+
+fn parse_unless_for_each_payment(after_cost: &str, cost: &ManaCost) -> Option<UnlessCost> {
+    let ManaCost::Cost { shards, generic } = cost else {
+        return None;
+    };
+    if !shards.is_empty() || *generic == 0 {
+        return None;
+    }
+
+    let (_, clause) = preceded(
+        tag::<_, _, VerboseError<&str>>(" for each "),
+        nom::combinator::rest,
+    )
+    .parse(after_cost)
+    .ok()?;
+    let qty = parse_for_each_clause(clause.trim())?;
+    let quantity = if *generic == 1 {
+        QuantityExpr::Ref { qty }
+    } else {
+        QuantityExpr::Multiply {
+            factor: i32::try_from(*generic).ok()?,
+            inner: Box::new(QuantityExpr::Ref { qty }),
+        }
+    };
+    Some(UnlessCost::DynamicGeneric { quantity })
 }
 
 /// Parse "where X is this creature's power" and similar dynamic quantity clauses.
@@ -9590,12 +9631,13 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CastVariantPaid, Comparator, ContinuousModification, ControllerRef, DoublePTMode, Duration,
-        FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction,
-        PaymentCost, TypeFilter,
+        CastVariantPaid, Comparator, ContinuousModification, ControllerRef, CountScope,
+        DoublePTMode, Duration, FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution,
+        ManaProduction, PaymentCost, TypeFilter, ZoneRef,
     };
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
+    use crate::types::player::PlayerCounterKind;
     use crate::types::zones::Zone;
 
     /// Parser must not invent verb stems for unknown words. The "-es" stripping
@@ -10583,6 +10625,100 @@ mod tests {
             );
         } else {
             panic!("expected Counter effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_counter_unless_pays_for_each_uses_dynamic_cost() {
+        let e = parse_effect(
+            "Counter target spell unless its controller pays {1} for each card in your graveyard",
+        );
+        if let Effect::Counter { unless_payment, .. } = &e {
+            assert!(
+                matches!(
+                    unless_payment,
+                    Some(UnlessCost::DynamicGeneric {
+                        quantity: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Graveyard,
+                                ..
+                            }
+                        }
+                    })
+                ),
+                "unless payment should be dynamic graveyard count, got {unless_payment:?}"
+            );
+        } else {
+            panic!("expected Counter effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_counter_unless_pays_for_each_multiplies_generic_cost() {
+        let e = parse_effect(
+            "Counter target spell unless its controller pays {3} for each card discarded this way",
+        );
+        if let Effect::Counter { unless_payment, .. } = &e {
+            assert!(
+                matches!(
+                    unless_payment,
+                    Some(UnlessCost::DynamicGeneric {
+                        quantity: QuantityExpr::Multiply {
+                            factor: 3,
+                            inner,
+                        }
+                    }) if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize
+                        }
+                    )
+                ),
+                "unless payment should multiply tracked-set count, got {unless_payment:?}"
+            );
+        } else {
+            panic!("expected Counter effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_draw_for_each_player_counter_uses_dynamic_count() {
+        let e = parse_effect("Draw a card for each experience counter you have");
+        if let Effect::Draw { count, .. } = &e {
+            assert!(
+                matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerCounter {
+                            kind: PlayerCounterKind::Experience,
+                            scope: CountScope::Controller,
+                        }
+                    }
+                ),
+                "draw count should use player-counter quantity, got {count:?}"
+            );
+        } else {
+            panic!("expected Draw effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_pump_for_each_player_counter_uses_dynamic_pt() {
+        let e = parse_effect("Kelsien gets +1/+1 for each experience counter you have");
+        if let Effect::Pump {
+            power, toughness, ..
+        } = &e
+        {
+            let expected = QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Experience,
+                    scope: CountScope::Controller,
+                },
+            };
+            assert_eq!(power, &PtValue::Quantity(expected.clone()));
+            assert_eq!(toughness, &PtValue::Quantity(expected));
+        } else {
+            panic!("expected Pump effect, got {e:?}");
         }
     }
 
@@ -12637,6 +12773,23 @@ mod tests {
     }
 
     #[test]
+    fn effect_add_one_mana_of_any_exiled_card_color_chrome_mox() {
+        let e = parse_effect("Add one mana of any of the exiled card's colors");
+        assert_eq!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::ChoiceAmongExiledColors {
+                    source: LinkedExileScope::ThisObject,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            }
+        );
+    }
+
+    #[test]
     fn effect_add_one_mana_of_any_color_among_exiled_cards() {
         // Synonym phrasing also routes to ChoiceAmongExiledColors.
         let e = parse_effect("Add one mana of any color among the exiled cards");
@@ -12725,6 +12878,7 @@ mod tests {
                 cost: PaymentCost::Life {
                     amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
                 },
+                ..
             }
         ));
     }
@@ -12745,6 +12899,7 @@ mod tests {
                             qty: crate::types::ability::QuantityRef::EventContextSourcePower,
                         },
                     },
+                    ..
                 }
             ),
             "expected PayCost(Life = EventContextSourcePower), got {e:?}"
@@ -12764,6 +12919,7 @@ mod tests {
                                 qty: crate::types::ability::QuantityRef::Variable { name },
                             },
                     },
+                ..
             } if name == "X" => {}
             other => panic!("expected PayCost(Life = Variable(X)), got {other:?}"),
         }
@@ -14299,7 +14455,7 @@ mod tests {
         let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
         assert_eq!(
             sub.condition,
-            Some(AbilityCondition::AdditionalCostPaid),
+            Some(AbilityCondition::additional_cost_paid_any()),
             "Expected AdditionalCostPaid condition"
         );
     }
@@ -14344,7 +14500,7 @@ mod tests {
         assert_eq!(
             sub.condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::AdditionalCostPaid),
+                condition: Box::new(AbilityCondition::additional_cost_paid_any()),
             }),
             "Expected Not(AdditionalCostPaid) condition"
         );
@@ -14955,6 +15111,53 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::SameName)));
+    }
+
+    #[test]
+    fn search_same_name_as_target_creature_uses_target_only_chain() {
+        let def = parse_effect_chain(
+            "Search your library for up to three cards with the same name as target creature, reveal them, put them into your hand, then shuffle.",
+            AbilityKind::Spell,
+        );
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(target),
+        } = *def.effect
+        else {
+            panic!("Expected TargetOnly wrapper, got {:?}", def.effect);
+        };
+        assert!(target.type_filters.contains(&TypeFilter::Creature));
+
+        let search = def.sub_ability.expect("expected search sub ability");
+        let Effect::SearchLibrary {
+            filter,
+            count,
+            reveal,
+            ..
+        } = *search.effect
+        else {
+            panic!(
+                "Expected SearchLibrary sub ability, got {:?}",
+                search.effect
+            );
+        };
+        assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 }));
+        assert!(reveal);
+        let TargetFilter::Typed(search_filter) = filter else {
+            panic!("Expected typed search filter, got {filter:?}");
+        };
+        assert!(search_filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::SameNameAsParentTarget)));
+        let change_zone = search.sub_ability.expect("expected search destination");
+        assert!(matches!(
+            *change_zone.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -16635,6 +16838,7 @@ mod tests {
                         TargetFilter::Typed(tf)
                             if tf.type_filters.contains(&TypeFilter::Card)
                                 && tf.properties.contains(&FilterProp::Another)
+                                && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
                     )),
                     "expected spell branch with Another, got {filters:?}"
                 );
@@ -17009,6 +17213,7 @@ mod tests {
                     cost: PaymentCost::Energy {
                         amount: QuantityExpr::Fixed { value: 2 },
                     },
+                    ..
                 }
             ),
             "expected PayCost Energy(2), got: {e:?}"
@@ -17025,6 +17230,7 @@ mod tests {
                     cost: PaymentCost::Energy {
                         amount: QuantityExpr::Fixed { value: 3 },
                     },
+                    ..
                 }
             ),
             "expected PayCost Energy(3), got: {e:?}"
@@ -19046,7 +19252,7 @@ mod tests {
             .as_ref()
             .expect("expected Attach sub_ability");
         match &*attach.effect {
-            Effect::Attach { target } => {
+            Effect::Attach { target, .. } => {
                 // Target slot must not be vacuous (Any) — either a typed
                 // "creature you control" filter or `ParentTarget` (chain
                 // composition routes the player-chosen target through the

@@ -1714,6 +1714,22 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::WasType { card_type } => source_id
             .and_then(|id| state.lki_cache.get(&id))
             .is_some_and(|lki| lki.card_types.contains(card_type)),
+        // CR 603.4 + CR 603.6 + CR 603.10: Intervening-if subject is the
+        // zone-change event object, not necessarily the trigger source.
+        TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin,
+            destination,
+            filter,
+        } => trigger_event.is_some_and(|event| {
+            super::filter::matches_zone_change_event_object_filter(
+                state,
+                event,
+                *origin,
+                *destination,
+                filter,
+                &FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0))),
+            )
+        }),
         // "if you control a [type]" — check for presence of matching permanent.
         TriggerCondition::ControlsType { filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
@@ -1850,6 +1866,22 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceIsTapped => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.tapped),
+        // CR 701.27g: True when the trigger source is a transformed permanent (DFC
+        // with its back face up). Negation wraps via `Not { Box::new(SourceIsTransformed) }`.
+        TriggerCondition::SourceIsTransformed => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.transformed),
+        // CR 708.2: True when the trigger source is face-up. Face-up is the inverse
+        // of the GameObject `face_down` flag — there is no separate `face_up` field.
+        // Negation wraps via `Not { Box::new(SourceIsFaceUp) }`.
+        TriggerCondition::SourceIsFaceUp => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| !obj.face_down),
+        // CR 708.2: True when the trigger source is face-down. Negation wraps via
+        // `Not { Box::new(SourceIsFaceDown) }`.
+        TriggerCondition::SourceIsFaceDown => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.face_down),
         // CR 113.6b: True when the trigger source is in the specified zone.
         TriggerCondition::SourceInZone { zone } => source_id
             .and_then(|id| state.objects.get(&id))
@@ -1933,8 +1965,9 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::Or { conditions } => conditions
             .iter()
             .any(|c| check_trigger_condition(state, c, controller, source_id, trigger_event)),
-        // CR 603.4: Negate the inner intervening-if predicate. Used for "unless [phrase]"
-        // patterns; mirrors `TargetFilter::Not` and `StaticCondition::Not`.
+        // CR 603.4 + CR 608.2c: Logical negation — invert the wrapped condition's
+        // truth value. Used for "unless [phrase]" intervening-if patterns; mirrors
+        // `TargetFilter::Not` and `StaticCondition::Not`.
         TriggerCondition::Not { condition } => {
             !check_trigger_condition(state, condition, controller, source_id, trigger_event)
         }
@@ -2086,6 +2119,20 @@ fn build_triggered_ability(
         // conditions like "if you cast it from your hand" can evaluate.
         if let Some(zone) = state.objects.get(&source_id).and_then(|o| o.cast_from_zone) {
             resolved.context.cast_from_zone = Some(zone);
+        }
+        // CR 702.33d + CR 702.33f: Propagate kicker payments from the source
+        // object's `kickers_paid` (set at cast resolution) into the
+        // triggered ability's context so `AbilityCondition::AdditionalCostPaid`
+        // (with kicker variant or multikicker count) can evaluate.
+        if let Some(obj) = state.objects.get(&source_id) {
+            if !obj.kickers_paid.is_empty() {
+                resolved.context.kickers_paid.clone_from(&obj.kickers_paid);
+                // Maintain the legacy single-bool flag for "if it was kicked"
+                // (no variant, min_count=1) so the default-shape evaluator
+                // remains correct on triggered abilities (the bool reads
+                // `additional_cost_paid` directly per the evaluator contract).
+                resolved.context.additional_cost_paid = true;
+            }
         }
         // CR 118.12: Carry unless_pay modifier from trigger definition.
         if trig_def.unless_pay.is_some() {
@@ -2720,6 +2767,118 @@ pub mod tests {
             1,
             "Creature entering should trigger creature ETB"
         );
+    }
+
+    #[test]
+    fn zone_change_object_condition_checks_entering_object_not_trigger_source() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Countered Entry".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .counters
+            .insert(crate::types::counter::CounterType::Plus1Plus1, 1);
+
+        let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter: TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
+            ),
+        };
+        let event = zone_changed_event(
+            entering,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+    }
+
+    #[test]
+    fn zone_change_object_condition_checks_dead_object_snapshot() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let dead = create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(0),
+            "Countered Dead".to_string(),
+            Zone::Graveyard,
+        );
+        let mut counters = std::collections::HashMap::new();
+        counters.insert(crate::types::counter::CounterType::Plus1Plus1, 1);
+        state.lki_cache.insert(
+            dead,
+            crate::types::game_state::LKISnapshot {
+                name: "Countered Dead".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                counters,
+            },
+        );
+
+        let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            filter: TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
+            ),
+        };
+        let event = zone_changed_event(
+            dead,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
     }
 
     #[test]
@@ -4543,7 +4702,7 @@ pub mod tests {
     // === CR 603.6a + CR 611.2b: "When ~ enters untapped/tapped" ETB gating ===
     //
     // Gingerbread Cabin class ("When this land enters untapped, create a Food
-    // token.") relies on `SourceIsTapped { negated: true }` evaluating the
+    // token.") relies on `Not { Box::new(SourceIsTapped) }` evaluating the
     // post-replacement-pipeline tapped state of the source at trigger-check
     // time. The parser already attaches the condition; these tests guard the
     // runtime evaluator so an ETB tapped via the "enters tapped unless ..."
@@ -4618,6 +4777,108 @@ pub mod tests {
         assert!(check_trigger_condition(
             &state,
             &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    // === CR 701.27g + CR 708.2: Source-state predicates (Transformed/FaceUp/FaceDown) ===
+
+    #[test]
+    fn source_is_transformed_fires_when_object_transformed() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test DFC".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&src).unwrap().transformed = true;
+
+        let cond = TriggerCondition::SourceIsTransformed;
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        let cond_neg = TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::SourceIsTransformed),
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &cond_neg,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    #[test]
+    fn source_is_transformed_suppressed_when_object_front_face() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test DFC".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&src).unwrap().transformed = false;
+
+        let cond = TriggerCondition::SourceIsTransformed;
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    #[test]
+    fn source_is_face_up_inverse_of_face_down() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Morph Test".to_string(),
+            Zone::Battlefield,
+        );
+        // Face-up (default): SourceIsFaceUp fires, SourceIsFaceDown does not.
+        state.objects.get_mut(&src).unwrap().face_down = false;
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::SourceIsFaceUp,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::SourceIsFaceDown,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Flip to face-down: predicates invert.
+        state.objects.get_mut(&src).unwrap().face_down = true;
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::SourceIsFaceUp,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::SourceIsFaceDown,
             PlayerId(0),
             Some(src),
             None,

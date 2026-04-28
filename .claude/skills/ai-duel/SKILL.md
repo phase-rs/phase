@@ -1,3 +1,8 @@
+---
+name: ai-duel
+description: Use when running AI-vs-AI duel simulations, validating AI matchup quality, checking combat or spellcasting regressions, tuning ai-duel CLI options, or interpreting batch simulation results.
+---
+
 # AI Duel Simulation
 
 Run AI-vs-AI game simulations to test decision quality, validate matchups, and catch regressions.

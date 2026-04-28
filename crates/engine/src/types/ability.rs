@@ -421,6 +421,14 @@ pub enum GainLifePlayer {
     Controller,
     /// The controller of the targeted permanent.
     TargetedController,
+    /// CR 115.2 + CR 601.2c + CR 119.3: An announced target player. The
+    /// engine resolves this via `ResolvedAbility::target_player()`, which
+    /// returns the first `TargetRef::Player` from `ability.targets` (and
+    /// falls back to controller when no Player target was announced).
+    /// Set by the parser/converter when the Oracle text is "target player
+    /// gains N life" rather than "you gain N life" or "[permanent's]
+    /// controller gains N life."
+    TargetPlayer,
 }
 
 /// How much life is gained — a fixed amount or derived from the targeted permanent.
@@ -3015,6 +3023,16 @@ pub enum AdditionalCost {
     /// "you may [cost]" — player decides whether to pay.
     /// If paid, `SpellContext::additional_cost_paid` is set to true.
     Optional(AbilityCost),
+    /// CR 702.33a-c + CR 601.2b/f: Kicker costs announced during spell
+    /// casting. `costs.len() == 1` is ordinary kicker, `costs.len() == 2`
+    /// represents "Kicker [cost 1] and/or [cost 2]" (CR 702.33b), and
+    /// `repeatable == true` represents multikicker (CR 702.33c), where the
+    /// single listed cost may be paid any number of times.
+    Kicker {
+        costs: Vec<AbilityCost>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        repeatable: bool,
+    },
     /// "[cost A] or [cost B]" — player must pay exactly one.
     /// Choosing the first cost sets `additional_cost_paid = true`.
     Choice(AbilityCost, AbilityCost),
@@ -3327,7 +3345,7 @@ pub enum Effect {
     Sacrifice {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 701.16a: Number of permanents to sacrifice. Defaults to 1 so every
+        /// CR 701.21a: Number of permanents to sacrifice. Defaults to 1 so every
         /// existing emission site — AST lowering, dungeon rooms, token graveyard
         /// upkeep, emblem cost handlers, Forge importer — keeps its original
         /// "sacrifice one" semantics without code changes. Dynamic quantities
@@ -3488,6 +3506,11 @@ pub enum Effect {
         grant_extra_turn_after: bool,
     },
     Attach {
+        #[serde(
+            default = "default_target_filter_self_ref",
+            skip_serializing_if = "target_filter_is_self_ref"
+        )]
+        attachment: TargetFilter,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
@@ -4017,6 +4040,11 @@ pub enum Effect {
     /// CR 118.1: Pay a cost during effect resolution (mana or life).
     PayCost {
         cost: PaymentCost,
+        /// CR 608.2c: Player who pays the resolution-time cost. Defaults to
+        /// the ability controller; target-derived refs such as
+        /// `ParentTargetController` cover "that spell's controller may pay".
+        #[serde(default = "default_target_filter_controller")]
+        payer: TargetFilter,
     },
     /// CR 601.2a + CR 118.9: Cast or play a card from a zone.
     /// Grants `ExileWithAltCost` casting permission on target cards (Discover pattern),
@@ -4553,6 +4581,10 @@ fn default_target_filter_self_ref() -> TargetFilter {
     TargetFilter::SelfRef
 }
 
+fn target_filter_is_self_ref(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::SelfRef)
+}
+
 /// CR 701.38a + CR 101.4: Default starting voter for `Effect::Vote` is the
 /// ability controller ("starting with you"). Defining this as a free function
 /// (not an enum default) keeps the serde shape stable across schema upgrades.
@@ -4576,6 +4608,7 @@ impl TargetFilter {
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
                 | TargetFilter::DefendingPlayer
+                | TargetFilter::AttachedTo
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetController
                 | TargetFilter::PostReplacementSourceController
@@ -5724,8 +5757,34 @@ impl AbilityDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AbilityCondition {
-    /// CR 702.33d: Kicker — optional additional cost; paid/unpaid state stored in SpellContext.
-    AdditionalCostPaid,
+    /// CR 702.33d + CR 702.33f + CR 608.2c: An optional additional cost was paid
+    /// during casting. Parameterized for kicker variant gating:
+    ///
+    ///   - `variant: None`, `min_count: 1` (default) — "if it was kicked" / "if
+    ///     the gift was promised" / "if its buyback cost was paid" / "if
+    ///     evidence was collected" / "if it was bargained". Evaluates against
+    ///     `SpellContext.additional_cost_paid` (the legacy single-bool flag,
+    ///     used by all non-kicker optional-additional-cost mechanics).
+    ///   - `variant: Some(KickerVariant)`, `min_count: 1` — "if it was kicked
+    ///     with its [A]/[B] kicker" (CR 702.33f). Evaluates against
+    ///     `SpellContext.kickers_paid` membership.
+    ///   - `variant: None`, `min_count: N` (N >= 2) — "if it was kicked twice"
+    ///     / "if it was kicked N times" (CR 702.33b/c). Evaluates against
+    ///     `SpellContext.kickers_paid.len() >= N`.
+    ///   - `kicker_cost: Some(_)` — parser-only cue for "with its {COST}
+    ///     kicker" clauses. Database synthesis resolves this to `variant`
+    ///     once the card's kicker declarations are visible.
+    AdditionalCostPaid {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<KickerVariant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kicker_cost: Option<ManaCost>,
+        #[serde(
+            default = "AbilityCondition::default_min_count",
+            skip_serializing_if = "AbilityCondition::is_default_min_count"
+        )]
+        min_count: u32,
+    },
     /// CR 608.2e: "Instead" clause — replaces the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
@@ -5792,6 +5851,16 @@ pub enum AbilityCondition {
     /// the ability's source object matches the filter. Used by leveler-style cards
     /// (e.g. Figure of Fable) where each activated ability gates on the source's current type.
     SourceMatchesFilter { filter: TargetFilter },
+    /// CR 603.4 + CR 603.6 + CR 603.10: In a trigger-body condition, match the
+    /// object from the current zone-change trigger event against a filter. ETB
+    /// conditions check the live object in its destination zone; death/LTB
+    /// conditions check the zone-change snapshot.
+    ZoneChangeObjectMatchesFilter {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<Zone>,
+        destination: Zone,
+        filter: TargetFilter,
+    },
     /// CR 608.2c + CR 614.1d: "if you control a [filter]" — gates sub_ability on whether
     /// the ability controller controls at least one battlefield permanent matching the
     /// filter (excluding the source itself). For the "controls NO matching permanent"
@@ -5825,6 +5894,11 @@ pub enum AbilityCondition {
     /// Used when multiple independent checks gate the same resolution
     /// (e.g., Revolt + mana value threshold on Fatal Push).
     And { conditions: Vec<AbilityCondition> },
+    /// CR 608.2c: Compound condition — at least one inner condition must be true.
+    /// Mirrors `TriggerCondition::Or` / `StaticCondition::Or` for ability-level
+    /// conditions. Used when an intervening-if or sub-ability gate is satisfied
+    /// by any of several independent checks.
+    Or { conditions: Vec<AbilityCondition> },
     /// CR 608.2c: Logical negation — sub_ability executes when `condition` is false.
     /// Mirrors `TriggerCondition::Not` for ability-level conditions. Replaces the
     /// per-leaf `negated: bool` fields that existed on `RevealedHasCardType`,
@@ -5847,6 +5921,85 @@ pub enum AbilityCondition {
     NthResolutionThisTurn { n: u32 },
 }
 
+impl AbilityCondition {
+    /// Default `min_count` for `AdditionalCostPaid` is 1 (any single payment).
+    /// Used by serde `#[serde(default = ...)]`.
+    pub(crate) fn default_min_count() -> u32 {
+        1
+    }
+
+    /// Skip-serialization predicate: omit `min_count` from JSON when it equals
+    /// the default value (1). Keeps card-data.json compact for the common case.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_default_min_count(value: &u32) -> bool {
+        *value == 1
+    }
+
+    /// Construct the default-shape `AdditionalCostPaid` condition: any single
+    /// optional-additional-cost payment was made. Equivalent to the legacy
+    /// nullary `AdditionalCostPaid` variant; preserves call sites in
+    /// `parser/oracle_effect/conditions.rs` (Gift, Buyback, Bargain, plain
+    /// "if it was kicked"), `database/synthesis.rs` (Bargain), and
+    /// `game/effects/change_zone.rs` (Collect Evidence).
+    pub fn additional_cost_paid_any() -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        }
+    }
+
+    /// CR 702.33f: "if it was kicked with its [A/B] kicker" — gates on a
+    /// specific kicker variant being paid.
+    pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            variant: Some(variant),
+            kicker_cost: None,
+            min_count: 1,
+        }
+    }
+
+    /// Parser-side representation for "if it was kicked with its {COST}
+    /// kicker". Database synthesis maps the printed cost to its positional
+    /// `KickerVariant` using the card's `AdditionalCost::Kicker` declaration.
+    pub fn additional_cost_paid_kicker_cost(cost: ManaCost) -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: Some(cost),
+            min_count: 1,
+        }
+    }
+
+    /// CR 702.33b/c: "if it was kicked N times" — gates on the total kicker
+    /// payment count meeting a minimum.
+    pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count,
+        }
+    }
+}
+
+/// CR 702.33f: Discriminator for which kicker cost was paid on a spell that has
+/// more than one kicker cost ("Kicker {A} and/or {B}"). Per CR 702.33f, the
+/// abilities that gate on a specific kicker reference the kickers by *position*
+/// on the card ("its [A] kicker" / "its [B] kicker"), so the discriminator is
+/// the position, not the cost text.
+///
+/// For single-kicker spells (CR 702.33a) and multikicker (CR 702.33c), only
+/// `First` is meaningful — there is no second kicker cost. Multikicker count is
+/// expressed via `Vec<KickerVariant>` length on `SpellContext.kickers_paid`
+/// (each repeated payment pushes another `First` entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KickerVariant {
+    /// CR 702.33f: First kicker cost as listed on the card.
+    First,
+    /// CR 702.33f: Second kicker cost as listed on the card. Only present when
+    /// the card has "Kicker {A} and/or {B}" (CR 702.33b).
+    Second,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -5854,6 +6007,21 @@ pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
+    /// CR 702.33d + CR 702.33f: The list of kicker payments declared during
+    /// casting, in payment order. For "Kicker {A} and/or {B}" cards (CR 702.33b),
+    /// each chosen kicker pushes a corresponding `KickerVariant` entry. For
+    /// multikicker (CR 702.33c), each repeated payment pushes another `First`.
+    /// Single-kicker spells push at most one `First` entry. Empty when no
+    /// kicker was paid.
+    ///
+    /// Linked to (and a strict superset of the information in)
+    /// `additional_cost_paid` for kicker-bearing spells:
+    ///   - empty                       ⇔ kicker not paid
+    ///   - non-empty                   ⇔ kicker paid
+    ///   - contains `KickerVariant::X` ⇔ that specific kicker variant was paid
+    ///   - `len() >= n`                ⇔ kicker was paid at least N times
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kickers_paid: Vec<KickerVariant>,
     /// Whether an optional "you may" effect was performed during resolution.
     /// Used by AbilityCondition::IfYouDo to gate dependent sub_abilities.
     #[serde(default)]
@@ -5983,6 +6151,17 @@ pub enum TriggerCondition {
     /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
     SourceIsTapped,
+    /// CR 701.27g: "if this [permanent] is transformed" — checks the source's transformed status.
+    /// A "transformed permanent" is a double-faced permanent on the battlefield with its
+    /// back face up. Negation ("not transformed") is expressed via
+    /// `Not { Box::new(SourceIsTransformed) }`.
+    SourceIsTransformed,
+    /// CR 708.2: "if this [permanent] is face-up" — checks the source's face-up status.
+    /// Negation ("face-down") is expressed via `Not { Box::new(SourceIsFaceUp) }`.
+    SourceIsFaceUp,
+    /// CR 708.2: "if this [permanent] is face-down" — checks the source's face-down status.
+    /// Negation ("face-up") is expressed via `Not { Box::new(SourceIsFaceDown) }`.
+    SourceIsFaceDown,
     /// CR 113.6b: "if this card is in [zone]" — true when the trigger source is in the given zone.
     SourceInZone { zone: crate::types::zones::Zone },
     /// CR 122.1: "if you put a counter on a permanent this turn" — true when the controller
@@ -6023,6 +6202,17 @@ pub enum TriggerCondition {
         maximum: Option<u32>,
     },
 
+    /// CR 603.4 + CR 603.6 + CR 603.10: Intervening-if condition whose subject
+    /// is the object from the triggering zone-change event rather than the
+    /// permanent that owns the ability. ETB conditions check the live object in
+    /// its destination zone; death/LTB conditions check the zone-change snapshot.
+    ZoneChangeObjectMatchesFilter {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<Zone>,
+        destination: Zone,
+        filter: TargetFilter,
+    },
+
     /// CR 508.1 + CR 603.2c + CR 603.4: Intervening-if for "attacks with N or more creatures"
     /// triggers. Reads the triggering `AttackersDeclared` event and counts attackers whose
     /// controller matches `scope` relative to the trigger's controller:
@@ -6056,11 +6246,14 @@ pub enum TriggerCondition {
     And { conditions: Vec<TriggerCondition> },
     /// Any condition must be true
     Or { conditions: Vec<TriggerCondition> },
-    /// CR 603.4: True when the inner predicate is false. Used for "unless [phrase]"
-    /// intervening-if patterns ("you lose 4 life unless you attacked this turn"
-    /// → `Not { Box::new(AttackedThisTurn) }`). Mirrors `TargetFilter::Not` and
-    /// `StaticCondition::Not` so trigger-side negation composes uniformly with
-    /// `And`/`Or`. Replaces the prior per-leaf `negated: bool` fields and the
+    /// CR 603.4 + CR 608.2c: Logical negation — the wrapped condition must
+    /// evaluate to false. Used for "unless [phrase]" intervening-if patterns
+    /// ("you lose 4 life unless you attacked this turn"
+    /// → `Not { Box::new(AttackedThisTurn) }`) and predicate-side negation
+    /// ("when ~ enters, if it isn't a [type]"). Mirrors the sibling wrapper
+    /// variants `TargetFilter::Not`, `StaticCondition::Not`, and
+    /// `AbilityCondition::Not` so trigger-side negation composes uniformly
+    /// with `And`/`Or`. Replaces per-leaf `negated: bool` fields and the
     /// `NotYourTurn` / `WasNotCast` / `NotCompletedDungeon` sibling-pair variants.
     Not { condition: Box<TriggerCondition> },
 }
@@ -6141,12 +6334,17 @@ pub enum ReplacementCondition {
     /// creature earlier this turn. Evaluated against
     /// `state.creatures_attacked_this_turn` for the controller.
     YouAttackedThisTurn,
-    /// CR 702.33d: "if was kicked" — replacement applies only when the creature
-    /// was cast with its kicker cost paid. Optional `cost_text` narrows to a specific
-    /// kicker variant (e.g., "its {1}{R} kicker").
+    /// CR 702.33d + CR 702.33f: "if was kicked" — replacement applies only when
+    /// the source permanent's spell was cast with at least one kicker cost paid.
+    /// Optional `variant` narrows to a specific kicker position (CR 702.33f:
+    /// "with its [A]/[B] kicker"). Evaluated against
+    /// `GameObject.kickers_paid` (populated at cast resolution from
+    /// `SpellContext.kickers_paid`).
     CastViaKicker {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost_text: Option<String>,
+        variant: Option<KickerVariant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kicker_cost: Option<ManaCost>,
     },
     /// "as long as ~ is tapped/untapped" — replacement applies only while the
     /// source object is in the required tapped state.
@@ -6510,12 +6708,23 @@ pub enum DamageModification {
     Triple,
     /// amount + value (e.g. Torbran, +2)
     Plus { value: u32 },
-    /// amount.saturating_sub(value) (e.g. Benevolent Unicorn, -1)
+    /// amount.saturating_sub(value) (e.g. Benevolent Unicorn, -1).
+    /// CR 615.1 + CR 614.1a: Continuous prevention statics ("prevent that damage")
+    /// emit `Minus { value: u32::MAX }` — saturating-subtraction yields 0 for any
+    /// amount, and the replacement is not consumed (continuous, not shield-style).
+    /// This is distinct from `ShieldKind::Prevention { All }` (one-shot consumed
+    /// shield); the saturating-max sentinel covers the continuous case.
     Minus { value: u32 },
     /// CR 614.1a: Conditional — if amount < source's power, set amount = source's power.
     /// References the replacement source's (not the damage source's) current post-layer power.
     /// Used by Ojer Axonil: "deals damage equal to ~'s power instead."
     SetToSourcePower,
+    /// CR 614.1a: Replace the damage amount with a fixed constant.
+    /// "If [source] would deal damage to [target], it deals N damage to
+    /// [target] instead." Distinct from `Plus`/`Minus` (arithmetic) and
+    /// `SetToSourcePower` (dynamic) — this is a flat override of the
+    /// event's amount with `value`.
+    SetTo { value: u32 },
 }
 
 /// CR 614.1a: Quantity modification for replacement effects (tokens, counters).
@@ -6572,6 +6781,14 @@ pub enum ReplacementMode {
     Mandatory,
     /// Player may accept or decline. `execute` runs on accept; `decline` runs on decline.
     Optional {
+        #[serde(default)]
+        decline: Option<Box<AbilityDefinition>>,
+    },
+    /// CR 118.12 + CR 614.12a: Player may pay a cost as the replacement choice
+    /// is made. The cost is paid before the permanent enters; `execute` runs on
+    /// paid, and `decline` runs on decline or failed payment.
+    MayCost {
+        cost: AbilityCost,
         #[serde(default)]
         decline: Option<Box<AbilityDefinition>>,
     },

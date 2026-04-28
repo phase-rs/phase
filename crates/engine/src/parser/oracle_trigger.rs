@@ -5771,7 +5771,7 @@ mod tests {
     }
 
     // CR 603.6a + CR 611.2b: "When this land enters untapped, ..." — Gingerbread
-    // Cabin class. The trigger must carry `SourceIsTapped { negated: true }` so
+    // Cabin class. The trigger must carry `Not { Box::new(SourceIsTapped) }` so
     // it only fires when the ETB-tapped replacement did NOT apply.
     #[test]
     fn trigger_etb_self_enters_untapped_attaches_condition() {
@@ -5793,7 +5793,7 @@ mod tests {
 
     // CR 603.6a + CR 611.2b: "Whenever a permanent you control enters tapped, ..." —
     // Amulet of Vigor class. The `enters tapped` rider must set
-    // `SourceIsTapped { negated: false }` (fires only when entering tapped).
+    // `SourceIsTapped` (fires only when entering tapped).
     #[test]
     fn trigger_etb_subject_enters_tapped_attaches_condition() {
         let def = parse_trigger_line(

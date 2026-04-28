@@ -57,6 +57,66 @@ pub enum EngineError {
     ActionNotAllowed(String),
 }
 
+fn handle_unlock_room_door(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    door: crate::game::game_object::RoomDoor,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if state.active_player != player
+        || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+        || !state.stack.is_empty()
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Room doors can be unlocked only as a main-phase special action with an empty stack"
+                .to_string(),
+        ));
+    }
+
+    let cost = {
+        let obj = state
+            .objects
+            .get(&object_id)
+            .ok_or_else(|| EngineError::InvalidAction("Room not found".to_string()))?;
+        if obj.controller != player || obj.zone != Zone::Battlefield {
+            return Err(EngineError::ActionNotAllowed(
+                "Only the controller of a battlefield Room can unlock it".to_string(),
+            ));
+        }
+        if !obj
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Room")
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "Object is not a Room".to_string(),
+            ));
+        }
+        if obj.room_unlocks.unwrap_or_default().is_unlocked(door) {
+            return Err(EngineError::ActionNotAllowed(
+                "That door is already unlocked".to_string(),
+            ));
+        }
+        match door {
+            crate::game::game_object::RoomDoor::Left => obj.mana_cost.clone(),
+            crate::game::game_object::RoomDoor::Right => obj
+                .back_face
+                .as_ref()
+                .map(|face| face.mana_cost.clone())
+                .ok_or_else(|| {
+                    EngineError::ActionNotAllowed("Room has no right door face".to_string())
+                })?,
+        }
+    };
+
+    casting::pay_unless_cost(state, player, &cost, events)?;
+
+    super::room::unlock_door_designation(state, object_id, player, door, events);
+    Ok(WaitingFor::Priority { player })
+}
+
 /// Public engine entrypoint. Every caller must supply the `actor` — the
 /// `PlayerId` whose authenticated identity is making this action. The engine
 /// rejects any action whose `actor` does not match `authorized_submitter(state)`
@@ -554,6 +614,7 @@ fn apply_action(
             | GameAction::CastSpellForFree { .. }
             | GameAction::CastSpellAsMiracle { .. }
             | GameAction::CancelCast
+            | GameAction::UnlockRoomDoor { .. }
             | GameAction::PayUnlessCost { .. }
             | GameAction::PayCombatTax { .. } => {
                 state.lands_tapped_for_mana.remove(&player);
@@ -707,6 +768,14 @@ fn apply_action(
                     &mut events,
                 )?
             }
+        }
+        (WaitingFor::Priority { player }, GameAction::UnlockRoomDoor { object_id, door }) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            handle_unlock_room_door(state, *player, object_id, door, &mut events)?
         }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
@@ -3799,13 +3868,16 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::game::game_object::{BackFaceData, RoomDoor};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
         QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypedFilter,
     };
+    use crate::types::card_type::CardType;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaCost;
     use crate::types::TriggerMode;
 
     /// Create a simple test ability definition.
@@ -3854,6 +3926,69 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn room_back_face(name: &str) -> BackFaceData {
+        BackFaceData {
+            name: name.to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types: CardType::default(),
+            mana_cost: ManaCost::default(),
+            keywords: Vec::new(),
+            abilities: Vec::new(),
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: Vec::new(),
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(crate::types::card::LayoutKind::Split),
+        }
+    }
+
+    #[test]
+    fn unlock_room_door_special_action_marks_door_and_emits_trigger_event() {
+        let mut state = setup_game_at_main_phase();
+        let room = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Bottomless Pool".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.room_unlocks = Some(Default::default());
+            obj.back_face = Some(room_back_face("Locker Room"));
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::UnlockRoomDoor {
+                object_id: room,
+                door: RoomDoor::Right,
+            },
+        )
+        .unwrap();
+
+        let room_obj = state.objects.get(&room).unwrap();
+        assert!(room_obj.room_unlocks.unwrap().right_unlocked);
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::RoomDoorUnlocked {
+                object_id,
+                door: RoomDoor::Right,
+                ..
+            } if *object_id == room
+        )));
     }
 
     #[test]
@@ -5654,7 +5789,7 @@ mod tests {
     // === Phase 04 Plan 03 Integration Tests ===
 
     use crate::types::ability::TargetRef;
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
 
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
         let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
@@ -6157,6 +6292,8 @@ mod tests {
             casting_variant: crate::types::game_state::CastingVariant::Normal,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),

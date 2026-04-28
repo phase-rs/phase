@@ -1,0 +1,57 @@
+{
+  "CardPT": {
+    "Power": 1,
+    "Toughness": 1
+  },
+  "ManaCost": [
+    {
+      "_ManaSymbol": "ManaCostGeneric",
+      "args": 1
+    },
+    {
+      "_ManaSymbol": "ManaCostU"
+    }
+  ],
+  "Name": "Augury Owl",
+  "Rules": [
+    {
+      "_Rule": "Flying"
+    },
+    {
+      "_Rule": "TriggerA",
+      "args": [
+        {
+          "_Trigger": "WhenAPermanentEntersTheBattlefield",
+          "args": {
+            "_Permanents": "SinglePermanent",
+            "args": {
+              "_Permanent": "ThisPermanent"
+            }
+          }
+        },
+        {
+          "_Actions": "ActionList",
+          "args": [
+            {
+              "_Action": "Scry",
+              "args": {
+                "_GameNumber": "Integer",
+                "args": 3
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Creature"
+    ],
+    "Subtypes": [
+      "Bird"
+    ],
+    "Supertypes": []
+  },
+  "_OracleCard": "Card"
+}

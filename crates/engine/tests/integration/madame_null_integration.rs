@@ -23,7 +23,7 @@
 use engine::game::effects;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityKind, Effect, PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility,
+    AbilityKind, Effect, PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
@@ -57,6 +57,7 @@ fn build_madame_null_pay_chain(source_id: ObjectId, controller: PlayerId) -> Res
                     qty: QuantityRef::EventContextSourcePower,
                 },
             },
+            payer: TargetFilter::Controller,
         },
         vec![],
         source_id,

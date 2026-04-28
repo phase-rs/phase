@@ -3,6 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
 use nom::combinator::{opt, value};
+use nom::multi::many0;
 use nom::Parser;
 
 use crate::types::ability::{
@@ -122,12 +123,16 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // Strip leading article ("a "/"an ") before "target" to handle "a target creature".
     // Guard: only strip when followed by "target " to avoid over-stripping.
     if let Ok((after_article, _)) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("a "),
+        tag::<_, _, nom_language::error::VerboseError<&str>>("a second "),
+        tag("a "),
         tag("an "),
     ))
     .parse(lower.as_str())
     {
-        if after_article.starts_with("target ") {
+        if tag::<_, _, nom_language::error::VerboseError<&str>>("target ")
+            .parse(after_article)
+            .is_ok()
+        {
             let original_rest = &text[lower.len() - after_article.len()..];
             return parse_target(original_rest);
         }
@@ -145,6 +150,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "up to five ",
         "up to six ",
         "one, two, or three ",
+        "a second ",
         "one or two ",
         "one ",
         "two ",
@@ -362,7 +368,11 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         }
         // "target" + type phrase (generic)
         let (filter, rest) = parse_type_phrase(&text[target_offset..]);
-        return (filter, rest);
+        let consumed_end = lower.len() - rest.len();
+        return (
+            scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
+            rest,
+        );
     }
 
     // CR 603.7: Anaphoric tracked-set pronouns
@@ -765,7 +775,11 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // Handles "other nonland permanents you own and control" after quantifier stripping.
     let (filter, rest) = parse_type_phrase(text);
     if target_filter_has_meaningful_content(&filter) {
-        (filter, rest)
+        let consumed_end = lower.len() - rest.len();
+        (
+            scope_target_spell_phrase(filter, &lower[..consumed_end]),
+            rest,
+        )
     } else {
         push_warning(format!(
             "target-fallback: parse_target could not classify '{}'",
@@ -905,8 +919,10 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         }
     }
 
-    // Handle color prefix: "white creature", "red spell", etc.
-    let color_prop = parse_color_prefix(&lower[pos..]);
+    // CR 105.1 + CR 105.2: Handle color adjective prefixes:
+    // "white creature", "red spell", "colorless creature", "multicolored card", etc.
+    let color_prop =
+        parse_color_prefix(&lower[pos..]).or_else(|| parse_color_quality_prefix(&lower[pos..]));
     if let Some((ref prop, color_len)) = color_prop {
         properties.push(prop.clone());
         pos += color_len;
@@ -1463,6 +1479,13 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             }
         }
     }
+    // CR 105.2b/c: Color-quality adjective prefix: "multicolored card",
+    // "colorless creature", etc.
+    if let Some((_prop, consumed)) = parse_color_quality_prefix(text) {
+        if starts_with_type_word(&text[consumed..]) {
+            return true;
+        }
+    }
     // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent"
     if let Ok((after_non, _)) = alt((
         tag::<_, _, nom_language::error::VerboseError<&str>>("non-"),
@@ -1521,6 +1544,68 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
             filters.iter().any(target_filter_has_meaningful_content)
         }
         _ => false,
+    }
+}
+
+fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
+    if !target_phrase_mentions_spell_word(phrase) {
+        return filter;
+    }
+
+    add_stack_zone_to_spell_targets(filter, target_phrase_uses_spell_suffix(phrase))
+}
+
+fn target_phrase_mentions_spell_word(phrase: &str) -> bool {
+    phrase
+        .split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ',' | ';' | '(' | ')'))
+        .any(|word| matches!(word, "spell" | "spells"))
+}
+
+fn target_phrase_uses_spell_suffix(phrase: &str) -> bool {
+    let mut previous = None;
+    for word in phrase
+        .split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ',' | ';' | '(' | ')'))
+        .filter(|word| !word.is_empty())
+    {
+        if matches!(word, "spell" | "spells") {
+            return previous.is_some_and(|previous| !matches!(previous, "or" | "and/or"));
+        }
+        previous = Some(word);
+    }
+    false
+}
+
+fn add_stack_zone_to_spell_targets(filter: TargetFilter, scope_all_typed: bool) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if (scope_all_typed || typed.type_filters.contains(&TypeFilter::Card))
+                && !typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InZone { zone } if *zone == Zone::Stack))
+            {
+                typed
+                    .properties
+                    .push(FilterProp::InZone { zone: Zone::Stack });
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_stack_zone_to_spell_targets(filter, scope_all_typed))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_stack_zone_to_spell_targets(filter, scope_all_typed))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(add_stack_zone_to_spell_targets(*filter, scope_all_typed)),
+        },
+        other => other,
     }
 }
 
@@ -1583,6 +1668,8 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::Unblocked
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
+            | FilterProp::Colorless
+            | FilterProp::Multicolored
             | FilterProp::NotColor { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
@@ -1769,6 +1856,21 @@ fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     Some((FilterProp::HasColor { color }, consumed))
 }
 
+/// Parse color-quality adjective prefixes: "colorless creature", "multicolored card", etc.
+/// Returns the filter property and bytes consumed including trailing space.
+fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
+    let (rest, prop) = alt((
+        value(
+            FilterProp::Colorless,
+            tag::<_, _, nom_language::error::VerboseError<&str>>("colorless "),
+        ),
+        value(FilterProp::Multicolored, tag("multicolored ")),
+    ))
+    .parse(text)
+    .ok()?;
+    Some((prop, text.len() - rest.len()))
+}
+
 /// CR 509.1h / CR 302.6: Parse status prefixes from type phrases.
 /// Called in a loop to consume multiple prefixes (e.g. "unblocked attacking ").
 /// Handles combat status (attacking, unblocked) and tap status (tapped, untapped).
@@ -1832,6 +1934,25 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
         tag::<_, _, nom_language::error::VerboseError<&str>>("with power or toughness ")
             .parse(trimmed)
     {
+        if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
+            let props = if comparator == Comparator::LE {
+                vec![
+                    FilterProp::PowerLE {
+                        value: value.clone(),
+                    },
+                    FilterProp::ToughnessLE { value },
+                ]
+            } else {
+                vec![
+                    FilterProp::PowerGE {
+                        value: value.clone(),
+                    },
+                    FilterProp::ToughnessGE { value },
+                ]
+            };
+            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
+        }
+
         let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
         let after_num = rest.trim_start();
         if let Ok((after, _)) =
@@ -1863,6 +1984,15 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("with toughness ").parse(trimmed)
     {
+        if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
+            let prop = if comparator == Comparator::LE {
+                FilterProp::ToughnessLE { value }
+            } else {
+                FilterProp::ToughnessGE { value }
+            };
+            return Some((prop, text.len() - after.len()));
+        }
+
         let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
         let after_num = rest.trim_start();
         let (prop, after) = if let Ok((a, _)) =
@@ -1882,6 +2012,15 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with power ")
         .parse(trimmed)
         .ok()?;
+    if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
+        let prop = if comparator == Comparator::LE {
+            FilterProp::PowerLE { value }
+        } else {
+            FilterProp::PowerGE { value }
+        };
+        return Some((prop, text.len() - after.len()));
+    }
+
     // CR 208.1 + CR 107.3a: Accept literal N or the variable X — X emits
     // `QuantityRef::Variable { "X" }` resolved at effect time against the
     // resolving ability's `chosen_x` via `FilterContext::from_ability`.
@@ -1899,6 +2038,49 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
         return None;
     };
     Some((prop, text.len() - after.len()))
+}
+
+fn parse_pt_quantity_comparison_tail(input: &str) -> Option<(Comparator, QuantityExpr, &str)> {
+    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    let input = input.trim_start();
+    let (after_cmp, comparator) = alt((
+        value(Comparator::LT, tag::<_, _, Vbe>("less than")),
+        value(Comparator::GT, tag("greater than")),
+    ))
+    .parse(input)
+    .ok()?;
+    let after_cmp = after_cmp.trim_start();
+    let (after_eq, includes_equal) =
+        if let Ok((rest, _)) = tag::<_, _, Vbe>("or equal to").parse(after_cmp) {
+            (rest.trim_start(), true)
+        } else {
+            (after_cmp, false)
+        };
+    let (after_qty, qty) = nom_quantity::parse_quantity_ref(after_eq).ok()?;
+    let value = QuantityExpr::Ref { qty };
+    let comparator = match (comparator, includes_equal) {
+        (Comparator::LT, true) => Comparator::LE,
+        (Comparator::GT, true) => Comparator::GE,
+        (comparator, false) => comparator,
+        _ => return None,
+    };
+    let value = match comparator {
+        Comparator::LT => QuantityExpr::Offset {
+            inner: Box::new(value),
+            offset: -1,
+        },
+        Comparator::GT => QuantityExpr::Offset {
+            inner: Box::new(value),
+            offset: 1,
+        },
+        _ => value,
+    };
+    let comparator = match comparator {
+        Comparator::LT => Comparator::LE,
+        Comparator::GT => Comparator::GE,
+        comparator => comparator,
+    };
+    Some((comparator, value, after_qty))
 }
 
 /// Parse "with mana value N or less" / "with mana value N or greater" suffix,
@@ -1993,6 +2175,32 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
     }
     if let Some(found) = try_dynamic(rest, false) {
         return Some(found);
+    }
+
+    // CR 202.3: Exact dynamic mana-value match — "with mana value equal to
+    // <quantity>". The RHS composes through `parse_cda_quantity`, so offsets
+    // ("1 plus the sacrificed creature's mana value"), event-context refs
+    // ("that damage"), and game-state counts ("the number of lands you
+    // control") share the same quantity grammar as CDA/static parsing.
+    if let Ok((after_equal_to, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("equal to ").parse(rest)
+    {
+        let (after, phrase) =
+            take_till::<_, _, nom_language::error::VerboseError<&str>>(|c: char| {
+                c == ',' || c == '.'
+            })
+            .parse(after_equal_to)
+            .ok()?;
+        let phrase = phrase.trim();
+        if let Some(value) = crate::parser::oracle_quantity::parse_cda_quantity(phrase) {
+            return Some((
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value,
+                },
+                text.len() - after.len(),
+            ));
+        }
     }
 
     // Static "N or less" / "N or greater" — also accepts literal X via
@@ -2145,7 +2353,7 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
 
         // Try keyword list separators in longest-match-first order.
         let mut found_sep = false;
-        for sep in &[", and ", " and ", ", "] {
+        for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) =
                 tag::<_, _, nom_language::error::VerboseError<&str>>(*sep).parse(remaining)
             {
@@ -2194,7 +2402,7 @@ fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> 
 
         // Try keyword list separators in longest-match-first order.
         let mut found_sep = false;
-        for sep in &[", and ", " and ", ", "] {
+        for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) =
                 tag::<_, _, nom_language::error::VerboseError<&str>>(*sep).parse(remaining)
             {
@@ -2296,6 +2504,17 @@ fn parse_leading_keyword_match(text: &str) -> Option<(KeywordMatch, usize)> {
 }
 
 fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
+    if let Ok((rest, kind)) = value(
+        KeywordKind::Disturb,
+        tag::<_, _, nom_language::error::VerboseError<&str>>("disturb"),
+    )
+    .parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
     if matches!(
         text,
         "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
@@ -2339,6 +2558,10 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
 fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
+
+    if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
+    }
 
     // CR 303.4 + CR 301.5: "that's enchanted or equipped" / "that's enchanted" /
     // "that's equipped" — relative clause attaching an attachment-presence
@@ -2497,6 +2720,69 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     }
 
     None
+}
+
+fn parse_color_relative_clause_suffix(
+    trimmed: &str,
+    leading_ws: usize,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let (after_intro, intro_len) = if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that's ").parse(trimmed)
+    {
+        (rest, "that's ".len())
+    } else if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that is ").parse(trimmed)
+    {
+        (rest, "that is ".len())
+    } else if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that are ").parse(trimmed)
+    {
+        (rest, "that are ".len())
+    } else {
+        return None;
+    };
+
+    let (rest, colors) = parse_color_disjunction(after_intro).ok()?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if colors.is_empty() || !next_char_is_boundary {
+        return None;
+    }
+
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    let props = if colors.len() == 1 {
+        vec![FilterProp::HasColor { color: colors[0] }]
+    } else {
+        vec![FilterProp::AnyOf {
+            props: colors
+                .into_iter()
+                .map(|color| FilterProp::HasColor { color })
+                .collect(),
+        }]
+    };
+    Some((props, consumed))
+}
+
+fn parse_color_disjunction(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, Vec<ManaColor>> {
+    let (rest, first) = nom_primitives::parse_color(input)?;
+    let (rest, mut tail) = many0(preceded_color_separator).parse(rest)?;
+    let mut colors = vec![first];
+    colors.append(&mut tail);
+    Ok((rest, colors))
+}
+
+fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResult<'_, ManaColor> {
+    let (rest, _) = alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>(", or "),
+        tag(", "),
+        tag(" or "),
+    ))
+    .parse(input)?;
+    nom_primitives::parse_color(rest)
 }
 
 /// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"
@@ -3427,6 +3713,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn colorless_creature_card() {
+        let (f, rest) = parse_type_phrase("colorless creature card with mana value 7 or greater");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Colorless,
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 7 },
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn colorless_adjective_does_not_distribute_across_or() {
+        let (f, rest) = parse_type_phrase("artifact or colorless creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter");
+        };
+        assert_eq!(filters.len(), 2);
+        let TargetFilter::Typed(artifact) = &filters[0] else {
+            panic!("expected artifact branch");
+        };
+        assert!(artifact.type_filters.contains(&TypeFilter::Artifact));
+        assert!(!artifact
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Colorless)));
+        let TargetFilter::Typed(creature) = &filters[1] else {
+            panic!("expected creature branch");
+        };
+        assert!(creature.type_filters.contains(&TypeFilter::Creature));
+        assert!(creature
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Colorless)));
+    }
+
+    #[test]
+    fn multicolored_card() {
+        let (f, rest) = parse_type_phrase("multicolored card");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Multicolored]))
+        );
+    }
+
     /// CR 208.1: "creature with power or toughness N or less" produces a
     /// disjunctive `AnyOf { [PowerLE, ToughnessLE] }` property. Used by
     /// Arnyn Deathbloom Botanist's dies-trigger subject filter, Stern
@@ -3484,6 +3822,51 @@ mod tests {
     }
 
     #[test]
+    fn creature_with_toughness_less_than_domain_count() {
+        let (f, rest) = parse_type_phrase(
+            "creature with toughness less than the number of basic land types among lands you control",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::ToughnessLE {
+                    value: QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::BasicLandTypeCount,
+                        }),
+                        offset: -1,
+                    },
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn creature_with_power_less_than_or_equal_to_controlled_count() {
+        let (f, rest) = parse_type_phrase(
+            "creature with power less than or equal to the number of allies you control",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::PowerLE {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Subtype("Ally".to_string())],
+                                controller: Some(ControllerRef::You),
+                                properties: Vec::new(),
+                            }),
+                        },
+                    },
+                }])
+            )
+        );
+    }
+
+    #[test]
     fn spell_with_mana_value_4_or_greater() {
         let (f, _) = parse_type_phrase("spell with mana value 4 or greater");
         assert_eq!(
@@ -3527,6 +3910,64 @@ mod tests {
                     },
                 },
             }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_equal_to_lands_you_control() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the number of lands you control",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::land().controller(ControllerRef::You)
+                        ),
+                    },
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_equal_to_offset_event_source() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to 1 plus the sacrificed creature's mana value, put it",
+        );
+        assert_eq!(rest, ", put it");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::CostPaidObjectManaValue,
+                    }),
+                    offset: 1,
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_equal_to_that_damage() {
+        let (f, rest) = parse_type_phrase("artifact card with mana value equal to that damage");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                }
+            ]))
         );
     }
 
@@ -3715,6 +4156,23 @@ mod tests {
     }
 
     #[test]
+    fn card_with_flashback_or_disturb_uses_keyword_kind_filters() {
+        let (f, rest) =
+            parse_type_phrase("card with flashback or disturb, put it into your graveyard");
+        assert_eq!(rest, "put it into your graveyard");
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected typed filter, got {f:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Card));
+        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Flashback,
+        }));
+        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Disturb,
+        }));
+    }
+
+    #[test]
     fn creature_of_the_chosen_type() {
         let (f, _) = parse_type_phrase("creature you control of the chosen type");
         assert_eq!(
@@ -3756,6 +4214,32 @@ mod tests {
                 },
             ]))
         );
+    }
+
+    #[test]
+    fn creature_with_keyword_list_or_separator() {
+        let (f, rest) = parse_type_phrase(
+            "creature with deathtouch, hexproof, reach, or trample and reveal it",
+        );
+        assert_eq!(rest, "reveal it");
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected typed filter, got {f:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        for keyword in [
+            Keyword::Deathtouch,
+            Keyword::Hexproof,
+            Keyword::Reach,
+            Keyword::Trample,
+        ] {
+            assert!(
+                typed.properties.contains(&FilterProp::WithKeyword {
+                    value: keyword.clone()
+                }),
+                "missing {keyword:?} in {:?}",
+                typed.properties
+            );
+        }
     }
 
     #[test]
@@ -5457,6 +5941,46 @@ mod tests {
     }
 
     #[test]
+    fn that_s_red_or_green_emits_color_disjunction() {
+        let result = parse_that_clause_suffix(" that's red or green");
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(consumed, " that's red or green".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::HasColor {
+                        color: ManaColor::Red,
+                    },
+                    FilterProp::HasColor {
+                        color: ManaColor::Green,
+                    },
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn target_spell_or_permanent_thats_red_or_green_distributes_color_to_both_legs() {
+        let (filter, rest) = parse_target("target spell or permanent that's red or green");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().all(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::AnyOf { props }
+                        if props.contains(&FilterProp::HasColor { color: ManaColor::Red })
+                            && props.contains(&FilterProp::HasColor { color: ManaColor::Green })
+                ))
+        )));
+    }
+
+    #[test]
     fn that_s_enchanted_or_equipped_in_full_target() {
         // Reyav / Dogmeat trigger subject form.
         let (filter, _rest) = parse_target("a creature you control that's enchanted or equipped");
@@ -5849,6 +6373,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_target_a_second_target_creature_you_control() {
+        let (filter, rest) = parse_target("a second target creature you control");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!("Expected Typed filter, got {filter:?}");
+        }
+    }
+
+    #[test]
     fn parse_target_other_target_creature_or_spell() {
         let (filter, rest) = parse_target("other target creature or spell");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -5867,6 +6403,43 @@ mod tests {
             TargetFilter::Typed(tf)
                 if tf.type_filters.contains(&TypeFilter::Card)
                     && tf.properties.contains(&FilterProp::Another)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+        )));
+    }
+
+    #[test]
+    fn parse_target_spell_or_creature_scopes_spell_leg_to_stack() {
+        let (filter, rest) = parse_target("target spell or creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Card)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+        )));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && !tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+        )));
+    }
+
+    #[test]
+    fn parse_target_artifact_or_enchantment_spell_scopes_all_legs_to_stack() {
+        let (filter, rest) = parse_target("target artifact or enchantment spell");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().all(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
         )));
     }
 

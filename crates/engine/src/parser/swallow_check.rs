@@ -493,6 +493,7 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
         || matches!(
             parsed.additional_cost,
             Some(crate::types::ability::AdditionalCost::Optional(_)
+                | crate::types::ability::AdditionalCost::Kicker { .. }
                 | crate::types::ability::AdditionalCost::Choice(_, _))
         )
         // CR 117.6 + 117.9 + 702.8 + 715.3a: Every variant of

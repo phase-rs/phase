@@ -279,7 +279,7 @@ pub(super) fn handle_replacement_choice(
             let mut replacement_ctx = None;
             if let Some(ctx) = state.pending_spell_resolution.take() {
                 if enters_battlefield {
-                    apply_pending_spell_resolution(state, &ctx);
+                    apply_pending_spell_resolution(state, &ctx, events);
                 }
                 replacement_ctx = Some(ctx);
             }
@@ -455,13 +455,17 @@ pub(super) fn apply_post_replacement_effect(
 fn apply_pending_spell_resolution(
     state: &mut GameState,
     ctx: &crate::types::game_state::PendingSpellResolution,
+    events: &mut Vec<GameEvent>,
 ) {
     use crate::types::game_state::CastingVariant;
 
     // CR 603.4: Propagate cast_from_zone so ETB triggers can evaluate
     // conditions like "if you cast it from your hand".
+    // CR 702.33d + CR 702.33f: Propagate kicker payments so ETB
+    // replacement / triggered abilities can gate on which kickers were paid.
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
+        obj.kickers_paid.clone_from(&ctx.kickers_paid);
     }
 
     // CR 303.4f: Aura resolving to battlefield attaches to its target.
@@ -471,13 +475,28 @@ fn apply_pending_spell_resolution(
         .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
         .unwrap_or(false);
     if is_aura {
-        if let Some(crate::types::ability::TargetRef::Object(target_id)) = ctx.spell_targets.first()
-        {
-            if state.battlefield.contains(target_id) {
-                effects::attach::attach_to(state, ctx.object_id, *target_id);
+        if let Some(target) = ctx.spell_targets.first() {
+            match target {
+                crate::types::ability::TargetRef::Object(target_id)
+                    if state.battlefield.contains(target_id) =>
+                {
+                    effects::attach::attach_to(state, ctx.object_id, *target_id);
+                }
+                crate::types::ability::TargetRef::Object(_) => {}
+                crate::types::ability::TargetRef::Player(player_id) => {
+                    effects::attach::attach_to_player(state, ctx.object_id, *player_id);
+                }
             }
         }
     }
+
+    super::room::unlock_door_designation(
+        state,
+        ctx.object_id,
+        ctx.controller,
+        crate::game::game_object::RoomDoor::Left,
+        events,
+    );
 
     // CR 702.185a: Warp delayed trigger setup.
     if ctx.casting_variant == CastingVariant::Warp {

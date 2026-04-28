@@ -1,0 +1,34 @@
+[package]
+name = "mtgish-import"
+version.workspace = true
+license.workspace = true
+edition = "2021"
+publish = false
+
+[dependencies]
+engine = { path = "../engine" }
+serde = { workspace = true }
+serde_json = "1"
+anyhow = "1"
+
+# Match the versions used by his crate so vendored types deserialize cleanly.
+serde_with = "3"
+
+[[bin]]
+name = "mtgish-convert"
+path = "src/bin/convert.rs"
+
+[[bin]]
+name = "mtgish-debug-deser"
+path = "src/bin/debug_deser.rs"
+
+[[bin]]
+name = "mtgish-diff"
+path = "src/bin/mtgish-diff.rs"
+
+[dev-dependencies]
+# Source-parse engine type files in `tests/manifest_coverage.rs` to assert
+# every `Vec<T>` field is classified by `ORDERING_MANIFEST`. `full` is
+# required for `syn::Item::Struct` field iteration with attributes.
+syn = { version = "2", features = ["full"] }
+tempfile = "3"

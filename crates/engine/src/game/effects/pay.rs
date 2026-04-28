@@ -2,6 +2,7 @@ use crate::game::casting;
 use crate::game::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{effective_speed, set_speed};
+use crate::game::targeting::resolve_effect_player_ref;
 use crate::types::ability::{Effect, PaymentCost, QuantityExpr, QuantityRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PayableResource, WaitingFor};
@@ -30,27 +31,28 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let cost = match &ability.effect {
-        Effect::PayCost { cost } => cost,
+    let (cost, payer_filter) = match &ability.effect {
+        Effect::PayCost { cost, payer } => (cost, payer),
         _ => return Err(EffectError::MissingParam("PayCost".to_string())),
     };
+    let Some(payer) = resolve_effect_player_ref(state, ability, payer_filter) else {
+        state.cost_payment_failed_flag = true;
+        return Ok(());
+    };
+    let mut payment_ability = ability.clone();
+    payment_ability.controller = payer;
 
     match cost {
         PaymentCost::Mana { cost: mana_cost } => {
             // CR 117.1: Pre-check affordability on a cloned state to avoid
             // partial mutations (auto_tap_lands runs before the can_pay check
             // inside pay_mana_cost). Only commit if the player can pay.
-            if !casting::can_pay_cost_after_auto_tap(
-                state,
-                ability.controller,
-                ability.source_id,
-                mana_cost,
-            ) {
+            if !casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, mana_cost) {
                 state.cost_payment_failed_flag = true;
                 return Ok(());
             }
             // Payment is affordable — commit the mutation.
-            let _ = casting::pay_unless_cost(state, ability.controller, mana_cost, events);
+            let _ = casting::pay_unless_cost(state, payer, mana_cost, events);
         }
         PaymentCost::Life { amount } => {
             // CR 118.8 + CR 119.4 + CR 119.8: Paying life as an effect-embedded
@@ -59,9 +61,9 @@ pub fn resolve(
             // CantLoseLife lock blocks the payment (cost unpayable). The amount
             // is a `QuantityExpr` resolved here — dynamic refs like
             // `EventContextSourcePower` resolve against the triggering event.
-            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
-            match pay_life_as_cost(state, ability.controller, amount, events) {
+            match pay_life_as_cost(state, payer, amount, events) {
                 PayLifeCostResult::Paid { .. } => {}
                 PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
                     state.cost_payment_failed_flag = true;
@@ -69,16 +71,11 @@ pub fn resolve(
             }
         }
         PaymentCost::Speed { amount } => {
-            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
             let amount = u8::try_from(amount.max(0)).unwrap_or(u8::MAX);
-            let current_speed = effective_speed(state, ability.controller);
+            let current_speed = effective_speed(state, payer);
             if amount <= current_speed {
-                set_speed(
-                    state,
-                    ability.controller,
-                    Some(current_speed - amount),
-                    events,
-                );
+                set_speed(state, payer, Some(current_speed - amount), events);
             } else {
                 state.cost_payment_failed_flag = true;
             }
@@ -98,33 +95,29 @@ pub fn resolve(
                 let max = state
                     .players
                     .iter()
-                    .find(|p| p.id == ability.controller)
+                    .find(|p| p.id == payer)
                     .map(|p| p.energy)
                     .unwrap_or(0);
                 state.waiting_for = WaitingFor::PayAmountChoice {
-                    player: ability.controller,
+                    player: payer,
                     resource: PayableResource::Energy,
                     min: 0,
                     max,
                 };
                 return Ok(());
             }
-            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
             let can_pay = state
                 .players
                 .iter()
-                .find(|p| p.id == ability.controller)
+                .find(|p| p.id == payer)
                 .is_some_and(|p| p.energy >= amount);
             if can_pay {
-                if let Some(p) = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == ability.controller)
-                {
+                if let Some(p) = state.players.iter_mut().find(|p| p.id == payer) {
                     p.energy -= amount;
                     events.push(GameEvent::EnergyChanged {
-                        player: ability.controller,
+                        player: payer,
                         delta: -(amount as i32),
                     });
                 }
@@ -145,6 +138,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::TargetFilter;
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
@@ -173,6 +167,7 @@ mod tests {
         };
         let ability = make_ability(Effect::PayCost {
             cost: PaymentCost::Mana { cost },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
@@ -190,6 +185,7 @@ mod tests {
         };
         let ability = make_ability(Effect::PayCost {
             cost: PaymentCost::Mana { cost },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
@@ -205,6 +201,7 @@ mod tests {
             cost: PaymentCost::Life {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
             },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
@@ -226,6 +223,7 @@ mod tests {
             cost: PaymentCost::Life {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
             },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
@@ -242,6 +240,7 @@ mod tests {
             cost: PaymentCost::Energy {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 2 },
             },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
@@ -263,6 +262,7 @@ mod tests {
             cost: PaymentCost::Energy {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 2 },
             },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);
@@ -282,6 +282,7 @@ mod tests {
             cost: PaymentCost::Energy {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
             },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -303,6 +304,7 @@ mod tests {
                     },
                 },
             },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -384,6 +386,7 @@ mod tests {
                         },
                     },
                 },
+                payer: TargetFilter::Controller,
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(500),
@@ -436,6 +439,7 @@ mod tests {
                     },
                 },
             },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -473,6 +477,7 @@ mod tests {
             cost: PaymentCost::Life {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
             },
+            payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events);

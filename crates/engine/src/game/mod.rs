@@ -52,6 +52,7 @@ pub mod public_state;
 pub mod quantity;
 pub mod replacement;
 pub mod restrictions;
+pub mod room;
 pub(crate) mod sacrifice;
 pub mod sba;
 pub mod scenario;

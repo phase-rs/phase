@@ -247,6 +247,41 @@ pub fn matches_target_filter_on_zone_change_record(
     )
 }
 
+/// CR 603.4 + CR 603.6 + CR 603.10: Evaluate a trigger condition whose
+/// subject is the object from a zone-change event.
+///
+/// Enter-the-battlefield conditions evaluate the live object in the destination
+/// zone. Death/leaves-the-battlefield conditions evaluate the zone-change
+/// record, which carries the event-time public characteristics used for LKI.
+pub fn matches_zone_change_event_object_filter(
+    state: &GameState,
+    event: &crate::types::events::GameEvent,
+    origin: Option<Zone>,
+    destination: Zone,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let crate::types::events::GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return false;
+    };
+
+    if origin.is_some_and(|required| *from != Some(required)) || *to != destination {
+        return false;
+    }
+
+    if destination == Zone::Battlefield {
+        matches_target_filter(state, *object_id, filter, ctx)
+    } else {
+        matches_target_filter_on_zone_change_record(state, record, filter, ctx)
+    }
+}
+
 fn filter_inner(
     state: &GameState,
     object_id: ObjectId,
@@ -1785,6 +1820,17 @@ fn zone_change_record_matches_property(
         // These predicates query live battlefield state (tap status, combat role,
         // attachment, current counters, face-down). The snapshot has already left
         // its public zone, so the predicate is semantically not applicable.
+        FilterProp::CountersGE {
+            counter_type,
+            count,
+        } => state.lki_cache.get(&record.object_id).is_some_and(|lki| {
+            let actual = lki.counters.get(counter_type).copied().unwrap_or(0) as i32;
+            actual >= resolve_filter_threshold(state, count, source)
+        }),
+        FilterProp::HasAnyCounter => state
+            .lki_cache
+            .get(&record.object_id)
+            .is_some_and(|lki| lki.counters.values().any(|&count| count > 0)),
         FilterProp::Tapped
         | FilterProp::Untapped
         | FilterProp::Attacking
@@ -1801,8 +1847,6 @@ fn zone_change_record_matches_property(
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::FaceDown
-        | FilterProp::CountersGE { .. }
-        | FilterProp::HasAnyCounter
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
         // — a zone-change snapshot cannot represent it. Fail closed.
         | FilterProp::NameMatchesAnyPermanent { .. } => false,

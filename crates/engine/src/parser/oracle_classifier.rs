@@ -1,11 +1,12 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
+use nom::combinator::verify;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
-use crate::parser::oracle_effect::split_leading_conditional;
+use crate::parser::oracle_effect::{split_leading_conditional, try_parse_named_choice};
 
 pub(crate) fn is_cant_win_lose_compound(lower: &str) -> bool {
     scan_contains(lower, "can't win the game") && scan_contains(lower, "can't lose the game")
@@ -314,10 +315,7 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
 }
 
 fn is_replacement_compound_pattern(lower: &str) -> bool {
-    if scan_contains(lower, "as ")
-        && scan_contains(lower, "enters")
-        && scan_contains(lower, "choose a")
-    {
+    if is_as_enters_choose_pattern(lower) {
         return true;
     }
     if (scan_contains(lower, "enters") || scan_contains(lower, "escapes"))
@@ -329,6 +327,25 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
         return true;
     }
     false
+}
+
+fn is_as_enters_choose_pattern(lower: &str) -> bool {
+    let has_as = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, VerboseError<&str>>("as ").parse(i)
+    })
+    .is_some();
+    let has_enters = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, VerboseError<&str>>("enters").parse(i)
+    })
+    .is_some();
+    let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        verify(tag::<_, _, VerboseError<&str>>("choose "), |_: &&str| {
+            try_parse_named_choice(i).is_some()
+        })
+        .parse(i)
+    })
+    .is_some();
+    has_as && has_enters && has_choose
 }
 
 const EFFECT_IMPERATIVE_PREFIXES: &[&str] = &[

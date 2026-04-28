@@ -6,10 +6,14 @@ use nom::combinator::{opt, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::oracle_cost::parse_oracle_cost;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_target::parse_type_phrase;
-use crate::types::ability::{AbilityCost, ControllerRef, TargetFilter, TypeFilter, TypedFilter};
+use super::oracle_util::strip_reminder_text;
+use crate::types::ability::{
+    AbilityCost, AdditionalCost, ControllerRef, TargetFilter, TypeFilter, TypedFilter,
+};
 use crate::types::keywords::{BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost};
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
@@ -76,6 +80,63 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
         }
     }
     expanded
+}
+
+/// CR 702.33a-c: Parse a kicker or multikicker keyword line into the casting
+/// cost declaration used by the engine. This lives with keyword parsing because
+/// Oracle prints kicker as a keyword line, while runtime casting consumes it as
+/// `AdditionalCost`.
+pub(crate) fn parse_kicker_additional_cost_line(raw: &str, lower: &str) -> Option<AdditionalCost> {
+    let (lower_after_prefix, repeatable) = alt((
+        value(
+            true,
+            alt((
+                tag::<_, _, VerboseError<&str>>("multikicker "),
+                tag("multikicker—"),
+            )),
+        ),
+        value(false, alt((tag("kicker "), tag("kicker—")))),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let raw_after_prefix = &raw[raw.len() - lower_after_prefix.len()..];
+
+    if repeatable {
+        return Some(AdditionalCost::Kicker {
+            costs: vec![parse_kicker_cost_payload(raw_after_prefix)?],
+            repeatable: true,
+        });
+    }
+
+    let costs = if let Ok((_, (lower_first, lower_second))) =
+        split_once_on(lower_after_prefix, " and/or ")
+    {
+        let separator_len = " and/or ".len();
+        let raw_first = &raw_after_prefix[..lower_first.len()];
+        let raw_second = &raw_after_prefix[lower_first.len() + separator_len..];
+        debug_assert_eq!(lower_second.len(), raw_second.len());
+        vec![
+            parse_kicker_cost_payload(raw_first)?,
+            parse_kicker_cost_payload(raw_second)?,
+        ]
+    } else {
+        vec![parse_kicker_cost_payload(raw_after_prefix)?]
+    };
+
+    Some(AdditionalCost::Kicker {
+        costs,
+        repeatable: false,
+    })
+}
+
+fn parse_kicker_cost_payload(input: &str) -> Option<AbilityCost> {
+    let stripped = strip_reminder_text(input);
+    let cost_text = stripped.trim().trim_end_matches('.').trim();
+    if cost_text.is_empty() {
+        return None;
+    }
+    Some(parse_oracle_cost(cost_text))
 }
 
 /// Try to extract keywords from a keyword-only line (comma-separated).
@@ -851,6 +912,14 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Undaunted => "undaunted".to_string(),
         Keyword::Station => "station".to_string(),
         Keyword::Paradigm => "paradigm".to_string(),
+        Keyword::Replicate(_) => "replicate".to_string(),
+        Keyword::Awaken(_) => "awaken".to_string(),
+        Keyword::ForMirrodin => "for mirrodin!".to_string(),
+        Keyword::MoreThanMeetsTheEye(_) => "more than meets the eye".to_string(),
+        Keyword::Freerunning(_) => "freerunning".to_string(),
+        Keyword::Increment => "increment".to_string(),
+        Keyword::Specialize(_) => "specialize".to_string(),
+        Keyword::Offering(quality) => format!("{} offering", quality.to_lowercase()),
         Keyword::Unknown(s) => s.to_lowercase(),
     }
 }

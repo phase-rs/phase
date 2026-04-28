@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -21,6 +21,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
+use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
 /// Wrap `cond` in `AbilityCondition::Not` when `negated` is true; otherwise
@@ -121,6 +122,87 @@ pub(crate) fn strip_leading_general_conditional(text: &str) -> (Option<AbilityCo
     (None, text.to_string())
 }
 
+/// CR 702.33b + CR 702.33c + CR 702.33f: Recognize quantified or per-variant
+/// kicker gating in a leading `"if [subject] was kicked …, [body]"` clause.
+/// Returns the typed `AbilityCondition` and the residual body when matched.
+///
+/// Patterns covered (subject is consumed permissively up to "was kicked"):
+/// - "if it was kicked twice, [body]"             → min_count = 2
+/// - "if it was kicked three times, [body]"       → min_count = N (English/digit)
+/// - "if it was kicked with its {COST} kicker, [body]"
+///   → parser records the printed cost; synthesis maps it to the card's
+///   positional `KickerVariant` once kicker declarations are visible.
+fn strip_quantified_kicker_conditional(
+    text: &str,
+    lower: &str,
+) -> Option<(AbilityCondition, String)> {
+    // CR 603.4: Locate the "was kicked" anchor. Subject (~/it/this creature/
+    // this spell) is consumed permissively — the typed shape is determined
+    // entirely by what follows.
+    let after_if = tag::<_, _, VerboseError<&str>>("if ")
+        .parse(lower)
+        .ok()
+        .map(|(rest, _)| rest)?;
+    let (after_kicked, _) = take_until::<_, _, VerboseError<&str>>("was kicked")
+        .parse(after_if)
+        .ok()?;
+    let (after_kicked, _) = tag::<_, _, VerboseError<&str>>("was kicked")
+        .parse(after_kicked)
+        .ok()?;
+
+    // Branch 1: "was kicked with its {COST} kicker, [body]" — per-variant.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" with its ").parse(after_kicked) {
+        let cost_start = text.len() - rest.len();
+        let (rest, cost_text) = take_until::<_, _, VerboseError<&str>>(" kicker, ")
+            .parse(rest)
+            .ok()?;
+        let (rest, _) = tag::<_, _, VerboseError<&str>>(" kicker, ")
+            .parse(rest)
+            .ok()?;
+        let offset = text.len() - rest.len();
+        let cost =
+            parse_kicker_condition_mana_cost(&text[cost_start..cost_start + cost_text.len()])?;
+        return Some((
+            AbilityCondition::additional_cost_paid_kicker_cost(cost),
+            text[offset..].to_string(),
+        ));
+    }
+
+    // Branch 2: "was kicked twice, [body]" → min_count = 2.
+    // CR 702.33b/c: "twice" is the printed form for kicked-N=2.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" twice, ").parse(after_kicked) {
+        let offset = text.len() - rest.len();
+        return Some((
+            AbilityCondition::additional_cost_paid_n_times(2),
+            text[offset..].to_string(),
+        ));
+    }
+
+    // Branch 3: "was kicked N times, [body]" → min_count = N. Accepts both
+    // English number words (one through twenty) and digit forms via
+    // `nom_primitives::parse_number`. "one time" is unprinted but harmless.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" ").parse(after_kicked) {
+        if let Ok((rest, n)) = nom_primitives::parse_number(rest) {
+            if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" times, ").parse(rest) {
+                let offset = text.len() - rest.len();
+                return Some((
+                    AbilityCondition::additional_cost_paid_n_times(n),
+                    text[offset..].to_string(),
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_kicker_condition_mana_cost(cost_text: &str) -> Option<ManaCost> {
+    nom_primitives::parse_mana_cost
+        .parse(cost_text.trim())
+        .ok()
+        .map(|(_, cost)| cost)
+}
+
 pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
@@ -129,7 +211,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
     }) {
         return (
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::AdditionalCostPaid),
+                condition: Box::new(AbilityCondition::additional_cost_paid_any()),
             }),
             rest.to_string(),
         );
@@ -146,7 +228,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             let offset = text.len() - rest.len();
             return (
                 Some(AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::AdditionalCostPaid),
+                    condition: Box::new(AbilityCondition::additional_cost_paid_any()),
                 }),
                 text[offset..].to_string(),
             );
@@ -169,6 +251,13 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         .parse(lower.as_str())
         .is_ok()
     {
+        // CR 702.33b/c + CR 702.33f: Quantified / per-variant kicker gating.
+        // Try "kicked twice/N times" and "kicked with its {COST} kicker"
+        // BEFORE the plain "was kicked" split so the more specific phrasings
+        // take priority. Returns early with the typed condition.
+        if let Some((cond, rest)) = strip_quantified_kicker_conditional(text, &lower) {
+            return (Some(cond), rest);
+        }
         nom_primitives::split_once_on(lower.as_str(), " was kicked, ")
             .or_else(|_| nom_primitives::split_once_on(lower.as_str(), " was bargained, "))
             .ok()
@@ -238,7 +327,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                 if stripped.len() < body.len() {
                     (stripped, AbilityCondition::AdditionalCostPaidInstead)
                 } else {
-                    (body, AbilityCondition::AdditionalCostPaid)
+                    (body, AbilityCondition::additional_cost_paid_any())
                 }
             };
             (Some(condition), body)
@@ -1509,5 +1598,60 @@ mod tests {
             } => assert_eq!(counter_type, "P1P1"),
             other => panic!("unexpected bridged condition: {other:?}"),
         }
+    }
+
+    /// CR 702.33d + CR 608.2c: Plain "if it was kicked, …" emits the
+    /// default-shape `AdditionalCostPaid` (variant=None, min_count=1) so the
+    /// existing single-bool semantics survive. Regression guard for Gift /
+    /// Buyback / Bargain / Evidence and Archangel of Wrath's first trigger.
+    #[test]
+    fn plain_kicked_emits_default_shape() {
+        let (cond, body) =
+            strip_additional_cost_conditional("If it was kicked, it deals 2 damage to any target.");
+        assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
+        assert_eq!(body, "it deals 2 damage to any target.");
+    }
+
+    /// CR 702.33b + CR 603.4: "if it was kicked twice, …" → min_count = 2.
+    /// Archangel of Wrath's second trigger.
+    #[test]
+    fn kicked_twice_emits_min_count_two() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If it was kicked twice, it deals 2 damage to any target.",
+        );
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::additional_cost_paid_n_times(2))
+        );
+        assert_eq!(body, "it deals 2 damage to any target.");
+    }
+
+    /// CR 702.33b/c: "if it was kicked three times, …" → min_count = N.
+    /// Exercises the `parse_number` English-word path.
+    #[test]
+    fn kicked_three_times_emits_min_count_three() {
+        let (cond, body) =
+            strip_additional_cost_conditional("If it was kicked three times, draw a card.");
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::additional_cost_paid_n_times(3))
+        );
+        assert_eq!(body, "draw a card.");
+    }
+
+    /// CR 702.33f: "if it was kicked with its {COST} kicker, …" records the
+    /// printed mana cost so synthesis can map it to the positional kicker.
+    #[test]
+    fn kicked_with_specific_kicker_emits_cost_metadata() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If it was kicked with its {2}{U} kicker, target player discards three cards.",
+        );
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::additional_cost_paid_kicker_cost(
+                parse_kicker_condition_mana_cost("{2}{U}").unwrap()
+            ))
+        );
+        assert_eq!(body, "target player discards three cards.");
     }
 }

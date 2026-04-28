@@ -1,4 +1,4 @@
-use crate::types::ability::{FilterProp, TargetFilter, TargetRef, TypedFilter};
+use crate::types::ability::{FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{HexproofFilter, Keyword};
@@ -33,6 +33,25 @@ pub fn find_legal_targets(
     // ParentTarget inherits targets from the parent ability at resolution time.
     // No new targeting needed — the sub_ability chain copies parent targets automatically.
     if matches!(filter, TargetFilter::ParentTarget) {
+        return targets;
+    }
+
+    if matches!(filter, TargetFilter::AttachedTo) {
+        if let Some(target) = resolve_event_context_target(state, filter, source_id) {
+            targets.push(target);
+        }
+        return targets;
+    }
+
+    if let TargetFilter::Or { filters } = filter {
+        let mut seen = HashSet::new();
+        for branch in filters {
+            for target in find_legal_targets(state, branch, source_controller, source_id) {
+                if seen.insert(target.clone()) {
+                    targets.push(target);
+                }
+            }
+        }
         return targets;
     }
 
@@ -262,6 +281,15 @@ pub fn resolve_event_context_target(
             let attacker_info = combat.attackers.iter().find(|a| a.object_id == source_id)?;
             Some(TargetRef::Player(attacker_info.defending_player))
         }
+        TargetFilter::AttachedTo => {
+            let host = state.objects.get(&source_id)?.attached_to?;
+            match host {
+                crate::game::game_object::AttachTarget::Object(id) => Some(TargetRef::Object(id)),
+                crate::game::game_object::AttachTarget::Player(player) => {
+                    Some(TargetRef::Player(player))
+                }
+            }
+        }
         TargetFilter::ParentTargetController => {
             let event = state.current_trigger_event.as_ref()?;
             let source_obj_id = extract_source_from_event(event)?;
@@ -280,6 +308,52 @@ pub fn resolve_event_context_target(
             Some(TargetRef::Player(controller))
         }
         _ => None,
+    }
+}
+
+/// Resolve a player reference carried in an effect target slot.
+///
+/// `TargetFilter::ParentTargetController` first consults the resolving
+/// ability's inherited targets, which is the spell-resolution path for
+/// "target spell unless its controller pays". It then checks the stack by
+/// target id/source id before falling back to event-context refs.
+pub fn resolve_effect_player_ref(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<PlayerId> {
+    match filter {
+        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::Player => ability.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            _ => None,
+        }),
+        TargetFilter::ParentTargetController => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => state
+                    .stack
+                    .iter()
+                    .find(|entry| entry.id == *id || entry.source_id == *id)
+                    .map(|entry| entry.controller)
+                    .or_else(|| state.objects.get(id).map(|obj| obj.controller)),
+                TargetRef::Player(player) => Some(*player),
+            })
+            .or_else(|| {
+                resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
+                    match target {
+                        TargetRef::Player(player) => Some(player),
+                        TargetRef::Object(id) => state.objects.get(&id).map(|obj| obj.controller),
+                    }
+                })
+            }),
+        _ => resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
+            match target {
+                TargetRef::Player(player) => Some(player),
+                TargetRef::Object(id) => state.objects.get(&id).map(|obj| obj.controller),
+            }
+        }),
     }
 }
 
@@ -707,6 +781,7 @@ fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::CastingVariant;
@@ -792,6 +867,29 @@ mod tests {
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn attached_to_resolves_player_host() {
+        let mut state = GameState::new_two_player(42);
+        let curse = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+
+        assert_eq!(
+            resolve_event_context_target(&state, &TargetFilter::AttachedTo, curse),
+            Some(TargetRef::Player(PlayerId(1)))
+        );
+        assert_eq!(
+            find_legal_targets(&state, &TargetFilter::AttachedTo, PlayerId(0), curse),
+            vec![TargetRef::Player(PlayerId(1))]
+        );
     }
 
     #[test]
@@ -1217,7 +1315,7 @@ mod tests {
     fn aang_airbend_filter_targets_stack_spells_and_other_creatures() {
         use crate::types::ability::Effect;
 
-        let (mut state, source_id, other_creature, _land) = setup_with_typed_creatures();
+        let (mut state, source_id, other_creature, land) = setup_with_typed_creatures();
         let spell_id = create_object(
             &mut state,
             CardId(300),
@@ -1253,6 +1351,7 @@ mod tests {
         assert!(targets.contains(&TargetRef::Object(other_creature)));
         assert!(targets.contains(&TargetRef::Object(spell_id)));
         assert!(!targets.contains(&TargetRef::Object(source_id)));
+        assert!(!targets.contains(&TargetRef::Object(land)));
     }
 
     #[test]

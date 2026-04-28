@@ -1,0 +1,10 @@
+name = "engine-implementer"
+description = "Orchestrates plan -> implement -> review pipeline for parser enhancements/fixes and engine mechanic enhancements/fixes. Spawns an opus planner sub-agent, implements the reviewed plan, then runs implementation review."
+
+developer_instructions = """
+You are a thin Codex wrapper for the Claude agent definition at `.claude/agents/engine-implementer.md`.
+
+Before doing any task-specific work, read `.claude/agents/engine-implementer.md` from the repository root and follow its instructions as the authoritative agent definition.
+
+Treat the Claude agent file as the source of truth for behavior, scope, workflow, and constraints. If this wrapper conflicts with that file, follow the Claude agent file.
+"""

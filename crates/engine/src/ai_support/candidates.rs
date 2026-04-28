@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::game::casting;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
+use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
@@ -1818,6 +1819,38 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
+    if is_main_phase && stack_empty && is_active {
+        for &obj_id in &state.battlefield {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            if obj.controller != player || !obj.card_types.subtypes.iter().any(|s| s == "Room") {
+                continue;
+            }
+            let unlocks = obj.room_unlocks.unwrap_or_default();
+            if !unlocks.left_unlocked {
+                actions.push(candidate(
+                    GameAction::UnlockRoomDoor {
+                        object_id: obj_id,
+                        door: RoomDoor::Left,
+                    },
+                    TacticalClass::Ability,
+                    Some(player),
+                ));
+            }
+            if obj.back_face.is_some() && !unlocks.right_unlocked {
+                actions.push(candidate(
+                    GameAction::UnlockRoomDoor {
+                        object_id: obj_id,
+                        door: RoomDoor::Right,
+                    },
+                    TacticalClass::Ability,
+                    Some(player),
+                ));
+            }
+        }
+    }
+
     // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
     for &obj_id in &state.players[player.0 as usize].hand {
         if let Some(obj) = state.objects.get(&obj_id) {
@@ -2849,6 +2882,38 @@ mod tests {
             !has_plain_cast,
             "must not offer CastPreparedCopy for unprepared creatures"
         );
+    }
+
+    #[test]
+    fn priority_actions_include_unlock_room_door_for_locked_room() {
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let room = create_object(
+            &mut state,
+            CardId(3),
+            p0,
+            "Test Room".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.room_unlocks = Some(Default::default());
+        }
+        state.phase = Phase::PreCombatMain;
+        state.active_player = p0;
+        state.priority_player = p0;
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+
+        let actions = crate::ai_support::legal_actions(&state);
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            GameAction::UnlockRoomDoor {
+                object_id,
+                door: RoomDoor::Left,
+            } if *object_id == room
+        )));
     }
 
     #[test]

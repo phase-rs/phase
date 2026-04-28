@@ -1,0 +1,51 @@
+[
+  {
+    "keywords": [
+      {
+        "Enchant": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": null,
+          "properties": []
+        }
+      }
+    ],
+    "abilities": [],
+    "triggers": [],
+    "statics": [
+      {
+        "mode": "Continuous",
+        "affected": {
+          "type": "SelfRef"
+        },
+        "modifications": [
+          {
+            "type": "AddPower",
+            "value": 1
+          },
+          {
+            "type": "AddToughness",
+            "value": 1
+          },
+          {
+            "type": "AddKeyword",
+            "keyword": "Flying"
+          }
+        ],
+        "condition": null,
+        "affected_zone": null,
+        "effect_zone": null,
+        "active_zones": [],
+        "characteristic_defining": false,
+        "description": null
+      }
+    ],
+    "replacements": [],
+    "additional_cost": null,
+    "casting_options": [],
+    "casting_restrictions": [],
+    "strive_cost": null
+  }
+]

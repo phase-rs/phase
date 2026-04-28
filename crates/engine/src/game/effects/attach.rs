@@ -1,5 +1,7 @@
 use crate::game::game_object::AttachTarget;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -12,33 +14,18 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let source_id = ability.source_id;
+    let (attachment_filter, target_filter) = match &ability.effect {
+        Effect::Attach { attachment, target } => (attachment, target),
+        _ => (&TargetFilter::SelfRef, &TargetFilter::Any),
+    };
 
-    // Determine target: prefer explicit targets, fall back to LastCreated for
-    // synthesized sub-abilities (Job select, Living Weapon).
-    let target_id = ability
-        .targets
-        .first()
-        .and_then(|t| match t {
-            crate::types::ability::TargetRef::Object(id) => Some(*id),
-            _ => None,
-        })
-        .or_else(|| {
-            // CR 702.182a: Resolve TargetFilter::LastCreated from game state
-            // when no explicit targets exist (e.g., "then attach this to it").
-            if matches!(
-                &ability.effect,
-                Effect::Attach {
-                    target: TargetFilter::LastCreated
-                }
-            ) {
-                state.last_created_token_ids.first().copied()
-            } else {
-                None
-            }
-        })
+    let mut target_slots = ability.targets.iter();
+    let attachment_id = resolve_object_filter(state, ability, attachment_filter, &mut target_slots)
+        .ok_or_else(|| EffectError::MissingParam("No attachment for Attach".to_string()))?;
+    let target_id = resolve_object_filter(state, ability, target_filter, &mut target_slots)
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
-    attach_to(state, source_id, target_id);
+    attach_to(state, attachment_id, target_id);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -46,6 +33,38 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+fn resolve_object_filter<'a>(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    target_slots: &mut impl Iterator<Item = &'a TargetRef>,
+) -> Option<ObjectId> {
+    match filter {
+        TargetFilter::SelfRef => Some(ability.source_id),
+        TargetFilter::LastCreated => target_slots
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .or_else(|| state.last_created_token_ids.first().copied()),
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+                .and_then(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+        }
+        TargetFilter::ParentTarget => ability.targets.iter().find_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        }),
+        _ => target_slots.find_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        }),
+    }
 }
 
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
@@ -395,6 +414,7 @@ mod tests {
 
         let ability = crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::SelfRef,
                 target: TargetFilter::LastCreated,
             },
             vec![], // No explicit targets — should fall back to LastCreated
@@ -435,6 +455,7 @@ mod tests {
 
         let ability = crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::SelfRef,
                 target: TargetFilter::LastCreated,
             },
             vec![crate::types::ability::TargetRef::Object(creature_a)],
@@ -450,6 +471,42 @@ mod tests {
             state.objects.get(&equipment_id).unwrap().attached_to,
             Some(AttachTarget::Object(creature_a))
         );
+    }
+
+    #[test]
+    fn attach_resolves_non_source_attachment_from_target_slot() {
+        let mut state = setup();
+        let source_id = spawn_creature(&mut state, "Windwalker");
+        let equipment_id = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let creature_id = spawn_creature(&mut state, "Bear");
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Any,
+                target: TargetFilter::Any,
+            },
+            vec![
+                crate::types::ability::TargetRef::Object(equipment_id),
+                crate::types::ability::TargetRef::Object(creature_id),
+            ],
+            source_id,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&equipment_id).unwrap().attached_to,
+            Some(AttachTarget::Object(creature_id))
+        );
+        assert!(state
+            .objects
+            .get(&creature_id)
+            .unwrap()
+            .attachments
+            .contains(&equipment_id));
+        assert_eq!(state.objects.get(&source_id).unwrap().attached_to, None);
     }
 
     #[test]

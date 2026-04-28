@@ -1029,7 +1029,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Untap { target }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
-        | Effect::Attach { target }
+        | Effect::Attach { target, .. }
         | Effect::Fight { target, .. }
         | Effect::CopySpell { target }
         | Effect::BecomeCopy { target, .. }
@@ -1216,6 +1216,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                     "player".into(),
                     match player {
                         GainLifePlayer::TargetedController => "target's controller",
+                        GainLifePlayer::TargetPlayer => "target player",
                         GainLifePlayer::Controller => unreachable!(),
                     }
                     .into(),
@@ -2173,6 +2174,11 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
             AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
                 build_cost_item(cost, items);
             }
+            AdditionalCost::Kicker { costs, .. } => {
+                for cost in costs {
+                    build_cost_item(cost, items);
+                }
+            }
             AdditionalCost::Choice(first, second) => {
                 build_cost_item(first, items);
                 build_cost_item(second, items);
@@ -2183,6 +2189,13 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 
     let label = match additional_cost {
         AdditionalCost::Optional(_) => "AdditionalCost:Optional",
+        AdditionalCost::Kicker { repeatable, .. } => {
+            if *repeatable {
+                "AdditionalCost:Multikicker"
+            } else {
+                "AdditionalCost:Kicker"
+            }
+        }
         AdditionalCost::Required(_) => "AdditionalCost:Required",
         AdditionalCost::Choice(_, _) => "AdditionalCost:Choice",
     };
@@ -2202,6 +2215,7 @@ fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
         AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
             ability_cost_has_unimplemented(cost)
         }
+        AdditionalCost::Kicker { costs, .. } => costs.iter().any(ability_cost_has_unimplemented),
         AdditionalCost::Choice(first, second) => {
             ability_cost_has_unimplemented(first) || ability_cost_has_unimplemented(second)
         }
@@ -3224,6 +3238,9 @@ fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> 
         AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
             ability_cost_has_unimplemented_parts(cost)
         }
+        AdditionalCost::Kicker { costs, .. } => {
+            costs.iter().any(ability_cost_has_unimplemented_parts)
+        }
         AdditionalCost::Choice(first, second) => {
             ability_cost_has_unimplemented_parts(first)
                 || ability_cost_has_unimplemented_parts(second)
@@ -3267,6 +3284,11 @@ fn collect_additional_cost_missing_parts(
     match additional_cost {
         AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
             collect_ability_cost_missing_parts(cost, missing);
+        }
+        AdditionalCost::Kicker { costs, .. } => {
+            for cost in costs {
+                collect_ability_cost_missing_parts(cost, missing);
+            }
         }
         AdditionalCost::Choice(first, second) => {
             collect_ability_cost_missing_parts(first, missing);
@@ -4091,14 +4113,13 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
     match cond {
         // Handled by `evaluate_condition` / `resolve_ability_chain`
         // (crates/engine/src/game/effects/mod.rs).
-        AbilityCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
+        AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
         AbilityCondition::IfYouDo => ("IfYouDo", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
-        AbilityCondition::Not { .. } => ("Not", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
         AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
@@ -4116,6 +4137,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ControllerControlsMatching { .. } => {
             ("ControllerControlsMatching", Handled)
         }
+        AbilityCondition::ZoneChangeObjectMatchesFilter { .. } => {
+            ("ZoneChangeObjectMatchesFilter", Handled)
+        }
         // Variants below are parsed but have no runtime resolver today.
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
@@ -4124,6 +4148,11 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
+        // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
+        // (effects/mod.rs), which short-circuits on the first true child.
+        AbilityCondition::Or { .. } => ("Or", Handled),
+        // CR 608.2c: Logical negation — handled by evaluate_condition (effects/mod.rs).
+        AbilityCondition::Not { .. } => ("Not", Handled),
         // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
         // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.

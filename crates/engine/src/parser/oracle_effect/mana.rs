@@ -805,6 +805,8 @@ fn scan_mana_production_type(
                 alt((
                     tag::<_, _, VerboseError<&str>>("mana of any of the exiled cards' colors"),
                     tag("mana of any of the exiled cards’ colors"),
+                    tag("mana of any of the exiled card's colors"),
+                    tag("mana of any of the exiled card’s colors"),
                     tag("mana of any color among the exiled cards"),
                 )),
             ),

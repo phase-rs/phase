@@ -1,0 +1,89 @@
+{
+  "CardPT": {
+    "Power": 2,
+    "Toughness": 3
+  },
+  "ManaCost": [
+    {
+      "_ManaSymbol": "ManaCostGeneric",
+      "args": 2
+    },
+    {
+      "_ManaSymbol": "ManaCostW"
+    }
+  ],
+  "Name": "Aven Riftwatcher",
+  "Rules": [
+    {
+      "_Rule": "Flying"
+    },
+    {
+      "_Rule": "VanishingEnters",
+      "args": 3
+    },
+    {
+      "_Rule": "TriggerA",
+      "args": [
+        {
+          "_Trigger": "WhenAPermanentEntersTheBattlefield",
+          "args": {
+            "_Permanents": "SinglePermanent",
+            "args": {
+              "_Permanent": "ThisPermanent"
+            }
+          }
+        },
+        {
+          "_Actions": "ActionList",
+          "args": [
+            {
+              "_Action": "GainLife",
+              "args": {
+                "_GameNumber": "Integer",
+                "args": 2
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "_Rule": "TriggerA",
+      "args": [
+        {
+          "_Trigger": "WhenAPermanentLeavesTheBattlefield",
+          "args": {
+            "_Permanents": "SinglePermanent",
+            "args": {
+              "_Permanent": "ThisPermanent"
+            }
+          }
+        },
+        {
+          "_Actions": "ActionList",
+          "args": [
+            {
+              "_Action": "GainLife",
+              "args": {
+                "_GameNumber": "Integer",
+                "args": 2
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Creature"
+    ],
+    "Subtypes": [
+      "Bird",
+      "Rebel",
+      "Soldier"
+    ],
+    "Supertypes": []
+  },
+  "_OracleCard": "Card"
+}

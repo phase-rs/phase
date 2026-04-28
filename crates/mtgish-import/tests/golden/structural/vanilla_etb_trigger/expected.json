@@ -1,0 +1,58 @@
+[
+  {
+    "keywords": [
+      "Flying"
+    ],
+    "abilities": [],
+    "triggers": [
+      {
+        "mode": "ChangesZone",
+        "execute": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Scry",
+            "count": {
+              "type": "Fixed",
+              "value": 3
+            },
+            "target": {
+              "type": "Controller"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "sorcery_speed": false,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "valid_card": {
+          "type": "SelfRef"
+        },
+        "origin": null,
+        "destination": "Battlefield",
+        "trigger_zones": [],
+        "phase": null,
+        "optional": false,
+        "damage_kind": "Any",
+        "secondary": false,
+        "valid_target": null,
+        "valid_source": null,
+        "description": null,
+        "constraint": null,
+        "condition": null,
+        "batched": false
+      }
+    ],
+    "statics": [],
+    "replacements": [],
+    "additional_cost": null,
+    "casting_options": [],
+    "casting_restrictions": [],
+    "strive_cost": null
+  }
+]

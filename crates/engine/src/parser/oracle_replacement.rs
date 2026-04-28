@@ -21,13 +21,13 @@ use super::oracle_util::{
     strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
+    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
     ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageTargetFilter, Duration, Effect, FilterProp, ManaModification, PreventionAmount,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
-use crate::types::mana::{ManaColor, ManaType};
+use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -574,7 +574,7 @@ fn tap_self_unless_controls_matching_ability(filter: &TargetFilter) -> AbilityDe
 }
 
 /// Parse shock land pattern: "As ~ enters, you may pay N life. If you don't, it enters tapped."
-/// Returns Optional ReplacementDefinition with execute=LoseLife (accept) and decline=Tap (decline).
+/// Returns a cost-bearing replacement choice: paying life accepts; declining taps.
 fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     // Match: "you may pay N life" + "enters tapped" (in either sentence order)
     if !nom_primitives::scan_contains(norm_lower, "you may pay")
@@ -591,14 +591,6 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     // Extract life amount: "pay 2 life", "pay 3 life", etc.
     let amount = extract_life_payment(norm_lower)?;
 
-    let lose_life = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::LoseLife {
-            amount: QuantityExpr::Fixed { value: amount },
-            target: None,
-        },
-    );
-
     let tap_self = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Tap {
@@ -608,7 +600,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 
     let has_basic_land_type_choice =
         nom_primitives::scan_contains(norm_lower, "choose a basic land type");
-    let execute = if has_basic_land_type_choice {
+    let execute = has_basic_land_type_choice.then(|| {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
@@ -616,10 +608,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
                 persist: true,
             },
         )
-        .sub_ability(lose_life)
-    } else {
-        lose_life
-    };
+    });
 
     let decline = if has_basic_land_type_choice {
         AbilityDefinition::new(
@@ -635,13 +624,21 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     };
 
     Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(execute)
-            .mode(ReplacementMode::Optional {
-                decline: Some(Box::new(decline)),
-            })
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string()),
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved);
+            if let Some(execute) = execute {
+                def = def.execute(execute);
+            }
+            def
+        }
+        .mode(ReplacementMode::MayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: amount },
+            },
+            decline: Some(Box::new(decline)),
+        })
+        .valid_card(TargetFilter::SelfRef)
+        .description(original_text.to_string()),
     )
 }
 
@@ -1572,11 +1569,22 @@ fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondi
         Ok(_) => {
             // Reconstruct the enters-with text for downstream parsing.
             let enters_start = norm_lower.len() - after_kicker_clause.len() + 2; // skip ", "
-            let condition = ReplacementCondition::CastViaKicker { cost_text };
+            let condition = ReplacementCondition::CastViaKicker {
+                variant: None,
+                kicker_cost: cost_text.as_deref().and_then(parse_lower_mana_cost),
+            };
             (Some(condition), &norm_lower[enters_start..])
         }
         Err(_) => (None, norm_lower),
     }
+}
+
+fn parse_lower_mana_cost(cost_text: &str) -> Option<ManaCost> {
+    let upper = cost_text.to_ascii_uppercase();
+    nom_primitives::parse_mana_cost
+        .parse(upper.as_str())
+        .ok()
+        .map(|(_, cost)| cost)
 }
 
 /// CR 603.4: Detect a trailing "if you cast it from [zone]" gate on a
@@ -3813,18 +3821,18 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
-        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
-        // Accept branch: LoseLife { amount: 2 }
-        let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
-            *execute.effect,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 2 },
+            def.mode,
+            ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 }
+                },
                 ..
             }
         ));
+        assert!(def.execute.is_none());
         // Decline branch: Tap { target: SelfRef }
-        if let ReplacementMode::Optional { decline } = &def.mode {
+        if let ReplacementMode::MayCost { decline, .. } = &def.mode {
             let decline = decline.as_ref().unwrap();
             assert!(matches!(
                 *decline.effect,
@@ -3844,11 +3852,12 @@ mod tests {
             "Some Shock Land",
         )
         .unwrap();
-        let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
-            *execute.effect,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 3 },
+            def.mode,
+            ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 }
+                },
                 ..
             }
         ));
@@ -3862,7 +3871,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
+        assert!(matches!(def.mode, ReplacementMode::MayCost { .. }));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -3871,15 +3880,9 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(
-            *execute.sub_ability.as_ref().unwrap().effect,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 2 },
-                ..
-            }
-        ));
+        assert!(execute.sub_ability.is_none());
 
-        if let ReplacementMode::Optional { decline } = &def.mode {
+        if let ReplacementMode::MayCost { decline, .. } = &def.mode {
             let decline = decline.as_ref().unwrap();
             assert!(matches!(
                 *decline.effect,
@@ -4119,6 +4122,23 @@ mod tests {
     }
 
     #[test]
+    fn as_enters_choose_two_colors() {
+        let def = parse_replacement_line(
+            "As this artifact enters, choose two colors.",
+            "Tablet of the Guilds",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::TwoColors,
+                persist: true,
+            }
+        ));
+    }
+
+    #[test]
     fn as_enters_choose_a_creature_type() {
         let def = parse_replacement_line(
             "As Door of Destinies enters, choose a creature type.",
@@ -4145,7 +4165,7 @@ mod tests {
         )
         .unwrap();
         // Should be Optional (shock land), not Mandatory (simple choose)
-        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
+        assert!(matches!(def.mode, ReplacementMode::MayCost { .. }));
     }
 
     #[test]
@@ -4503,7 +4523,10 @@ mod tests {
         ));
         assert!(matches!(
             def.condition,
-            Some(ReplacementCondition::CastViaKicker { cost_text: None })
+            Some(ReplacementCondition::CastViaKicker {
+                variant: None,
+                kicker_cost: None
+            })
         ));
     }
 
@@ -4525,11 +4548,17 @@ mod tests {
                 ..
             } if counter_type == "P1P1"
         ));
+        // CR 702.33d + CR 702.33f: per-variant resolution is deferred, but the
+        // parser keeps typed cost metadata so synthesis can map it to the card's
+        // positional `KickerVariant`.
         match &def.condition {
-            Some(ReplacementCondition::CastViaKicker { cost_text }) => {
-                assert_eq!(cost_text.as_deref(), Some("{1}{r}"));
-            }
-            other => panic!("Expected CastViaKicker, got {other:?}"),
+            Some(ReplacementCondition::CastViaKicker {
+                variant: None,
+                kicker_cost: Some(_),
+            }) => {}
+            other => panic!(
+                "Expected CastViaKicker {{ variant: None, kicker_cost: Some(_) }}, got {other:?}"
+            ),
         }
     }
 

@@ -339,6 +339,10 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
 
 /// Inner implementation operating on pre-lowercased input.
 fn starts_clause_text_lower(s: &str) -> bool {
+    if starts_multiword_keyword_continuation(s) {
+        return false;
+    }
+
     // Table-driven prefix check via nom tag() — try all imperative verbs and
     // pronoun/determiner clause starters.  Split into multiple alt() groups
     // chained with .or() to stay within nom's 21-tuple limit.
@@ -407,6 +411,19 @@ fn starts_clause_text_lower(s: &str) -> bool {
     )))
     .parse(s)
     .is_ok()
+}
+
+fn starts_multiword_keyword_continuation(s: &str) -> bool {
+    let Ok((rest, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("double strike"),
+        tag("double team"),
+    ))
+    .parse(s) else {
+        return false;
+    };
+    rest.chars()
+        .next()
+        .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
 }
 
 /// CR 603.7a: Check if accumulated clause text begins with a temporal prefix
@@ -637,6 +654,7 @@ pub(super) fn apply_clause_continuation(
                 change_zone.sub_ability = Some(Box::new(AbilityDefinition::new(
                     kind,
                     Effect::Attach {
+                        attachment: TargetFilter::SelfRef,
                         target: TargetFilter::Any,
                     },
                 )));
@@ -1860,6 +1878,28 @@ mod tests {
     fn comma_then_clause_still_splits() {
         let chunks = clause_texts("draw a card, then discard a card");
         assert_eq!(chunks, vec!["draw a card", "discard a card"]);
+    }
+
+    #[test]
+    fn comma_keyword_list_does_not_split_double_strike() {
+        let chunks = clause_texts(
+            "creatures you control gain flying, vigilance, and double strike until end of turn",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "creatures you control gain flying, vigilance, and double strike until end of turn"
+            ]
+        );
+    }
+
+    #[test]
+    fn comma_keyword_list_does_not_split_double_team() {
+        let chunks = clause_texts("creatures you control gain flying, and double team");
+        assert_eq!(
+            chunks,
+            vec!["creatures you control gain flying, and double team"]
+        );
     }
 
     #[test]

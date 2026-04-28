@@ -111,6 +111,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
             });
         }
     }
+    if card_face.card_type.subtypes.iter().any(|s| s == "Room") {
+        obj.room_unlocks.get_or_insert_with(Default::default);
+    }
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
