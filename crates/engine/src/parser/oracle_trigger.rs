@@ -437,16 +437,39 @@ pub(crate) fn parse_trigger_line_with_index(
     let condition_text: &str = &condition_text_stripped;
 
     let effect_lower = effect_text.to_lowercase();
+    // Extract intervening-if condition from effect text first — a leading
+    // "if X, " can hide the "you may " optional marker behind the if-clause
+    // ("At the beginning of your upkeep, if you have more cards in hand
+    // than each opponent, you may return this card from your graveyard to
+    // your hand"). Without stripping the if first, the optional check
+    // below would see "if …" at position 0 and miss the "you may " that
+    // sits between the comma and the verb.
+    let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
+
     // CR 609.3: "You may" at the start of the effect text makes the triggered
     // effect optional at resolution — the player chooses whether to perform it.
     // Mid-chain "you may" is per-sentence optional, handled by
     // parse_effect_chain → strip_optional_effect_prefix().
-    let optional = tag::<_, _, VerboseError<&str>>("you may ")
-        .parse(effect_lower.as_str())
-        .is_ok();
-
-    // Extract intervening-if condition from effect text
-    let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
+    //
+    // Three cases route here:
+    //   1. Bare "you may verb …"                     → optional=true at pos 0
+    //   2. "if X, you may verb …" with X recognized  → extract_if_condition
+    //      strips "if X, " and post-strip starts with "you may"
+    //   3. "if X, you may verb …" with X unrecognized → extract_if_condition
+    //      returns the text unchanged. We still want optional detection, so
+    //      fall back to a structural "if [phrase], " skip — find the FIRST
+    //      ", " that closes the if-clause and re-check after the comma.
+    //      The condition itself remains uncaptured (Condition_If swallow
+    //      will fire), but the optional flag is preserved.
+    let starts_with_you_may =
+        |s: &str| tag::<_, _, VerboseError<&str>>("you may ").parse(s).is_ok();
+    let after_structural_if = effect_lower
+        .strip_prefix("if ") // allow-noncombinator: structural if-clause skip when condition is unrecognized
+        .and_then(|rest| rest.split_once(", "))
+        .map(|(_cond, body)| body);
+    let optional = starts_with_you_may(effect_lower.as_str())
+        || starts_with_you_may(effect_without_if.trim_start())
+        || after_structural_if.is_some_and(starts_with_you_may);
 
     // Strip constraint sentences so they don't leak into effect parsing as sub-abilities
     let effect_final = strip_constraint_sentences(&effect_without_if);
@@ -691,6 +714,9 @@ fn strip_constraint_sentences(text: &str) -> String {
 /// Patterns:
 /// - "draw a card unless that player pays {X}, where X is ~ power"
 /// - "create a token unless that player pays {2}"
+/// - "sacrifice it unless you discard a card at random"  (CR 608.2c — UnlessCost::DiscardCard)
+/// - "destroy it unless you sacrifice a creature"        (UnlessCost::Sacrifice)
+/// - "draw a card unless you pay 2 life"                 (CR 119.4 — UnlessCost::PayLife)
 fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -700,13 +726,36 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
 
     let after_unless = &lower[unless_pos + 8..];
 
-    // CR 608.2c: "unless you discard a [type]" is handled by the Discard
-    // effect parser — don't strip it here.
-    if tag::<_, _, VerboseError<&str>>("you discard ")
-        .parse(after_unless)
-        .is_ok()
+    // CR 608.2c: When the primary effect is itself a discard imperative
+    // ("discard a card unless you discard a creature card"), the discard-
+    // effect parser (`parse_discard_unless_filter` in oracle_effect/imperative.rs)
+    // encodes the unless-clause as a *type qualifier* on the mandatory discard,
+    // not as an alternative cost on a different effect. Defer to that path.
+    let primary_is_discard = tag::<_, _, VerboseError<&str>>("discard ")
+        .parse(lower[..unless_pos].trim_start())
+        .is_ok();
+    if primary_is_discard
+        && tag::<_, _, VerboseError<&str>>("you discard ")
+            .parse(after_unless)
+            .is_ok()
     {
         return (text.to_string(), None);
+    }
+
+    // CR 118.12 + CR 608.2c + CR 119.4: Non-mana alternative costs ("you discard
+    // a card", "you sacrifice a [filter]", "you pay N life") map to the existing
+    // `UnlessCost::{DiscardCard, Sacrifice, PayLife}` variants — the runtime
+    // resolver in `engine_payment_choices.rs` already handles all four via
+    // `WaitingFor::WardDiscardChoice` / `WaitingFor::WardSacrificeChoice`.
+    if let Some(cost) = parse_unless_alt_cost(after_unless) {
+        let cleaned = text[..unless_pos].trim().to_string();
+        return (
+            cleaned,
+            Some(UnlessPayModifier {
+                cost,
+                payer: TargetFilter::Controller,
+            }),
+        );
     }
 
     // Parse payer + payment verb as a single combinator: "(payer) pay(s) " → (TargetFilter, &str).
@@ -773,6 +822,113 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     let cleaned = text[..unless_pos].trim().to_string();
 
     (cleaned, Some(UnlessPayModifier { cost, payer }))
+}
+
+/// CR 118.12 + CR 608.2c + CR 119.4: Recognize non-mana "unless" alternative
+/// costs that map to existing `UnlessCost` variants. Operates on the lowercased
+/// text immediately after `" unless "`.
+///
+/// Patterns recognized:
+/// - `you discard a card[ at random][.]`     → `UnlessCost::DiscardCard`
+/// - `you sacrifice [N] [filter][.]`         → `UnlessCost::Sacrifice { count, filter }`
+/// - `you pay N life[.]`                     → `UnlessCost::PayLife { amount }`
+///
+/// Returns `None` for any other shape (mana costs and unknown forms fall
+/// through to the existing mana-cost path in `extract_unless_pay_modifier`).
+///
+/// FIDELITY NOTE: `UnlessCost::DiscardCard` does not currently model "at random"
+/// — the engine resolves via `WaitingFor::WardDiscardChoice` (player-chosen).
+/// This is a known sub-fidelity gap (Balduvian Horde class). Parameterizing
+/// `UnlessCost::DiscardCard` with a `random` axis is deferred pending the
+/// `UnlessCost`/`AbilityCost` unification refactor.
+fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
+    // "you discard a card" — match prefix, accept any trailing modifiers
+    // ("at random", trailing punctuation) since the caller strips the entire
+    // unless-clause wholesale.
+    if tag::<_, _, VerboseError<&str>>("you discard a card")
+        .parse(after_unless)
+        .is_ok()
+    {
+        return Some(UnlessCost::DiscardCard);
+    }
+
+    // "you pay N life" / "you pay N life." — life amount is bare integer.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you pay ").parse(after_unless) {
+        if let Some((amount, after_num)) = parse_number(rest) {
+            if tag::<_, _, VerboseError<&str>>("life")
+                .parse(after_num.trim_start())
+                .is_ok()
+            {
+                return Some(UnlessCost::PayLife {
+                    amount: amount as i32,
+                });
+            }
+        }
+    }
+
+    // "you sacrifice [count] [filter]" — delegates filter parsing to the shared
+    // `parse_target` building block (oracle_target). Count is optional and
+    // defaults to 1; articles ("a"/"an") are absorbed by `parse_target` via
+    // its "target {phrase}" entry point.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you sacrifice ").parse(after_unless) {
+        return parse_unless_sacrifice_filter(rest);
+    }
+
+    None
+}
+
+/// Parse the tail of "you sacrifice ..." into an `UnlessCost::Sacrifice`.
+/// Expects lowercased text. Accepts:
+/// - `a creature` / `an artifact` / `a [type] you control`
+/// - `two creatures` / `three lands`
+/// - terminal sentence punctuation
+fn parse_unless_sacrifice_filter(rest: &str) -> Option<UnlessCost> {
+    // Trim trailing sentence punctuation so it doesn't leak into parse_target.
+    let trimmed = rest.trim().trim_end_matches('.').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Extract count: leading numeric word > 1 keeps as count, otherwise count=1.
+    let (count, filter_text) = if let Some((n, after_num)) = parse_number(trimmed) {
+        if n > 1 {
+            (n, after_num.trim().to_string())
+        } else {
+            // n == 1 from a literal "1" — uncommon; treat as count=1 with
+            // remainder as the filter phrase.
+            (1u32, after_num.trim().to_string())
+        }
+    } else {
+        // No count — strip leading article via nom combinator so parse_target
+        // receives a bare type phrase (parse_target only strips "a"/"an" when
+        // they precede "target", not when they precede a type word).
+        let stripped = alt((tag::<_, _, VerboseError<&str>>("a "), tag("an ")))
+            .parse(trimmed)
+            .map(|(rest, _)| rest)
+            .unwrap_or(trimmed);
+        (1u32, stripped.to_string())
+    };
+
+    if filter_text.is_empty() {
+        return None;
+    }
+
+    // Delegate filter parsing to the shared building block. The `target {...}`
+    // wrapper triggers the article-stripping + type-phrase path.
+    let target_phrase = format!("target {}", filter_text);
+    let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    // Reject if parse_target left meaningful unconsumed text (signals the
+    // filter phrase wasn't fully understood — e.g. "two creatures with flying"
+    // where "with flying" isn't absorbed; better to fall through than to
+    // emit a partial filter).
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    Some(UnlessCost::Sacrifice { count, filter })
 }
 
 /// Parse "where X is ~'s power" / "where X is this creature's power" etc.
@@ -910,7 +1066,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
 
         // Not combinator — handle common negation patterns.
         StaticCondition::Not { condition } => match condition.as_ref() {
-            StaticCondition::DuringYourTurn => Some(TriggerCondition::NotYourTurn),
+            StaticCondition::DuringYourTurn => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringYourTurn),
+            }),
             // Negate a quantity comparison by flipping the comparator.
             // Apply the same `Another` → `OtherThanTriggerObject` substitution
             // as the affirmative branch (CR 603.4).
@@ -941,9 +1099,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
                 })
             }
             // CR 611.2b: Not(SourceIsTapped) → source is untapped.
-            StaticCondition::SourceIsTapped => {
-                Some(TriggerCondition::SourceIsTapped { negated: true })
-            }
+            StaticCondition::SourceIsTapped => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::SourceIsTapped),
+            }),
             _ => None,
         },
 
@@ -974,9 +1132,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         StaticCondition::HasCityBlessing => Some(TriggerCondition::HasCityBlessing),
         // CR 611.2b: Source tapped state bridges for trigger conditions like
         // "At the beginning of your upkeep, if this land is tapped, ..."
-        StaticCondition::SourceIsTapped => {
-            Some(TriggerCondition::SourceIsTapped { negated: false })
-        }
+        StaticCondition::SourceIsTapped => Some(TriggerCondition::SourceIsTapped),
         // CR 113.6b: Source zone bridges for trigger conditions like
         // "At the beginning of your upkeep, if this card is in your graveyard, ..."
         StaticCondition::SourceInZone { zone } => {
@@ -1008,7 +1164,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.
-        StaticCondition::CompletedADungeon => Some(TriggerCondition::CompletedADungeon),
+        StaticCondition::CompletedADungeon => {
+            Some(TriggerCondition::CompletedDungeon { specific: None })
+        }
 
         // CR 903.3: Commander control bridges directly.
         StaticCondition::ControlsCommander => Some(TriggerCondition::ControlsCommander),
@@ -1078,7 +1236,9 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             strip_condition_clause(text, pos, pattern.len()),
             Some(TriggerCondition::Or {
                 conditions: vec![
-                    TriggerCondition::WasNotCast,
+                    TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::WasCast),
+                    },
                     TriggerCondition::ManaSpentCondition {
                         text: "no mana was spent to cast them".to_string(),
                     },
@@ -1091,7 +1251,9 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     if let Some(pos) = tp.find("if it wasn't cast") {
         return (
             strip_condition_clause(text, pos, "if it wasn't cast".len()),
-            Some(TriggerCondition::WasNotCast),
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::WasCast),
+            }),
         );
     }
 
@@ -1107,9 +1269,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     }) {
         return (
             strip_condition_clause(text, prefix.len(), "unless it escaped".len()),
-            Some(TriggerCondition::CastVariantPaid {
-                variant: CastVariantPaid::Escape,
-                negated: true,
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Escape,
+                }),
             }),
         );
     }
@@ -1231,37 +1394,58 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
-    // --- Shared combinator path: parse_inner_condition + bridge ---
-    // Handles ALL game-state conditions: control presence, life total, hand size,
-    // graveyard threshold, "you attacked this turn", "a creature died this turn",
-    // "you gained life", "no spells were cast last turn", counter added, etc.
-    if let Some(if_pos) = tp.find("if ") {
-        let cond_fragment = &lower[if_pos + "if ".len()..];
-        if let Ok((rest, sc)) = parse_inner_condition(cond_fragment) {
-            let rest_trimmed = rest.trim();
-            // Accept only if parser stopped at a clause boundary and there's
-            // no "otherwise" branch that depends on this condition.
-            let has_otherwise = rest_trimmed
-                .trim_start_matches('.')
-                .trim_start()
-                .starts_with("otherwise");
-            if !has_otherwise
-                && (rest_trimmed.is_empty()
-                    || rest_trimmed.starts_with(',')
-                    || rest_trimmed.starts_with('.'))
-            {
-                if let Some(trigger_cond) = static_condition_to_trigger_condition(&sc) {
-                    let consumed = cond_fragment.len() - rest.len();
-                    return (
-                        strip_condition_clause(text, if_pos, "if ".len() + consumed),
-                        Some(trigger_cond),
-                    );
-                }
-            }
-        }
+    // CR 603.4: Both `if` and trailing `unless` introduce intervening predicates.
+    // `unless` is the negation of `if` — wrap the parsed predicate in `Not`.
+    // Cost-form `unless` ("unless you pay {2}", "unless you sacrifice a creature")
+    // is already stripped upstream by `extract_unless_pay_modifier`.
+    if let Some(result) = try_extract_intervening(&tp, &lower, text, "if ", |c| c) {
+        return result;
+    }
+    if let Some(result) =
+        try_extract_intervening(&tp, &lower, text, " unless ", |c| TriggerCondition::Not {
+            condition: Box::new(c),
+        })
+    {
+        return result;
     }
 
     (text.to_string(), None)
+}
+
+/// Try to extract an intervening predicate introduced by `keyword`.
+///
+/// Runs `parse_inner_condition` on the fragment after `keyword`, accepts only
+/// if it stops at a clause boundary with no dangling `otherwise` branch (which
+/// would change the semantics from intervening-if to a conditional override
+/// pair), then bridges to `TriggerCondition` via `static_condition_to_trigger_condition`
+/// and applies `wrap`. Used for both `if X` (wrap = identity) and
+/// `unless X` (wrap = `Not`).
+fn try_extract_intervening(
+    tp: &TextPair<'_>,
+    lower: &str,
+    text: &str,
+    keyword: &str,
+    wrap: impl FnOnce(TriggerCondition) -> TriggerCondition,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let pos = tp.find(keyword)?;
+    let cond_fragment = &lower[pos + keyword.len()..];
+    let (rest, sc) = parse_inner_condition(cond_fragment).ok()?;
+    let rest_trimmed = rest.trim();
+    let after_dots = rest_trimmed.trim_start_matches('.').trim_start();
+    let has_otherwise = tag::<_, _, VerboseError<&str>>("otherwise")
+        .parse(after_dots)
+        .is_ok();
+    let at_boundary =
+        rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.');
+    if has_otherwise || !at_boundary {
+        return None;
+    }
+    let inner = static_condition_to_trigger_condition(&sc)?;
+    let consumed = cond_fragment.len() - rest.len();
+    Some((
+        strip_condition_clause(text, pos, keyword.len() + consumed),
+        Some(wrap(inner)),
+    ))
 }
 
 /// CR 702.49a: Parse "whenever you activate a ninjutsu ability" trigger.
@@ -1307,10 +1491,7 @@ fn try_extract_ninjutsu_condition(
             let end = kw_pos + keyword.len() + extra;
             return Some((
                 strip_condition_clause(text, pos, end - pos),
-                Some(TriggerCondition::CastVariantPaid {
-                    variant: *variant,
-                    negated: false,
-                }),
+                Some(TriggerCondition::CastVariantPaid { variant: *variant }),
             ));
         }
     }
@@ -1366,7 +1547,11 @@ fn try_extract_not_completed_dungeon(
             let clause_len = prefix.len() + name.len();
             return Some((
                 strip_condition_clause(text, pos, clause_len),
-                Some(TriggerCondition::NotCompletedDungeon { dungeon: *id }),
+                Some(TriggerCondition::Not {
+                    condition: Box::new(TriggerCondition::CompletedDungeon {
+                        specific: Some(*id),
+                    }),
+                }),
             ));
         }
     }
@@ -2324,7 +2509,13 @@ fn parse_enters_tapped_state_rider(input: &str) -> Option<TriggerCondition> {
         return None;
     }
 
-    Some(TriggerCondition::SourceIsTapped { negated })
+    Some(if negated {
+        TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::SourceIsTapped),
+        }
+    } else {
+        TriggerCondition::SourceIsTapped
+    })
 }
 
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
@@ -5588,7 +5779,9 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::SourceIsTapped { negated: true })
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::SourceIsTapped)
+            })
         );
         assert!(def.execute.is_some());
     }
@@ -5604,10 +5797,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
-        assert_eq!(
-            def.condition,
-            Some(TriggerCondition::SourceIsTapped { negated: false })
-        );
+        assert_eq!(def.condition, Some(TriggerCondition::SourceIsTapped));
     }
 
     // Guard: a bare "enters" (no tapped-state rider) must NOT attach a
@@ -5620,7 +5810,12 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert!(
-            !matches!(def.condition, Some(TriggerCondition::SourceIsTapped { .. })),
+            !matches!(def.condition, Some(TriggerCondition::SourceIsTapped))
+                && !matches!(
+                    &def.condition,
+                    Some(TriggerCondition::Not { condition })
+                        if matches!(**condition, TriggerCondition::SourceIsTapped)
+                ),
             "bare `enters` must not attach SourceIsTapped; got {:?}",
             def.condition
         );
@@ -5636,15 +5831,19 @@ mod tests {
         // Valid terminators:
         assert_eq!(
             parse_enters_tapped_state_rider("s untapped"),
-            Some(TriggerCondition::SourceIsTapped { negated: true })
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::SourceIsTapped)
+            })
         );
         assert_eq!(
             parse_enters_tapped_state_rider("s untapped "),
-            Some(TriggerCondition::SourceIsTapped { negated: true })
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::SourceIsTapped)
+            })
         );
         assert_eq!(
             parse_enters_tapped_state_rider("s tapped,"),
-            Some(TriggerCondition::SourceIsTapped { negated: false })
+            Some(TriggerCondition::SourceIsTapped)
         );
     }
 
@@ -7899,6 +8098,156 @@ mod tests {
     }
 
     #[test]
+    fn trigger_unless_you_discard_a_card() {
+        // CR 608.2c: Balduvian Horde — "sacrifice it unless you discard a card at random".
+        // The "at random" suffix is currently sub-fidelity (player-chosen via WardDiscardChoice);
+        // the cost-gate itself is captured.
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless you discard a card at random.",
+            "Balduvian Horde",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::DiscardCard),
+            "cost should be DiscardCard, got {:?}",
+            unless_pay.cost
+        );
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Sacrifice { .. }),
+            "execute should be Sacrifice, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_sacrifice_filter() {
+        // Bog Elemental — "sacrifice this creature unless you sacrifice a land".
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this creature unless you sacrifice a land.",
+            "Bog Elemental",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        match &unless_pay.cost {
+            UnlessCost::Sacrifice { count, filter } => {
+                assert_eq!(*count, 1);
+                match filter {
+                    TargetFilter::Typed(typed) => {
+                        assert!(
+                            typed
+                                .type_filters
+                                .iter()
+                                .any(|t| matches!(t, TypeFilter::Land)),
+                            "filter should include Land, got {:?}",
+                            typed.type_filters,
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {:?}", other),
+                }
+            }
+            other => panic!("cost should be Sacrifice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_pay_n_life() {
+        // Carnophage — "tap this creature unless you pay 1 life".
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, tap this creature unless you pay 1 life.",
+            "Carnophage",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 1 }),
+            "cost should be PayLife {{ amount: 1 }}, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_discard_typed_does_not_match() {
+        // Drekavac — "unless you discard a noncreature card". UnlessCost::DiscardCard
+        // doesn't carry filter info, so we deliberately fall through (preserves
+        // rules-correctness; player-chosen any-card discard would violate the
+        // "noncreature card" restriction). Coverage waits, architecture wins.
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless you discard a noncreature card.",
+            "Drekavac",
+        );
+        assert!(
+            def.unless_pay.is_none(),
+            "typed discard should fall through (UnlessCost::DiscardCard has no filter), got {:?}",
+            def.unless_pay
+        );
+    }
+
+    #[test]
+    fn trigger_unless_intervening_attacked_this_turn() {
+        // Bellowing Saddlebrute (Raid) — "When this creature enters, you lose 4
+        // life unless you attacked this turn." The trailing intervening-unless
+        // wraps `AttackedThisTurn >= 1` in `Not`, leaving "you lose 4 life" as
+        // the effect.
+        let def = parse_trigger_line(
+            "When ~ enters, you lose 4 life unless you attacked this turn.",
+            "Bellowing Saddlebrute",
+        );
+        let cond = def
+            .condition
+            .expect("intervening unless should set condition");
+        match cond {
+            TriggerCondition::Not { condition } => match *condition {
+                TriggerCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::AttackedThisTurn,
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                } => {}
+                other => panic!("inner should be AttackedThisTurn >= 1, got {:?}", other),
+            },
+            other => panic!("expected TriggerCondition::Not, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_intervening_controls_creature() {
+        // Generic shape: "deals 3 damage to target player unless you control a
+        // creature" — IsPresent(Creature) wrapped in Not.
+        let def = parse_trigger_line(
+            "When ~ enters, ~ deals 3 damage to target player unless you control a creature.",
+            "Test",
+        );
+        match def.condition {
+            Some(TriggerCondition::Not { condition }) => match *condition {
+                TriggerCondition::ControlsType { .. } => {}
+                other => panic!("inner should be ControlsType, got {:?}", other),
+            },
+            other => panic!("expected Some(Not), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_intervening_does_not_swallow_unless_pay() {
+        // Sanity: "unless you pay {2}" must remain captured by
+        // extract_unless_pay_modifier — NOT routed through the new
+        // intervening-condition combinator. If parse_inner_condition somehow
+        // matched a cost phrase, the unless_pay slot would be lost.
+        let def = parse_trigger_line("When ~ enters, draw a card unless you pay {2}.", "Test");
+        assert!(
+            def.unless_pay.is_some(),
+            "unless-pay must be captured as alt-cost, not as intervening condition"
+        );
+        assert!(
+            def.condition.is_none(),
+            "no intervening condition should be set when unless-pay handled it"
+        );
+    }
+
+    #[test]
     fn trigger_put_into_graveyard_from_battlefield_self() {
         // CR 700.4: "Is put into a graveyard from the battlefield" is a synonym for "dies."
         let def = parse_trigger_line(
@@ -8732,7 +9081,6 @@ mod tests {
             def.condition,
             Some(TriggerCondition::CastVariantPaid {
                 variant: CastVariantPaid::Sneak,
-                negated: false,
             })
         );
     }
@@ -8748,7 +9096,6 @@ mod tests {
             def.condition,
             Some(TriggerCondition::CastVariantPaid {
                 variant: CastVariantPaid::Ninjutsu,
-                negated: false,
             })
         );
     }
@@ -8769,9 +9116,10 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::CastVariantPaid {
-                variant: CastVariantPaid::Escape,
-                negated: true,
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Escape,
+                }),
             })
         );
         let execute = def.execute.as_deref().expect("execute ability");
@@ -9804,7 +10152,9 @@ mod tests {
             cond,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: crate::types::ability::PlayerScope::Controller
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 40 },
@@ -9821,7 +10171,9 @@ mod tests {
                 cond,
                 Some(TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::LifeTotal,
+                        qty: QuantityRef::LifeTotal {
+                            player: crate::types::ability::PlayerScope::Controller
+                        },
                     },
                     comparator: Comparator::GE,
                     ..
@@ -9943,7 +10295,9 @@ mod tests {
     fn bridge_quantity_comparison() {
         let sc = StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::HandSize,
+                qty: QuantityRef::HandSize {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },
@@ -9981,7 +10335,12 @@ mod tests {
             condition: Box::new(StaticCondition::DuringYourTurn),
         };
         let tc = static_condition_to_trigger_condition(&sc).unwrap();
-        assert_eq!(tc, TriggerCondition::NotYourTurn);
+        assert_eq!(
+            tc,
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringYourTurn),
+            }
+        );
     }
 
     #[test]
@@ -10019,7 +10378,9 @@ mod tests {
         let sc = StaticCondition::Not {
             condition: Box::new(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },
@@ -10055,7 +10416,9 @@ mod tests {
                 StaticCondition::HasMaxSpeed,
                 StaticCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::HandSize,
+                        qty: QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 3 },
@@ -10109,7 +10472,7 @@ mod tests {
     fn bridge_source_is_tapped() {
         assert_eq!(
             static_condition_to_trigger_condition(&StaticCondition::SourceIsTapped),
-            Some(TriggerCondition::SourceIsTapped { negated: false }),
+            Some(TriggerCondition::SourceIsTapped),
         );
     }
 
@@ -10174,7 +10537,12 @@ mod tests {
     #[test]
     fn fallback_does_not_shadow_specific_not_your_turn() {
         let (_, cond) = extract_if_condition("if it's not your turn, draw a card");
-        assert_eq!(cond.unwrap(), TriggerCondition::NotYourTurn);
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringYourTurn),
+            }
+        );
     }
 
     #[test]
@@ -10206,7 +10574,9 @@ mod tests {
             cond.unwrap(),
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: crate::types::ability::PlayerScope::Controller
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },
@@ -10388,10 +10758,7 @@ mod tests {
         let (cleaned, cond) =
             extract_if_condition("put a storage counter on it if this land is tapped");
         assert!(cleaned.contains("put a storage counter"));
-        assert_eq!(
-            cond.unwrap(),
-            TriggerCondition::SourceIsTapped { negated: false }
-        );
+        assert_eq!(cond.unwrap(), TriggerCondition::SourceIsTapped);
     }
 
     #[test]
@@ -10612,11 +10979,16 @@ mod tests {
             other => panic!("Expected Or filter, got {other:?}"),
         }
 
-        // Condition: Or { WasNotCast, ManaSpentCondition }
+        // Condition: Or { Not(WasCast), ManaSpentCondition }
         match &def.condition {
             Some(TriggerCondition::Or { conditions }) => {
                 assert_eq!(conditions.len(), 2);
-                assert_eq!(conditions[0], TriggerCondition::WasNotCast);
+                assert_eq!(
+                    conditions[0],
+                    TriggerCondition::Not {
+                        condition: Box::new(TriggerCondition::WasCast),
+                    }
+                );
                 assert!(
                     matches!(&conditions[1], TriggerCondition::ManaSpentCondition { .. }),
                     "Expected ManaSpentCondition, got {:?}",
@@ -10635,7 +11007,12 @@ mod tests {
             "Test Card",
         );
         assert_eq!(def.mode, TriggerMode::ChangesZone);
-        assert_eq!(def.condition, Some(TriggerCondition::WasNotCast));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::WasCast),
+            })
+        );
     }
 
     #[test]

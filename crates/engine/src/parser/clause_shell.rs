@@ -350,7 +350,12 @@ mod tests {
     fn peel_duration_until_your_next_turn() {
         let (peeled, ctx) = peel_clause("you don't lose unspent mana until your next turn");
         assert_eq!(peeled, "you don't lose unspent mana");
-        assert_eq!(ctx.duration(), Some(&Duration::UntilYourNextTurn));
+        assert_eq!(
+            ctx.duration(),
+            Some(&Duration::UntilNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller,
+            })
+        );
     }
 
     #[test]

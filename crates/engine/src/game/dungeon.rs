@@ -149,8 +149,8 @@ pub fn dungeon_sentinel_id(player: PlayerId) -> crate::types::identifiers::Objec
 
 use crate::types::ability::{
     AbilityCondition, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, ResolvedAbility,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::game_state::TargetSelectionConstraint;
@@ -307,7 +307,9 @@ pub fn room_effects(
                 source_id,
                 controller,
             )
-            .duration(Duration::UntilYourNextTurn);
+            .duration(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            });
             (ability, vec![])
         }
         // 4: Lost Level — "Destroy target creature of an opponent's choice"

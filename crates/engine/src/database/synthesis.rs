@@ -978,7 +978,6 @@ pub fn synthesize_evoke(face: &mut CardFace) {
                 t.condition,
                 Some(TriggerCondition::CastVariantPaid {
                     variant: CastVariantPaid::Evoke,
-                    negated: false,
                 })
             )
             && matches!(
@@ -1005,7 +1004,6 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         .valid_card(TargetFilter::SelfRef)
         .condition(TriggerCondition::CastVariantPaid {
             variant: CastVariantPaid::Evoke,
-            negated: false,
         })
         .execute(sac)
         .description(
@@ -2044,7 +2042,6 @@ mod evoke_synthesis_tests {
             trigger.condition,
             Some(TriggerCondition::CastVariantPaid {
                 variant: CastVariantPaid::Evoke,
-                negated: false,
             })
         ));
         assert!(matches!(
@@ -2115,7 +2112,6 @@ mod evoke_runtime_tests {
 
         let condition = TriggerCondition::CastVariantPaid {
             variant: CastVariantPaid::Evoke,
-            negated: false,
         };
 
         // Untagged → false.
@@ -2179,9 +2175,10 @@ mod evoke_runtime_tests {
             Zone::Battlefield,
         );
 
-        let negated = TriggerCondition::CastVariantPaid {
-            variant: CastVariantPaid::Escape,
-            negated: true,
+        let negated = TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::CastVariantPaid {
+                variant: CastVariantPaid::Escape,
+            }),
         };
 
         // Untagged (reanimated or put onto battlefield without being cast) →

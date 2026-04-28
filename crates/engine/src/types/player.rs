@@ -14,7 +14,7 @@ use crate::game::deck_loading::DeckEntry;
 /// damage, attacking, and SBA loss-from-life purposes, but they remain in the
 /// game state (never removed from `state.players`). Their phased-out turn
 /// proceeds with the player still as the active player; the status is cleared
-/// at the next time a `Duration::UntilYourNextTurn` effect that phased them
+/// at the next time a `Duration::UntilNextTurnOf` effect that phased them
 /// out would expire (the active player's untap step).
 ///
 /// CR 702.26 governs *permanent* phasing only; the player-phasing semantics

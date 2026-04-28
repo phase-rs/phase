@@ -702,7 +702,9 @@ mod tests {
         // statically bound it — the design intent is "could produce many".
         let mut face = empty_face("Pest Infestation");
         let dynamic_count = QuantityExpr::Ref {
-            qty: engine::types::ability::QuantityRef::HandSize,
+            qty: engine::types::ability::QuantityRef::HandSize {
+                player: engine::types::ability::PlayerScope::Controller,
+            },
         };
         face.abilities
             .push(spell_ability_with(creature_token_effect(dynamic_count)));

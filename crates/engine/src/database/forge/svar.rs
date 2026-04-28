@@ -146,10 +146,14 @@ impl<'a> SvarResolver<'a> {
         // Known tokens
         match base {
             "YourLife" => Ok(QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal,
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
             }),
             "CardsInHand" | "CardsInYourHand" => Ok(QuantityExpr::Ref {
-                qty: QuantityRef::HandSize,
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
             }),
             "CardsInYourGrave" | "CardsInYourGraveyard" => Ok(QuantityExpr::Ref {
                 qty: QuantityRef::GraveyardSize,
@@ -213,7 +217,9 @@ mod tests {
         assert_eq!(
             resolver.resolve_count("YourLife").unwrap(),
             QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller
+                }
             }
         );
     }

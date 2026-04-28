@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -221,8 +222,16 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   const attackSlideMagnitude = isCompactHeight ? 12 : 30;
   const attackSlide = isAttacking ? (obj.controller === playerId ? -attackSlideMagnitude : attackSlideMagnitude) : 0;
 
-  const handleClick = () => {
+  const handleClick = (e: React.MouseEvent) => {
     if (longPressFired.current) { longPressFired.current = false; return; }
+    // Attached cards (Auras / Equipment / Fortifications) render as nested
+    // <PermanentCard> inside their host's wrapper so they get full
+    // click/hover/target handling for free. Without stopping propagation, a
+    // click on an attachment would bubble to the host and `selectObject(host)`
+    // would steal focus — preventing the player from selecting the Equipment
+    // to activate Equip and reattach it. Stop the bubble so the attachment's
+    // own intent (target / activate / select) wins cleanly.
+    if (obj.attached_to !== null) e.stopPropagation();
     // TapCreaturesForManaAbility is mid-cost resolution — check before combat mode
     // so clicks land even when DeclareAttackers combat mode is active.
     if (isSelectableForManaCost && tapCreatureCostChoice) {

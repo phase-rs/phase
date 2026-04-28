@@ -1069,7 +1069,9 @@ mod tests {
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Hand,
                         ..
-                    } | QuantityRef::HandSize
+                    } | QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller
+                    }
                 }
             ),
             "count should be hand-card-count reference, got {count:?}"

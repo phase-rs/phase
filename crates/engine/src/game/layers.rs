@@ -8,7 +8,7 @@ use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
     ContinuousModification, CopiableValues, Duration, Effect, ManaContribution, ManaProduction,
-    QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    PlayerScope, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -65,10 +65,10 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                 ..
             } => false,
             CastingPermission::PlayFromExile {
-                duration: Duration::UntilYourNextTurn | Duration::Permanent,
+                duration: Duration::UntilNextTurnOf { .. } | Duration::Permanent,
                 ..
             } => true,
-            // UntilHostLeavesPlay / ForAsLongAs / UntilControllerNextUntapStep:
+            // UntilHostLeavesPlay / ForAsLongAs / UntilNextUntapStepOf:
             // these are pruned by their own systems (zone-exit cleanup, condition
             // re-evaluation, untap step). Retain here — they are not end-of-turn.
             CastingPermission::PlayFromExile { .. } => true,
@@ -85,14 +85,17 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
 }
 
 /// CR 514.2 + CR 611.2a/b: Remove `PlayFromExile` permissions granted to
-/// `active_player` whose `Duration::UntilYourNextTurn` expires at that
-/// player's untap step. Called from the untap step alongside
+/// `active_player` whose `Duration::UntilNextTurnOf { Controller }` expires
+/// at that player's untap step. Called from the untap step alongside
 /// `prune_until_next_turn_effects`.
 pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_player: PlayerId) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.casting_permissions.retain(|p| match p {
             CastingPermission::PlayFromExile {
-                duration: Duration::UntilYourNextTurn,
+                duration:
+                    Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
                 granted_to,
             } => *granted_to != active_player,
             CastingPermission::PlayFromExile { .. }
@@ -108,16 +111,22 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
     }
 }
 
-/// Remove transient `UntilYourNextTurn` effects whose controller's turn is starting.
-/// Called at the start of the active player's turn (untap step) per CR 514.2.
+/// Remove transient `UntilNextTurnOf { Controller }` effects whose controller's
+/// turn is starting. Called at the start of the active player's turn (untap step)
+/// per CR 514.2.
 ///
 /// Also clears `goaded_by` entries for the active player on all battlefield objects,
 /// per CR 701.15a: goad expires at the beginning of the goading player's next turn.
 pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: PlayerId) {
     let before = state.transient_continuous_effects.len();
-    state
-        .transient_continuous_effects
-        .retain(|e| !(e.duration == Duration::UntilYourNextTurn && e.controller == active_player));
+    state.transient_continuous_effects.retain(|e| {
+        !(matches!(
+            e.duration,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller
+            }
+        ) && e.controller == active_player)
+    });
     if state.transient_continuous_effects.len() != before {
         state.layers_dirty = true;
     }
@@ -140,7 +149,12 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
 pub fn prune_controller_untap_step_effects(state: &mut GameState, active_player: PlayerId) {
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|e| {
-        if e.duration != Duration::UntilControllerNextUntapStep {
+        if !matches!(
+            e.duration,
+            Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller
+            }
+        ) {
             return true;
         }
         // The effect applies to specific objects — check if the affected object
@@ -4205,7 +4219,9 @@ mod tests {
         let exiled = make_exiled_card(&mut state, PlayerId(0));
         let perms = &mut state.objects.get_mut(&exiled).unwrap().casting_permissions;
         perms.push(CastingPermission::PlayFromExile {
-            duration: Duration::UntilYourNextTurn,
+            duration: Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
             granted_to: PlayerId(0),
         });
         perms.push(CastingPermission::PlayFromExile {
@@ -4234,7 +4250,9 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
-                duration: Duration::UntilYourNextTurn,
+                duration: Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
                 granted_to: PlayerId(0),
             });
         state
@@ -4243,7 +4261,9 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
-                duration: Duration::UntilYourNextTurn,
+                duration: Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
                 granted_to: PlayerId(1),
             });
 

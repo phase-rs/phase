@@ -6235,7 +6235,9 @@ mod tests {
         ));
         assert_eq!(
             r.abilities[1].duration,
-            Some(crate::types::ability::Duration::UntilYourNextTurn)
+            Some(crate::types::ability::Duration::UntilNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller,
+            })
         );
 
         assert!(matches!(
@@ -7264,7 +7266,9 @@ mod tests {
                         matches!(
                             **inner,
                             QuantityExpr::Ref {
-                                qty: QuantityRef::LifeTotal
+                                qty: QuantityRef::LifeTotal {
+                                    player: crate::types::ability::PlayerScope::Controller
+                                }
                             }
                         ),
                         "expected LifeTotal, got {inner:?}"
@@ -7285,7 +7289,9 @@ mod tests {
                         matches!(
                             **inner,
                             QuantityExpr::Ref {
-                                qty: QuantityRef::HandSize
+                                qty: QuantityRef::HandSize {
+                                    player: crate::types::ability::PlayerScope::Controller
+                                }
                             }
                         ),
                         "expected HandSize, got {inner:?}"

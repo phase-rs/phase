@@ -211,7 +211,10 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       const oppName = getOpponentDisplayName(turnPlayerId);
       bannerText = `${oppName.toUpperCase()}'S TURN`;
     }
-    useUiStore.getState().flashTurnBanner(bannerText);
+    // CR 500: per-player turn count (skipped turns excluded). Engine increments
+    // turns_taken before TurnStarted fires, so newState already has the value.
+    const turnNumber = newState.players[turnPlayerId]?.turns_taken ?? 1;
+    useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
   }
 
   // 6. Normalize events into animation steps
@@ -434,7 +437,9 @@ async function processRemoteUpdateInner(
       const oppName = getOpponentDisplayName(turnPlayerId);
       bannerText = `${oppName.toUpperCase()}'S TURN`;
     }
-    useUiStore.getState().flashTurnBanner(bannerText);
+    // CR 500: per-player turn count from the post-update state.
+    const turnNumber = state.players[turnPlayerId]?.turns_taken ?? 1;
+    useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
   }
 
   // 3. Normalize events into animation steps
