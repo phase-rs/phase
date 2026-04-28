@@ -1113,9 +1113,10 @@ export interface LegalActionsResult {
   /** Effective mana costs for castable spells, keyed by object_id string. */
   spellCosts?: Record<string, ManaCost>;
   /**
-   * Engine-grouped subset of `actions` keyed by `GameAction::source_object()`.
-   * Frontend uses this for "what can I do with this card?" lookups so it
-   * doesn't have to introspect `GameAction` variants client-side.
+   * Engine-grouped per-object actions keyed by `GameAction::source_object()`.
+   * May include mana actions omitted from flat `actions`; frontend uses this
+   * for "what can I do with this card?" lookups instead of inferring action
+   * availability from objects.
    */
   legalActionsByObject?: Record<string, GameAction[]>;
 }

@@ -2584,8 +2584,8 @@ pub struct GameState {
     pub players_zone_changed_this_way: HashSet<PlayerId>,
 
     /// CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
-    /// Set after resolve_effect for effects producing a numeric result (LoseLife, DealDamage).
-    /// Read by QuantityRef::PreviousEffectAmount ("gain life equal to the life lost this way").
+    /// Set after resolve_effect for effects producing a numeric result (life loss,
+    /// damage, counter removal). Read by QuantityRef::PreviousEffectAmount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
 

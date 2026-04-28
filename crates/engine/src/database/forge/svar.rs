@@ -177,7 +177,10 @@ impl<'a> SvarResolver<'a> {
             b if b.starts_with("CardCounters.") => {
                 let counter_type = b.strip_prefix("CardCounters.").unwrap().to_lowercase();
                 Ok(QuantityExpr::Ref {
-                    qty: QuantityRef::CountersOnSelf { counter_type },
+                    qty: QuantityRef::CountersOn {
+                        scope: crate::types::ability::ObjectScope::Source,
+                        counter_type: Some(counter_type),
+                    },
                 })
             }
 

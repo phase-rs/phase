@@ -950,11 +950,15 @@ fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
     // Fall through to keyword-based matching for less common patterns
     if scan_contains(&rest_lower, "power") {
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::SelfPower,
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         })
     } else if scan_contains(&rest_lower, "toughness") {
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::SelfToughness,
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         })
     } else {
         None
@@ -4404,7 +4408,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                     _ => TypedFilter::default(),
                 }
             };
-            base_tf = base_tf.properties(vec![FilterProp::CmcEQ {
+            base_tf = base_tf.properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::ChosenNumber,
                 },
@@ -5749,8 +5754,8 @@ mod tests {
     use super::*;
     use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
     use crate::types::ability::{
-        Comparator, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PtValue,
-        QuantityExpr, QuantityRef, TypedFilter, UnlessCost,
+        Comparator, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PlayerScope,
+        PtValue, QuantityExpr, QuantityRef, TypedFilter, UnlessCost,
     };
 
     #[test]
@@ -6415,7 +6420,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
@@ -6435,7 +6442,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -6474,7 +6483,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },
@@ -6500,7 +6511,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
@@ -6523,7 +6536,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -6544,7 +6559,9 @@ mod tests {
             cond,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
@@ -8067,7 +8084,9 @@ mod tests {
             unless_pay.cost,
             UnlessCost::DynamicGeneric {
                 quantity: QuantityExpr::Ref {
-                    qty: QuantityRef::SelfPower
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source
+                    }
                 }
             }
         );
@@ -9412,7 +9431,9 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -9614,6 +9635,128 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::PreCombatMain));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    /// Coalition Relic, third ability — Future Sight artifact, issue #130.
+    ///
+    /// Oracle: "At the beginning of your precombat main phase, you may remove
+    /// all charge counters from ~. If you do, add one mana of any color for
+    /// each charge counter removed this way."
+    ///
+    /// This trigger composes four primitives that must all wire together:
+    ///
+    /// 1. CR 505.1: "precombat main phase" → `Phase::PreCombatMain`.
+    /// 2. CR 603.5 + CR 118.12: "you may" → `optional: true` on both the
+    ///    trigger def AND its execute ability, routing through
+    ///    `WaitingFor::OptionalEffectChoice` at resolution; "If you do" checks
+    ///    whether the player chose to pay the optional cost.
+    /// 3. CR 122.1: "remove all charge counters from ~" →
+    ///    `Effect::RemoveCounter { counter_type: "charge", count: -1, target:
+    ///    SelfRef }` (count=-1 is the "remove all" sentinel).
+    /// 4. CR 609.3 + CR 106.1 + CR 122.1: "If you do, add one mana of any
+    ///    color for each charge counter removed this way" →
+    ///    sub_ability with `condition: Some(IfYouDo)` and effect
+    ///    `Effect::Mana { produced: AnyOneColor { count:
+    ///    QuantityExpr::Ref { qty: PreviousEffectAmount }, color_options: <all
+    ///    five>, .. }, .. }`. The runtime parent-effect-aware scan in
+    ///    `effects/mod.rs` reads `GameEvent::CounterRemoved` for RemoveCounter
+    ///    parents to populate `last_effect_amount`, which
+    ///    `PreviousEffectAmount` reads.
+    #[test]
+    fn trigger_coalition_relic_charge_counter_drain() {
+        use crate::types::ability::AbilityCondition;
+        use crate::types::ability::ManaProduction;
+
+        let def = parse_trigger_line(
+            "At the beginning of your precombat main phase, you may remove all charge counters from ~. If you do, add one mana of any color for each charge counter removed this way.",
+            "Coalition Relic",
+        );
+
+        // (1) Phase shape.
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::PreCombatMain));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+
+        // (2) Optional flag on the trigger def itself.
+        assert!(def.optional, "trigger must carry optional: true");
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger must have an execute body");
+
+        // (2 cont.) Optional propagated to the execute root so the resolver
+        // routes through WaitingFor::OptionalEffectChoice.
+        assert!(
+            execute.optional,
+            "execute root must carry optional: true so OptionalEffectChoice fires"
+        );
+
+        // (3) Root effect: remove all charge counters from self.
+        match &*execute.effect {
+            Effect::RemoveCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, "charge");
+                assert_eq!(*count, -1, "count=-1 is the remove-all sentinel");
+                assert!(matches!(target, TargetFilter::SelfRef));
+            }
+            other => panic!("expected Effect::RemoveCounter, got {other:?}"),
+        }
+
+        // (4) Sub-ability: gated by IfYouDo, produces dynamic-count any-color
+        // mana from the count of counters removed by the parent.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("execute must have an If-you-do sub-ability");
+
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::IfYouDo),
+            "sub-ability must be gated by IfYouDo so it only fires when the player accepted"
+        );
+        assert!(
+            !sub.optional,
+            "sub-ability is not its own optional choice — only the root prompts the player"
+        );
+
+        match &*sub.effect {
+            Effect::Mana {
+                produced,
+                target: mana_target,
+                ..
+            } => {
+                assert!(
+                    mana_target.is_none(),
+                    "no player target on this mana production"
+                );
+                match produced {
+                    ManaProduction::AnyOneColor {
+                        count,
+                        color_options,
+                        ..
+                    } => {
+                        assert_eq!(
+                            *count,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::PreviousEffectAmount
+                            },
+                            "for-each tail must dispatch to PreviousEffectAmount"
+                        );
+                        assert_eq!(
+                            color_options.len(),
+                            5,
+                            "any-color must offer all five colors"
+                        );
+                    }
+                    other => panic!("expected AnyOneColor, got {other:?}"),
+                }
+            }
+            other => panic!("expected Effect::Mana on sub-ability, got {other:?}"),
+        }
     }
 
     #[test]
@@ -10072,7 +10215,9 @@ mod tests {
             cond,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -10406,7 +10551,9 @@ mod tests {
             cond.unwrap(),
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeGainedThisTurn,
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },

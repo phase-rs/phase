@@ -1,6 +1,8 @@
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -19,9 +21,17 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (position, target_filter) = match &ability.effect {
-        Effect::PutAtLibraryPosition { position, target } => (position.clone(), target.clone()),
-        _ => (LibraryPosition::Top, TargetFilter::None),
+    let (position, target_filter, count_expr) = match &ability.effect {
+        Effect::PutAtLibraryPosition {
+            position,
+            target,
+            count,
+        } => (position.clone(), target.clone(), count.clone()),
+        _ => (
+            LibraryPosition::Top,
+            TargetFilter::None,
+            QuantityExpr::Fixed { value: 1 },
+        ),
     };
 
     // CR 608.2c + 603.10a: An anaphoric "it" / "~" in a top-level trigger effect
@@ -33,22 +43,39 @@ pub fn resolve(
         TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
     ) && ability.targets.is_empty();
 
-    let object_id = if use_self {
-        ability.source_id
+    let collected_targets: Vec<crate::types::identifiers::ObjectId> = if use_self {
+        vec![ability.source_id]
     } else {
         ability
             .targets
             .iter()
-            .find_map(|t| {
+            .filter_map(|t| {
                 if let TargetRef::Object(id) = t {
                     Some(*id)
                 } else {
                     None
                 }
             })
-            .ok_or(EffectError::InvalidParam(
-                "PutAtLibraryPosition requires a target".to_string(),
-            ))?
+            .collect()
+    };
+
+    if collected_targets.is_empty() {
+        return Err(EffectError::InvalidParam(
+            "PutAtLibraryPosition requires a target".to_string(),
+        ));
+    }
+
+    // CR 701.24g: `count` carries the cardinality of the placement. The runtime
+    // collects N `TargetRef::Object` entries from the targeting layer; the
+    // resolver places each at `position` in the order they were chosen, which
+    // honors the trailing "in any order" Oracle phrase (the player's selection
+    // order *is* the placement order). For the dominant `count: Fixed(1)` case,
+    // `expected` is 1 and `collected_targets` carries exactly one id.
+    let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
+    let to_place = if expected == 0 {
+        collected_targets.as_slice()
+    } else {
+        &collected_targets[..collected_targets.len().min(expected)]
     };
 
     let index = match position {
@@ -58,7 +85,9 @@ pub fn resolve(
         LibraryPosition::Bottom => None,
         LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
     };
-    zones::move_to_library_at_index(state, object_id, index, events);
+    for object_id in to_place {
+        zones::move_to_library_at_index(state, *object_id, index, events);
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::PutAtLibraryPosition,
@@ -100,6 +129,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
             },
             vec![TargetRef::Object(id2)],
@@ -150,6 +180,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
             },
             vec![TargetRef::Object(id2)],
@@ -187,6 +218,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Bottom,
             },
             vec![TargetRef::Object(id1)],
@@ -221,6 +253,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
             },
             vec![],
@@ -249,6 +282,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
             },
             vec![],
@@ -288,6 +322,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
             },
         )));
@@ -350,6 +385,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::NthFromTop { n: 3 },
             },
             vec![TargetRef::Object(id4)],

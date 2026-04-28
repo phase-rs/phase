@@ -1255,14 +1255,13 @@ pub enum FilterProp {
     /// Used for "creature with one or more counters on it" phrases where the
     /// counter type is unspecified (Nils, Discipline Enforcer's attack-tax class).
     HasAnyCounter,
-    /// Matches objects with converted mana cost >= N (for "mana value N or greater").
-    /// CR 202.3: Uses QuantityExpr to support both fixed and dynamic comparisons.
-    CmcGE {
-        value: QuantityExpr,
-    },
-    /// Matches objects with converted mana cost <= N (for "mana value N or less").
-    /// CR 202.3: Uses QuantityExpr to support both fixed and dynamic comparisons.
-    CmcLE {
+    /// Matches objects whose mana value satisfies `comparator` against `value`.
+    /// CR 202.3. Replaces the legacy `CmcGE`/`CmcLE`/`CmcEQ` sibling cluster;
+    /// the comparator axis is parameterized via the existing `Comparator` enum,
+    /// unlocking GT/LT/NE comparisons without further variant proliferation.
+    /// Supports both fixed and dynamic (e.g., X) thresholds via `QuantityExpr`.
+    Cmc {
+        comparator: Comparator,
         value: QuantityExpr,
     },
     InZone {
@@ -1470,11 +1469,6 @@ pub enum FilterProp {
     /// Contrast with TargetsOnly (CR 115.9c) which requires ALL targets to match (.all()).
     Targets {
         filter: Box<TargetFilter>,
-    },
-    /// Matches objects with converted mana cost == N (for "with mana value N" exact match).
-    /// CR 202.3: Uses QuantityExpr to support both fixed and dynamic comparisons.
-    CmcEQ {
-        value: QuantityExpr,
     },
     /// CR 107.3 + CR 202.1: Matches spells/objects whose printed mana cost contains
     /// an `{X}` shard. Used for "spell with {X} in its mana cost" qualifier on
@@ -1775,6 +1769,20 @@ pub enum PlayerScope {
     AllPlayers { aggregate: AggregateFunction },
 }
 
+/// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
+/// to read from when a `QuantityRef` (and future per-object conditions) is
+/// per-object. Mirrors `PlayerScope` for the player axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ObjectScope {
+    /// CR 109.5 / CR 113.6: The source object of the resolving ability —
+    /// "this creature", "~", "it" (when "it" anaphors back to the source).
+    Source,
+    /// CR 115.1: The first object target of the resolving ability — "that
+    /// creature", "the creature", "it" (when "it" anaphors back to a target).
+    Target,
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -1809,23 +1817,26 @@ pub enum QuantityRef {
     ///
     /// For counters on a *player* (experience, poison, rad, ticket), use
     /// [`QuantityRef::PlayerCounter`] instead.
-    CountersOnSelf { counter_type: String },
-    /// Count of counters of a given type on the previously targeted object.
-    /// Used for "for each [counter type] counter on that creature" anaphoric patterns.
-    /// Semantically distinct from CountersOnSelf: counts counters on a *targeted* object.
-    CountersOnTarget { counter_type: String },
-    /// CR 122.1: Total counters of any type on the previously targeted object.
-    /// Used for "the number of counters on that creature" where the counter type is
-    /// unspecified (e.g., Nils, Discipline Enforcer — per the Scryfall rulings, ALL
-    /// counters on the creature are considered, not just +1/+1 counters).
-    AnyCountersOnTarget,
-    /// CR 122.1: Total counters of any type on the source object.
-    /// Used for bare "counter on it" / "counters on ~" phrasings where no
-    /// specific counter type is named (Gemstone Mine: "When there are no
-    /// counters on ~, sacrifice it"; depletion-land cycle and similar).
-    /// Mirrors `CountersOnSelf` (which restricts to one type) and
-    /// `AnyCountersOnTarget` (which sums all types on a targeted object).
-    AnyCountersOnSelf,
+    /// CR 122.1: Count of counters on an object, parameterized by scope and
+    /// type filter (Round Π-5). Replaces the 4-variant cluster
+    /// `CountersOnSelf` / `CountersOnTarget` / `AnyCountersOnSelf` /
+    /// `AnyCountersOnTarget`.
+    ///
+    /// - `scope = Source`: counts on the source permanent ("counter on ~").
+    /// - `scope = Target`: counts on the first object target ("counter on
+    ///   that creature").
+    /// - `counter_type = Some(ct)`: only counters of type `ct`.
+    /// - `counter_type = None`: total counters of any type (e.g., Gemstone
+    ///   Mine "When there are no counters on ~"; Nils, Discipline Enforcer
+    ///   "the number of counters on that creature" per Scryfall ruling).
+    ///
+    /// For counters on a *player* (experience, poison, rad, ticket), use
+    /// [`QuantityRef::PlayerCounter`] instead.
+    CountersOn {
+        scope: ObjectScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter_type: Option<String>,
+    },
     /// CR 122.1: Total counters across all objects matching a filter.
     /// Used for phrases like "the number of +1/+1 counters on lands you control"
     /// (`counter_type: Some("P1P1")`) and "counters among artifacts and creatures
@@ -1855,10 +1866,15 @@ pub enum QuantityRef {
     },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
-    /// CR 208.1: The current power of the source object (post-layer).
-    SelfPower,
-    /// CR 208.1: The current toughness of the source object (post-layer).
-    SelfToughness,
+    /// CR 208.1 + CR 113.6: Current power of an object, scoped via ObjectScope
+    /// (Round Π-6). Replaces the `SelfPower` / `TargetPower` sibling pair.
+    /// `Source` reads the source object's power (post-layer); `Target` reads
+    /// the first object target's power.
+    Power { scope: ObjectScope },
+    /// CR 208.1 + CR 113.6: Current toughness of an object, scoped via
+    /// ObjectScope (Round Π-6). Mirrors `Power`. Replaces the `SelfToughness`
+    /// variant.
+    Toughness { scope: ObjectScope },
     /// CR 202.3: The mana value of the source object — i.e. the object passed
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
     /// is the spell-being-cast, so "pay life equal to its mana value" reads
@@ -1874,8 +1890,6 @@ pub enum QuantityRef {
         property: ObjectProperty,
         filter: TargetFilter,
     },
-    /// The power of the targeted permanent. Used for "equal to target's power".
-    TargetPower,
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
@@ -1915,12 +1929,33 @@ pub enum QuantityRef {
     /// top of each player action and at the start of each top-level ability chain.
     ExiledFromHandThisResolution,
     /// CR 609.3: Numeric amount produced by the preceding effect in the sub_ability chain.
-    /// Used for "gain life equal to the life lost this way" and similar patterns where
-    /// a sub_ability references the parent effect's numeric result (life lost, damage dealt).
+    /// Used for patterns where a sub_ability references the parent effect's numeric
+    /// result (life lost, damage dealt, counters removed).
     PreviousEffectAmount,
-    /// CR 118.4: Amount of life the controller has lost this turn.
-    /// Used for "as long as you've lost life this turn" static conditions.
-    LifeLostThisTurn,
+    /// CR 118.4 + CR 119.3: Amount of life lost this turn, scoped by `player`
+    /// per the workspace "Parameterize, don't proliferate" principle (Round Π-3).
+    ///
+    /// - `Controller`: controller's life lost this turn (`p.life_lost_this_turn`).
+    ///   Used by "as long as you've lost life this turn".
+    /// - `Opponent { aggregate: Sum }`: total life lost across opponents
+    ///   (legacy `OpponentLifeLostThisTurn`). Used by "if an opponent lost life
+    ///   this turn".
+    /// - `AllPlayers { aggregate: Max }`: maximum life lost by any single player
+    ///   (legacy `MaxLifeLostThisTurnAcrossPlayers`). Used by "if a player lost
+    ///   N or more life this turn" (Y'shtola, Knight of the Ebon Legion).
+    /// - `Target`: reserved — no current cards reference a targeted player's
+    ///   life-lost-this-turn, but the slot exists for symmetry with `LifeTotal`
+    ///   / `HandSize`.
+    LifeLostThisTurn { player: PlayerScope },
+    /// CR 700.8: Number of creatures in `player`'s party. A party consists of
+    /// up to one Cleric, one Rogue, one Warrior, and one Wizard creature
+    /// `player` controls; the resolver maximizes the count when creatures have
+    /// multiple party-relevant types (CR 700.8b). The result is bounded
+    /// `0..=4`. `PlayerScope::Controller` is the default reading
+    /// ("your party"); `Target`/`Opponent { .. }`/`AllPlayers { .. }` cover
+    /// targeted-player and cross-player aggregate variants per the same axis
+    /// used by `LifeTotal`/`HandSize`.
+    PartySize { player: PlayerScope },
     /// CR 702.179f: The controller's current speed, treating no speed as 0.
     Speed,
     /// CR 603.7c: Numeric value from the triggering event.
@@ -1982,8 +2017,12 @@ pub enum QuantityRef {
     EnteredThisTurn { filter: TargetFilter },
     /// CR 710.2: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
-    /// Amount of life the controller has gained this turn.
-    LifeGainedThisTurn,
+    /// CR 119.4: Amount of life gained this turn, scoped by `player` per the
+    /// workspace "Parameterize, don't proliferate" principle (Round Π-4 — mirrors
+    /// `LifeLostThisTurn`'s Π-3 lift). `Controller` reads
+    /// `p.life_gained_this_turn` directly; `Opponent { Sum }` totals across
+    /// opponents (Needlebite Trap "if an opponent gained life this turn").
+    LifeGainedThisTurn { player: PlayerScope },
     /// CR 500: Number of turns this player has taken so far in the game.
     /// Resolved against the controller/scope player.
     TurnsTaken,
@@ -2007,24 +2046,6 @@ pub enum QuantityRef {
     /// CR 117.1: Number of spells cast last turn (by any player).
     /// Used for werewolf transform conditions.
     SpellsCastLastTurn,
-    /// CR 119.3: Amount of life any opponent has lost this turn.
-    /// Used for "if an opponent lost life this turn" conditions.
-    OpponentLifeLostThisTurn,
-    /// CR 119.3 + CR 603.4: Maximum amount of life lost this turn by any single
-    /// player (controller or opponent). Resolves to
-    /// `state.players.iter().map(|p| p.life_lost_this_turn).max()`.
-    ///
-    /// Used for the intervening-if clause "if a player lost N or more life this
-    /// turn" — semantically "any single player has individually lost ≥ N", not
-    /// "the sum of life lost across all players is ≥ N". Y'shtola, Night's
-    /// Blessed and Knight of the Ebon Legion both use this idiom with N=4.
-    ///
-    /// Distinct from `OpponentLifeLostThisTurn` because:
-    /// - The "a player" quantifier covers controller + opponents (not just
-    ///   opponents).
-    /// - The semantic is per-player max (one player crossed the threshold), not
-    ///   cross-player sum.
-    MaxLifeLostThisTurnAcrossPlayers,
     /// CR 122.1: Whether the controller added any counter to any permanent this turn.
     CounterAddedThisTurn,
     /// CR 701.9 + CR 603.4: Whether any opponent of the controller discarded a
@@ -2656,6 +2677,27 @@ pub enum ParsedCondition {
     PlayerCountAtLeast {
         filter: PlayerFilter,
         minimum: usize,
+    },
+    // -- Combinators --
+    /// CR 601.3 / CR 602.5: All inner conditions must be true. Used for compound
+    /// casting/activation restrictions like "Cast this spell only if you control a
+    /// Forest and you've cast a creature spell this turn". Mirrors `AbilityCondition::And`
+    /// and `TriggerCondition::And` so restriction-side conjunction composes uniformly.
+    And {
+        conditions: Vec<ParsedCondition>,
+    },
+    /// CR 601.3 / CR 602.5: Any inner condition must be true. Used for disjunctive
+    /// casting/activation restrictions ("only if X or Y"). Mirrors `TriggerCondition::Or`
+    /// for restriction-level conditions.
+    Or {
+        conditions: Vec<ParsedCondition>,
+    },
+    /// CR 601.3 / CR 602.5: True when the inner predicate is false. Used for
+    /// "Cast this spell only if you don't ..." / "Activate only if it isn't ..." patterns.
+    /// Mirrors `AbilityCondition::Not` and `TriggerCondition::Not` so restriction-side
+    /// negation composes uniformly with `And`/`Or`.
+    Not {
+        condition: Box<ParsedCondition>,
     },
 }
 
@@ -4184,8 +4226,16 @@ pub enum Effect {
     /// CR 701.24g: Put a card at a specific position in its owner's library.
     /// Unlike ChangeZone { destination: Library } which auto-shuffles (CR 401.3),
     /// this uses move_to_library_position for precise placement without shuffling.
+    ///
+    /// `count` carries the cardinality of the placement ("put **two** cards
+    /// from your hand on top of your library in any order" — Cavalier of Gales,
+    /// Brainstorm). Defaults to `Fixed(1)` for the dominant "put it on top" /
+    /// "put that card on the bottom" forms; the JSON shape stays unchanged via
+    /// `default_quantity_one`.
     PutAtLibraryPosition {
         target: TargetFilter,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         position: LibraryPosition,
     },
     /// CR 401.4: Target's owner puts it on top or bottom of their library (owner chooses).
@@ -5668,9 +5718,6 @@ pub enum AbilityCondition {
     /// CR 608.2e: "Instead" clause — replaces the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
-    /// Negated additional cost: sub_ability executes only when the cost was NOT paid.
-    /// Used by Gift "if the gift wasn't promised" pattern.
-    AdditionalCostNotPaid,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
     IfYouDo,
     /// CR 603.12: "When you do" — reflexive trigger that always fires when the parent
@@ -5682,18 +5729,18 @@ pub enum AbilityCondition {
     CastFromZone { zone: Zone },
     /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last revealed card's type.
     /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`.
-    /// `negated` handles "if it's a nonland card" patterns.
     /// `additional_filter` holds optional extra filter properties (e.g., `IsChosenCreatureType`
-    /// for "creature card of the chosen type").
+    /// for "creature card of the chosen type"). For "if it's a nonland card" patterns,
+    /// wrap with `AbilityCondition::Not`.
     RevealedHasCardType {
         card_type: CoreType,
-        negated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         additional_filter: Option<FilterProp>,
     },
-    /// CR 400.7 + CR 608.2c: True when the source permanent did NOT enter the battlefield
-    /// this turn. Used for "unless ~ entered this turn" exemptions (e.g., Moon-Circuit Hacker).
-    SourceDidNotEnterThisTurn,
+    /// CR 400.7 + CR 608.2c: True when the source permanent entered the battlefield
+    /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker
+    /// "unless ~ entered this turn"), wrap with `AbilityCondition::Not`.
+    SourceEnteredThisTurn,
     /// CR 702.49 + CR 603.4: True when the source permanent entered via a ninjutsu-family
     /// activation of the specified variant this turn.
     CastVariantPaid { variant: CastVariantPaid },
@@ -5724,48 +5771,36 @@ pub enum AbilityCondition {
     /// CR 400.7 + CR 608.2c: "If that creature was a [type]" — gates the sub_ability on
     /// whether the target (or its last-known information if `use_lki` is true) matches the filter.
     /// Present-tense ("is a") checks current state; past-tense ("was a") checks LKI per CR 400.7.
+    /// For the "does NOT match" sense, wrap with `AbilityCondition::Not`.
     TargetMatchesFilter {
         filter: TargetFilter,
         #[serde(default)]
         use_lki: bool,
-        /// When true, the condition is satisfied when the target does NOT match.
-        #[serde(default)]
-        negated: bool,
     },
     /// CR 608.2c: "If this creature/permanent is a [type]" — gates sub_ability on whether
     /// the ability's source object matches the filter. Used by leveler-style cards
     /// (e.g. Figure of Fable) where each activated ability gates on the source's current type.
     SourceMatchesFilter { filter: TargetFilter },
-    /// CR 608.2c + CR 614.1d: "if you control a/no [filter]" — gates sub_ability on whether
+    /// CR 608.2c + CR 614.1d: "if you control a [filter]" — gates sub_ability on whether
     /// the ability controller controls at least one battlefield permanent matching the
-    /// filter (excluding the source itself). When `negated` is true, the condition is
-    /// satisfied iff the controller controls NO matching permanent. Used by reveal-tribal
-    /// land cycles (Fortified Beachhead, Temple of the Dragon Queen) where the on_decline
-    /// Tap fires only when the controller doesn't already control a [filter] permanent.
+    /// filter (excluding the source itself). For the "controls NO matching permanent"
+    /// sense (reveal-tribal land cycles like Fortified Beachhead / Temple of the Dragon
+    /// Queen on_decline), wrap with `AbilityCondition::Not`.
     /// `filter` MUST have its `ControllerRef::You` pre-bound by the parser.
-    ControllerControlsMatching {
-        filter: TargetFilter,
-        #[serde(default)]
-        negated: bool,
-    },
-    /// CR 608.2c: "If it's your turn" / "If it's not your turn" — gates sub_ability on
-    /// whether the active player is the ability's controller.
-    IsYourTurn {
-        #[serde(default)]
-        negated: bool,
-    },
+    ControllerControlsMatching { filter: TargetFilter },
+    /// CR 608.2c: "If it's your turn" — gates sub_ability on whether the active player
+    /// is the ability's controller. For "if it's not your turn", wrap with
+    /// `AbilityCondition::Not`.
+    IsYourTurn,
     /// CR 608.2c: "If a [noun] was [verb]ed this way" — sub_ability executes only if
     /// the parent effect produced a zone change involving an object matching the filter.
     /// Evaluated by checking `state.last_zone_changed_ids` against the filter.
     /// Handles both optional-targeting parents (empty targets → empty IDs → false)
     /// and mandatory parents (type filter check on moved objects).
     ZoneChangedThisWay { filter: TargetFilter },
-    /// CR 611.2b: "if this [permanent] is tapped/untapped" — checks the source's tapped status.
-    /// When `negated` is true, condition is met when the source is *untapped*.
-    SourceIsTapped {
-        #[serde(default)]
-        negated: bool,
-    },
+    /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
+    /// For the untapped sense, wrap with `AbilityCondition::Not`.
+    SourceIsTapped,
     /// CR 608.2c: General "instead" replacement — wraps any `AbilityCondition` with
     /// replacement semantics. When the inner condition is met at resolution, the sub's
     /// effect chain replaces the parent's entire effect chain. When not met, the base
@@ -5779,6 +5814,14 @@ pub enum AbilityCondition {
     /// Used when multiple independent checks gate the same resolution
     /// (e.g., Revolt + mana value threshold on Fatal Push).
     And { conditions: Vec<AbilityCondition> },
+    /// CR 608.2c: Logical negation — sub_ability executes when `condition` is false.
+    /// Mirrors `TriggerCondition::Not` for ability-level conditions. Replaces the
+    /// per-leaf `negated: bool` fields that existed on `RevealedHasCardType`,
+    /// `TargetMatchesFilter`, `ControllerControlsMatching`, `IsYourTurn`, and
+    /// `SourceIsTapped`, plus the dedicated negation variants
+    /// `AdditionalCostNotPaid` and `SourceDidNotEnterThisTurn`. Used by
+    /// "if you don't" / "unless you" / "if it isn't" sub-clause gates.
+    Not { condition: Box<AbilityCondition> },
     /// CR 730.2a: True when it's neither day nor night (day_night is None).
     /// Used by Daybound/Nightbound ETB initialization: "If it's neither day nor night,
     /// it becomes day as this creature enters."
@@ -7847,7 +7890,8 @@ mod tests {
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 3 },
             },
-            FilterProp::CmcGE {
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 4 },
             },
             FilterProp::InZone {

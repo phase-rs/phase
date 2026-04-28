@@ -301,7 +301,8 @@ mod tests {
         }
 
         let filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string(),

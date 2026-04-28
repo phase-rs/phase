@@ -12,8 +12,9 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, ObjectProperty, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter,
+    ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -411,9 +412,20 @@ fn resolve_ref(
         }
         // CR 103.4: The format's starting life total.
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
-        // CR 118.4: Total life lost this turn by the controller.
-        QuantityRef::LifeLostThisTurn => {
-            player.map_or(0, |p| u32_to_i32_saturating(p.life_lost_this_turn))
+        // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
+        QuantityRef::LifeLostThisTurn { player } => {
+            resolve_per_player_scalar(state, *player, controller, targets, |p| {
+                u32_to_i32_saturating(p.life_lost_this_turn)
+            })
+        }
+        // CR 700.8: Number of creatures in `player`'s party. The maximum
+        // assignment of creatures to the four party slots (Cleric/Rogue/
+        // Warrior/Wizard) is computed per CR 700.8b for creatures with
+        // multiple party-relevant types. Bounded to `0..=4`.
+        QuantityRef::PartySize { player: scope } => {
+            resolve_per_player_scalar(state, *scope, controller, targets, |p| {
+                compute_party_size(state, p.id)
+            })
         }
         QuantityRef::Speed => i32::from(effective_speed(state, controller)),
         QuantityRef::ObjectCount { filter } => {
@@ -497,14 +509,30 @@ fn resolve_ref(
         QuantityRef::PlayerCount { filter } => {
             resolve_player_count(state, filter, controller, source_id)
         }
-        QuantityRef::CountersOnSelf { counter_type } => state
-            .objects
-            .get(&source_id)
-            .map(|obj| {
-                let ct = parse_counter_type(counter_type);
-                u32_to_i32_saturating(obj.counters.get(&ct).copied().unwrap_or(0))
-            })
-            .unwrap_or(0),
+        // CR 122.1: Counters on an object, scoped via ObjectScope (Π-5).
+        // Replaces CountersOnSelf / CountersOnTarget / AnyCountersOnSelf /
+        // AnyCountersOnTarget. `counter_type = None` sums every type.
+        QuantityRef::CountersOn {
+            scope,
+            counter_type,
+        } => {
+            let object = match scope {
+                ObjectScope::Source => state.objects.get(&source_id),
+                ObjectScope::Target => targets.iter().find_map(|t| match t {
+                    TargetRef::Object(id) => state.objects.get(id),
+                    _ => None,
+                }),
+            };
+            object
+                .map(|obj| match counter_type {
+                    Some(ct) => {
+                        let kind = parse_counter_type(ct);
+                        u32_to_i32_saturating(obj.counters.get(&kind).copied().unwrap_or(0))
+                    }
+                    None => u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()),
+                })
+                .unwrap_or(0)
+        }
         // CR 107.3a + CR 601.2b + CR 107.3i: "X" resolves to the value chosen at
         // cast time, carried on the resolving ability's `chosen_x`
         // (CR 601.2b announcement; CR 107.3i makes all instances share the value).
@@ -542,24 +570,24 @@ fn resolve_ref(
             })
             .unwrap_or(0),
         // CR 208.3 + CR 113.6: A creature's power/toughness from current state,
-        // falling back to Last Known Information if the source has left the battlefield.
-        QuantityRef::SelfPower => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.power)
-            .or_else(|| state.lki_cache.get(&source_id).and_then(|lki| lki.power))
-            .unwrap_or(0),
-        QuantityRef::SelfToughness => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.toughness)
-            .or_else(|| {
-                state
-                    .lki_cache
-                    .get(&source_id)
-                    .and_then(|lki| lki.toughness)
-            })
-            .unwrap_or(0),
+        // falling back to Last Known Information if the source has left the
+        // battlefield. Scoped via ObjectScope (Π-6).
+        QuantityRef::Power { scope } => resolve_object_pt(
+            state,
+            *scope,
+            source_id,
+            targets,
+            |obj| obj.power,
+            |lki| lki.power,
+        ),
+        QuantityRef::Toughness { scope } => resolve_object_pt(
+            state,
+            *scope,
+            source_id,
+            targets,
+            |obj| obj.toughness,
+            |lki| lki.toughness,
+        ),
         // CR 202.3 + CR 118.9: Mana value of the source object. Used by
         // alt-cost cast permissions ("pay life equal to its mana value rather
         // than paying its mana cost") where `source_id` is the spell being
@@ -608,44 +636,6 @@ fn resolve_ref(
                 AggregateFunction::Sum => values.sum(),
             }
         }
-        QuantityRef::CountersOnTarget { counter_type } => {
-            // Find the first object target and count counters of the given type.
-            let ct = parse_counter_type(counter_type);
-            targets
-                .iter()
-                .find_map(|t| {
-                    if let TargetRef::Object(id) = t {
-                        state.objects.get(id)
-                    } else {
-                        None
-                    }
-                })
-                .map(|obj| u32_to_i32_saturating(obj.counters.get(&ct).copied().unwrap_or(0)))
-                .unwrap_or(0)
-        }
-        // CR 122.1: Sum counters of every type on the source object.
-        // Used by bare "counter on it" / "counters on ~" phrasings where no
-        // specific counter type is named (Gemstone Mine, depletion lands).
-        // Mirrors `AnyCountersOnTarget` but resolves against `source_id`.
-        QuantityRef::AnyCountersOnSelf => state
-            .objects
-            .get(&source_id)
-            .map(|obj| u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()))
-            .unwrap_or(0),
-        // CR 122.1: Sum counters of every type on the first targeted object.
-        // Used by Nils-class attack-tax scaling — per the official ruling, ALL
-        // counters on the attacker (not just +1/+1 counters) count toward X.
-        QuantityRef::AnyCountersOnTarget => targets
-            .iter()
-            .find_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    state.objects.get(id)
-                } else {
-                    None
-                }
-            })
-            .map(|obj| u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()))
-            .unwrap_or(0),
         QuantityRef::CountersOnObjects {
             counter_type,
             filter,
@@ -674,20 +664,6 @@ fn resolve_ref(
                     }
                 })
                 .sum()
-        }
-        QuantityRef::TargetPower => {
-            // Find the first object target and return its power.
-            targets
-                .iter()
-                .find_map(|t| {
-                    if let TargetRef::Object(id) = t {
-                        state.objects.get(id)
-                    } else {
-                        None
-                    }
-                })
-                .and_then(|obj| obj.power)
-                .unwrap_or(0)
         }
         QuantityRef::Devotion { colors } => u32_to_i32_saturating(
             crate::game::devotion::count_devotion(state, controller, colors),
@@ -824,7 +800,7 @@ fn resolve_ref(
             count
         }
         // CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
-        // Used for "gain life equal to the life lost this way" patterns.
+        // The resolver stamps this from the parent effect's semantic event class.
         QuantityRef::PreviousEffectAmount => state.last_effect_amount.unwrap_or(0),
         // CR 609.3: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state
@@ -1037,9 +1013,11 @@ fn resolve_ref(
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
-        // Life gained this turn — uses tracked counter on player.
-        QuantityRef::LifeGainedThisTurn => {
-            player.map_or(0, |p| u32_to_i32_saturating(p.life_gained_this_turn))
+        // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
+        QuantityRef::LifeGainedThisTurn { player } => {
+            resolve_per_player_scalar(state, *player, controller, targets, |p| {
+                u32_to_i32_saturating(p.life_gained_this_turn)
+            })
         }
         // CR 400.7: Count of permanents controlled by player that left the battlefield this turn.
         QuantityRef::PermanentsLeftBattlefieldThisTurn => usize_to_i32_saturating(
@@ -1103,24 +1081,6 @@ fn resolve_ref(
         }
         // CR 117.1: Total spells cast last turn (by any player).
         QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
-        // CR 119.3: Total life lost by opponents this turn.
-        QuantityRef::OpponentLifeLostThisTurn => state
-            .players
-            .iter()
-            .filter(|p| p.id != controller)
-            .map(|p| u32_to_i32_saturating(p.life_lost_this_turn))
-            .sum(),
-        // CR 119.3 + CR 603.4: Maximum life lost this turn across all players
-        // (controller and opponents). Used by "if a player lost N or more life
-        // this turn" intervening-if clauses (Y'shtola, Knight of the Ebon
-        // Legion). Per-player max, not sum — "a player lost N+" means "some
-        // single player has individually lost ≥ N".
-        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => state
-            .players
-            .iter()
-            .map(|p| u32_to_i32_saturating(p.life_lost_this_turn))
-            .max()
-            .unwrap_or(0),
         // CR 122.1: Whether the controller added any counter to any permanent this turn.
         QuantityRef::CounterAddedThisTurn => {
             if state
@@ -1133,8 +1093,8 @@ fn resolve_ref(
             }
         }
         // CR 701.9 + CR 603.4: Whether any opponent of the controller discarded
-        // a card this turn. Mirrors OpponentLifeLostThisTurn semantics — scans
-        // the per-turn discard set for any player != controller.
+        // a card this turn. Mirrors `LifeLostThisTurn { Opponent { Sum } }`
+        // semantics — scans the per-turn discard set for any player != controller.
         QuantityRef::OpponentDiscardedCardThisTurn => {
             if state
                 .players_who_discarded_card_this_turn
@@ -1231,6 +1191,44 @@ fn scoped_players<'a>(
     })
 }
 
+/// CR 208.3 + CR 113.6 + CR 400.7: Resolve a per-object scalar (power, toughness)
+/// through an `ObjectScope`, with LKI fallback for the source.
+///
+/// Single authority for `Power { scope }` / `Toughness { scope }` resolution
+/// (Π-6). `obj_extract` returns the property for a current object; `lki_extract`
+/// returns the same property from a Last Known Information snapshot. LKI fallback
+/// applies only to the source object — Target reads only the current state per
+/// CR 113.6 (a target's identity is captured on cast/announce).
+fn resolve_object_pt<F, G>(
+    state: &GameState,
+    scope: ObjectScope,
+    source_id: ObjectId,
+    targets: &[TargetRef],
+    obj_extract: F,
+    lki_extract: G,
+) -> i32
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
+    match scope {
+        ObjectScope::Source => state
+            .objects
+            .get(&source_id)
+            .and_then(&obj_extract)
+            .or_else(|| state.lki_cache.get(&source_id).and_then(&lki_extract))
+            .unwrap_or(0),
+        ObjectScope::Target => targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => state.objects.get(id),
+                _ => None,
+            })
+            .and_then(&obj_extract)
+            .unwrap_or(0),
+    }
+}
+
 /// CR 102 + CR 119 + CR 402: Resolve a per-player scalar through a `PlayerScope`.
 ///
 /// Single authority for all `LifeTotal { player }` / `HandSize { player }`-style
@@ -1291,6 +1289,109 @@ where
         AggregateFunction::Min => values.min().unwrap_or(0),
         AggregateFunction::Sum => values.sum(),
     }
+}
+
+/// CR 700.8 + CR 700.8b: Compute the size of `player`'s party.
+///
+/// A player's party consists of up to one Cleric creature, one Rogue, one
+/// Warrior, and one Wizard the player controls (CR 700.8). When a creature
+/// has multiple party-relevant types, it counts toward only one slot, and
+/// the assignment maximizes the resulting party size (CR 700.8b). The
+/// result is bounded `0..=4`.
+///
+/// Reads each battlefield creature's post-layer `card_types.subtypes` so
+/// type-changing effects (Arcane Adaptation, Conspiracy, etc.) compose
+/// correctly. The four party slots are encoded as a 4-bit mask; the maximum
+/// matching is computed by exact bipartite enumeration over the 24 slot
+/// permutations — trivially small (4 slots, ≤24 permutations) and strictly
+/// correct.
+pub(crate) fn compute_party_size(state: &GameState, player: PlayerId) -> i32 {
+    /// Bitmask: bit 0=Cleric, 1=Rogue, 2=Warrior, 3=Wizard.
+    fn party_mask(subtypes: &[String]) -> u8 {
+        let mut mask = 0u8;
+        for s in subtypes {
+            match s.as_str() {
+                "Cleric" => mask |= 0b0001,
+                "Rogue" => mask |= 0b0010,
+                "Warrior" => mask |= 0b0100,
+                "Wizard" => mask |= 0b1000,
+                _ => {}
+            }
+        }
+        mask
+    }
+
+    // Collect non-zero party masks for each creature `player` controls on the
+    // battlefield. Creatures with no party-relevant types are skipped.
+    let masks: Vec<u8> = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| {
+            obj.controller == player && obj.card_types.core_types.contains(&CoreType::Creature)
+        })
+        .map(|obj| party_mask(&obj.card_types.subtypes))
+        .filter(|m| *m != 0)
+        .collect();
+
+    if masks.is_empty() {
+        return 0;
+    }
+
+    // CR 700.8b: try every permutation of the 4 slot indices and assign each
+    // creature to the first slot in the permutation it satisfies. Take the
+    // maximum across all permutations.
+    let permutations: [[u8; 4]; 24] = [
+        [0, 1, 2, 3],
+        [0, 1, 3, 2],
+        [0, 2, 1, 3],
+        [0, 2, 3, 1],
+        [0, 3, 1, 2],
+        [0, 3, 2, 1],
+        [1, 0, 2, 3],
+        [1, 0, 3, 2],
+        [1, 2, 0, 3],
+        [1, 2, 3, 0],
+        [1, 3, 0, 2],
+        [1, 3, 2, 0],
+        [2, 0, 1, 3],
+        [2, 0, 3, 1],
+        [2, 1, 0, 3],
+        [2, 1, 3, 0],
+        [2, 3, 0, 1],
+        [2, 3, 1, 0],
+        [3, 0, 1, 2],
+        [3, 0, 2, 1],
+        [3, 1, 0, 2],
+        [3, 1, 2, 0],
+        [3, 2, 0, 1],
+        [3, 2, 1, 0],
+    ];
+    let mut best: u32 = 0;
+    for perm in &permutations {
+        let mut filled: u8 = 0;
+        let mut count: u32 = 0;
+        for &m in &masks {
+            for &slot in perm {
+                let bit = 1u8 << slot;
+                if filled & bit == 0 && m & bit != 0 {
+                    filled |= bit;
+                    count += 1;
+                    break;
+                }
+            }
+            if filled == 0b1111 {
+                break;
+            }
+        }
+        if count > best {
+            best = count;
+            if best == 4 {
+                break;
+            }
+        }
+    }
+    best as i32
 }
 
 /// Count players matching a PlayerFilter relative to the controller.
@@ -1383,6 +1484,91 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
     use crate::types::SpellCastRecord;
+
+    /// CR 700.8 + CR 700.8b: party size — building-block test exercising
+    /// `compute_party_size` directly across the full assignment surface.
+    /// Verifies that the bipartite-matching maximizes the count for creatures
+    /// with multi-class subtype lines, that the cap is 4, and that opponent's
+    /// creatures don't contribute.
+    #[test]
+    fn compute_party_size_covers_700_8b_assignment() {
+        let mut state = GameState::new_two_player(42);
+
+        // Helper: spawn a creature on `controller`'s battlefield with given subtypes.
+        let spawn = |state: &mut GameState, controller: PlayerId, subtypes: &[&str]| {
+            let id = create_object(
+                state,
+                CardId(100),
+                controller,
+                "Test Creature".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = subtypes.iter().map(|s| (*s).to_string()).collect();
+        };
+
+        // No creatures → party size 0.
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 0);
+
+        // One Cleric Wizard alone: assignment is forced (one slot), party = 1
+        // per CR 700.8b. The set-of-types shortcut would wrongly return 2.
+        spawn(&mut state, PlayerId(0), &["Cleric", "Wizard"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 1);
+
+        // Add a plain Wizard. Optimal: Cleric Wizard → Cleric, Wizard → Wizard.
+        // Party = 2.
+        spawn(&mut state, PlayerId(0), &["Wizard"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 2);
+
+        // Add a Rogue Warrior. Optimal: assign to Rogue OR Warrior (not both).
+        // Party = 3.
+        spawn(&mut state, PlayerId(0), &["Rogue", "Warrior"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 3);
+
+        // Add a plain Warrior. Optimal: Rogue Warrior → Rogue, Warrior →
+        // Warrior, plus the existing Cleric/Wizard pair. Party = 4 (cap).
+        spawn(&mut state, PlayerId(0), &["Warrior"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 4);
+
+        // Adding a fifth party-typed creature does not exceed the cap.
+        spawn(&mut state, PlayerId(0), &["Rogue"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 4);
+
+        // Non-party creature subtypes contribute nothing.
+        spawn(&mut state, PlayerId(1), &["Goblin", "Soldier"]);
+        assert_eq!(compute_party_size(&state, PlayerId(1)), 0);
+
+        // Opponent-controlled party-typed creature does not count for P0.
+        spawn(&mut state, PlayerId(1), &["Cleric"]);
+        assert_eq!(compute_party_size(&state, PlayerId(1)), 1);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 4);
+    }
+
+    /// CR 700.8: end-to-end resolution through `QuantityRef::PartySize` with
+    /// `PlayerScope::Controller` reads the controller's party size.
+    #[test]
+    fn resolve_party_size_controller_scope() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Wizard".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.card_types.subtypes = vec!["Wizard".to_string()];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PartySize {
+                player: PlayerScope::Controller,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 0);
+    }
 
     /// CR 122.1: PlayerCounter resolves controller scope from the named player.
     /// Opponents/All sums the kind across the matching scope (Toph's "you have"
@@ -2075,8 +2261,34 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
-    /// CR 119.3 + CR 603.4: `MaxLifeLostThisTurnAcrossPlayers` returns the
-    /// maximum life-loss across all players (controller + opponents),
+    /// CR 119.3: `LifeLostThisTurn { Opponent { Sum } }` sums life lost across
+    /// opponents, excluding the controller. Three players' losses [2, 5, 1]
+    /// with controller = 0 → sum of opponents 1+2 = 5+1 = 6. Locks in the
+    /// pre-Π-3 `OpponentLifeLostThisTurn` semantic.
+    #[test]
+    fn resolve_quantity_opponent_life_lost_this_turn_sum() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].life_lost_this_turn = 2;
+        state.players[1].life_lost_this_turn = 5;
+        state.players[2].life_lost_this_turn = 1;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+        };
+        // Controller = player 0: opponents are 1 and 2 → 5 + 1 = 6.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 6);
+        // Controller = player 1: opponents are 0 and 2 → 2 + 1 = 3.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(1)), 3);
+    }
+
+    /// CR 119.3 + CR 603.4: `LifeLostThisTurn { AllPlayers { Max } }` returns
+    /// the maximum life-loss across all players (controller + opponents),
     /// not the sum. Three players' losses [2, 5, 1] → max = 5.
     /// Critical: 2 + 5 + 1 = 8 would falsely satisfy a >= 8 threshold,
     /// while max = 5 correctly fails it.
@@ -2090,7 +2302,11 @@ mod tests {
         state.players[2].life_lost_this_turn = 1;
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+            qty: QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
         };
         // Resolves identically regardless of which player is the controller —
         // the variant scans all players, not just opponents.
@@ -2105,7 +2321,11 @@ mod tests {
     fn resolve_quantity_max_life_lost_this_turn_none_lost() {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+            qty: QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
@@ -2182,8 +2402,9 @@ mod tests {
             .insert(CounterType::Loyalty, 4);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::CountersOnSelf {
-                counter_type: "loyalty".to_string(),
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some("loyalty".to_string()),
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 4);
@@ -2213,7 +2434,10 @@ mod tests {
             .insert(CounterType::Generic("charge".to_string()), 3);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::AnyCountersOnSelf,
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: None,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
     }
@@ -2231,9 +2455,41 @@ mod tests {
             Zone::Battlefield,
         );
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::AnyCountersOnSelf,
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: None,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
+    }
+
+    /// CR 119.4 (Π-4): `LifeGainedThisTurn { Opponent { Sum } }` sums life
+    /// gained across opponents, excluding the controller. Locks in the
+    /// opponent-axis semantic introduced by Π-4 (no pre-Π-4 equivalent —
+    /// `LifeGainedThisTurn` was unit-variant controller-only before).
+    #[test]
+    fn resolve_quantity_opponent_life_gained_this_turn_sum() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].life_gained_this_turn = 4;
+        state.players[1].life_gained_this_turn = 7;
+        state.players[2].life_gained_this_turn = 2;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+        };
+        // Controller = player 0: opponents are 1 and 2 → 7 + 2 = 9.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 9);
+        // Controller = player 2: opponents are 0 and 1 → 4 + 7 = 11.
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(2), ObjectId(1)),
+            11
+        );
     }
 
     #[test]
@@ -2377,12 +2633,16 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::SelfPower,
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
 
         let expr_t = QuantityExpr::Ref {
-            qty: QuantityRef::SelfToughness,
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
     }
@@ -2832,7 +3092,8 @@ mod tests {
         }
 
         let inner_filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string(),

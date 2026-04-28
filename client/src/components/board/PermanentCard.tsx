@@ -20,7 +20,7 @@ import { COUNTER_COLORS, computePTDisplay, formatCounterTooltip, formatCounterTy
 import { getCardDisplayColors } from "../card/cardFrame.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { KeywordStrip } from "./KeywordStrip.tsx";
-import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
+import { collectObjectActions, isManaObjectAction } from "../../viewmodel/cardActionChoice.ts";
 
 interface PermanentCardProps {
   objectId: number;
@@ -260,16 +260,13 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         objectId,
       );
       const abilityActions: Array<Extract<GameAction, { type: "ActivateAbility" }>> = [];
-      const manaActions: Array<Extract<GameAction, { type: "ActivateAbility" }>> = [];
+      const manaActions: GameAction[] = [];
       const keywordActions: GameAction[] = [];
       for (const action of objectActions) {
-        if (action.type === "ActivateAbility") {
-          const effectType = o?.abilities?.[action.data.ability_index]?.effect?.type;
-          if (effectType === "Mana") {
-            manaActions.push(action);
-          } else {
-            abilityActions.push(action);
-          }
+        if (isManaObjectAction(action, o)) {
+          manaActions.push(action);
+        } else if (action.type === "ActivateAbility") {
+          abilityActions.push(action);
         } else {
           // CR 113.3b keyword activations (Crew/Station/Equip/Saddle) and any
           // future per-permanent action are surfaced alongside activated
@@ -277,33 +274,21 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
           keywordActions.push(action);
         }
       }
-      // Prefer ActivateAbility entries emitted by legal_actions — they carry the
-      // exact ability_index and let the engine prompt ChooseManaColor for
-      // multi-option productions (AnyOneColor, ChoiceAmongCombinations). The
-      // TapLandForMana shortcut is only used when the engine emitted no mana
-      // action (single-option basic lands pre-legalActions, edge cases).
-      const manaFallback: GameAction = manaActions.length === 0
-        ? { type: "TapLandForMana", data: { object_id: objectId } }
-        : manaActions[0];
       const manaChoiceNeeded = manaActions.length > 1;
 
       const nonManaActions: GameAction[] = [...abilityActions, ...keywordActions];
       if (nonManaActions.length === 0 && canTapForMana) {
         if (manaChoiceNeeded) {
           setPendingAbilityChoice({ objectId, actions: manaActions });
-        } else {
-          dispatchAction(manaFallback);
+        } else if (manaActions.length === 1) {
+          dispatchAction(manaActions[0]);
         }
       } else if (nonManaActions.length === 1 && !canTapForMana) {
         dispatchAction(nonManaActions[0]);
       } else {
         const allActions: GameAction[] = [...nonManaActions];
         if (canTapForMana) {
-          if (manaChoiceNeeded) {
-            allActions.push(...manaActions);
-          } else {
-            allActions.push(manaFallback);
-          }
+          allActions.push(...manaActions);
         }
         if (allActions.length === 1) {
           dispatchAction(allActions[0]);

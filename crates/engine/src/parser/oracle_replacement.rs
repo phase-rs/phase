@@ -564,12 +564,13 @@ fn tap_self_unless_controls_matching_ability(filter: &TargetFilter) -> AbilityDe
             target: TargetFilter::SelfRef,
         },
     )
-    .condition(
-        crate::types::ability::AbilityCondition::ControllerControlsMatching {
-            filter: bound_filter,
-            negated: true,
-        },
-    )
+    .condition(crate::types::ability::AbilityCondition::Not {
+        condition: Box::new(
+            crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                filter: bound_filter,
+            },
+        ),
+    })
 }
 
 /// Parse shock land pattern: "As ~ enters, you may pay N life. If you don't, it enters tapped."
@@ -3991,24 +3992,24 @@ mod tests {
             .as_ref()
             .expect("Tarkir variant on_decline must carry a condition");
         match cond {
-            crate::types::ability::AbilityCondition::ControllerControlsMatching {
-                filter: cond_filter,
-                negated,
-            } => {
-                assert!(*negated, "Tap is suppressed when controller has matching");
-                // Coherence check: condition filter has You-bound and Soldier subtype.
-                match cond_filter {
-                    TargetFilter::Typed(tf) => {
-                        assert_eq!(tf.controller, Some(ControllerRef::You));
-                        assert!(tf
-                            .type_filters
-                            .iter()
-                            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Soldier")));
-                    }
-                    other => panic!("expected Typed Soldier condition filter, got {other:?}"),
+            crate::types::ability::AbilityCondition::Not { condition: inner } => {
+                match inner.as_ref() {
+                    crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                        filter: cond_filter,
+                    } => match cond_filter {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(tf.controller, Some(ControllerRef::You));
+                            assert!(tf
+                                .type_filters
+                                .iter()
+                                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Soldier")));
+                        }
+                        other => panic!("expected Typed Soldier condition filter, got {other:?}"),
+                    },
+                    other => panic!("expected Not(ControllerControlsMatching), got {other:?}"),
                 }
             }
-            other => panic!("expected ControllerControlsMatching, got {other:?}"),
+            other => panic!("expected Not(ControllerControlsMatching), got {other:?}"),
         }
     }
 
@@ -4030,23 +4031,24 @@ mod tests {
         };
         let decline = on_decline.as_ref().unwrap();
         match decline.condition.as_ref() {
-            Some(crate::types::ability::AbilityCondition::ControllerControlsMatching {
-                filter,
-                negated,
-            }) => {
-                assert!(*negated);
-                match filter {
-                    TargetFilter::Typed(tf) => {
-                        assert_eq!(tf.controller, Some(ControllerRef::You));
-                        assert!(tf
-                            .type_filters
-                            .iter()
-                            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dragon")));
-                    }
-                    other => panic!("expected Typed Dragon filter, got {other:?}"),
+            Some(crate::types::ability::AbilityCondition::Not { condition: inner }) => {
+                match inner.as_ref() {
+                    crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                        filter,
+                    } => match filter {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(tf.controller, Some(ControllerRef::You));
+                            assert!(tf
+                                .type_filters
+                                .iter()
+                                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dragon")));
+                        }
+                        other => panic!("expected Typed Dragon filter, got {other:?}"),
+                    },
+                    other => panic!("expected Not(ControllerControlsMatching), got {other:?}"),
                 }
             }
-            other => panic!("expected ControllerControlsMatching, got {other:?}"),
+            other => panic!("expected Not(ControllerControlsMatching), got {other:?}"),
         }
     }
 

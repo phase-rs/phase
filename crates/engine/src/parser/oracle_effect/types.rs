@@ -491,6 +491,13 @@ pub(super) enum TargetedImperativeAst {
         /// any card in the discarding player's hand is legal.
         filter: Option<TargetFilter>,
     },
+    /// CR 701.9a: Back-reference discard — "discard that card" / "discard those
+    /// cards" — discards a specific card identified by the parent effect's
+    /// affected IDs (Seek, Conjure, Reveal-Choose). Distinct from `Discard`
+    /// which is player-choice-from-hand. Lowers to `Effect::DiscardCard`.
+    DiscardCard {
+        target: TargetFilter,
+    },
     /// CR 701.3: Return to hand (bounce).
     Return {
         target: TargetFilter,
@@ -636,6 +643,11 @@ pub(super) enum HandRevealImperativeAst {
     RevealPartial {
         count: crate::types::ability::QuantityExpr,
     },
+    /// CR 701.20a: Back-reference reveal — "reveal it" / "reveal that card" /
+    /// "reveal those cards" — reveals a specific card identified by the parent
+    /// effect's affected IDs (e.g. "look at top → reveal it" patterns).
+    /// Lowers to `Effect::Reveal { target: ParentTarget }`.
+    RevealBackRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -713,7 +725,27 @@ pub(super) enum ShuffleImperativeAst {
     ShuffleLibrary {
         target: TargetFilter,
     },
-    ChangeZoneToLibrary,
+    /// CR 701.24a + CR 400.3: "shuffle <pronoun> into <possessive> library".
+    /// Examples: "shuffle it into its owner's library" (Cavalier of Gales),
+    /// "shuffle that card into its owner's library" (search-then-shuffle
+    /// tutors), "shuffle them into their owners' libraries" (compound
+    /// subject).
+    ///
+    /// `target` carries the pronoun resolution — `SelfRef` for "it" / "~",
+    /// `ParentTarget` for "them" / "that card" / "those cards".
+    /// `owner_library` is `true` when the possessive resolves unambiguously
+    /// to the moving card's owner ("its owner's", "their owner's", "their
+    /// owners'") and `false` for "your library". Bare "their library" is
+    /// intentionally not treated as owner-routing because the antecedent is
+    /// ambiguous.
+    ///
+    /// Lowered to `Effect::ChangeZone { destination: Library, target,
+    /// owner_library, … }` + a `Shuffle` sub_ability via
+    /// `with_shuffle_sub_ability`.
+    ChangeZoneToLibrary {
+        target: TargetFilter,
+        owner_library: bool,
+    },
     ChangeZoneAllToLibrary {
         origin: Zone,
     },

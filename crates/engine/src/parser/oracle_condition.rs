@@ -22,9 +22,54 @@ use crate::types::zones::Zone;
 /// `ParsedCondition`. These conditions gate whether a spell can be cast or ability activated.
 /// Returns `None` for unrecognized conditions (caller treats `None` as permissive true).
 /// Normalizes input: lowercase, trim, strip trailing period.
+///
+/// Tries compound forms first (`X and Y`, `X or Y`, `not X`) so logical composition
+/// of leaf conditions composes through `ParsedCondition::And`/`Or`/`Not` per the
+/// standard combinator triple shared with `AbilityCondition` and `TriggerCondition`.
 pub fn parse_restriction_condition(text: &str) -> Option<ParsedCondition> {
     let lower = text.trim().trim_end_matches('.').to_lowercase();
-    parse_condition_text(&lower)
+    parse_compound_condition(&lower).or_else(|| parse_condition_text(&lower))
+}
+
+/// CR 601.3 / CR 602.5: Try logical-composition forms of restriction conditions.
+/// Order matters: try `and`/`or` splits first (binary outer structure), then leading
+/// `not ` (unary). Each fragment must parse as an atomic condition; if any fragment
+/// fails, the whole compound parse returns `None` so the caller falls back to atomic.
+fn parse_compound_condition(text: &str) -> Option<ParsedCondition> {
+    if let Some(conditions) = parse_connector_split(text, " and ") {
+        return Some(ParsedCondition::And { conditions });
+    }
+    if let Some(conditions) = parse_connector_split(text, " or ") {
+        return Some(ParsedCondition::Or { conditions });
+    }
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("not ").parse(text) {
+        let inner = parse_condition_text(rest)?;
+        return Some(ParsedCondition::Not {
+            condition: Box::new(inner),
+        });
+    }
+    None
+}
+
+/// Split `text` on `connector` and parse each fragment as an atomic condition.
+/// Returns `None` if the connector is absent, only one fragment exists, or any
+/// fragment fails to parse — leaving the caller to try atomic parsing on the full text.
+/// This guards against false splits like "more cards in hand than each opponent" being
+/// torn apart by " or " inside a single atomic phrase: each fragment must be a complete
+/// atomic condition for the compound parse to succeed.
+fn parse_connector_split(text: &str, connector: &str) -> Option<Vec<ParsedCondition>> {
+    if !text.contains(connector) {
+        return None;
+    }
+    let fragments: Vec<&str> = text.split(connector).map(str::trim).collect();
+    if fragments.len() < 2 {
+        return None;
+    }
+    fragments
+        .into_iter()
+        .map(parse_condition_text)
+        .collect::<Option<Vec<_>>>()
+        .filter(|v| v.len() >= 2)
 }
 
 fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
@@ -1001,6 +1046,55 @@ mod tests {
                 color: ManaColor::White,
                 count: 2,
             })
+        ));
+    }
+
+    #[test]
+    fn parses_compound_and() {
+        // Two atomic conditions joined by "and" form a ParsedCondition::And.
+        let parsed =
+            parse_restriction_condition("you attacked this turn and you gained life this turn");
+        assert!(matches!(
+            parsed,
+            Some(ParsedCondition::And { ref conditions })
+                if conditions.len() == 2
+                    && matches!(conditions[0], ParsedCondition::YouAttackedThisTurn)
+                    && matches!(conditions[1], ParsedCondition::YouGainedLifeThisTurn)
+        ));
+    }
+
+    #[test]
+    fn parses_compound_or() {
+        let parsed =
+            parse_restriction_condition("you attacked this turn or you gained life this turn");
+        assert!(matches!(
+            parsed,
+            Some(ParsedCondition::Or { ref conditions })
+                if conditions.len() == 2
+                    && matches!(conditions[0], ParsedCondition::YouAttackedThisTurn)
+                    && matches!(conditions[1], ParsedCondition::YouGainedLifeThisTurn)
+        ));
+    }
+
+    #[test]
+    fn parses_compound_not() {
+        let parsed = parse_restriction_condition("not you attacked this turn");
+        assert!(matches!(
+            parsed,
+            Some(ParsedCondition::Not { ref condition })
+                if matches!(**condition, ParsedCondition::YouAttackedThisTurn)
+        ));
+    }
+
+    #[test]
+    fn compound_falls_back_when_fragment_unparseable() {
+        // " or " inside an atomic phrase must not tear it apart — when a fragment
+        // fails, the compound parse returns None and the caller tries atomic parsing.
+        let parsed = parse_restriction_condition("you have more cards in hand than each opponent");
+        // Atomic parse succeeds (QuantityVsEachOpponent); compound must not interfere.
+        assert!(matches!(
+            parsed,
+            Some(ParsedCondition::QuantityVsEachOpponent { .. })
         ));
     }
 

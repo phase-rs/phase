@@ -205,6 +205,12 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         }) {
             let after_lower = after_color.trim().to_lowercase();
             // CR 106.7: "that a land an opponent controls could produce"
+            // CR 115.1 + CR 115.7: When the for-each branch resolves a player
+            // target filter (e.g., "for each card in target opponent's hand"),
+            // surface it on the returned `Effect::Mana::target` so the caller
+            // attaches a player target slot. All other any-color variants have
+            // no player target — `mana_target` defaults to `None`.
+            let mut mana_target: Option<TargetFilter> = None;
             let produced = if nom_on_lower(after_color.trim(), &after_lower, |i| {
                 value((), tag("that a land an opponent controls could produce")).parse(i)
             })
@@ -243,6 +249,24 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     count,
                     contribution,
                 }
+            } else if let Some((dynamic_qty, target)) =
+                try_parse_any_color_for_each_suffix(&after_lower)
+            {
+                // CR 106.1: "mana of any color for each [filter]" — dynamic
+                // count of any-color mana, with one color choice per mana
+                // produced. Mirrors the fixed-color "for each" handling in
+                // `parse_mana_production_clause` (e.g., "Add {R} for each card
+                // in target opponent's hand"); the only delta is that the
+                // color options are the full any-color set instead of a fixed
+                // list. Class: Coalition Relic, Storage Counter cycle
+                // (Saprazzan Cove, Dwarven Hold, Hollow Trees, Mercadian
+                // Bazaar).
+                mana_target = target;
+                ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref { qty: dynamic_qty },
+                    color_options: all_mana_colors(),
+                    contribution,
+                }
             } else {
                 ManaProduction::AnyOneColor {
                     count,
@@ -255,7 +279,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: None,
+                target: mana_target,
             });
         }
 
@@ -413,6 +437,38 @@ fn for_each_clause_target_filter(for_each_rest: &str) -> Option<TargetFilter> {
     } else {
         None
     }
+}
+
+/// CR 106.1: Detect a `for each [filter]` suffix on the "any color" branch and
+/// dispatch the inner clause to the shared `parse_for_each_clause` quantity
+/// dispatcher. Leading whitespace is skipped so the suffix is recognized whether
+/// the input begins with a literal space or has been pre-trimmed. The for-each
+/// clause is passed lowercase-normalized — `parse_for_each_clause` itself does
+/// its own lowercasing for type-phrase parsing, and the clause never contains
+/// a card name (which would already be `~`-normalized upstream by the same
+/// pipeline that built the `lower` view passed in here).
+///
+/// Returns the resolved `QuantityRef` paired with an optional player
+/// `TargetFilter` so the parent `Effect::Mana` can attach a player target slot
+/// when the for-each clause references "target opponent" / "target player"
+/// (CR 115.1 + CR 115.7). Mirrors `parse_mana_production_clause`'s
+/// `for_each_clause_target_filter` call so future printings of
+/// "Add one mana of any color for each card in target opponent's hand"
+/// surface the player target via the same primitive.
+///
+/// Returns `None` when no for-each suffix is present or the inner clause does
+/// not parse as a known quantity.
+fn try_parse_any_color_for_each_suffix(lower: &str) -> Option<(QuantityRef, Option<TargetFilter>)> {
+    let (rest, _) = preceded(
+        nom::character::complete::multispace0::<_, VerboseError<&str>>,
+        tag("for each "),
+    )
+    .parse(lower.trim_start())
+    .ok()?;
+    let for_each_rest = rest.trim().trim_end_matches('.').trim();
+    let qty = super::super::oracle_quantity::parse_for_each_clause(for_each_rest)?;
+    let target = for_each_clause_target_filter(for_each_rest);
+    Some((qty, target))
 }
 
 pub(super) fn parse_mana_production_clause(
@@ -1407,6 +1463,94 @@ mod tests {
         assert!(
             target.is_none(),
             "Cabal Coffers does not target a player; target must be None",
+        );
+    }
+
+    /// CR 106.1 + CR 609.3 + CR 122.1: Coalition Relic — "add one mana of any
+    /// color for each charge counter removed this way". This is the AnyOneColor
+    /// equivalent of the fixed-color "Add {R} for each X" pattern. Class also
+    /// includes the Storage Counter cycle (Saprazzan Cove, Dwarven Hold, etc.).
+    /// Without this the bare "any color" branch produces `count: Fixed(1)` and
+    /// silently drops the for-each tail.
+    #[test]
+    fn coalition_relic_any_color_for_each_charge_counter_removed_this_way() {
+        let effect = try_parse_add_mana_effect(
+            "Add one mana of any color for each charge counter removed this way.",
+        )
+        .expect("any-color + for-each must parse");
+        let Effect::Mana {
+            produced, target, ..
+        } = effect
+        else {
+            panic!("expected Effect::Mana, got {effect:?}");
+        };
+        match produced {
+            ManaProduction::AnyOneColor {
+                count,
+                color_options,
+                ..
+            } => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PreviousEffectAmount
+                    },
+                    "for-each tail must dispatch to PreviousEffectAmount"
+                );
+                assert_eq!(
+                    color_options.len(),
+                    5,
+                    "any-color must offer all five colors"
+                );
+            }
+            other => panic!("expected AnyOneColor, got {other:?}"),
+        }
+        assert!(
+            target.is_none(),
+            "for-each-counters-removed has no player target",
+        );
+    }
+
+    /// CR 106.1 + CR 115.1 + CR 115.7: Symmetry test for the new AnyOneColor
+    /// for-each branch — when the for-each clause references a player target,
+    /// the parsed `Effect::Mana::target` must surface that filter so the
+    /// surrounding ability attaches a player target slot. Mirrors the
+    /// fixed-color analogue (`add_mana_for_each_card_in_target_players_hand`)
+    /// for "any color".
+    #[test]
+    fn add_any_color_mana_for_each_card_in_target_opponents_hand() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+        let effect = try_parse_add_mana_effect(
+            "Add one mana of any color for each card in target opponent's hand.",
+        )
+        .expect("any-color + for-each + target-opponent must parse");
+        let Effect::Mana {
+            produced, target, ..
+        } = effect
+        else {
+            panic!("expected Effect::Mana, got {effect:?}");
+        };
+        match produced {
+            ManaProduction::AnyOneColor { color_options, .. } => {
+                assert_eq!(
+                    color_options.len(),
+                    5,
+                    "any-color must offer all five colors"
+                );
+            }
+            other => panic!("expected AnyOneColor, got {other:?}"),
+        }
+        // CR 115.1: target must be the opponent player filter so the engine
+        // surfaces a player target slot at cast/trigger time.
+        let target = target.expect("target opponent must surface a player target filter");
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected TargetFilter::Typed, got {target:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+        // Sanity: this is a player target (no type filter).
+        assert_eq!(
+            typed,
+            TypedFilter::default().controller(ControllerRef::Opponent)
         );
     }
 }

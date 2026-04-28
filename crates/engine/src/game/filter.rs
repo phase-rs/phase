@@ -1069,24 +1069,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::Multicolored => record.colors.len() > 1,
         // CR 105.2c: Colorless objects have no color.
         FilterProp::Colorless => record.colors.is_empty(),
-        FilterProp::CmcGE { value } => match value {
-            QuantityExpr::Fixed { value } => record.mana_value as i32 >= *value,
+        FilterProp::Cmc { comparator, value } => match value {
+            QuantityExpr::Fixed { value: v } => comparator.evaluate(record.mana_value as i32, *v),
             _ => {
-                debug_assert!(false, "dynamic QuantityExpr in spell record CmcGE filter — parser should only produce Fixed values here");
-                false
-            }
-        },
-        FilterProp::CmcLE { value } => match value {
-            QuantityExpr::Fixed { value } => (record.mana_value as i32) <= *value,
-            _ => {
-                debug_assert!(false, "dynamic QuantityExpr in spell record CmcLE filter — parser should only produce Fixed values here");
-                false
-            }
-        },
-        FilterProp::CmcEQ { value } => match value {
-            QuantityExpr::Fixed { value } => record.mana_value as i32 == *value,
-            _ => {
-                debug_assert!(false, "dynamic QuantityExpr in spell record CmcEQ filter — parser should only produce Fixed values here");
+                debug_assert!(false, "dynamic QuantityExpr in spell record Cmc filter — parser should only produce Fixed values here");
                 false
             }
         },
@@ -1286,17 +1272,9 @@ fn matches_filter_prop(
         // CR 202.3: Mana value threshold comparisons. Dynamic thresholds
         // (`QuantityRef::Variable { "X" }`) resolve against the ability's
         // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
-        FilterProp::CmcGE { value } => {
+        FilterProp::Cmc { comparator, value } => {
             let cmc = obj.mana_cost.mana_value() as i32;
-            cmc >= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::CmcLE { value } => {
-            let cmc = obj.mana_cost.mana_value() as i32;
-            cmc <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::CmcEQ { value } => {
-            let cmc = obj.mana_cost.mana_value() as i32;
-            cmc == resolve_filter_threshold(state, value, source)
+            comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
         }
         // CR 107.3 + CR 202.1: "spell with {X} in its mana cost" — inspects the
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
@@ -1730,15 +1708,10 @@ fn zone_change_record_matches_property(
             record.toughness.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
         }
         // CR 202.3: Mana value threshold on the event-time object.
-        FilterProp::CmcGE { value } => {
-            record.mana_value as i32 >= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::CmcLE { value } => {
-            record.mana_value as i32 <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::CmcEQ { value } => {
-            record.mana_value as i32 == resolve_filter_threshold(state, value, source)
-        }
+        FilterProp::Cmc { comparator, value } => comparator.evaluate(
+            record.mana_value as i32,
+            resolve_filter_threshold(state, value, source),
+        ),
         // CR 105.1 / CR 202.2: Color membership on the event-time object.
         FilterProp::HasColor { color } => record.colors.contains(color),
         FilterProp::NotColor { color } => !record.colors.contains(color),
@@ -3109,7 +3082,8 @@ mod tests {
         let cmc8 = add_battlefield_creature_with_cmc(&mut state, PlayerId(0), "Huge", 8);
 
         let filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string(),
@@ -3182,7 +3156,8 @@ mod tests {
         let cmc2 = add_battlefield_creature_with_cmc(&mut state, PlayerId(0), "Small", 2);
 
         let filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string(),

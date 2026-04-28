@@ -66,9 +66,10 @@ interface GameStoreState {
   /** Effective mana costs for castable spells, keyed by object_id string. */
   spellCosts: Record<string, ManaCost>;
   /**
-   * Engine-grouped subset of `legalActions` keyed by source object id.
-   * Frontend "what can I do with this card?" lookups go through this map
-   * instead of introspecting GameAction variants client-side.
+   * Engine-grouped per-object actions keyed by source object id.
+   * May include mana actions that are intentionally absent from flat
+   * `legalActions`; frontend "what can I do with this card?" lookups go
+   * through this map instead of inferring action availability from objects.
    */
   legalActionsByObject: Record<string, GameAction[]>;
   stateHistory: GameState[];

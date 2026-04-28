@@ -298,12 +298,13 @@ mod tests {
                 target: TargetFilter::SelfRef,
             },
         )
-        .condition(
-            crate::types::ability::AbilityCondition::ControllerControlsMatching {
-                filter: cond_filter,
-                negated: true,
-            },
-        );
+        .condition(crate::types::ability::AbilityCondition::Not {
+            condition: Box::new(
+                crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                    filter: cond_filter,
+                },
+            ),
+        });
 
         let ability = ResolvedAbility::new(
             Effect::RevealFromHand {
@@ -375,12 +376,13 @@ mod tests {
                 target: TargetFilter::SelfRef,
             },
         )
-        .condition(
-            crate::types::ability::AbilityCondition::ControllerControlsMatching {
-                filter: cond_filter,
-                negated: true,
-            },
-        );
+        .condition(crate::types::ability::AbilityCondition::Not {
+            condition: Box::new(
+                crate::types::ability::AbilityCondition::ControllerControlsMatching {
+                    filter: cond_filter,
+                },
+            ),
+        });
 
         let ability = ResolvedAbility::new(
             Effect::RevealFromHand {

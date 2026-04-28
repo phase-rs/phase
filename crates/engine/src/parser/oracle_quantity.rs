@@ -19,8 +19,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, CountScope, ObjectProperty, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, TargetFilter, ZoneRef,
+    AggregateFunction, CountScope, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
 };
 use crate::types::mana::ManaColor;
 
@@ -56,7 +56,10 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
             .trim();
         let counter_type = normalize_counter_type(raw_type);
         if !counter_type.is_empty() {
-            return Some(QuantityRef::CountersOnSelf { counter_type });
+            return Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(counter_type),
+            });
         }
     }
 
@@ -74,7 +77,10 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
             .trim();
         let counter_type = normalize_counter_type(raw_type);
         if !counter_type.is_empty() {
-            return Some(QuantityRef::CountersOnTarget { counter_type });
+            return Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Target,
+                counter_type: Some(counter_type),
+            });
         }
     }
 
@@ -441,10 +447,11 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     if let Some(qty) = parse_quantity_ref(stripped) {
         if !matches!(
             qty,
-            QuantityRef::TargetPower
-                | QuantityRef::LifeTotal {
-                    player: PlayerScope::Target
-                }
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target
+            } | QuantityRef::LifeTotal {
+                player: PlayerScope::Target
+            }
         ) {
             return Some(QuantityExpr::Ref { qty });
         }
@@ -553,6 +560,30 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
         .parse(rest)?;
         Ok((rest, ()))
     })
+}
+
+/// CR 609.3 + CR 122.1: Detect "counter[s] removed this way" — the for-each
+/// quantifier shape produced by cards that drain self-counters and reference
+/// the count in a downstream effect (Coalition Relic, Storage Counter cycle).
+///
+/// We accept the singular and plural forms with or without a leading
+/// counter-type word. The combinator is run at every word boundary so the
+/// surrounding clause can be either "counter removed this way",
+/// "counters removed this way", or "<type> counter[s] removed this way".
+/// The counter-type word, when present, is intentionally NOT extracted —
+/// the resolved quantity is whatever the parent `Effect::RemoveCounter`
+/// removed, and the parent already restricts by counter type.
+fn try_parse_counters_removed_this_way(lower: &str) -> bool {
+    crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
+        let (rest, _) = alt((
+            value((), tag::<_, _, VerboseError<&str>>("counters")),
+            value((), tag::<_, _, VerboseError<&str>>("counter")),
+        ))
+        .parse(input)?;
+        let (rest, _) = tag(" removed this way").parse(rest)?;
+        Ok((rest, ()))
+    })
+    .is_some()
 }
 
 /// Parse the clause after "for each" into a `QuantityExpr`, supporting
@@ -703,6 +734,27 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
                 });
             }
         }
+        // CR 609.3 + CR 122.1: "[counter-type] counter[s] removed this way" — the
+        // numeric amount of counters removed by the preceding `Effect::RemoveCounter`
+        // in the sub-ability chain. The parent-effect-aware scan in
+        // `effects/mod.rs` reads `GameEvent::CounterRemoved` for RemoveCounter
+        // parents and stamps `state.last_effect_amount`, which
+        // `PreviousEffectAmount` reads.
+        //
+        // Class: Coalition Relic ("you may remove all charge counters from ~. If
+        // you do, add one mana of any color for each charge counter removed this
+        // way."), the Ice Age Storage Counter cycle (Saprazzan Cove, Dwarven
+        // Hold, Hollow Trees, Mercadian Bazaar), and any future card that
+        // references the count of counters removed by a preceding effect.
+        //
+        // We intentionally do NOT extract the counter-type word: `last_effect_amount`
+        // is the count of whatever counter type the parent removed. The English
+        // restatement of the type is a redundant gloss, not a quantity-shape
+        // distinction. If a future card needs type-discriminated "removed this
+        // way" quantities, this is the right place to extend.
+        if try_parse_counters_removed_this_way(&lower) {
+            return Some(QuantityRef::PreviousEffectAmount);
+        }
         return Some(QuantityRef::TrackedSetSize);
     }
 
@@ -771,8 +823,9 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     if clause.contains("counter on") {
         let raw_type = clause.split("counter").next().unwrap_or("").trim();
         if !raw_type.is_empty() {
-            return Some(QuantityRef::CountersOnSelf {
-                counter_type: normalize_counter_type(raw_type),
+            return Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(normalize_counter_type(raw_type)),
             });
         }
     }
@@ -873,8 +926,11 @@ mod tests {
     fn for_each_counter_on_self_normalized() {
         let qty = parse_for_each_clause("+1/+1 counter on ~").unwrap();
         match qty {
-            QuantityRef::CountersOnSelf { counter_type } => assert_eq!(counter_type, "P1P1"),
-            other => panic!("Expected CountersOnSelf, got {other:?}"),
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(counter_type),
+            } => assert_eq!(counter_type, "P1P1"),
+            other => panic!("Expected CountersOn{{Source, P1P1}}, got {other:?}"),
         }
     }
 
@@ -883,7 +939,7 @@ mod tests {
         // Singular "counter on ~" (not "counters on ~")
         let qty = parse_for_each_clause("blight counter on it").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOnSelf { ref counter_type } if counter_type == "blight"),
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(ref counter_type) } if counter_type == "blight"),
             "singular counter form should produce CountersOnSelf"
         );
     }
@@ -892,7 +948,7 @@ mod tests {
     fn for_each_counter_on_that_creature() {
         let qty = parse_for_each_clause("+1/+1 counter on that creature").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "P1P1"),
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(ref counter_type) } if counter_type == "P1P1"),
             "counter on that creature should produce CountersOnTarget, not CountersOnSelf"
         );
     }
@@ -903,11 +959,46 @@ mod tests {
         assert_eq!(qty, QuantityRef::TrackedSetSize);
     }
 
+    /// CR 609.3 + CR 122.1: "[type] counter[s] removed this way" must dispatch
+    /// to `PreviousEffectAmount` so the resolver picks up the actual count of
+    /// counters removed by the parent `Effect::RemoveCounter`. Coalition Relic
+    /// and the Storage Counter cycle depend on this dispatch — without it, the
+    /// generic `TrackedSetSize` fallback returns the count of *objects* affected
+    /// (always 1 for a self-counter-removal), which is wrong.
+    #[test]
+    fn for_each_charge_counter_removed_this_way_is_previous_effect_amount() {
+        let qty = parse_for_each_clause("charge counter removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_charge_counters_removed_this_way_is_previous_effect_amount() {
+        // Plural variant — same dispatch.
+        let qty = parse_for_each_clause("charge counters removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_counter_removed_this_way_is_previous_effect_amount() {
+        // Untyped (no leading counter-type word). The runtime amount is whatever
+        // the parent removed; the omitted English type word is informational.
+        let qty = parse_for_each_clause("counter removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_storage_counter_removed_this_way_is_previous_effect_amount() {
+        // Storage Counter cycle (Saprazzan Cove etc.) — same shape, different
+        // counter type. Must produce the same dispatch.
+        let qty = parse_for_each_clause("storage counter removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
     #[test]
     fn quantity_ref_counters_on_target() {
         let qty = parse_quantity_ref("+1/+1 counters on that creature").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "P1P1"),
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(ref counter_type) } if counter_type == "P1P1"),
             "counters on that creature should produce CountersOnTarget"
         );
     }
@@ -916,7 +1007,7 @@ mod tests {
     fn quantity_ref_singular_counter_on_target() {
         let qty = parse_quantity_ref("charge counter on that permanent").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "charge"),
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(ref counter_type) } if counter_type == "charge"),
             "singular counter on that permanent should produce CountersOnTarget"
         );
     }
@@ -987,7 +1078,9 @@ mod tests {
         assert!(matches!(
             qty,
             QuantityExpr::Ref {
-                qty: QuantityRef::SelfPower
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                }
             }
         ));
     }
@@ -998,7 +1091,9 @@ mod tests {
         assert!(matches!(
             qty,
             QuantityExpr::Ref {
-                qty: QuantityRef::SelfToughness
+                qty: QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source
+                }
             }
         ));
     }
@@ -1021,9 +1116,13 @@ mod tests {
         let qty = parse_cda_quantity("the number of +1/+1 counters on ~").unwrap();
         match qty {
             QuantityExpr::Ref {
-                qty: QuantityRef::CountersOnSelf { counter_type },
+                qty:
+                    QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type),
+                    },
             } => assert_eq!(counter_type, "P1P1"),
-            other => panic!("Expected CountersOnSelf, got {other:?}"),
+            other => panic!("Expected CountersOn{{Source, P1P1}}, got {other:?}"),
         }
     }
 
@@ -1262,7 +1361,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
     }
@@ -1272,7 +1373,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you gained this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeGainedThisTurn
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
     }
@@ -1515,14 +1618,18 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
         // Without "this turn" suffix (after duration stripping)
         assert_eq!(
             parse_event_context_quantity("the life you've lost"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
     }
@@ -1532,13 +1639,17 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've gained this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeGainedThisTurn
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
         assert_eq!(
             parse_event_context_quantity("the life you've gained"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeGainedThisTurn
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller
+                }
             })
         );
     }
@@ -1547,7 +1658,9 @@ mod tests {
     fn parse_quantity_ref_life_lost() {
         assert_eq!(
             parse_quantity_ref("life you've lost"),
-            Some(QuantityRef::LifeLostThisTurn)
+            Some(QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller
+            })
         );
     }
 

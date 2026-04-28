@@ -448,8 +448,18 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
     .parse(input)?;
     // Property: "power " or "toughness "
     let (rest, qty) = alt((
-        value(QuantityRef::SelfPower, tag("power is ")),
-        value(QuantityRef::SelfToughness, tag("toughness is ")),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("power is "),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("toughness is "),
+        ),
     ))
     .parse(rest)?;
     let (rest, n) = parse_number(rest)?;
@@ -918,11 +928,21 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
             tag("committed a crime this turn"),
         ),
         value(
-            make_quantity_ge(QuantityRef::LifeGainedThisTurn, 1),
+            make_quantity_ge(
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                1,
+            ),
             tag("gained life this turn"),
         ),
         value(
-            make_quantity_ge(QuantityRef::LifeLostThisTurn, 1),
+            make_quantity_ge(
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                1,
+            ),
             tag("lost life this turn"),
         ),
         // "you've cast another spell this turn" → SpellsCastThisTurn >= 2
@@ -984,18 +1004,42 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         ),
         // "an opponent lost life this turn"
         value(
-            make_quantity_ge(QuantityRef::OpponentLifeLostThisTurn, 1),
+            make_quantity_ge(
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Sum,
+                    },
+                },
+                1,
+            ),
             alt((
                 tag("an opponent lost life this turn"),
                 tag("that player lost life this turn"),
+            )),
+        ),
+        // CR 119.4 + CR 603.4: "an opponent gained life this turn" — sum across
+        // opponents, mirroring the lost-life sibling. Unlocks Needlebite Trap
+        // alt-cost gate and any future opponent-gain-gated trap/condition.
+        value(
+            make_quantity_ge(
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Sum,
+                    },
+                },
+                1,
+            ),
+            alt((
+                tag("an opponent gained life this turn"),
+                tag("that player gained life this turn"),
             )),
         ),
         // CR 119.3 + CR 603.4: "a player lost N or more life this turn"
         // (Y'shtola, Night's Blessed; Knight of the Ebon Legion). The "a
         // player" quantifier covers controller + opponents; the threshold
         // semantic is "any single player crossed N", not "sum across
-        // players" — see QuantityRef::MaxLifeLostThisTurnAcrossPlayers
-        // doc comment.
+        // players" — resolves via `LifeLostThisTurn { player: AllPlayers {
+        // aggregate: Max } }`.
         parse_player_lost_life_this_turn,
         // CR 701.9 + CR 603.4: "an opponent discarded a card this turn"
         value(
@@ -1067,16 +1111,36 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
     ))
     .parse(rest)?;
     let (rest, first) = alt((
-        value(QuantityRef::SelfPower, tag("power")),
-        value(QuantityRef::SelfToughness, tag("toughness")),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("toughness"),
+        ),
     ))
     .parse(rest)?;
     // Optional " or <other property>" disjunction — natural-language OR.
     let (rest, second) = opt(preceded(
         tag(" or "),
         alt((
-            value(QuantityRef::SelfPower, tag("power")),
-            value(QuantityRef::SelfToughness, tag("toughness")),
+            value(
+                QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source,
+                },
+                tag("power"),
+            ),
+            value(
+                QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source,
+                },
+                tag("toughness"),
+            ),
         )),
     ))
     .parse(rest)?;
@@ -1193,11 +1257,24 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
 
     // Map event verbs to their QuantityRef for the shared "life this turn" object.
     fn life_verb(v: &str) -> Option<QuantityRef> {
-        match v {
-            "gained" => Some(QuantityRef::LifeGainedThisTurn),
-            "lost" => Some(QuantityRef::LifeLostThisTurn),
-            _ => None,
-        }
+        let result: nom::IResult<&str, QuantityRef, nom_language::error::VerboseError<&str>> =
+            alt((
+                value(
+                    QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                    tag("gained"),
+                ),
+                value(
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                    tag("lost"),
+                ),
+            ))
+            .parse(v);
+        let (rest, qty) = result.ok()?;
+        rest.is_empty().then_some(qty)
     }
 
     // Try "[verb1] and [verb2] life this turn"
@@ -1237,12 +1314,28 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
             tag::<_, _, nom_language::error::VerboseError<&str>>("or more life this turn")
                 .parse(after_n)
         {
-            return Ok((rest, make_quantity_ge(QuantityRef::LifeGainedThisTurn, n)));
+            return Ok((
+                rest,
+                make_quantity_ge(
+                    QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                    n,
+                ),
+            ));
         }
     }
     // "life this turn" (minimum 1)
     let (rest, _) = tag("life this turn").parse(rest)?;
-    Ok((rest, make_quantity_ge(QuantityRef::LifeGainedThisTurn, 1)))
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            1,
+        ),
+    ))
 }
 
 /// CR 119.3 + CR 603.4: Parse "a player lost N or more life this turn".
@@ -1250,8 +1343,9 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
 /// Y'shtola, Night's Blessed and Knight of the Ebon Legion use this idiom for
 /// the intervening-`if` clause of a phase trigger. The "a player" quantifier
 /// covers controller + opponents (not just opponents), and the per-player max
-/// semantic is enforced by `QuantityRef::MaxLifeLostThisTurnAcrossPlayers`
-/// (one player must individually have lost ≥ N — not the sum across players).
+/// semantic is enforced by `LifeLostThisTurn { player: AllPlayers { aggregate:
+/// Max } }` (one player must individually have lost ≥ N — not the sum across
+/// players).
 ///
 /// Grammar: `"a player lost " + parse_ge_threshold + "life this turn"`.
 /// Composes through the existing `StaticCondition::QuantityComparison` →
@@ -1262,7 +1356,14 @@ fn parse_player_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondi
     let (rest, _) = tag("life this turn").parse(rest)?;
     Ok((
         rest,
-        make_quantity_ge(QuantityRef::MaxLifeLostThisTurnAcrossPlayers, n),
+        make_quantity_ge(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
+            n,
+        ),
     ))
 }
 
@@ -1350,7 +1451,13 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
             tag("cast a spell this turn"),
         ),
         value(
-            make_quantity_comparison(QuantityRef::LifeLostThisTurn, Comparator::EQ, 0),
+            make_quantity_comparison(
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                Comparator::EQ,
+                0,
+            ),
             tag("lose life this turn"),
         ),
         value(
@@ -2366,13 +2473,37 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeGainedThisTurn,
+                        qty: QuantityRef::LifeGainedThisTurn { .. },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
             } => {}
             other => panic!("expected LifeGainedThisTurn GE 1, got {other:?}"),
         }
+    }
+
+    /// CR 119.4 + CR 603.4 (Π-4): "an opponent gained life this turn" must
+    /// parse to `LifeGainedThisTurn { Opponent { Sum } } ≥ 1` — the
+    /// opponent-axis dual to the existing `you've gained` controller-axis
+    /// reading. Unlocks Needlebite Trap class.
+    #[test]
+    fn test_parse_condition_an_opponent_gained_life_this_turn() {
+        let (rest, c) = parse_inner_condition("an opponent gained life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
     }
 
     #[test]
@@ -2383,7 +2514,7 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn,
+                        qty: QuantityRef::LifeLostThisTurn { .. },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -2859,7 +2990,10 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SelfPower,
+                        qty:
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
                     },
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 3 },
@@ -2877,7 +3011,10 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SelfPower,
+                        qty:
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
@@ -2946,7 +3083,7 @@ mod tests {
                 assert!(matches!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn
+                        qty: QuantityRef::LifeLostThisTurn { .. }
                     }
                 ));
                 assert_eq!(comparator, Comparator::EQ);
@@ -3098,8 +3235,12 @@ mod tests {
                         _ => None,
                     })
                     .collect();
-                assert!(pt_refs.contains(&QuantityRef::SelfPower));
-                assert!(pt_refs.contains(&QuantityRef::SelfToughness));
+                assert!(pt_refs.contains(&QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                }));
+                assert!(pt_refs.contains(&QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source
+                }));
             }
             other => panic!("expected Or, got {other:?}"),
         }
@@ -3130,7 +3271,9 @@ mod tests {
                 assert_eq!(
                     rhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SelfPower
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
                     }
                 );
             }
@@ -3521,9 +3664,9 @@ mod tests {
     }
 
     /// CR 119.3 + CR 603.4: Y'shtola's "a player lost 4 or more life this
-    /// turn" must parse to MaxLifeLostThisTurnAcrossPlayers ≥ 4 — the
-    /// per-player-max semantic, not the cross-opponent sum semantic of
-    /// `OpponentLifeLostThisTurn`.
+    /// turn" must parse to `LifeLostThisTurn { player: AllPlayers { Max } } ≥ 4`
+    /// — the per-player-max semantic, not the cross-opponent sum semantic of
+    /// `Opponent { Sum }`.
     #[test]
     fn test_parse_condition_a_player_lost_four_or_more_life() {
         let (rest, c) = parse_inner_condition("a player lost 4 or more life this turn").unwrap();
@@ -3532,7 +3675,11 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
@@ -3551,7 +3698,11 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
@@ -3571,7 +3722,11 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },

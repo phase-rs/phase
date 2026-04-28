@@ -978,6 +978,48 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
     }
 }
 
+fn previous_effect_amount_from_events(effect: &Effect, events: &[GameEvent]) -> Option<i32> {
+    let amount = match effect {
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::DamageDealt { amount, .. } => {
+                        Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
+                    }
+                    _ => None,
+                })
+                .sum()
+        }
+        Effect::LoseLife { .. } | Effect::PayCost { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged { amount, .. } if *amount < 0 => Some(-*amount),
+                _ => None,
+            })
+            .sum(),
+        Effect::GainLife { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
+                _ => None,
+            })
+            .sum(),
+        Effect::RemoveCounter { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CounterRemoved { count, .. } => {
+                    Some(crate::game::arithmetic::u32_to_i32_saturating(*count))
+                }
+                _ => None,
+            })
+            .sum(),
+        _ => 0,
+    };
+
+    (amount > 0).then_some(amount)
+}
+
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
 /// No SVar lookup, no parse_ability(). The depth is bounded by the data structure.
 pub fn resolve_ability_chain(
@@ -1397,26 +1439,17 @@ pub fn resolve_ability_chain(
         } // end shares_quality_failed else
     }
 
-    // CR 609.3: Extract numeric result from events emitted by this effect for
-    // PreviousEffectAmount in sub_abilities ("gain life equal to the life lost this way").
-    // Sum all LifeChanged (negative = loss) and DamageDealt events from this effect.
+    // CR 609.3: Extract the numeric result emitted by this parent effect for
+    // `QuantityRef::PreviousEffectAmount` in sub-abilities. The event class is
+    // selected by the parent `Effect` so unrelated numeric side effects from the
+    // same resolution are not mixed together: damage to a battle removes defense
+    // counters and also deals damage, but "damage dealt this way" must read only
+    // `DamageDealt`; Coalition Relic's "counter removed this way" must read only
+    // `CounterRemoved`.
+    if let Some(amount) =
+        previous_effect_amount_from_events(&ability.effect, &events[events_before..])
     {
-        let mut amount_sum: i32 = 0;
-        for event in &events[events_before..] {
-            match event {
-                GameEvent::LifeChanged { amount, .. } => {
-                    // Life loss is negative; take absolute value for "life lost this way"
-                    amount_sum += amount.unsigned_abs() as i32;
-                }
-                GameEvent::DamageDealt { amount, .. } => {
-                    amount_sum += *amount as i32;
-                }
-                _ => {}
-            }
-        }
-        if amount_sum > 0 {
-            state.last_effect_amount = Some(amount_sum);
-        }
+        state.last_effect_amount = Some(amount);
     }
 
     // CR 608.2c: Populate last_zone_changed_ids for ZoneChangedThisWay condition evaluation.
@@ -1820,7 +1853,6 @@ fn evaluate_condition(
 ) -> bool {
     match condition {
         AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
-        AbilityCondition::AdditionalCostNotPaid => !ability.context.additional_cost_paid,
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
         }
@@ -1833,7 +1865,6 @@ fn evaluate_condition(
         // "of the chosen type" (IsChosenCreatureType).
         AbilityCondition::RevealedHasCardType {
             card_type,
-            negated,
             additional_filter,
         } => {
             let type_matches = state
@@ -1873,19 +1904,15 @@ fn evaluate_condition(
                 }
                 None => true,
             };
-            let matches = type_matches && filter_matches;
-            if *negated {
-                !matches
-            } else {
-                matches
-            }
+            type_matches && filter_matches
         }
-        // CR 400.7 + CR 608.2c: "unless ~ entered this turn"
-        AbilityCondition::SourceDidNotEnterThisTurn => state
+        // CR 400.7 + CR 608.2c: source permanent entered the battlefield this turn.
+        // For the "unless ~ entered this turn" sense, wrap with `Not`.
+        AbilityCondition::SourceEnteredThisTurn => state
             .objects
             .get(&ability.source_id)
-            .map(|obj| obj.entered_battlefield_turn != Some(state.turn_number))
-            .unwrap_or(true),
+            .map(|obj| obj.entered_battlefield_turn == Some(state.turn_number))
+            .unwrap_or(false),
         // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid"
         AbilityCondition::CastVariantPaid { variant } => state
             .objects
@@ -1932,11 +1959,7 @@ fn evaluate_condition(
             })
             .is_some_and(|obj| obj.has_keyword(keyword)),
         // CR 400.7 + CR 608.2c: "if that creature was a [type]" — check target or its LKI.
-        AbilityCondition::TargetMatchesFilter {
-            filter,
-            use_lki,
-            negated,
-        } => {
+        AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
             let target_id = ability.targets.iter().find_map(|t| match t {
                 TargetRef::Object(id) => Some(*id),
                 _ => None,
@@ -1952,7 +1975,7 @@ fn evaluate_condition(
                                 record,
                                 filter,
                                 &crate::game::filter::FilterContext::from_ability(ability),
-                            ) ^ negated;
+                            );
                         }
                     }
                     // CR 400.7: Check last-known information for past-tense conditions.
@@ -2002,7 +2025,7 @@ fn evaluate_condition(
             } else {
                 false
             };
-            matched ^ negated
+            matched
         }
         // CR 608.2c: "If this creature/permanent is a [type]" — check source object.
         AbilityCondition::SourceMatchesFilter { filter } => {
@@ -2019,19 +2042,16 @@ fn evaluate_condition(
         // `filter`. Excludes the source itself so a Soldier-typed land doesn't satisfy
         // its own "you control a Soldier" check. `filter` carries `ControllerRef::You`
         // pre-bound by the parser; FilterContext provides the source binding.
-        AbilityCondition::ControllerControlsMatching { filter, negated } => {
+        AbilityCondition::ControllerControlsMatching { filter } => {
             let ctx = crate::game::filter::FilterContext::from_ability(ability);
-            let controls_any = state.objects.values().any(|o| {
+            state.objects.values().any(|o| {
                 o.zone == crate::types::zones::Zone::Battlefield
                     && o.id != ability.source_id
                     && crate::game::filter::matches_target_filter(state, o.id, filter, &ctx)
-            });
-            controls_any != *negated
+            })
         }
         // CR 608.2c: "If it's your turn" — check active player against controller.
-        AbilityCondition::IsYourTurn { negated } => {
-            (state.active_player == ability.controller) != *negated
-        }
+        AbilityCondition::IsYourTurn => state.active_player == ability.controller,
         // CR 608.2c: "If a [noun] was [verb]ed this way" — check if any zone-changed
         // object matches the type filter. For optional-targeting parents with no targets
         // chosen, last_zone_changed_ids is empty → returns false.
@@ -2043,14 +2063,12 @@ fn evaluate_condition(
                 .iter()
                 .any(|&id| crate::game::filter::matches_target_filter(state, id, filter, &ctx))
         }
-        // CR 611.2b: "if this creature/permanent is tapped/untapped" — check source object.
-        AbilityCondition::SourceIsTapped { negated } => {
-            let is_tapped = state
-                .objects
-                .get(&ability.source_id)
-                .is_some_and(|obj| obj.tapped);
-            is_tapped != *negated
-        }
+        // CR 611.2b: "if this creature/permanent is tapped" — check source object.
+        // For the untapped sense, wrap with `Not`.
+        AbilityCondition::SourceIsTapped => state
+            .objects
+            .get(&ability.source_id)
+            .is_some_and(|obj| obj.tapped),
         // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
         // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
         AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),
@@ -2058,6 +2076,8 @@ fn evaluate_condition(
         AbilityCondition::And { conditions } => conditions
             .iter()
             .all(|c| evaluate_condition(c, state, ability)),
+        // CR 608.2c: Logical negation — true when the inner condition is false.
+        AbilityCondition::Not { condition } => !evaluate_condition(condition, state, ability),
         // CR 730.2a: True when it's neither day nor night (no designation set yet).
         AbilityCondition::DayNightIsNeither => state.day_night.is_none(),
         // CR 603.4: "if this is the [Nth] time this ability has resolved this turn".
@@ -2227,9 +2247,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CastingPermission, ControllerRef, DelayedTriggerCondition,
-        Duration, FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-        SpellContext, TargetFilter, TargetRef, TypedFilter,
+        Duration, FilterProp, GainLifePlayer, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, TargetFilter, TargetRef, TypedFilter,
     };
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::{ExileLink, ExileLinkKind, LinkedExileSnapshot};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaColor;
@@ -2362,6 +2384,73 @@ mod tests {
     }
 
     #[test]
+    fn previous_effect_amount_for_damage_ignores_counter_side_effects() {
+        let mut state = GameState::new_two_player(42);
+        let battle_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Test Siege".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let battle = state.objects.get_mut(&battle_id).unwrap();
+            battle.card_types.core_types.push(CoreType::Battle);
+            battle.defense = Some(5);
+            battle.base_defense = Some(5);
+            battle.counters.insert(CounterType::Defense, 5);
+        }
+
+        let sub = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(battle_id)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::CounterRemoved {
+                    counter_type: CounterType::Defense,
+                    count: 3,
+                    ..
+                }
+            )),
+            "damage to a battle must still emit the defense-counter side effect"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::DamageDealt { amount: 3, .. })),
+            "damage event must still be present for PreviousEffectAmount"
+        );
+        assert_eq!(
+            state.players[0].life, 23,
+            "sub-ability must use the damage amount only, not damage + counters removed"
+        );
+    }
+
+    #[test]
     fn resolve_ability_chain_condition_blocks_optional_prompt() {
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
@@ -2374,7 +2463,9 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IsYourTurn { negated: true })
+        .condition(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IsYourTurn),
+        })
         .sub_ability(ResolvedAbility::new(
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
@@ -3053,7 +3144,7 @@ mod tests {
             PlayerId(0),
         )
         .condition(AbilityCondition::ConditionInstead {
-            inner: Box::new(AbilityCondition::IsYourTurn { negated: false }),
+            inner: Box::new(AbilityCondition::IsYourTurn),
         });
 
         // Parent: deal 2 damage — should be replaced
@@ -3128,7 +3219,9 @@ mod tests {
         )
         .condition(AbilityCondition::ConditionInstead {
             // negated: true → NOT your turn → condition NOT met (it IS our turn)
-            inner: Box::new(AbilityCondition::IsYourTurn { negated: true }),
+            inner: Box::new(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IsYourTurn),
+            }),
         })
         .sub_ability(instead_chain);
         instead_sub.else_ability = Some(Box::new(base_chain));
@@ -3750,7 +3843,9 @@ mod tests {
         .condition(AbilityCondition::ConditionInstead {
             // Pick a condition that evaluates to false in this state so the
             // swap does NOT fire and the else branch stash path runs.
-            inner: Box::new(AbilityCondition::IsYourTurn { negated: true }),
+            inner: Box::new(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IsYourTurn),
+            }),
         });
         sub.else_ability = Some(Box::new(else_branch));
 
@@ -3972,7 +4067,9 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IsYourTurn { negated: true });
+        .condition(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IsYourTurn),
+        });
         ability.player_scope = Some(PlayerFilter::All);
 
         let mut events = Vec::new();
@@ -4533,10 +4630,7 @@ mod tests {
         );
         // And([IsYourTurn(false=not negated), IsYourTurn(false=not negated)]) — both true
         let cond = AbilityCondition::And {
-            conditions: vec![
-                AbilityCondition::IsYourTurn { negated: false },
-                AbilityCondition::IsYourTurn { negated: false },
-            ],
+            conditions: vec![AbilityCondition::IsYourTurn, AbilityCondition::IsYourTurn],
         };
         assert!(evaluate_condition(&cond, &state, &ability));
     }
@@ -4592,8 +4686,10 @@ mod tests {
         // And([IsYourTurn(true), IsYourTurn(false)]) — one is "not your turn" which is false
         let cond = AbilityCondition::And {
             conditions: vec![
-                AbilityCondition::IsYourTurn { negated: true },
-                AbilityCondition::IsYourTurn { negated: false },
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::IsYourTurn),
+                },
+                AbilityCondition::IsYourTurn,
             ],
         };
         assert!(!evaluate_condition(&cond, &state, &ability));
@@ -4617,7 +4713,7 @@ mod tests {
             PlayerId(0),
         )
         .condition(AbilityCondition::ConditionInstead {
-            inner: Box::new(AbilityCondition::IsYourTurn { negated: false }),
+            inner: Box::new(AbilityCondition::IsYourTurn),
         });
 
         // Parent: deal 2 damage with a condition that would normally block it.
@@ -4633,7 +4729,9 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IsYourTurn { negated: true })
+        .condition(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IsYourTurn),
+        })
         .sub_ability(instead_sub);
 
         let mut events = Vec::new();

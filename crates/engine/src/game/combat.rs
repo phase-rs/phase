@@ -3606,7 +3606,10 @@ mod tests {
                 generic: 0,
             },
             scaling: UnlessPayScaling::PerAffectedWithRef {
-                quantity: QuantityRef::AnyCountersOnTarget,
+                quantity: QuantityRef::CountersOn {
+                    scope: crate::types::ability::ObjectScope::Target,
+                    counter_type: None,
+                },
             },
         });
         nils_obj.static_definitions.push(def);

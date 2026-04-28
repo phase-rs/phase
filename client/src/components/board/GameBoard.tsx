@@ -5,6 +5,7 @@ import { isMultiplayerMode, useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { sortCreaturesForBlockers } from "../../viewmodel/blockerSorting.ts";
+import { isManaObjectAction } from "../../viewmodel/cardActionChoice.ts";
 import {
   buildPlayerBattlefieldView,
   getWaitingForObjectChoiceIds,
@@ -131,11 +132,7 @@ export function GameBoard() {
         const objectId = Number(idStr);
         const object = gameState.objects[objectId];
         if (!object) continue;
-        const hasNonManaAction = actions.some((action) => {
-          if (action.type !== "ActivateAbility") return true;
-          const effectType = object.abilities?.[action.data.ability_index]?.effect?.type;
-          return effectType !== "Mana";
-        });
+        const hasNonManaAction = actions.some((action) => !isManaObjectAction(action, object));
         if (hasNonManaAction) {
           activatableObjectIds.add(objectId);
         }
@@ -143,14 +140,11 @@ export function GameBoard() {
     }
 
     if (playerCanAct) {
-      for (const objectId of gameState.battlefield) {
+      for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
+        const objectId = Number(idStr);
         const object = gameState.objects[objectId];
-        if (!object || object.controller !== myId || object.tapped) continue;
-        if (object.card_types.core_types.includes("Land")) {
-          manaTappableObjectIds.add(objectId);
-          continue;
-        }
-        if (object.has_mana_ability && !object.has_summoning_sickness) {
+        if (!object) continue;
+        if (actions.some((action) => isManaObjectAction(action, object))) {
           manaTappableObjectIds.add(objectId);
         }
       }
@@ -166,7 +160,7 @@ export function GameBoard() {
       validAttackerIds,
       validTargetObjectIds,
     };
-  }, [canActForWaitingState, gameState, legalActionsByObject, localPlayerId, myId, waitingFor]);
+  }, [canActForWaitingState, gameState, legalActionsByObject, localPlayerId, waitingFor]);
 
   if (!gameState) {
     return (

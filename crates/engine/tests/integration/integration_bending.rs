@@ -1159,8 +1159,9 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             // CR 603.4 + CR 608.2c: "if it has four or more quest counters on it"
             .condition(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CountersOnSelf {
-                        counter_type: "quest".to_string(),
+                    qty: QuantityRef::CountersOn {
+                        scope: engine::types::ability::ObjectScope::Source,
+                        counter_type: Some("quest".to_string()),
                     },
                 },
                 comparator: Comparator::GE,
@@ -1517,8 +1518,9 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
             )
             .condition(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CountersOnSelf {
-                        counter_type: "quest".to_string(),
+                    qty: QuantityRef::CountersOn {
+                        scope: engine::types::ability::ObjectScope::Source,
+                        counter_type: Some("quest".to_string()),
                     },
                 },
                 comparator: Comparator::GE,
@@ -1722,8 +1724,9 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
             )
             .condition(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CountersOnSelf {
-                        counter_type: "quest".to_string(),
+                    qty: QuantityRef::CountersOn {
+                        scope: engine::types::ability::ObjectScope::Source,
+                        counter_type: Some("quest".to_string()),
                     },
                 },
                 comparator: Comparator::GE,

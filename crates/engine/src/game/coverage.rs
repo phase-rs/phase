@@ -6,10 +6,10 @@ use crate::game::triggers::build_trigger_registry;
 use crate::parser::oracle::is_commander_permission_sentence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, AggregateFunction, ChoiceType, ContinuousModification, ControllerRef,
-    CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
-    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, PlayerFilter, PlayerScope,
-    PtValue, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    AdditionalCost, AggregateFunction, ChoiceType, Comparator, ContinuousModification,
+    ControllerRef, CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
+    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, SharedQuality, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
     StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
@@ -288,9 +288,17 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 fmt_quantity(count),
                 counter_type.as_str()
             )),
-            FilterProp::CmcGE { value } => parts.push(format!("mv {}+", fmt_quantity(value))),
-            FilterProp::CmcLE { value } => parts.push(format!("mv {}-", fmt_quantity(value))),
-            FilterProp::CmcEQ { value } => parts.push(format!("mv {}", fmt_quantity(value))),
+            FilterProp::Cmc { comparator, value } => {
+                let suffix = match comparator {
+                    Comparator::GE => "+",
+                    Comparator::LE => "-",
+                    Comparator::GT => ">",
+                    Comparator::LT => "<",
+                    Comparator::EQ => "",
+                    Comparator::NE => "≠",
+                };
+                parts.push(format!("mv {}{}", fmt_quantity(value), suffix))
+            }
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
             FilterProp::NameMatchesAnyPermanent { controller } => match controller {
@@ -589,14 +597,19 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("# of distinctly-named {}", fmt_target(filter))
         }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
-        QuantityRef::CountersOnSelf { counter_type } => {
-            format!("{counter_type} counters on self")
+        QuantityRef::CountersOn {
+            scope,
+            counter_type,
+        } => {
+            let scope_str = match scope {
+                ObjectScope::Source => "self",
+                ObjectScope::Target => "target",
+            };
+            match counter_type {
+                Some(ct) => format!("{ct} counters on {scope_str}"),
+                None => format!("counters on {scope_str} (any type)"),
+            }
         }
-        QuantityRef::CountersOnTarget { counter_type } => {
-            format!("{counter_type} counters on target")
-        }
-        QuantityRef::AnyCountersOnTarget => "counters on target (any type)".into(),
-        QuantityRef::AnyCountersOnSelf => "counters on self (any type)".into(),
         QuantityRef::CountersOnObjects {
             counter_type,
             filter,
@@ -605,8 +618,14 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             None => format!("counters on {}", fmt_target(filter)),
         },
         QuantityRef::Variable { name } => name.clone(),
-        QuantityRef::SelfPower => "self power".into(),
-        QuantityRef::SelfToughness => "self toughness".into(),
+        QuantityRef::Power { scope } => match scope {
+            ObjectScope::Source => "self power".into(),
+            ObjectScope::Target => "target's power".into(),
+        },
+        QuantityRef::Toughness { scope } => match scope {
+            ObjectScope::Source => "self toughness".into(),
+            ObjectScope::Target => "target's toughness".into(),
+        },
         QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
             function,
@@ -625,7 +644,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("{func} {prop} of {}", fmt_target(filter))
         }
-        QuantityRef::TargetPower => "target's power".into(),
         QuantityRef::Devotion { colors } => {
             let c: Vec<_> = colors.iter().map(fmt_mana_color_full).collect();
             format!("devotion to {}", c.join("/"))
@@ -669,7 +687,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
-        QuantityRef::LifeLostThisTurn => "life lost this turn".into(),
+        QuantityRef::LifeLostThisTurn { player } => {
+            format!("life lost this turn ({})", fmt_player_scope(*player))
+        }
         QuantityRef::EventContextAmount => "event amount".into(),
         QuantityRef::EventContextSourcePower => "source's power".into(),
         QuantityRef::EventContextSourceToughness => "source's toughness".into(),
@@ -683,7 +703,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("{} entered this turn", fmt_target(filter))
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
-        QuantityRef::LifeGainedThisTurn => "life gained this turn".into(),
+        QuantityRef::LifeGainedThisTurn { player } => {
+            format!("life gained this turn ({})", fmt_player_scope(*player))
+        }
         QuantityRef::PermanentsLeftBattlefieldThisTurn => {
             "permanents left battlefield this turn".into()
         }
@@ -696,10 +718,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::AttackedThisTurn => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
-        QuantityRef::OpponentLifeLostThisTurn => "opponent life lost this turn".into(),
-        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => {
-            "max life lost this turn across players".into()
-        }
         QuantityRef::CounterAddedThisTurn => "counter added this turn".into(),
         QuantityRef::OpponentDiscardedCardThisTurn => "opponent discarded card this turn".into(),
         QuantityRef::DungeonsCompleted => "dungeons completed".into(),
@@ -729,6 +747,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 CountScope::All => "each player has",
             };
             format!("# of {kind} counters {scope_s}")
+        }
+        QuantityRef::PartySize { player } => {
+            format!("party size ({})", fmt_player_scope(*player))
         }
     }
 }
@@ -1498,8 +1519,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::MiracleCast { .. } => {}
         // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.
         Effect::MadnessCast { .. } => {}
-        Effect::PutAtLibraryPosition { target, position } => {
+        Effect::PutAtLibraryPosition {
+            target,
+            count,
+            position,
+        } => {
             d.push(("target".into(), fmt_target(target)));
+            d.push(("count".into(), format!("{count:?}")));
             d.push(("position".into(), format!("{position:?}")));
         }
         Effect::PutOnTopOrBottom { target } => {
@@ -4067,12 +4093,12 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
-        AbilityCondition::AdditionalCostNotPaid => ("AdditionalCostNotPaid", Handled),
         AbilityCondition::IfYouDo => ("IfYouDo", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
-        AbilityCondition::SourceDidNotEnterThisTurn => ("SourceDidNotEnterThisTurn", Handled),
+        AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
+        AbilityCondition::Not { .. } => ("Not", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
         AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
@@ -4081,7 +4107,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
-        AbilityCondition::IsYourTurn { .. } => ("IsYourTurn", Handled),
+        AbilityCondition::IsYourTurn => ("IsYourTurn", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
         // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by
@@ -4094,7 +4120,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Unhandled),
-        AbilityCondition::SourceIsTapped { .. } => ("SourceIsTapped", Unhandled),
+        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Unhandled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -4119,17 +4145,19 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinctNames { .. } => ("ObjectCountDistinctNames", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
-        QuantityRef::CountersOnSelf { .. } => ("CountersOnSelf", Handled),
-        QuantityRef::CountersOnTarget { .. } => ("CountersOnTarget", Handled),
-        QuantityRef::AnyCountersOnTarget => ("AnyCountersOnTarget", Handled),
-        QuantityRef::AnyCountersOnSelf => ("AnyCountersOnSelf", Handled),
+        QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
         QuantityRef::Variable { .. } => ("Variable", Handled),
-        QuantityRef::SelfPower => ("SelfPower", Handled),
-        QuantityRef::SelfToughness => ("SelfToughness", Handled),
+        QuantityRef::Power { scope } => match scope {
+            ObjectScope::Source => ("SelfPower", Handled),
+            ObjectScope::Target => ("TargetPower", Handled),
+        },
+        QuantityRef::Toughness { scope } => match scope {
+            ObjectScope::Source => ("SelfToughness", Handled),
+            ObjectScope::Target => ("TargetToughness", Handled),
+        },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
-        QuantityRef::TargetPower => ("TargetPower", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypesInZone { .. } => ("DistinctCardTypesInZone", Handled),
         QuantityRef::DistinctCardTypesExiledBySource => {
@@ -4144,7 +4172,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
-        QuantityRef::LifeLostThisTurn => ("LifeLostThisTurn", Handled),
+        QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
         QuantityRef::EventContextSourcePower => ("EventContextSourcePower", Handled),
         QuantityRef::EventContextSourceToughness => ("EventContextSourceToughness", Handled),
@@ -4153,7 +4181,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
-        QuantityRef::LifeGainedThisTurn => ("LifeGainedThisTurn", Handled),
+        QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::PermanentsLeftBattlefieldThisTurn => {
             ("PermanentsLeftBattlefieldThisTurn", Unhandled)
         }
@@ -4162,14 +4190,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
-        QuantityRef::CreaturesDiedThisTurn => ("CreaturesDiedThisTurn", Unhandled),
+        QuantityRef::CreaturesDiedThisTurn => ("CreaturesDiedThisTurn", Handled),
         QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Unhandled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
-        QuantityRef::OpponentLifeLostThisTurn => ("OpponentLifeLostThisTurn", Unhandled),
-        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => {
-            ("MaxLifeLostThisTurnAcrossPlayers", Handled)
-        }
         QuantityRef::CounterAddedThisTurn => ("CounterAddedThisTurn", Unhandled),
         QuantityRef::OpponentDiscardedCardThisTurn => ("OpponentDiscardedCardThisTurn", Handled),
         QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
@@ -4184,6 +4208,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
+        QuantityRef::PartySize { .. } => ("PartySize", Handled),
     }
 }
 
@@ -7720,7 +7745,7 @@ mod tests {
     /// unhandled resolver feature.
     #[test]
     fn is_your_turn_condition_is_marked_handled() {
-        let (name, support) = condition_feature(&AbilityCondition::IsYourTurn { negated: false });
+        let (name, support) = condition_feature(&AbilityCondition::IsYourTurn);
         assert_eq!(name, "IsYourTurn");
         assert_eq!(
             support,

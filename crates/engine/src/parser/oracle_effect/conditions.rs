@@ -16,12 +16,26 @@ use super::{parse_effect_chain, scan_contains_phrase};
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
-    Duration, Effect, FilterProp, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter,
+    Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::zones::Zone;
+
+/// Wrap `cond` in `AbilityCondition::Not` when `negated` is true; otherwise
+/// return it unchanged. Replaces the per-leaf `negated: bool` fields that
+/// existed before Π-N — call sites that previously emitted `Variant { ...,
+/// negated }` now construct the positive variant and pass through this helper.
+fn maybe_negate(cond: AbilityCondition, negated: bool) -> AbilityCondition {
+    if negated {
+        AbilityCondition::Not {
+            condition: Box::new(cond),
+        }
+    } else {
+        cond
+    }
+}
 
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
@@ -114,7 +128,9 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         value((), tag("if the gift wasn't promised, ")).parse(i)
     }) {
         return (
-            Some(AbilityCondition::AdditionalCostNotPaid),
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::AdditionalCostPaid),
+            }),
             rest.to_string(),
         );
     }
@@ -129,7 +145,9 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         {
             let offset = text.len() - rest.len();
             return (
-                Some(AbilityCondition::AdditionalCostNotPaid),
+                Some(AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::AdditionalCostPaid),
+                }),
                 text[offset..].to_string(),
             );
         }
@@ -282,7 +300,9 @@ pub(super) fn strip_unless_entered_suffix(text: &str) -> (Option<AbilityConditio
     ] {
         if let Some((before, _)) = tp.split_around(pattern) {
             return (
-                Some(AbilityCondition::SourceDidNotEnterThisTurn),
+                Some(AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::SourceEnteredThisTurn),
+                }),
                 before.original.trim_end_matches('.').trim().to_string(),
             );
         }
@@ -366,11 +386,13 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
         let remainder = after_type.strip_prefix(", ").unwrap_or(after_type);
         let offset = text.len() - remainder.len();
         return (
-            Some(AbilityCondition::RevealedHasCardType {
-                card_type,
+            Some(maybe_negate(
+                AbilityCondition::RevealedHasCardType {
+                    card_type,
+                    additional_filter,
+                },
                 negated,
-                additional_filter,
-            }),
+            )),
             text[offset..].to_string(),
         );
     }
@@ -392,11 +414,13 @@ fn parse_its_a_type_condition(condition_text: &str) -> Option<AbilityCondition> 
     let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
     let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
     let card_type = CoreType::from_str(&capitalized).ok()?;
-    Some(AbilityCondition::RevealedHasCardType {
-        card_type,
+    Some(maybe_negate(
+        AbilityCondition::RevealedHasCardType {
+            card_type,
+            additional_filter: None,
+        },
         negated,
-        additional_filter: None,
-    })
+    ))
 }
 
 pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
@@ -441,7 +465,7 @@ pub(super) fn strip_turn_conditional(text: &str) -> (Option<AbilityCondition>, S
         .parse(input)
     }) {
         return (
-            Some(AbilityCondition::IsYourTurn { negated }),
+            Some(maybe_negate(AbilityCondition::IsYourTurn, negated)),
             rest.to_string(),
         );
     }
@@ -489,7 +513,6 @@ pub(super) fn strip_property_conditional(text: &str) -> (Option<AbilityCondition
                     Some(AbilityCondition::TargetMatchesFilter {
                         filter,
                         use_lki: *use_lki,
-                        negated: false,
                     }),
                     before.original.to_string(),
                 );
@@ -577,7 +600,10 @@ fn build_counter_condition(
 ) -> AbilityCondition {
     AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
-            qty: QuantityRef::CountersOnSelf { counter_type },
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(counter_type),
+            },
         },
         comparator,
         rhs: QuantityExpr::Fixed { value: threshold },
@@ -630,10 +656,12 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     if let Some((before, after)) = tp.rsplit_around(" if it has mana value ") {
         if let Some((comparator, threshold)) = parse_mana_value_threshold(after.lower) {
             let prop = match comparator {
-                Comparator::LE => FilterProp::CmcLE {
+                Comparator::LE => FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { value: threshold },
                 },
-                Comparator::GE => FilterProp::CmcGE {
+                Comparator::GE => FilterProp::Cmc {
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { value: threshold },
                 },
                 _ => return (None, text.to_string()),
@@ -641,7 +669,6 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
             let condition = AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
                 use_lki: false,
-                negated: false,
             };
             return (
                 Some(condition),
@@ -986,7 +1013,7 @@ fn counter_threshold_to_condition(
 
 fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<AbilityCondition> {
     match sc {
-        StaticCondition::DuringYourTurn => Some(AbilityCondition::IsYourTurn { negated: false }),
+        StaticCondition::DuringYourTurn => Some(AbilityCondition::IsYourTurn),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -1015,10 +1042,12 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
             })
         }
         StaticCondition::Not { condition } => match condition.as_ref() {
-            StaticCondition::DuringYourTurn => Some(AbilityCondition::IsYourTurn { negated: true }),
-            StaticCondition::SourceEnteredThisTurn => {
-                Some(AbilityCondition::SourceDidNotEnterThisTurn)
-            }
+            StaticCondition::DuringYourTurn => Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IsYourTurn),
+            }),
+            StaticCondition::SourceEnteredThisTurn => Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::SourceEnteredThisTurn),
+            }),
             StaticCondition::QuantityComparison {
                 lhs,
                 comparator,
@@ -1045,9 +1074,9 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                 })
             }
             // CR 611.2b: Not(SourceIsTapped) → source is untapped.
-            StaticCondition::SourceIsTapped => {
-                Some(AbilityCondition::SourceIsTapped { negated: true })
-            }
+            StaticCondition::SourceIsTapped => Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::SourceIsTapped),
+            }),
             _ => None,
         },
         StaticCondition::SourceMatchesFilter { filter } => {
@@ -1055,9 +1084,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                 filter: filter.clone(),
             })
         }
-        StaticCondition::SourceIsTapped => {
-            Some(AbilityCondition::SourceIsTapped { negated: false })
-        }
+        StaticCondition::SourceIsTapped => Some(AbilityCondition::SourceIsTapped),
         // CR 122.1 + CR 608.2c: Counter-threshold gate on the source object.
         // Maps to `QuantityCheck { CountersOn(Self|AnyCountersOnSelf), Comparator, Fixed }`
         // so the existing sub-ability condition evaluator handles it without
@@ -1071,10 +1098,14 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         } => {
             let qty = QuantityExpr::Ref {
                 qty: match counters {
-                    CounterMatch::OfType(ct) => QuantityRef::CountersOnSelf {
-                        counter_type: ct.as_str().to_string(),
+                    CounterMatch::OfType(ct) => QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(ct.as_str().to_string()),
                     },
-                    CounterMatch::Any => QuantityRef::AnyCountersOnSelf,
+                    CounterMatch::Any => QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    },
                 },
             };
             Some(counter_threshold_to_condition(qty, *minimum, *maximum))
@@ -1163,11 +1194,13 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
     // imperative (Destroy target creature or enchantment). Type-resolution via
     // LKI mirrors the "it was a [type] card" branch below.
     if let Some((type_filter, negated)) = parse_a_type_was_verbed_this_way(&lower) {
-        return Some(AbilityCondition::TargetMatchesFilter {
-            filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
-            use_lki: true,
+        return Some(maybe_negate(
+            AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
+                use_lki: true,
+            },
             negated,
-        });
+        ));
     }
 
     // CR 400.7 + CR 608.2c: Past-tense "it was a [type] card" — the card has already
@@ -1189,11 +1222,13 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
                 .trim();
             let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase(type_text);
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
-                return Some(AbilityCondition::TargetMatchesFilter {
-                    filter,
-                    use_lki: true,
-                    negated: negated_lki,
-                });
+                return Some(maybe_negate(
+                    AbilityCondition::TargetMatchesFilter {
+                        filter,
+                        use_lki: true,
+                    },
+                    negated_lki,
+                ));
             }
         }
     }
@@ -1222,11 +1257,13 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
             "creature" => Some(CoreType::Creature),
             "land" => Some(CoreType::Land),
             "nonland" => {
-                return Some(AbilityCondition::RevealedHasCardType {
-                    card_type: CoreType::Land,
-                    negated: !negated,
-                    additional_filter: None,
-                });
+                return Some(maybe_negate(
+                    AbilityCondition::RevealedHasCardType {
+                        card_type: CoreType::Land,
+                        additional_filter: None,
+                    },
+                    !negated,
+                ));
             }
             "instant" => Some(CoreType::Instant),
             "sorcery" => Some(CoreType::Sorcery),
@@ -1237,11 +1274,13 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
             _ => None,
         };
         if let Some(card_type) = card_type {
-            return Some(AbilityCondition::RevealedHasCardType {
-                card_type,
+            return Some(maybe_negate(
+                AbilityCondition::RevealedHasCardType {
+                    card_type,
+                    additional_filter: None,
+                },
                 negated,
-                additional_filter: None,
-            });
+            ));
         }
     }
 
@@ -1407,7 +1446,11 @@ mod tests {
             AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::AnyCountersOnSelf,
+                        qty:
+                            QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: None,
+                            },
                     },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -1427,7 +1470,11 @@ mod tests {
             AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::AnyCountersOnSelf,
+                        qty:
+                            QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: None,
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -1451,7 +1498,11 @@ mod tests {
             AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::CountersOnSelf { counter_type },
+                        qty:
+                            QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(counter_type),
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },

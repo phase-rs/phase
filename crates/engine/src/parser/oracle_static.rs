@@ -28,8 +28,8 @@ use super::oracle_util::{
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
-    ContinuousModification, ControllerRef, FilterProp, QuantityExpr, QuantityRef, StaticCondition,
-    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+    StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -3117,8 +3117,17 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     //     that creature"). Detected by the typed QuantityRef.
     //   - Otherwise falls through to the canonical (per_affected, dynamic_qty) lattice.
     let scaling = match (per_affected.is_some(), dynamic_qty) {
-        (_, Some(QuantityRef::AnyCountersOnTarget)) => UnlessPayScaling::PerAffectedWithRef {
-            quantity: QuantityRef::AnyCountersOnTarget,
+        (
+            _,
+            Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Target,
+                counter_type: None,
+            }),
+        ) => UnlessPayScaling::PerAffectedWithRef {
+            quantity: QuantityRef::CountersOn {
+                scope: ObjectScope::Target,
+                counter_type: None,
+            },
         },
         (true, Some(qty)) => UnlessPayScaling::PerAffectedAndQuantityRef { quantity: qty },
         (true, None) => UnlessPayScaling::PerAffectedCreature,
@@ -3160,7 +3169,13 @@ fn parse_dynamic_x_clause(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
     .parse(input)
     {
-        return Ok(("", QuantityRef::AnyCountersOnTarget));
+        return Ok((
+            "",
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Target,
+                counter_type: None,
+            },
+        ));
     }
 
     // Delegate to the shared quantity-ref combinator which is case-sensitive on
@@ -3314,11 +3329,14 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         let mv_filter = parse_mana_value_suffix(cursor).and_then(|(prop, consumed)| {
             let is_fixed = matches!(
                 &prop,
-                FilterProp::CmcGE {
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { .. }
-                } | FilterProp::CmcLE {
+                } | FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { .. }
-                } | FilterProp::CmcEQ {
+                } | FilterProp::Cmc {
+                    comparator: Comparator::EQ,
                     value: QuantityExpr::Fixed { .. }
                 },
             );
@@ -4572,11 +4590,13 @@ fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> 
         if let Some((n, after_n)) = parse_number(mv_rest) {
             let after_n = after_n.trim_start();
             if nom_tag_lower(after_n, after_n, "or greater").is_some() {
-                tf = tf.properties(vec![FilterProp::CmcGE {
+                tf = tf.properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { value: n as i32 },
                 }]);
             } else if nom_tag_lower(after_n, after_n, "or less").is_some() {
-                tf = tf.properties(vec![FilterProp::CmcLE {
+                tf = tf.properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { value: n as i32 },
                 }]);
             }
@@ -4721,11 +4741,13 @@ fn parse_cant_cast_mana_value(
     let after_n = after_n.trim_start();
 
     let prop = if nom_tag_lower(after_n, after_n, "or less").is_some() {
-        FilterProp::CmcLE {
+        FilterProp::Cmc {
+            comparator: Comparator::LE,
             value: QuantityExpr::Fixed { value: n as i32 },
         }
     } else if nom_tag_lower(after_n, after_n, "or greater").is_some() {
-        FilterProp::CmcGE {
+        FilterProp::Cmc {
+            comparator: Comparator::GE,
             value: QuantityExpr::Fixed { value: n as i32 },
         }
     } else {
@@ -5371,7 +5393,12 @@ fn parse_continuous_gets_has(
     // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
     if let Some((before_for_each, after_for_each)) = tp.split_around("for each ") {
         let pt_text = before_for_each.original.trim();
-        let for_each_clause = after_for_each.lower.trim_end_matches('.');
+        let raw_for_each = after_for_each.lower.trim_end_matches('.');
+        // Strip a trailing keyword clause (" and has flying", " and gains haste",
+        // etc.) so the for-each filter parser sees only its own clause. The
+        // trailing keywords are picked up separately via `extract_keyword_clause`
+        // on `description` below.
+        let for_each_clause = strip_trailing_keyword_clause(raw_for_each);
 
         let pt_lower = pt_text.to_lowercase();
         let pt_source = nom_tag_lower(&pt_lower, &pt_lower, "gets ")
@@ -5993,6 +6020,21 @@ pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
     // Reuses the building block from oracle_keyword.rs which handles inline,
     // comma-continuation, and Oxford comma protection patterns.
     super::oracle_keyword::expand_protection_parts(&parts)
+}
+
+/// CR 613.4c: For "+N/+M for each X and has [keyword]" patterns, the for-each
+/// filter clause ends at " and has " / " and gains " / " and have ". Returns
+/// the input slice truncated at the first matching boundary, or unchanged if
+/// no boundary is present. Mirrors the keyword recognition in
+/// `extract_keyword_clause` but in the inverse direction (returns the
+/// pre-boundary span instead of the post-boundary one).
+fn strip_trailing_keyword_clause(clause: &str) -> &str {
+    for needle in [" and gains ", " and gain ", " and has ", " and have "] {
+        if let Some(pos) = clause.find(needle) {
+            return &clause[..pos];
+        }
+    }
+    clause
 }
 
 fn extract_keyword_clause(text: &str) -> Option<&str> {
@@ -8672,7 +8714,8 @@ mod tests {
             Some(TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::CmcLE {
+                    .properties(vec![FilterProp::Cmc {
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 3 },
                     }]),
             ))
@@ -9299,9 +9342,13 @@ mod tests {
         if let TargetFilter::Typed(tf) = &filter {
             assert!(tf.type_filters.contains(&TypeFilter::Permanent));
             assert!(
-                tf.properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::CmcLE { .. })),
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        ..
+                    }
+                )),
                 "Expected CmcLE property, got: {:?}",
                 tf.properties
             );
@@ -9680,7 +9727,8 @@ mod tests {
         let has_dynamic_cmc_le = tf.properties.iter().any(|p| {
             matches!(
                 p,
-                FilterProp::CmcLE {
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount { .. }
                     }
@@ -11395,7 +11443,8 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CmcLE {
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 3 }
                     }
                 )));
@@ -11523,7 +11572,8 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CmcGE {
+                    FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 5 }
                     }
                 )));
@@ -11749,7 +11799,8 @@ mod tests {
                     .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))));
                 assert!(tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CmcGE {
+                    FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 4 }
                     }
                 )));
@@ -12424,7 +12475,8 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(
-                    tf.properties.contains(&FilterProp::CmcGE {
+                    tf.properties.contains(&FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 6 },
                     }),
                     "Expected CmcGE(6) property, got {:?}",
@@ -12457,7 +12509,8 @@ mod tests {
                     tf.type_filters
                 );
                 assert!(
-                    tf.properties.contains(&FilterProp::CmcGE {
+                    tf.properties.contains(&FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 4 },
                     }),
                     "Expected CmcGE(4), got {:?}",
@@ -12490,7 +12543,8 @@ mod tests {
                     tf.properties
                 );
                 assert!(
-                    tf.properties.contains(&FilterProp::CmcGE {
+                    tf.properties.contains(&FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 4 },
                     }),
                     "Expected CmcGE(4), got {:?}",
@@ -12515,9 +12569,16 @@ mod tests {
         match &def.affected {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(
-                    !tf.properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::CmcGE { .. } | FilterProp::CmcLE { .. })),
+                    !tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::GE,
+                            ..
+                        } | FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            ..
+                        }
+                    )),
                     "Did not expect any Cmc property, got {:?}",
                     tf.properties
                 );
@@ -13279,7 +13340,13 @@ mod tests {
         let (_cost, scaling) = extract_unless_pay(&def);
         match scaling {
             UnlessPayScaling::PerAffectedWithRef { quantity } => {
-                assert!(matches!(quantity, QuantityRef::AnyCountersOnTarget));
+                assert!(matches!(
+                    quantity,
+                    QuantityRef::CountersOn {
+                        scope: ObjectScope::Target,
+                        counter_type: None
+                    }
+                ));
             }
             other => panic!("expected PerAffectedWithRef, got {other:?}"),
         }

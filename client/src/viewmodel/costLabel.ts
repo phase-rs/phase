@@ -129,6 +129,7 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "CrimesCommittedThisTurn": return "crimes committed this turn";
     // Counter / property references
     case "BasicLandTypeCount": return "basic land types you control";
+    case "PartySize": return "your party's size";
     case "TrackedSetSize": return "exiled cards";
     case "CardsExiledBySource": return "cards exiled by this";
     case "ExiledFromHandThisResolution": return "cards exiled from hand";

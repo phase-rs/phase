@@ -6,8 +6,8 @@ use nom::combinator::{opt, value};
 use nom::Parser;
 
 use crate::types::ability::{
-    AttachmentKind, ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality,
-    TargetFilter, TypeFilter, TypedFilter,
+    AttachmentKind, Comparator, ControllerRef, FilterProp, QuantityExpr, QuantityRef,
+    SharedQuality, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::identifiers::TrackedSetId;
@@ -1969,16 +1969,20 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
             }
         };
         let prop = match (is_le, is_equal) {
-            (true, true) => FilterProp::CmcLE {
+            (true, true) => FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: make_value(0),
             },
-            (true, false) => FilterProp::CmcLE {
+            (true, false) => FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: make_value(-1),
             },
-            (false, true) => FilterProp::CmcGE {
+            (false, true) => FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: make_value(0),
             },
-            (false, false) => FilterProp::CmcGE {
+            (false, false) => FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: make_value(1),
             },
         };
@@ -2001,14 +2005,32 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
     let (prop, after) = if let Ok((a, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
     {
-        (FilterProp::CmcGE { value }, a)
+        (
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value,
+            },
+            a,
+        )
     } else if let Ok((a, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
     {
-        (FilterProp::CmcLE { value }, a)
+        (
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value,
+            },
+            a,
+        )
     } else {
         // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
-        (FilterProp::CmcEQ { value }, after_num)
+        (
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value,
+            },
+            after_num,
+        )
     };
     Some((prop, text.len() - after.len()))
 }
@@ -2030,9 +2052,24 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     use nom::combinator::{opt, value};
 
     let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
     let (rest, _) = tag_e::<_, _, nom_language::error::VerboseError<&str>>("with ")
         .parse(trimmed)
         .ok()?;
+
+    // CR 122.1: Bare "with a counter on it" / "with a counter on them" — any
+    // counter of any type. Distinct from typed "with a +1/+1 counter on it"
+    // (CountersGE) — emits HasAnyCounter so `creature with a counter on it`
+    // matches any counter-bearing creature regardless of type. Must precede the
+    // typed-counter branch so the empty-counter-type guard there doesn't fire.
+    for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
+        if let Ok((after, _)) =
+            tag_e::<_, _, nom_language::error::VerboseError<&str>>(prefix).parse(rest)
+        {
+            let consumed = leading_ws + "with ".len() + (rest.len() - after.len());
+            return Some((FilterProp::HasAnyCounter, consumed));
+        }
+    }
 
     // Parse count: optional article ("a"/"an" → implicit 1) or an explicit
     // quantity expression followed by a space. Neither branch matching means
@@ -3451,7 +3488,8 @@ mod tests {
         let (f, _) = parse_type_phrase("spell with mana value 4 or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::CmcGE {
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 4 },
             }]))
         );
@@ -3465,7 +3503,8 @@ mod tests {
         let (f, _) = parse_type_phrase("creature card with mana value x or less");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::Variable {
                         name: "X".to_string(),
@@ -3480,7 +3519,8 @@ mod tests {
         let (f, _) = parse_type_phrase("spell with mana value x or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::CmcGE {
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::Variable {
                         name: "X".to_string(),
@@ -4991,7 +5031,8 @@ mod tests {
                     assert!(
                         typed.properties.iter().any(|p| matches!(
                             p,
-                            FilterProp::CmcLE {
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
                                 value: QuantityExpr::Fixed { value: 2 }
                             }
                         )),
@@ -5084,7 +5125,8 @@ mod tests {
         );
         assert!(typed.properties.iter().any(|property| matches!(
             property,
-            FilterProp::CmcLE {
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextSourceManaValue
                 }

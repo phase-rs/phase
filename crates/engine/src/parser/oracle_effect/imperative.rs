@@ -734,6 +734,22 @@ pub(super) fn parse_targeted_action_ast(
         nom_on_lower(text, lower, |input| value((), tag("discard ")).parse(input))
     {
         let after_discard = &lower[lower.len() - after_discard_orig.len()..];
+        // CR 701.9a: Back-reference discard — "discard that card" / "discard
+        // those cards" target a specific card identified by the parent effect
+        // (Seek/Conjure/Reveal-Choose populate ParentTarget at runtime). Must
+        // be checked before the player-choice count-based discard path, since
+        // "that card" is not a count phrase.
+        if alt((
+            tag::<_, _, VerboseError<&str>>("that card"),
+            tag("those cards"),
+        ))
+        .parse(after_discard)
+        .is_ok()
+        {
+            return Some(TargetedImperativeAst::DiscardCard {
+                target: TargetFilter::ParentTarget,
+            });
+        }
         // CR 701.9a: Detect "at random" suffix for random discard effects.
         let random = nom_primitives::scan_contains(after_discard, "at random");
         // CR 701.9b: Detect "up to" prefix for optional partial discard.
@@ -1014,6 +1030,11 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             unless_filter,
             filter,
         },
+        // CR 701.9a: Back-reference discard — "discard that card" / "discard those
+        // cards" — discards specific cards via ParentTarget binding. Count is
+        // implicit (1 per parent-affected ID; the runtime expands ParentTarget
+        // into the full set at rebind time).
+        TargetedImperativeAst::DiscardCard { target } => Effect::DiscardCard { count: 1, target },
         TargetedImperativeAst::Return { target } => Effect::Bounce {
             target,
             destination: None,
@@ -1427,9 +1448,25 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         return Some(HandRevealImperativeAst::LookAt { target });
     }
 
-    nom_on_lower(text, lower, |input| {
+    let (_, after_reveal) = nom_on_lower(text, lower, |input| {
         value((), alt((tag("reveal "), tag("reveals ")))).parse(input)
     })?;
+
+    // CR 701.20a: Back-reference reveal — "reveal it" / "reveal that card" /
+    // "reveal those cards" — reveals a specific card identified by the parent
+    // effect's affected IDs. Common in "look at top → reveal it" sequences
+    // (Frost Augur, Archghoul of Thraben, Leaf-Crowned Elder).
+    let after_reveal_lower = &lower[lower.len() - after_reveal.len()..];
+    if alt((
+        tag::<_, _, VerboseError<&str>>("it"),
+        tag("that card"),
+        tag("those cards"),
+    ))
+    .parse(after_reveal_lower)
+    .is_ok()
+    {
+        return Some(HandRevealImperativeAst::RevealBackRef);
+    }
 
     // CR 701.20a: "reveals a number of cards from their hand equal to X"
     if nom_primitives::scan_contains(lower, "hand")
@@ -1471,6 +1508,11 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             target: TargetFilter::Any,
             card_filter: TargetFilter::Any,
             count: Some(count),
+        },
+        // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
+        // ParentTarget binds at runtime to the parent ability's affected IDs.
+        HandRevealImperativeAst::RevealBackRef => Effect::Reveal {
+            target: TargetFilter::ParentTarget,
         },
     }
 }
@@ -2252,17 +2294,23 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             }
         }
         // CR 701.24g: Place at a specific position — uses move_to_library_position,
-        // not ChangeZone which auto-shuffles per CR 401.3.
+        // not ChangeZone which auto-shuffles per CR 401.3. `count` defaults to
+        // `Fixed(1)` here; the cardinality patcher in `oracle_effect/mod.rs`
+        // upgrades it (and the target filter) by re-inspecting the imperative
+        // text once the clause has been lowered.
         PutImperativeAst::TopOfLibrary => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
         },
         PutImperativeAst::BottomOfLibrary => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
         },
         PutImperativeAst::NthFromTop { n } => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::NthFromTop { n },
         },
     }
@@ -2465,10 +2513,66 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             return Some(ShuffleImperativeAst::ShuffleLibrary { target });
         }
     }
+    // CR 701.24a + CR 400.3: "shuffle <pronoun> into <possessive> library" —
+    // covers "shuffle it into its owner's library" (Cavalier cycle), "shuffle
+    // ~ into your library", "shuffle that card into its owner's library"
+    // (search-then-shuffle tutors), "shuffle them into their owners' libraries"
+    // (compound subject). Both pronoun (it/them/that card/those cards/~) and
+    // possessive (its owner's / their owner's / their owners' / your) are
+    // classified via nom combinators so the lowered `ChangeZone` carries the
+    // correct `target` (SelfRef vs ParentTarget) and `owner_library` flag.
     if contains_object_pronoun(lower, "shuffle", "into")
         || contains_object_pronoun(lower, "shuffles", "into")
     {
-        return Some(ShuffleImperativeAst::ChangeZoneToLibrary);
+        // Pronoun classification. Walk word-boundaries, peel "shuffle"/
+        // "shuffles" + " ", then alt() over the four object-pronoun variants.
+        // "it" / "~" → SelfRef (singular, anaphoric to the source object);
+        // "them" / "that card" / "those cards" → ParentTarget (refers to a
+        // previously-bound target). The fall-through "SelfRef" arm only
+        // engages when the outer `contains_object_pronoun` guard somehow
+        // matched a pronoun the inner combinator didn't recognize — defensive
+        // and also matches the existing "shuffle this creature into …" form.
+        let target = nom_primitives::scan_at_word_boundaries(lower, |input| {
+            let (rest, _) = alt((
+                tag::<_, _, VerboseError<&str>>("shuffle "),
+                tag("shuffles "),
+            ))
+            .parse(input)?;
+            alt((
+                value(TargetFilter::ParentTarget, tag("them")),
+                value(TargetFilter::ParentTarget, tag("that card")),
+                value(TargetFilter::ParentTarget, tag("those cards")),
+                value(TargetFilter::SelfRef, tag("it")),
+                value(TargetFilter::SelfRef, tag("~")),
+            ))
+            .parse(rest)
+        })
+        .unwrap_or(TargetFilter::SelfRef);
+        // Library possessor. CR 400.3 routes the move to the card's *owner*
+        // when the Oracle names a possessive that resolves to the owner —
+        // "its owner's", "their owner's", "their owners'". Bare "their" /
+        // "their library" is intentionally NOT treated as owner-routing:
+        // "their" is ambiguous (controller vs owner vs plural antecedent)
+        // and would mis-classify "each player shuffles their library".
+        // "your library" leaves owner_library: false (the default).
+        // TODO(CR 400.3): When `owner_library: true`, the `Shuffle` sub_ability
+        // produced by `with_shuffle_sub_ability` still targets `Controller`,
+        // so a stolen creature shuffles its current controller's library
+        // instead of its owner's. Fixing this requires lifting `Effect::Shuffle`
+        // to accept an owner-of-target binding (separate commit).
+        let owner_library = nom_primitives::scan_at_word_boundaries(lower, |input| {
+            alt((
+                value((), tag::<_, _, VerboseError<&str>>("its owner's library")),
+                value((), tag("their owner's library")),
+                value((), tag("their owners' libraries")),
+            ))
+            .parse(input)
+        })
+        .is_some();
+        return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+            target,
+            owner_library,
+        });
     }
     if contains_possessive(lower, "shuffle", "graveyard") {
         return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary {
@@ -2524,12 +2628,19 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
         ShuffleImperativeAst::ShuffleLibrary { target } => {
             parsed_clause(Effect::Shuffle { target })
         }
-        ShuffleImperativeAst::ChangeZoneToLibrary => {
+        ShuffleImperativeAst::ChangeZoneToLibrary {
+            target,
+            owner_library,
+        } => {
+            // CR 701.24a + CR 400.3: `target` and `owner_library` are
+            // populated by `parse_shuffle_ast`'s combinator-based pronoun /
+            // possessive classification. See the construction site for the
+            // detection grammar and the TODO on the `Shuffle` sub-target.
             let effect = Effect::ChangeZone {
                 origin: None,
                 destination: Zone::Library,
-                target: TargetFilter::Any,
-                owner_library: false,
+                target,
+                owner_library,
                 enter_transformed: false,
                 under_your_control: false,
                 enter_tapped: false,
@@ -4767,7 +4878,7 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: crate::types::ability::QuantityRef::LifeLostThisTurn
+                            qty: crate::types::ability::QuantityRef::LifeLostThisTurn { .. }
                         }
                     ),
                     "Expected LifeLostThisTurn, got {amount:?}"

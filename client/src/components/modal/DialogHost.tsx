@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 
 import type { WaitingFor } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 
 // `WaitingFor` variants that do NOT render a centered dialog/overlay.
@@ -49,6 +50,12 @@ function isClickThroughDialog(waitingFor: WaitingFor | null | undefined): boolea
 
 export function DialogHost({ children }: { children: ReactNode }) {
   const waitingFor = useGameStore((s) => s.waitingFor);
+  // UI-driven dialogs (e.g. the planeswalker / multi-ability picker fired
+  // from PermanentCard while the player has Priority) also need the host to
+  // anchor `fixed inset-0` descendants to the viewport. Subscribing here
+  // keeps the contract uniform: any modal rendered inside DialogHost is
+  // centered regardless of which signal triggered it.
+  const hasUiDialog = useUiStore((s) => s.pendingAbilityChoice != null);
   const [peeked, setPeeked] = useState(false);
   const shouldReduceMotion = useReducedMotion();
 
@@ -57,9 +64,9 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // engine update), reset peek so the player isn't shown a hidden dialog.
   useEffect(() => {
     setPeeked(false);
-  }, [waitingFor]);
+  }, [waitingFor, hasUiDialog]);
 
-  const dialogVisible = isDialogVisibleFor(waitingFor);
+  const dialogVisible = isDialogVisibleFor(waitingFor) || hasUiDialog;
   const clickThrough = isClickThroughDialog(waitingFor);
   // Only wrap when there's a centered dialog that benefits from being
   // anchored to the viewport. Click-through overlays (TargetingOverlay)

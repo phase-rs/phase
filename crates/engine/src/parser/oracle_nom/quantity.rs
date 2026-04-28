@@ -350,6 +350,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
         parse_cards_exiled_with_source,
         parse_life_total_ref,
+        // CR 700.8: party-size phrasings — must precede `parse_speed_ref`
+        // and zone counts so the leading "your " possessive routes to the
+        // dedicated party combinator instead of a generic zone fallback.
+        parse_party_size_ref,
         parse_speed_ref,
         parse_cards_in_zone_ref,
         parse_self_power_ref,
@@ -458,6 +462,10 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // generic type-filter arm so the typed player-counter ref wins over a
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
         parse_player_counter_ref_tail,
+        // CR 700.8: "creatures in your party" must precede the generic
+        // "<type> you control" arm — the trailing "in your party" is what
+        // distinguishes party-size from a controlled-creature count.
+        parse_creatures_in_your_party_tail,
         parse_number_of_controlled_type,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
         // must be tried BEFORE the scoped-zone combinator so the target-referring
@@ -641,6 +649,64 @@ fn parse_life_total_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
+/// CR 700.8: Standalone "your party" phrasings → `QuantityRef::PartySize`.
+///
+/// Covers the surface forms used by ZNR Party cards as full-quantity
+/// expressions (not the post-"for each" form, which is handled by
+/// [`parse_creature_in_party_for_each`]):
+/// - `"your party's size"` (Cleric of Life's Bond, Coveted Prize, Tazri…)
+/// - `"the size of your party"` (rarer rewording)
+///
+/// Composes a single `tag` per phrasing under one `alt` — no permutation
+/// enumeration. The possessive axis is intentionally limited to `your` here:
+/// no printed card today reads "an opponent's party's size", so the
+/// `PlayerScope::Opponent { .. }` branch is unlocked at the type layer
+/// without needing dedicated parser surface.
+fn parse_party_size_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::PartySize {
+            player: PlayerScope::Controller,
+        },
+        alt((tag("your party's size"), tag("the size of your party"))),
+    )
+    .parse(input)
+}
+
+/// CR 700.8: Inner form reached after `parse_the_number_of` has consumed
+/// `"the number of "` — recognizes `"creatures in your party"` and the
+/// (rare) singular `"creature in your party"`. Returns `PartySize`
+/// (`PlayerScope::Controller`); see [`parse_party_size_ref`] for the
+/// possessive-axis discussion.
+fn parse_creatures_in_your_party_tail(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::PartySize {
+            player: PlayerScope::Controller,
+        },
+        alt((
+            tag("creatures in your party"),
+            tag("creature in your party"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 700.8: Reached after `for each ` has been consumed. Recognizes
+/// `"creature in your party"` (singular per Oracle templating) and returns
+/// the party-size ref so "for each creature in your party" composes to the
+/// same scaling expression as "equal to your party's size".
+fn parse_creature_in_party_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::PartySize {
+            player: PlayerScope::Controller,
+        },
+        alt((
+            tag("creature in your party"),
+            tag("creatures in your party"),
+        )),
+    )
+    .parse(input)
+}
+
 fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
@@ -730,10 +796,30 @@ fn parse_scoped_zone_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)>
 /// identically.
 fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        value(QuantityRef::SelfPower, tag("its power")),
-        value(QuantityRef::SelfPower, tag("~'s power")),
-        value(QuantityRef::SelfPower, tag("this creature's power")),
-        value(QuantityRef::SelfPower, tag("this card's power")),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("its power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("~'s power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("this creature's power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("this card's power"),
+        ),
     ))
     .parse(input)
 }
@@ -743,10 +829,30 @@ fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// rationale.
 fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        value(QuantityRef::SelfToughness, tag("its toughness")),
-        value(QuantityRef::SelfToughness, tag("~'s toughness")),
-        value(QuantityRef::SelfToughness, tag("this creature's toughness")),
-        value(QuantityRef::SelfToughness, tag("this card's toughness")),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("its toughness"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("~'s toughness"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("this creature's toughness"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("this card's toughness"),
+        ),
     ))
     .parse(input)
 }
@@ -763,34 +869,66 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         nom::combinator::opt(alt((tag("the amount of "), tag("amount of ")))).parse(input)?;
     alt((
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("total life you lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("total life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("life you lost this turn"),
         ),
         // Duration-stripped forms (after strip_trailing_duration removes "this turn")
-        value(QuantityRef::LifeLostThisTurn, tag("the life you've lost")),
-        value(QuantityRef::LifeLostThisTurn, tag("the life you lost")),
-        value(QuantityRef::LifeLostThisTurn, tag("life you've lost")),
-        value(QuantityRef::LifeLostThisTurn, tag("life you lost")),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("the life you've lost"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("the life you lost"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("life you've lost"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("life you lost"),
+        ),
         // CR 119.3 + CR 608.2k: Third-person variants resolve against the
         // per-target player during effect iteration. The runtime's
         // `LifeLostThisTurn` reads `player.life_lost_this_turn` where
@@ -800,22 +938,35 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // a new typed variant. Archfiend of Despair, Wound Reflection,
         // Astarion (Feed mode), Blitzwing, Warlock Class.
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life that player lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life they lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the amount of life they lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life that player lost"),
         ),
-        value(QuantityRef::LifeLostThisTurn, tag("the life they lost")),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("the life they lost"),
+        ),
     ))
     .parse(input)
 }
@@ -830,37 +981,66 @@ fn parse_life_gained_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         nom::combinator::opt(alt((tag("the amount of "), tag("amount of ")))).parse(input)?;
     alt((
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("total life you gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("total life you've gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you've gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("life you've gained this turn"),
         ),
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("life you gained this turn"),
         ),
         // Duration-stripped forms
         value(
-            QuantityRef::LifeGainedThisTurn,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you've gained"),
         ),
-        value(QuantityRef::LifeGainedThisTurn, tag("the life you gained")),
-        value(QuantityRef::LifeGainedThisTurn, tag("life you've gained")),
-        value(QuantityRef::LifeGainedThisTurn, tag("life you gained")),
+        value(
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("the life you gained"),
+        ),
+        value(
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("life you've gained"),
+        ),
+        value(
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("life you gained"),
+        ),
     ))
     .parse(input)
 }
@@ -935,7 +1115,7 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
 ///   - Saxon-genitive: "target creature's power" / "the target creature's power"
 ///   - Of-form: "the power of target creature [you control|an opponent controls]?"
 ///
-/// All variants resolve to the same `QuantityRef::TargetPower`. CR 107.1.
+/// All variants resolve to the same `QuantityRef::Power { scope: crate::types::ability::ObjectScope::Target }`. CR 107.1.
 /// Longest-first ordering: the controller-qualified of-form variants must come
 /// before the bare of-form so `alt`'s short-circuit doesn't strand the
 /// "you control" / "an opponent controls" suffix as un-consumed remainder
@@ -943,18 +1123,34 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Soul's Majesty, Predator's Rapport, and similar.
 fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        value(QuantityRef::TargetPower, tag("target creature's power")),
-        value(QuantityRef::TargetPower, tag("the target creature's power")),
         value(
-            QuantityRef::TargetPower,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
+            tag("target creature's power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
+            tag("the target creature's power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
             tag("the power of target creature you control"),
         ),
         value(
-            QuantityRef::TargetPower,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
             tag("the power of target creature an opponent controls"),
         ),
         value(
-            QuantityRef::TargetPower,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
             tag("the power of target creature"),
         ),
     ))
@@ -1049,9 +1245,46 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_distinct_card_types_in_zone,
         parse_zone_card_count,
         parse_for_each_attached_to_source,
+        // CR 700.8: "creature in your party" must precede the generic
+        // "<type> you control" arm — same reason as in
+        // `parse_number_of_inner`.
+        parse_creature_in_party_for_each,
+        // CR 700.4 + CR 700.7: "creature that died this turn" / "creature that
+        // died under your control this turn" — event-based count of dies-events
+        // tracked in `state.zone_changes_this_turn`. Must precede
+        // `parse_for_each_controlled_type` since the leading "creature" token
+        // would otherwise commit the simple `<type> you control` arm.
+        parse_for_each_creature_died_this_turn,
         parse_for_each_controlled_type,
     ))
     .parse(input)
+}
+
+/// CR 700.4 + CR 700.7: Parse "creature that died" / "creature that died
+/// under your control" → CreaturesDiedThisTurn.
+///
+/// Engine tracking is per-turn-only (no last-turn / total counts), so the
+/// trailing "this turn" qualifier is semantically redundant — it gets stripped
+/// upstream by `strip_trailing_duration` before this arm sees the clause.
+/// Both the with-qualifier and without-qualifier forms map to the same
+/// `CreaturesDiedThisTurn` quantity ref.
+fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((
+        // "creature that died" canonical forms
+        tag("creature that died under your control this turn"),
+        tag("creature that died under your control"),
+        tag("creature that died this turn"),
+        tag("creature that died"),
+        // CR 700.7: "creature put into [a/your] graveyard from the battlefield"
+        // is the long form of "died" — both reference the same battlefield→
+        // graveyard transition tracked in `zone_changes_this_turn`.
+        tag("creature put into your graveyard from the battlefield this turn"),
+        tag("creature put into your graveyard from the battlefield"),
+        tag("creature put into a graveyard from the battlefield this turn"),
+        tag("creature put into a graveyard from the battlefield"),
+    ))
+    .parse(input)?;
+    Ok((rest, QuantityRef::CreaturesDiedThisTurn))
 }
 
 /// CR 301.5 + CR 303.4: Parse "<type> [and <type>]* attached to ~" — counts
@@ -1107,8 +1340,36 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
 }
 
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, tf) = parse_type_filter_word(input)?;
+    // CR 109.1: Optional "other " / "another " prefix excludes the source from
+    // the count. Lowered to FilterProp::Another (CR 109.1), preserving the
+    // self-exclusion semantic at runtime via filter evaluation against the
+    // source object's identity.
+    let (rest, has_other) = nom::combinator::opt(alt((
+        nom::combinator::value(
+            (),
+            tag::<_, _, nom_language::error::VerboseError<&str>>("other "),
+        ),
+        nom::combinator::value((), tag("another ")),
+    )))
+    .parse(input)?;
+    let (rest, tf) = parse_type_filter_word(rest)?;
     let (rest, _) = tag(" you control").parse(rest)?;
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    if !properties.is_empty() {
+        return Ok((
+            rest,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![tf],
+                    controller: Some(ControllerRef::You),
+                    properties,
+                }),
+            },
+        ));
+    }
     Ok((
         rest,
         QuantityRef::ObjectCount {
@@ -1315,6 +1576,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_quantity_ref_party_size_phrasings() {
+        // CR 700.8: standalone party-size phrasings.
+        for phrase in [
+            "your party's size",
+            "the size of your party",
+            "the number of creatures in your party",
+            "the number of creature in your party",
+        ] {
+            let (rest, q) = parse_quantity(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PartySize {
+                        player: PlayerScope::Controller
+                    }
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+    }
+
+    #[test]
+    fn test_parse_for_each_creature_in_your_party() {
+        // CR 700.8: post-"for each" form.
+        let (rest, q) = parse_for_each("for each creature in your party").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::PartySize {
+                player: PlayerScope::Controller
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn test_parse_quantity_ref_hand_size() {
         let (rest, q) = parse_quantity_ref("cards in your hand").unwrap();
         assert_eq!(
@@ -1358,7 +1655,12 @@ mod tests {
     #[test]
     fn test_parse_quantity_ref_self_power() {
         let (rest, q) = parse_quantity_ref("its power").unwrap();
-        assert_eq!(q, QuantityRef::SelfPower);
+        assert_eq!(
+            q,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -1373,7 +1675,13 @@ mod tests {
             "this card's power",
         ] {
             let (rest, q) = parse_quantity_ref(phrase).unwrap();
-            assert_eq!(q, QuantityRef::SelfPower, "phrase: {phrase}");
+            assert_eq!(
+                q,
+                QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                },
+                "phrase: {phrase}"
+            );
             assert_eq!(rest, "", "phrase: {phrase}");
         }
     }
@@ -1535,7 +1843,12 @@ mod tests {
     #[test]
     fn test_parse_quantity_ref_life_lost() {
         let (rest, q) = parse_quantity_ref("the life you've lost this turn").unwrap();
-        assert_eq!(q, QuantityRef::LifeLostThisTurn);
+        assert_eq!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -1543,14 +1856,24 @@ mod tests {
     fn test_parse_quantity_ref_amount_of_life_gained() {
         // CR 119.3: Hope Estheim class — "the amount of life you gained this turn".
         let (rest, q) = parse_quantity_ref("the amount of life you gained this turn").unwrap();
-        assert_eq!(q, QuantityRef::LifeGainedThisTurn);
+        assert_eq!(
+            q,
+            QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller
+            }
+        );
         assert_eq!(rest, "");
     }
 
     #[test]
     fn test_parse_quantity_ref_amount_of_life_lost() {
         let (rest, q) = parse_quantity_ref("the amount of life you lost this turn").unwrap();
-        assert_eq!(q, QuantityRef::LifeLostThisTurn);
+        assert_eq!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -1641,7 +1964,9 @@ mod tests {
         assert_eq!(
             q,
             QuantityExpr::Ref {
-                qty: QuantityRef::SelfPower
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                }
             }
         );
         assert_eq!(rest, "");
@@ -1690,7 +2015,12 @@ mod tests {
     #[test]
     fn test_parse_target_power() {
         let (rest, q) = parse_quantity_ref("target creature's power").unwrap();
-        assert_eq!(q, QuantityRef::TargetPower);
+        assert_eq!(
+            q,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -1764,7 +2094,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::SelfPower,
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }

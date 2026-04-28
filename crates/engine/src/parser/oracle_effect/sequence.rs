@@ -785,6 +785,7 @@ pub(super) fn apply_clause_continuation(
                 kind,
                 Effect::PutAtLibraryPosition {
                     target: TargetFilter::Any,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     position: crate::types::ability::LibraryPosition::Bottom,
                 },
             );

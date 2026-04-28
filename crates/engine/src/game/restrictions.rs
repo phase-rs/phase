@@ -787,6 +787,18 @@ fn evaluate_condition(
             crate::game::quantity::resolve_player_count(state, filter, player, source_id) as usize
                 >= *minimum
         }
+        // CR 601.3 / CR 602.5: Compound restriction — all inner conditions must be true.
+        ParsedCondition::And { conditions } => conditions
+            .iter()
+            .all(|c| evaluate_condition(state, player, source_id, c)),
+        // CR 601.3 / CR 602.5: Disjunctive restriction — any inner condition must be true.
+        ParsedCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| evaluate_condition(state, player, source_id, c)),
+        // CR 601.3 / CR 602.5: Logical negation — true when the inner condition is false.
+        ParsedCondition::Not { condition } => {
+            !evaluate_condition(state, player, source_id, condition)
+        }
     }
 }
 
