@@ -7,7 +7,7 @@ use nom_language::error::VerboseError;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_target::{parse_mana_value_suffix, parse_type_phrase};
+use super::super::oracle_target::{parse_mana_value_suffix, parse_target, parse_type_phrase};
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
 };
@@ -144,6 +144,7 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
         target_player,
         up_to,
         selection_constraint,
+        reference_target: scan_same_name_reference_target(lower),
         extra_filters,
         multi_destination,
         multi_enter_tapped,
@@ -707,6 +708,26 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             continue;
         }
 
+        // CR 115.1c + CR 608.2c: "with the same name as target {creature,…}" declares
+        // a target solely to parameterize the search filter. The target is lowered as
+        // a structural `TargetOnly` wrapper, and the library filter reads it via
+        // `SameNameAsParentTarget`.
+        if let Ok((rest, _)) =
+            tag::<_, _, VerboseError<&str>>("with the same name as ").parse(remaining)
+        {
+            if tag::<_, _, VerboseError<&str>>("target ")
+                .parse(rest)
+                .is_ok()
+            {
+                let (target, after_target) = parse_target(rest);
+                if !matches!(target, TargetFilter::Any) {
+                    suffix.properties.push(FilterProp::SameNameAsParentTarget);
+                    remaining = after_target.trim_start();
+                    continue;
+                }
+            }
+        }
+
         // CR 608.2c: "with different names" / "with different name" — distinct-names
         // constraint is already encoded on the search details upstream via
         // `scan_distinct_names_clause`. The chomping arm here exists solely to
@@ -777,6 +798,16 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         ));
         break;
     }
+}
+
+fn scan_same_name_reference_target(lower: &str) -> Option<TargetFilter> {
+    scan_preceded(lower, "with the same name as ", |input| {
+        let _ = tag::<_, _, VerboseError<&str>>("target ").parse(input)?;
+        let (target, rest) = parse_target(input);
+        Ok((rest, target))
+    })
+    .map(|(target, _)| target)
+    .filter(|target| !matches!(target, TargetFilter::Any))
 }
 
 /// Parse the destination zone from search Oracle text.
@@ -1020,6 +1051,29 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::Multicolored)));
+    }
+
+    #[test]
+    fn search_same_name_as_target_creature_captures_reference_target() {
+        let details = parse_search_library_details(
+            "search your library for up to three cards with the same name as target creature, reveal them, put them into your hand",
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected Typed filter, got {:?}", details.filter);
+        };
+        assert!(filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::SameNameAsParentTarget)));
+
+        let Some(TargetFilter::Typed(target)) = details.reference_target else {
+            panic!(
+                "expected typed reference target, got {:?}",
+                details.reference_target
+            );
+        };
+        assert!(target.type_filters.contains(&TypeFilter::Creature));
     }
 
     #[test]

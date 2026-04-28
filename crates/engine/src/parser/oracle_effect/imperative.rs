@@ -1222,6 +1222,7 @@ pub(super) fn parse_search_and_creation_ast(
             target_player: details.target_player,
             up_to: details.up_to,
             selection_constraint: details.selection_constraint,
+            reference_target: details.reference_target,
             extra_filters: details.extra_filters,
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
@@ -1332,6 +1333,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             target_player,
             up_to,
             selection_constraint,
+            reference_target: _,
             // Extras are consumed in `lower_imperative_family_ast` via
             // `lower_multi_filter_search_library`, which builds a chained
             // `ParsedEffectClause`. At this bare-Effect lowering site, multiple
@@ -2815,6 +2817,55 @@ pub(super) fn lower_multi_filter_search_library(
     clause
 }
 
+#[allow(clippy::too_many_arguments)]
+fn lower_target_referenced_search_library(
+    reference_target: TargetFilter,
+    filter: TargetFilter,
+    count: QuantityExpr,
+    reveal: bool,
+    target_player: Option<TargetFilter>,
+    up_to: bool,
+    selection_constraint: SearchSelectionConstraint,
+    extra_filters: Vec<TargetFilter>,
+    destination: Zone,
+    enter_tapped: bool,
+) -> ParsedEffectClause {
+    let search_clause = if extra_filters.is_empty() {
+        parsed_clause(Effect::SearchLibrary {
+            filter,
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
+            reveal,
+            target_player,
+            selection_constraint,
+        })
+    } else {
+        lower_multi_filter_search_library(
+            filter,
+            count,
+            reveal,
+            target_player,
+            up_to,
+            selection_constraint,
+            extra_filters,
+            destination,
+            enter_tapped,
+        )
+    };
+
+    let mut search_def = AbilityDefinition::new(AbilityKind::Spell, search_clause.effect);
+    search_def.sub_ability = search_clause.sub_ability;
+
+    let mut clause = parsed_clause(Effect::TargetOnly {
+        target: reference_target,
+    });
+    clause.sub_ability = Some(Box::new(search_def));
+    clause
+}
+
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
     let shuffle = AbilityDefinition::new(
@@ -4227,6 +4278,37 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 target_player,
                 up_to,
                 selection_constraint,
+                reference_target: Some(reference_target),
+                extra_filters,
+                multi_destination,
+                multi_enter_tapped,
+            },
+        )) => lower_target_referenced_search_library(
+            reference_target,
+            filter,
+            count,
+            reveal,
+            target_player,
+            up_to,
+            selection_constraint,
+            extra_filters,
+            multi_destination,
+            multi_enter_tapped,
+        ),
+        // CR 701.23a + CR 107.1: Dual/N-way search ("a X card and a Y card") lowers
+        // to a chain of independent `SearchLibrary` effects linked via sub_ability,
+        // mirroring `lower_put_counter_list`. Intercepted here because the bare
+        // `Effect` returned by `lower_search_and_creation_ast` cannot express a
+        // chain — only `ParsedEffectClause.sub_ability` can.
+        ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(
+            SearchCreationImperativeAst::SearchLibrary {
+                filter,
+                count,
+                reveal,
+                target_player,
+                up_to,
+                selection_constraint,
+                reference_target: None,
                 extra_filters,
                 multi_destination,
                 multi_enter_tapped,

@@ -5836,6 +5836,15 @@ fn append_to_deepest_sub_ability(
     cursor.sub_ability = Some(tail);
 }
 
+fn intrinsic_continuation_effect(def: &AbilityDefinition) -> &Effect {
+    if matches!(*def.effect, Effect::TargetOnly { .. }) {
+        if let Some(sub_ability) = def.sub_ability.as_deref() {
+            return &sub_ability.effect;
+        }
+    }
+    &def.effect
+}
+
 /// CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
 /// sentence from a chain of Oracle text, returning the stripped text and the
 /// captured rounding mode. Used by `parse_effect_chain_impl` to consume the
@@ -6839,8 +6848,11 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             continue;
         }
 
-        let intrinsic_continuation =
-            parse_intrinsic_continuation_ast(normalized_text, &current_defs[0].effect, full_text);
+        let intrinsic_continuation = parse_intrinsic_continuation_ast(
+            normalized_text,
+            intrinsic_continuation_effect(&current_defs[0]),
+            full_text,
+        );
 
         // Phase 1.5: cascade-vs-AST structural diff. Captures cases where
         // the chunk loop's linear strippers populated a slot but
@@ -15079,6 +15091,53 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::SameName)));
+    }
+
+    #[test]
+    fn search_same_name_as_target_creature_uses_target_only_chain() {
+        let def = parse_effect_chain(
+            "Search your library for up to three cards with the same name as target creature, reveal them, put them into your hand, then shuffle.",
+            AbilityKind::Spell,
+        );
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(target),
+        } = *def.effect
+        else {
+            panic!("Expected TargetOnly wrapper, got {:?}", def.effect);
+        };
+        assert!(target.type_filters.contains(&TypeFilter::Creature));
+
+        let search = def.sub_ability.expect("expected search sub ability");
+        let Effect::SearchLibrary {
+            filter,
+            count,
+            reveal,
+            ..
+        } = *search.effect
+        else {
+            panic!(
+                "Expected SearchLibrary sub ability, got {:?}",
+                search.effect
+            );
+        };
+        assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 }));
+        assert!(reveal);
+        let TargetFilter::Typed(search_filter) = filter else {
+            panic!("Expected typed search filter, got {filter:?}");
+        };
+        assert!(search_filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::SameNameAsParentTarget)));
+        let change_zone = search.sub_ability.expect("expected search destination");
+        assert!(matches!(
+            *change_zone.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
     }
 
     #[test]
