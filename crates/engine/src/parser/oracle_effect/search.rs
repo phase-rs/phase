@@ -18,7 +18,7 @@ use crate::types::ability::{
     ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, TargetFilter, TypeFilter,
     TypedFilter,
 };
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::zones::Zone;
 
 /// Scan `lower` at word boundaries for `tag_prefix`, then apply `combinator` to the
@@ -371,6 +371,10 @@ pub(super) fn parse_search_filter(text: &str) -> TargetFilter {
         return filter;
     }
 
+    if let Some(filter) = parse_search_filter_leading_property_stack(type_text) {
+        return filter;
+    }
+
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
     if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
@@ -393,6 +397,66 @@ pub(super) fn parse_search_filter(text: &str) -> TargetFilter {
     let (type_word, suffix_text) = split_search_type_word_and_suffix(clean);
 
     parse_search_filter_fallback(type_word, suffix_text, is_basic)
+}
+
+fn parse_search_filter_leading_property_stack(text: &str) -> Option<TargetFilter> {
+    let mut properties = Vec::new();
+    let mut remaining = text;
+    while let Ok((rest, property)) = parse_search_leading_filter_property(remaining) {
+        properties.push(property);
+        remaining = rest;
+    }
+    if properties.is_empty() {
+        return None;
+    }
+
+    let filter = parse_search_filter(remaining);
+    search_filter_has_meaningful_content(&filter).then(|| {
+        apply_search_suffix_constraints(
+            filter,
+            &SearchSuffixConstraints {
+                properties,
+                type_filters: Vec::new(),
+            },
+        )
+    })
+}
+
+fn parse_search_leading_filter_property(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<VerboseError<&str>>> {
+    alt((
+        value(
+            FilterProp::NotSupertype {
+                value: Supertype::Legendary,
+            },
+            tag("nonlegendary "),
+        ),
+        value(
+            FilterProp::NotSupertype {
+                value: Supertype::Basic,
+            },
+            tag("nonbasic "),
+        ),
+        value(
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            },
+            tag("legendary "),
+        ),
+        value(
+            FilterProp::HasSupertype {
+                value: Supertype::Basic,
+            },
+            tag("basic "),
+        ),
+        |i| {
+            let (rest, color) = nom_primitives::parse_color(i)?;
+            let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest)?;
+            Ok((rest, FilterProp::HasColor { color }))
+        },
+    ))
+    .parse(input)
 }
 
 fn parse_search_filter_disjunction(text: &str) -> Option<TargetFilter> {
@@ -1162,6 +1226,59 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::Multicolored)));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_nonlegendary_green_creature_card() {
+        let filter = parse_search_filter(
+            "nonlegendary green creature card with mana value 3 or less, put it onto the battlefield",
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::NotSupertype {
+                value: Supertype::Legendary
+            }
+        )));
+        assert!(typed.properties.iter().any(
+            |property| matches!(property, FilterProp::HasColor { color } if *color == crate::types::mana::ManaColor::Green)
+        ));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 }
+            }
+        )));
+    }
+
+    #[test]
+    fn search_filter_leading_properties_do_not_distribute_across_or() {
+        let filter = parse_search_filter("green creature card or an artifact card, reveal it");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(creature) = &filters[0] else {
+            panic!("expected typed green creature branch, got {:?}", filters[0]);
+        };
+        assert!(creature.type_filters.contains(&TypeFilter::Creature));
+        assert!(creature.properties.iter().any(
+            |property| matches!(property, FilterProp::HasColor { color } if *color == crate::types::mana::ManaColor::Green)
+        ));
+
+        let TargetFilter::Typed(artifact) = &filters[1] else {
+            panic!("expected typed artifact branch, got {:?}", filters[1]);
+        };
+        assert!(artifact.type_filters.contains(&TypeFilter::Artifact));
+        assert!(!artifact
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::HasColor { .. })));
     }
 
     #[test]
