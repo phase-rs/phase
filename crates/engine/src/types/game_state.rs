@@ -15,7 +15,7 @@ use super::ability::{
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
 use super::counter::CounterType;
-use super::events::GameEvent;
+use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::Keyword;
@@ -2583,6 +2583,15 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_zone_changed_ids: Vec<ObjectId>,
 
+    /// CR 608.2c + CR 109.5: Player actions performed during the current
+    /// top-level ability resolution. Distinct from turn-level trackers like
+    /// `players_who_searched_library_this_turn`: this set accumulates only
+    /// within one resolving chain so "for each opponent who searched their
+    /// library this way" counts the opponents who accepted that offer, even
+    /// across player-scope iterations and interactive continuations.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub player_actions_this_way: HashSet<(PlayerId, PlayerActionKind)>,
+
     /// CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
     /// Set after resolve_effect for effects producing a numeric result (life loss,
     /// damage, counter removal). Read by QuantityRef::PreviousEffectAmount.
@@ -2883,6 +2892,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             last_zone_changed_ids: Vec::new(),
+            player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
             last_effect_count: None,
             exiled_from_hand_this_resolution: 0,
@@ -3047,6 +3057,7 @@ impl PartialEq for GameState {
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
             && self.last_zone_changed_ids == other.last_zone_changed_ids
+            && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             && self.lki_cache == other.lki_cache

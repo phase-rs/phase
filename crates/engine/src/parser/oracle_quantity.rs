@@ -19,9 +19,10 @@ use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, CountScope, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
+    AggregateFunction, CountScope, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
+    PlayerScope, QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
 };
+use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
 
 /// Map a quantity phrase to a dynamic QuantityRef.
@@ -624,6 +625,21 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
     Some(QuantityExpr::Sum { exprs })
 }
 
+/// CR 608.2c + CR 109.5: Recognize "opponent who searched their library this
+/// way" as a player-action quantity. The runtime accumulator is keyed by
+/// `GameEvent::PlayerPerformedAction`, not by zone changes, so it still counts
+/// a player who searched and failed to find.
+fn parse_opponent_searched_library_this_way(
+    input: &str,
+) -> nom::IResult<&str, (), VerboseError<&str>> {
+    let (input, _) = tag("opponent who ").parse(input)?;
+    let (input, _) = alt((tag("searches"), tag("searched"))).parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    let (input, _) = alt((tag("a "), tag("their "))).parse(input)?;
+    let (input, _) = tag("library this way").parse(input)?;
+    Ok((input, ()))
+}
+
 /// Parse the clause after "for each" into a QuantityRef.
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
@@ -661,6 +677,23 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         // Phyrexian Hydra, Vigor, Stormwild Capridor, Hostility.
         if lower == "1 damage prevented this way" || lower == "damage prevented this way" {
             return Some(QuantityRef::EventContextAmount);
+        }
+        // CR 608.2c + CR 109.5: "opponent who searches/searched [a/their] library
+        // this way" — Tempting Offer cycle's bonus-tutor-per-accepting-opponent
+        // step. A single nom combinator handles all four (verb tense × article)
+        // permutations, returning a player-count quantity rather than the
+        // object-count `TrackedSetSize` fallback below. Must be tried before that
+        // fallback because every "opponent who … this way" clause does contain
+        // "this way".
+        if let Ok((rest, ())) = parse_opponent_searched_library_this_way(lower.as_str()) {
+            if rest.is_empty() {
+                return Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PerformedActionThisWay {
+                        relation: PlayerRelation::Opponent,
+                        action: PlayerActionKind::SearchedLibrary,
+                    },
+                });
+            }
         }
         // CR 609.3 + CR 122.1: "[counter-type] counter[s] removed this way" — the
         // numeric amount of counters removed by the preceding `Effect::RemoveCounter`
@@ -1398,6 +1431,66 @@ mod tests {
         assert!(
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 109.5: Tempt with Discovery's
+    /// bonus-tutor-per-accepting-opponent step parses as a player-action count.
+    /// Verb tense (searches/searched) and article (a/their) variants produce
+    /// the same typed quantity.
+    #[test]
+    fn for_each_opponent_who_searched_library_this_way_present_their() {
+        let qty = parse_for_each_clause("opponent who searches their library this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::SearchedLibrary,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_searched_library_this_way_past_a() {
+        let qty = parse_for_each_clause("opponent who searched a library this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::SearchedLibrary,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_searched_library_this_way_past_their() {
+        let qty = parse_for_each_clause("opponent who searched their library this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::SearchedLibrary,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_searched_library_this_way_present_a() {
+        let qty = parse_for_each_clause("opponent who searches a library this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::SearchedLibrary,
+                },
+            }
         );
     }
 

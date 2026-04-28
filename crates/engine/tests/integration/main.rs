@@ -20,4 +20,5 @@ mod madame_null_integration;
 mod oracle_parser;
 mod rules;
 mod swans_prevention_followup;
+mod tempt_with_discovery;
 mod ureni_attack_trigger;

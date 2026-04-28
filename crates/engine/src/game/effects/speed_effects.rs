@@ -71,6 +71,16 @@ fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
+        PlayerFilter::PerformedActionThisWay { relation, action } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::matches_relation(player.id, controller, *relation)
+                    && crate::game::players::performed_action_this_way(state, player.id, *action)
+            })
+            .map(|player| player.id)
+            .collect(),
         PlayerFilter::OwnersOfCardsExiledBySource => state
             .players
             .iter()
