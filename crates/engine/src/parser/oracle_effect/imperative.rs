@@ -1448,9 +1448,25 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         return Some(HandRevealImperativeAst::LookAt { target });
     }
 
-    nom_on_lower(text, lower, |input| {
+    let (_, after_reveal) = nom_on_lower(text, lower, |input| {
         value((), alt((tag("reveal "), tag("reveals ")))).parse(input)
     })?;
+
+    // CR 701.20a: Back-reference reveal — "reveal it" / "reveal that card" /
+    // "reveal those cards" — reveals a specific card identified by the parent
+    // effect's affected IDs. Common in "look at top → reveal it" sequences
+    // (Frost Augur, Archghoul of Thraben, Leaf-Crowned Elder).
+    let after_reveal_lower = &lower[lower.len() - after_reveal.len()..];
+    if alt((
+        tag::<_, _, VerboseError<&str>>("it"),
+        tag("that card"),
+        tag("those cards"),
+    ))
+    .parse(after_reveal_lower)
+    .is_ok()
+    {
+        return Some(HandRevealImperativeAst::RevealBackRef);
+    }
 
     // CR 701.20a: "reveals a number of cards from their hand equal to X"
     if nom_primitives::scan_contains(lower, "hand")
@@ -1492,6 +1508,11 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             target: TargetFilter::Any,
             card_filter: TargetFilter::Any,
             count: Some(count),
+        },
+        // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
+        // ParentTarget binds at runtime to the parent ability's affected IDs.
+        HandRevealImperativeAst::RevealBackRef => Effect::Reveal {
+            target: TargetFilter::ParentTarget,
         },
     }
 }

@@ -643,6 +643,11 @@ pub(super) enum HandRevealImperativeAst {
     RevealPartial {
         count: crate::types::ability::QuantityExpr,
     },
+    /// CR 701.20a: Back-reference reveal — "reveal it" / "reveal that card" /
+    /// "reveal those cards" — reveals a specific card identified by the parent
+    /// effect's affected IDs (e.g. "look at top → reveal it" patterns).
+    /// Lowers to `Effect::Reveal { target: ParentTarget }`.
+    RevealBackRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
