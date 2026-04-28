@@ -1,4 +1,6 @@
+use nom::branch::alt;
 use nom::bytes::complete::tag;
+use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -362,12 +364,9 @@ pub(super) fn parse_search_filter(text: &str) -> TargetFilter {
 
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
     if !matches!(parsed_filter, TargetFilter::Any) {
-        let mut suffix_properties = vec![];
-        parse_search_filter_suffixes(remainder, &mut suffix_properties);
-        return apply_search_suffix_properties(
-            normalize_search_filter(parsed_filter),
-            &suffix_properties,
-        );
+        let mut suffix = SearchSuffixConstraints::default();
+        parse_search_filter_suffixes(remainder, &mut suffix);
+        return apply_search_suffix_constraints(normalize_search_filter(parsed_filter), &suffix);
     }
 
     let type_text = strip_search_card_suffix(type_text);
@@ -392,44 +391,58 @@ fn parse_search_filter_fallback(
     suffix_text: &str,
     is_basic: bool,
 ) -> TargetFilter {
-    let properties = build_search_suffix_properties(suffix_text, is_basic);
-
-    match type_word {
-        "land" => TargetFilter::Typed(TypedFilter::new(TypeFilter::Land).properties(properties)),
-        "creature" => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(properties))
-        }
-        "artifact" => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(properties))
-        }
-        "enchantment" => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment).properties(properties))
-        }
-        "instant" => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(properties))
-        }
-        "sorcery" => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery).properties(properties))
-        }
-        "planeswalker" => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker).properties(properties))
-        }
-        "instant or sorcery" => TargetFilter::Or {
-            filters: vec![
-                TargetFilter::Typed(
-                    TypedFilter::new(TypeFilter::Instant).properties(properties.clone()),
-                ),
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery).properties(properties)),
-            ],
-        },
-        other => parse_search_specialized_type_word(other, properties),
-    }
+    let suffix = build_search_suffix_constraints(suffix_text, is_basic);
+    let filter = parse_search_builtin_type_word(type_word)
+        .unwrap_or_else(|| parse_search_specialized_type_word(type_word));
+    apply_search_suffix_constraints(filter, &suffix)
 }
 
-fn parse_search_specialized_type_word(
-    type_word: &str,
-    properties: Vec<FilterProp>,
-) -> TargetFilter {
+fn parse_search_builtin_type_word(type_word: &str) -> Option<TargetFilter> {
+    let (rest, filter) = alt((
+        value(
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                ],
+            },
+            tag::<_, _, VerboseError<&str>>("instant or sorcery"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+            tag("planeswalker"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+            tag("enchantment"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            tag("artifact"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            tag("creature"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+            tag("sorcery"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+            tag("instant"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            tag("land"),
+        ),
+    ))
+    .parse(type_word)
+    .ok()?;
+    rest.is_empty().then_some(filter)
+}
+
+fn parse_search_specialized_type_word(type_word: &str) -> TargetFilter {
     let negated_types: &[(&str, TypeFilter)] = &[
         ("noncreature", TypeFilter::Creature),
         ("nonland", TypeFilter::Land),
@@ -438,52 +451,38 @@ fn parse_search_specialized_type_word(
     ];
     for &(prefix, ref inner) in negated_types {
         if type_word == prefix {
-            return TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Non(Box::new(inner.clone()))).properties(properties),
-            );
+            return TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(inner.clone()))));
         }
     }
 
     let land_subtypes = ["plains", "island", "swamp", "mountain", "forest"];
     if land_subtypes.contains(&type_word) {
-        return TargetFilter::Typed(
-            TypedFilter::land()
-                .subtype(capitalize(type_word))
-                .properties(properties),
-        );
+        return TargetFilter::Typed(TypedFilter::land().subtype(capitalize(type_word)));
     }
     if type_word == "equipment" {
         return TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Artifact)
-                .subtype("Equipment".to_string())
-                .properties(properties),
+            TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()),
         );
     }
     if type_word == "aura" {
         return TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Enchantment)
-                .subtype("Aura".to_string())
-                .properties(properties),
+            TypedFilter::new(TypeFilter::Enchantment).subtype("Aura".to_string()),
         );
     }
-    if type_word == "card" && !properties.is_empty() {
-        return TargetFilter::Typed(TypedFilter::default().properties(properties));
+    if type_word == "card" {
+        return TargetFilter::Typed(TypedFilter::default());
     }
     if !type_word.is_empty()
         && type_word != "card"
         && type_word != "permanent"
         && type_word.chars().all(|c| c.is_alphabetic())
     {
-        return TargetFilter::Typed(
-            TypedFilter::default()
-                .subtype(capitalize(type_word))
-                .properties(properties),
-        );
+        return TargetFilter::Typed(TypedFilter::default().subtype(capitalize(type_word)));
     }
 
     let (filter, _) = parse_type_phrase(type_word);
     if !matches!(filter, TargetFilter::Any) {
-        return apply_search_suffix_properties(filter, &properties);
+        return filter;
     }
 
     push_warning(format!(
@@ -491,6 +490,12 @@ fn parse_search_specialized_type_word(
         type_word
     ));
     TargetFilter::Any
+}
+
+#[derive(Debug, Clone, Default)]
+struct SearchSuffixConstraints {
+    properties: Vec<FilterProp>,
+    type_filters: Vec<TypeFilter>,
 }
 
 fn strip_search_card_suffix(text: &str) -> &str {
@@ -511,15 +516,15 @@ fn split_search_type_word_and_suffix(clean: &str) -> (&str, &str) {
     }
 }
 
-fn build_search_suffix_properties(suffix_text: &str, is_basic: bool) -> Vec<FilterProp> {
-    let mut properties = vec![];
+fn build_search_suffix_constraints(suffix_text: &str, is_basic: bool) -> SearchSuffixConstraints {
+    let mut suffix = SearchSuffixConstraints::default();
     if is_basic {
-        properties.push(FilterProp::HasSupertype {
+        suffix.properties.push(FilterProp::HasSupertype {
             value: crate::types::card_type::Supertype::Basic,
         });
     }
-    parse_search_filter_suffixes(suffix_text, &mut properties);
-    properties
+    parse_search_filter_suffixes(suffix_text, &mut suffix);
+    suffix
 }
 
 fn normalize_search_filter(filter: TargetFilter) -> TargetFilter {
@@ -560,49 +565,70 @@ fn normalize_search_typed_filter(mut typed_filter: TypedFilter) -> TypedFilter {
     typed_filter
 }
 
-fn apply_search_suffix_properties(
+fn apply_search_suffix_constraints(
     filter: TargetFilter,
-    suffix_properties: &[FilterProp],
+    suffix: &SearchSuffixConstraints,
 ) -> TargetFilter {
-    if suffix_properties.is_empty() {
+    if suffix.properties.is_empty() && suffix.type_filters.is_empty() {
         return filter;
     }
 
     match filter {
         TargetFilter::Any => {
-            TargetFilter::Typed(TypedFilter::default().properties(suffix_properties.to_vec()))
+            TargetFilter::Typed(apply_search_suffix_to_typed(TypedFilter::default(), suffix))
         }
-        TargetFilter::Typed(mut typed_filter) => {
-            for property in suffix_properties {
-                if !typed_filter
-                    .properties
-                    .iter()
-                    .any(|existing| existing.same_kind(property))
-                {
-                    typed_filter.properties.push(property.clone());
-                }
-            }
-            TargetFilter::Typed(typed_filter)
+        TargetFilter::Typed(typed_filter) => {
+            TargetFilter::Typed(apply_search_suffix_to_typed(typed_filter, suffix))
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .into_iter()
-                .map(|branch| apply_search_suffix_properties(branch, suffix_properties))
+                .map(|branch| apply_search_suffix_constraints(branch, suffix))
                 .collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
             filters: filters
                 .into_iter()
-                .map(|branch| apply_search_suffix_properties(branch, suffix_properties))
+                .map(|branch| apply_search_suffix_constraints(branch, suffix))
                 .collect(),
         },
         other => other,
     }
 }
 
+fn apply_search_suffix_to_typed(
+    mut typed_filter: TypedFilter,
+    suffix: &SearchSuffixConstraints,
+) -> TypedFilter {
+    for type_filter in &suffix.type_filters {
+        if !typed_filter.type_filters.contains(type_filter) {
+            typed_filter.type_filters.push(type_filter.clone());
+        }
+    }
+    for property in &suffix.properties {
+        if !typed_filter
+            .properties
+            .iter()
+            .any(|existing| existing.same_kind(property))
+        {
+            typed_filter.properties.push(property.clone());
+        }
+    }
+    typed_filter
+}
+
+fn basic_land_type_any_of() -> TypeFilter {
+    TypeFilter::AnyOf(
+        ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+            .into_iter()
+            .map(|subtype| TypeFilter::Subtype(subtype.to_string()))
+            .collect(),
+    )
+}
+
 /// Parse property suffixes from search filter text ("with mana value ...", "with a different name ...").
 /// Reuses the existing suffix parsers from oracle_target.
-fn parse_search_filter_suffixes(text: &str, properties: &mut Vec<FilterProp>) {
+fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints) {
     let lower = text.to_lowercase();
     let mut remaining = lower.as_str();
 
@@ -653,7 +679,7 @@ fn parse_search_filter_suffixes(text: &str, properties: &mut Vec<FilterProp>) {
         }
 
         if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("with that name").parse(remaining) {
-            properties.push(FilterProp::SameName);
+            suffix.properties.push(FilterProp::SameName);
             remaining = rest.trim_start();
             continue;
         }
@@ -676,7 +702,7 @@ fn parse_search_filter_suffixes(text: &str, properties: &mut Vec<FilterProp>) {
                 })
                 .parse(rest)
                 .unwrap_or((rest, ""));
-            properties.push(FilterProp::SameNameAsParentTarget);
+            suffix.properties.push(FilterProp::SameNameAsParentTarget);
             remaining = after_noun.trim_start();
             continue;
         }
@@ -696,8 +722,16 @@ fn parse_search_filter_suffixes(text: &str, properties: &mut Vec<FilterProp>) {
             continue;
         }
 
+        if let Ok((rest, _)) =
+            tag::<_, _, VerboseError<&str>>("with a basic land type").parse(remaining)
+        {
+            suffix.type_filters.push(basic_land_type_any_of());
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Some((prop, consumed)) = parse_mana_value_suffix(remaining) {
-            properties.push(prop);
+            suffix.properties.push(prop);
             remaining = remaining[consumed..].trim_start();
             continue;
         }
@@ -724,7 +758,7 @@ fn parse_search_filter_suffixes(text: &str, properties: &mut Vec<FilterProp>) {
                     TargetFilter::Any
                 }
             };
-            properties.push(FilterProp::DifferentNameFrom {
+            suffix.properties.push(FilterProp::DifferentNameFrom {
                 filter: Box::new(inner_filter),
             });
             let skip = rest
@@ -875,9 +909,9 @@ mod tests {
         // warning must still fire so coverage reports surface parser gaps.
         use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
         clear_warnings();
-        let mut props = vec![];
+        let mut suffix = SearchSuffixConstraints::default();
         // Invented suffix that won't hit any existing filter-suffix pattern.
-        parse_search_filter_suffixes(" with unrecognized flibbertigibbet suffix", &mut props);
+        parse_search_filter_suffixes(" with unrecognized flibbertigibbet suffix", &mut suffix);
         let warnings = take_warnings();
         assert!(
             warnings
@@ -903,15 +937,16 @@ mod tests {
     }
 
     #[test]
-    fn build_search_suffix_properties_includes_basic_and_same_name() {
-        let properties = build_search_suffix_properties(" with that name", true);
-        assert!(properties.iter().any(|property| matches!(
+    fn build_search_suffix_constraints_includes_basic_and_same_name() {
+        let suffix = build_search_suffix_constraints(" with that name", true);
+        assert!(suffix.properties.iter().any(|property| matches!(
             property,
             FilterProp::HasSupertype {
                 value: crate::types::card_type::Supertype::Basic
             }
         )));
-        assert!(properties
+        assert!(suffix
+            .properties
             .iter()
             .any(|property| matches!(property, FilterProp::SameName)));
     }
@@ -932,6 +967,25 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::SameName)));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_land_card_with_basic_land_type() {
+        let filter = parse_search_filter("land card with a basic land type");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Land));
+        assert!(
+            typed.type_filters.iter().any(|type_filter| matches!(
+                type_filter,
+                TypeFilter::AnyOf(filters)
+                    if filters.iter().any(|filter| matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Plains"))
+                        && filters.iter().any(|filter| matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Forest"))
+            )),
+            "expected basic-land subtype disjunction, got {:?}",
+            typed.type_filters
+        );
     }
 
     #[test]
@@ -975,7 +1029,7 @@ mod tests {
 
     #[test]
     fn parse_search_specialized_type_word_handles_unknown_alphabetic_subtype() {
-        let filter = parse_search_specialized_type_word("elf", vec![]);
+        let filter = parse_search_specialized_type_word("elf");
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };

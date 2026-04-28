@@ -9619,12 +9619,13 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CastVariantPaid, Comparator, ContinuousModification, ControllerRef, DoublePTMode, Duration,
-        FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction,
-        PaymentCost, TypeFilter, ZoneRef,
+        CastVariantPaid, Comparator, ContinuousModification, ControllerRef, CountScope,
+        DoublePTMode, Duration, FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution,
+        ManaProduction, PaymentCost, TypeFilter, ZoneRef,
     };
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
+    use crate::types::player::PlayerCounterKind;
     use crate::types::zones::Zone;
 
     /// Parser must not invent verb stems for unknown words. The "-es" stripping
@@ -10665,6 +10666,47 @@ mod tests {
             );
         } else {
             panic!("expected Counter effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_draw_for_each_player_counter_uses_dynamic_count() {
+        let e = parse_effect("Draw a card for each experience counter you have");
+        if let Effect::Draw { count, .. } = &e {
+            assert!(
+                matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerCounter {
+                            kind: PlayerCounterKind::Experience,
+                            scope: CountScope::Controller,
+                        }
+                    }
+                ),
+                "draw count should use player-counter quantity, got {count:?}"
+            );
+        } else {
+            panic!("expected Draw effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_pump_for_each_player_counter_uses_dynamic_pt() {
+        let e = parse_effect("Kelsien gets +1/+1 for each experience counter you have");
+        if let Effect::Pump {
+            power, toughness, ..
+        } = &e
+        {
+            let expected = QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Experience,
+                    scope: CountScope::Controller,
+                },
+            };
+            assert_eq!(power, &PtValue::Quantity(expected.clone()));
+            assert_eq!(toughness, &PtValue::Quantity(expected));
+        } else {
+            panic!("expected Pump effect, got {e:?}");
         }
     }
 

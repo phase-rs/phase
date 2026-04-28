@@ -1254,6 +1254,7 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // "<type> you control" arm — same reason as in
         // `parse_number_of_inner`.
         parse_creature_in_party_for_each,
+        parse_player_counter_ref_tail,
         // CR 700.4 + CR 700.7: "creature that died this turn" / "creature that
         // died under your control this turn" — event-based count of dies-events
         // tracked in `state.zone_changes_this_turn`. Must precede
@@ -1399,7 +1400,9 @@ fn parse_speed_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// downstream and no permutation-enumerated tag lists.
 fn parse_player_counter_ref_tail(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, kind) = parse_player_counter_kind(input)?;
-    let (rest, _) = tag(" counters ").parse(rest)?;
+    let (rest, _) = tag(" counter").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
     let (rest, scope) = parse_player_counter_possessor(rest)?;
     Ok((rest, QuantityRef::PlayerCounter { kind, scope }))
 }
@@ -2291,6 +2294,36 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parses_player_counter_for_each_singular_and_plural() {
+        let cases: &[(&str, PlayerCounterKind, CountScope)] = &[
+            (
+                "experience counter you have",
+                PlayerCounterKind::Experience,
+                CountScope::Controller,
+            ),
+            (
+                "rad counters each opponent has",
+                PlayerCounterKind::Rad,
+                CountScope::Opponents,
+            ),
+        ];
+        for (phrase, kind, scope) in cases {
+            let (rest, q) = parse_for_each_clause_ref(phrase).unwrap_or_else(|e| {
+                panic!("for-each phrase `{phrase}` failed to parse: {e:?}");
+            });
+            assert_eq!(
+                q,
+                QuantityRef::PlayerCounter {
+                    kind: *kind,
+                    scope: scope.clone(),
+                },
+                "{phrase}"
+            );
+            assert_eq!(rest, "", "{phrase}");
+        }
     }
 
     #[test]
