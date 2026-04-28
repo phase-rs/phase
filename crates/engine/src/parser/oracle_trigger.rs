@@ -70,6 +70,16 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
     }
 }
 
+fn trigger_condition_source_zone(condition: &TriggerCondition) -> Option<Zone> {
+    match condition {
+        TriggerCondition::SourceInZone { zone } => Some(*zone),
+        TriggerCondition::And { conditions } => {
+            conditions.iter().find_map(trigger_condition_source_zone)
+        }
+        _ => None,
+    }
+}
+
 /// CR 107.3a + CR 107.3i + CR 601.2f + CR 603.2: In an ETB trigger on a spell
 /// cast for `{X}`, bare "X" in the trigger body refers to the value paid for
 /// `{X}` during the cast. At runtime the `QuantityRef::Variable{name:"X"}`
@@ -591,9 +601,16 @@ pub(crate) fn parse_trigger_line_with_index(
     // Preserve the original oracle text for coverage/UI annotation
     def.description = Some(text.to_string());
 
-    // CR 603.6c: Self zone-change triggers and self-recursive effects can function from
-    // non-battlefield zones. Derive the active zone from the typed trigger/effect data.
-    if matches!(def.valid_card, Some(TargetFilter::SelfRef))
+    // CR 113.6k: A trigger condition that can't trigger from the battlefield
+    // functions in all zones it can trigger from. Derive the active source zone
+    // from typed trigger/effect data instead of leaving it battlefield-only.
+    if let Some(zone) = def
+        .condition
+        .as_ref()
+        .and_then(trigger_condition_source_zone)
+    {
+        def.trigger_zones = vec![zone];
+    } else if matches!(def.valid_card, Some(TargetFilter::SelfRef))
         && def.destination == Some(Zone::Graveyard)
     {
         def.trigger_zones = vec![Zone::Graveyard];
@@ -1142,6 +1159,17 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         StaticCondition::SourceInZone { zone } => {
             Some(TriggerCondition::SourceInZone { zone: *zone })
         }
+        // CR 122.1: Source counter conditions bridge directly for trigger
+        // intervening-if predicates such as Suspend's "if this card is suspended".
+        StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        } => Some(TriggerCondition::HasCounters {
+            counters: counters.clone(),
+            minimum: *minimum,
+            maximum: *maximum,
+        }),
 
         // Variants with no TriggerCondition equivalent (combat-only / source-state / cost).
         StaticCondition::SourceEnteredThisTurn
@@ -1150,7 +1178,6 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::DevotionGE { .. }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::SpeedGE { .. }
-        | StaticCondition::HasCounters { .. }
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone
@@ -5757,6 +5784,7 @@ mod tests {
         Comparator, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PlayerScope,
         PtValue, QuantityExpr, QuantityRef, TypedFilter, UnlessCost,
     };
+    use crate::types::counter::{CounterMatch, CounterType};
 
     #[test]
     fn trigger_etb_self() {
@@ -10508,6 +10536,66 @@ mod tests {
             static_condition_to_trigger_condition(&StaticCondition::SourceInZone {
                 zone: Zone::Graveyard,
             }),
+            Some(TriggerCondition::SourceInZone {
+                zone: Zone::Graveyard,
+            }),
+        );
+    }
+
+    #[test]
+    fn bridge_has_counters() {
+        assert_eq!(
+            static_condition_to_trigger_condition(&StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                minimum: 1,
+                maximum: None,
+            }),
+            Some(TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                minimum: 1,
+                maximum: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn trigger_intervening_if_this_card_is_suspended() {
+        let def = parse_trigger_line(
+            "Whenever you cast a spell, if this card is suspended, remove a time counter from it.",
+            "17-Year Cicadas",
+        );
+
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.trigger_zones, vec![Zone::Exile]);
+        match def.condition {
+            Some(TriggerCondition::And { conditions }) => {
+                assert!(conditions.iter().any(|condition| matches!(
+                    condition,
+                    TriggerCondition::SourceInZone { zone: Zone::Exile }
+                )));
+                assert!(conditions.iter().any(|condition| matches!(
+                    condition,
+                    TriggerCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Time),
+                        minimum: 1,
+                        maximum: None,
+                    }
+                )));
+            }
+            other => panic!("expected suspended And condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_intervening_if_this_card_is_in_your_graveyard_sets_trigger_zone() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if this card is in your graveyard, you gain 1 life.",
+            "Graveyard Source",
+        );
+
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+        assert_eq!(
+            def.condition,
             Some(TriggerCondition::SourceInZone {
                 zone: Zone::Graveyard,
             }),

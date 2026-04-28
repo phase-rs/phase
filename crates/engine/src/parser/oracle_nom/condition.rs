@@ -18,7 +18,7 @@ use crate::types::ability::{
     AggregateFunction, Comparator, ControllerRef, PlayerScope, QuantityExpr, QuantityRef,
     StaticCondition, TargetFilter,
 };
-use crate::types::counter::CounterMatch;
+use crate::types::counter::{CounterMatch, CounterType};
 
 /// Parse a condition phrase from Oracle text.
 ///
@@ -882,6 +882,22 @@ fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     use crate::types::zones::Zone;
 
     alt((
+        // CR 702.62b: A card is suspended while it is in exile with a time
+        // counter on it. The "has suspend" component is guaranteed by cards
+        // that print this source-referential condition.
+        value(
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::SourceInZone { zone: Zone::Exile },
+                    StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Time),
+                        minimum: 1,
+                        maximum: None,
+                    },
+                ],
+            },
+            alt((tag("~ is suspended"), tag("this card is suspended"))),
+        ),
         // Graveyard (player-specific)
         value(
             StaticCondition::SourceInZone {
