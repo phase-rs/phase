@@ -798,6 +798,7 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::Comparator;
 
     #[test]
     fn search_target_opponent_library() {
@@ -986,6 +987,26 @@ mod tests {
             "expected basic-land subtype disjunction, got {:?}",
             typed.type_filters
         );
+    }
+
+    #[test]
+    fn parse_search_filter_handles_colorless_creature_card() {
+        let filter = parse_search_filter("colorless creature card with mana value 7 or greater");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Colorless)));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 }
+            }
+        )));
     }
 
     #[test]

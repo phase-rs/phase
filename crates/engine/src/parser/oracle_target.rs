@@ -905,8 +905,10 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         }
     }
 
-    // Handle color prefix: "white creature", "red spell", etc.
-    let color_prop = parse_color_prefix(&lower[pos..]);
+    // CR 105.1 + CR 105.2c: Handle color adjective prefixes:
+    // "white creature", "red spell", "colorless creature", etc.
+    let color_prop =
+        parse_color_prefix(&lower[pos..]).or_else(|| parse_colorless_prefix(&lower[pos..]));
     if let Some((ref prop, color_len)) = color_prop {
         properties.push(prop.clone());
         pos += color_len;
@@ -1463,6 +1465,14 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             }
         }
     }
+    // CR 105.2c: Colorless adjective prefix: "colorless creature", etc.
+    if let Ok((after_colorless, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("colorless ").parse(text)
+    {
+        if starts_with_type_word(after_colorless) {
+            return true;
+        }
+    }
     // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent"
     if let Ok((after_non, _)) = alt((
         tag::<_, _, nom_language::error::VerboseError<&str>>("non-"),
@@ -1583,6 +1593,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::Unblocked
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
+            | FilterProp::Colorless
             | FilterProp::NotColor { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
@@ -1767,6 +1778,15 @@ fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
         .ok()?;
     let consumed = text.len() - rest.len();
     Some((FilterProp::HasColor { color }, consumed))
+}
+
+/// Parse the colorless adjective prefix: "colorless creature", "colorless spell", etc.
+/// Returns (FilterProp::Colorless, bytes consumed including trailing space).
+fn parse_colorless_prefix(text: &str) -> Option<(FilterProp, usize)> {
+    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("colorless ")
+        .parse(text)
+        .ok()?;
+    Some((FilterProp::Colorless, text.len() - rest.len()))
 }
 
 /// CR 509.1h / CR 302.6: Parse status prefixes from type phrases.
@@ -3451,6 +3471,48 @@ mod tests {
                 color: ManaColor::Red
             }]))
         );
+    }
+
+    #[test]
+    fn colorless_creature_card() {
+        let (f, rest) = parse_type_phrase("colorless creature card with mana value 7 or greater");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Colorless,
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 7 },
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn colorless_adjective_does_not_distribute_across_or() {
+        let (f, rest) = parse_type_phrase("artifact or colorless creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter");
+        };
+        assert_eq!(filters.len(), 2);
+        let TargetFilter::Typed(artifact) = &filters[0] else {
+            panic!("expected artifact branch");
+        };
+        assert!(artifact.type_filters.contains(&TypeFilter::Artifact));
+        assert!(!artifact
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Colorless)));
+        let TargetFilter::Typed(creature) = &filters[1] else {
+            panic!("expected creature branch");
+        };
+        assert!(creature.type_filters.contains(&TypeFilter::Creature));
+        assert!(creature
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Colorless)));
     }
 
     /// CR 208.1: "creature with power or toughness N or less" produces a
