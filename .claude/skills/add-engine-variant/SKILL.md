@@ -120,7 +120,7 @@ If you've made it through all three stages with EXTEND_OK / WITHIN_SECTION verdi
 - "Engine doesn't have it" → without grepping for engine-native names (CreateTriggerUntil mtgish ↔ CreateDelayedTrigger engine)
 - "Just one more sibling" → ignoring the sibling-cluster smell and compounding parameterization debt
 - "Unify under one type" → crossing CR rule sections and conflating runtime resolvers
-- "Type-only stub returning true" → like `CastViaKicker { .. } => true` which silently mis-resolves at runtime
+- "Type-only stub returning a placeholder true/false" → masks runtime correctness; pair with real evaluation logic before shipping. The historical example: `ReplacementCondition::CastViaKicker` initially shipped with a `=> true` stub that silently over-applied to non-kicked spells. Resolved by adding `Option<KickerVariant>` to the variant and tracking `SpellContext.kickers_paid` at cast resolution — the runtime now actually evaluates the gate. Always verify the resolver does what the variant doc-comment claims.
 
 ## When refusing
 
