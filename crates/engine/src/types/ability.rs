@@ -2669,6 +2669,27 @@ pub enum ParsedCondition {
         filter: PlayerFilter,
         minimum: usize,
     },
+    // -- Combinators --
+    /// CR 601.3 / CR 602.5: All inner conditions must be true. Used for compound
+    /// casting/activation restrictions like "Cast this spell only if you control a
+    /// Forest and you've cast a creature spell this turn". Mirrors `AbilityCondition::And`
+    /// and `TriggerCondition::And` so restriction-side conjunction composes uniformly.
+    And {
+        conditions: Vec<ParsedCondition>,
+    },
+    /// CR 601.3 / CR 602.5: Any inner condition must be true. Used for disjunctive
+    /// casting/activation restrictions ("only if X or Y"). Mirrors `TriggerCondition::Or`
+    /// for restriction-level conditions.
+    Or {
+        conditions: Vec<ParsedCondition>,
+    },
+    /// CR 601.3 / CR 602.5: True when the inner predicate is false. Used for
+    /// "Cast this spell only if you don't ..." / "Activate only if it isn't ..." patterns.
+    /// Mirrors `AbilityCondition::Not` and `TriggerCondition::Not` so restriction-side
+    /// negation composes uniformly with `And`/`Or`.
+    Not {
+        condition: Box<ParsedCondition>,
+    },
 }
 
 // ---------------------------------------------------------------------------
