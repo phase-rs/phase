@@ -15,8 +15,8 @@ use super::primitives::parse_number;
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, FilterProp, ObjectProperty, QuantityExpr,
-    QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, FilterProp, ObjectProperty, PlayerScope,
+    QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::player::PlayerCounterKind;
 
@@ -154,8 +154,18 @@ fn parse_their_tail(input: &str) -> OracleResult<'_, QuantityRef> {
             tag("graveyard"),
         ),
         // Life total before bare "life" (longer tag first).
-        value(QuantityRef::TargetLifeTotal, tag("life total")),
-        value(QuantityRef::TargetLifeTotal, tag("life")),
+        value(
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
+            tag("life total"),
+        ),
+        value(
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
+            tag("life"),
+        ),
     ))
     .parse(input)
 }
@@ -166,8 +176,18 @@ fn parse_his_or_her_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     preceded(
         tag("his or her "),
         alt((
-            value(QuantityRef::TargetLifeTotal, tag("life total")),
-            value(QuantityRef::TargetLifeTotal, tag("life")),
+            value(
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Target,
+                },
+                tag("life total"),
+            ),
+            value(
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Target,
+                },
+                tag("life"),
+            ),
         )),
     )
     .parse(input)
@@ -208,8 +228,18 @@ fn parse_your_tail(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("graveyard"),
         ),
-        value(QuantityRef::LifeTotal, tag("life total")),
-        value(QuantityRef::LifeTotal, tag("life")),
+        value(
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Controller,
+            },
+            tag("life total"),
+        ),
+        value(
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Controller,
+            },
+            tag("life"),
+        ),
     ))
     .parse(input)
 }
@@ -602,7 +632,13 @@ fn parse_number_of_opponents(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// Parse "your life total".
 fn parse_life_total_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    value(QuantityRef::LifeTotal, tag("your life total")).parse(input)
+    value(
+        QuantityRef::LifeTotal {
+            player: PlayerScope::Controller,
+        },
+        tag("your life total"),
+    )
+    .parse(input)
 }
 
 fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
@@ -929,11 +965,15 @@ fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 fn parse_target_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(
-            QuantityRef::TargetLifeTotal,
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
             tag("target player's life total"),
         ),
         value(
-            QuantityRef::TargetLifeTotal,
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
             tag("that player's life total"),
         ),
     ))
@@ -1266,7 +1306,9 @@ mod tests {
         assert_eq!(
             q,
             QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller
+                }
             }
         );
         assert_eq!(rest, "");
@@ -1686,7 +1728,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::TargetLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Target
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }
@@ -1701,7 +1745,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::TargetLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Target
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }
@@ -1733,7 +1779,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }
@@ -1750,7 +1798,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::TargetLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Target
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }
@@ -1785,7 +1835,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::TargetLifeTotal,
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Target
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }

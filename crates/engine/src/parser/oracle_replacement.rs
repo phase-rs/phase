@@ -5776,7 +5776,9 @@ mod tests {
             def.condition,
             Some(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller
+                    },
                 },
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 1 },

@@ -10,24 +10,21 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let count = match &ability.effect {
-        Effect::ExileTop { count, .. } => {
+    let (count, player_filter) = match &ability.effect {
+        Effect::ExileTop { count, player } => (
             // Use resolve_quantity_with_targets so that TargetZoneCardCount (and
             // HalfRounded wrapping it) can resolve against the targeted player.
-            resolve_quantity_with_targets(state, count, ability) as usize
-        }
+            resolve_quantity_with_targets(state, count, ability) as usize,
+            player.clone(),
+        ),
         _ => return Err(EffectError::MissingParam("ExileTop count".to_string())),
     };
 
-    use crate::types::ability::TargetRef;
-    let target_player = ability
-        .targets
-        .iter()
-        .find_map(|target| match target {
-            TargetRef::Player(player_id) => Some(*player_id),
-            _ => None,
-        })
-        .unwrap_or(ability.controller);
+    // CR 115.1: Mirror Draw/Mill/Discard — context-ref filters (Controller, etc.)
+    // must consult state slots, not `ability.targets`. Otherwise a chained
+    // sub-ability's "exile the top N cards of your library" would inherit the
+    // parent's Player target and exile from the wrong library.
+    let target_player = super::resolve_player_for_context_ref(state, ability, &player_filter);
 
     // CR 701.17b: A player can't mill/exile more cards than are in their library;
     // exile as many as possible.
@@ -59,7 +56,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{QuantityExpr, TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -149,6 +146,51 @@ mod tests {
         assert_eq!(
             state.objects.get(&third).map(|obj| obj.zone),
             Some(Zone::Library)
+        );
+    }
+
+    #[test]
+    fn exile_top_controller_filter_does_not_inherit_parent_player_target() {
+        // CR 115.1 regression: a chained ExileTop with `player: Controller`
+        // must exile from the spell controller's library, not the parent's
+        // inherited Player target.
+        let mut state = GameState::new_two_player(42);
+        let p0_top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 top".to_string(),
+            Zone::Library,
+        );
+        let p1_top = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 top".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![TargetRef::Player(PlayerId(1))], // inherited parent target
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&p0_top).map(|obj| obj.zone),
+            Some(Zone::Exile),
+            "P0's library top should be exiled (Controller filter resolves to caster)"
+        );
+        assert_eq!(
+            state.objects.get(&p1_top).map(|obj| obj.zone),
+            Some(Zone::Library),
+            "P1's library must NOT be exiled — parent target inheritance must not override Controller filter"
         );
     }
 

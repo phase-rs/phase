@@ -3279,7 +3279,7 @@ pub fn pay_ability_cost(
         // CR 701.43a: "To exert a permanent, its controller chooses to have it
         // not untap during its controller's next untap step." Modeled as a
         // transient continuous effect with `StaticMode::CantUntap` scoped to
-        // `Duration::UntilControllerNextUntapStep` on the source permanent,
+        // `Duration::UntilNextUntapStepOf { Controller }` on the source permanent,
         // identical to the "doesn't untap during its controller's next untap
         // step" pattern already handled by the layer system (see
         // `layers::prune_controller_untap_step_effects`).
@@ -3305,7 +3305,9 @@ pub fn pay_ability_cost(
             state.add_transient_continuous_effect(
                 source_id,
                 controller,
-                crate::types::ability::Duration::UntilControllerNextUntapStep,
+                crate::types::ability::Duration::UntilNextUntapStepOf {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
                 TargetFilter::SpecificObject { id: source_id },
                 vec![
                     crate::types::ability::ContinuousModification::AddStaticMode {
@@ -11608,7 +11610,9 @@ mod tests {
             assert_eq!(effects.len(), 1);
             assert_eq!(
                 effects[0].duration,
-                crate::types::ability::Duration::UntilControllerNextUntapStep
+                crate::types::ability::Duration::UntilNextUntapStepOf {
+                    player: crate::types::ability::PlayerScope::Controller,
+                }
             );
             assert!(effects[0].modifications.iter().any(|m| matches!(
                 m,

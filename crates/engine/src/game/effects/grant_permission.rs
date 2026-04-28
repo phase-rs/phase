@@ -126,7 +126,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{CastingPermission, Duration, TargetFilter};
+    use crate::types::ability::{CastingPermission, Duration, PlayerScope, TargetFilter};
     use crate::types::game_state::GameState;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
@@ -145,7 +145,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
-                    duration: Duration::UntilYourNextTurn,
+                    duration: Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
                     granted_to: PlayerId(0),
                 },
                 target: TargetFilter::Any,
@@ -191,7 +193,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
-                    duration: Duration::UntilYourNextTurn,
+                    duration: Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
                     granted_to: PlayerId(0),
                 },
                 target: TargetFilter::Any,
@@ -236,7 +240,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
-                    duration: Duration::UntilYourNextTurn,
+                    duration: Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
                     granted_to: PlayerId(0),
                 },
                 target: TargetFilter::Any,

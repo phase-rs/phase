@@ -12,6 +12,7 @@ import { useUiStore } from "../../stores/uiStore";
 export function TurnBanner() {
   const showTurnBanner = useUiStore((s) => s.showTurnBanner);
   const turnBannerText = useUiStore((s) => s.turnBannerText);
+  const turnBannerNumber = useUiStore((s) => s.turnBannerNumber);
   const shouldReduceMotion = useReducedMotion();
 
   const isYourTurn = turnBannerText.toUpperCase().includes("YOUR");
@@ -50,12 +51,22 @@ export function TurnBanner() {
             transition={{ duration: 0.2 }}
           >
             <div className="absolute inset-0 bg-black/50" />
-            <span
-              className="relative text-5xl font-extrabold tracking-wider select-none"
-              style={{ color: colors.primary }}
-            >
-              {turnBannerText}
-            </span>
+            <div className="relative flex flex-col items-center select-none gap-8">
+              {turnBannerNumber != null && (
+                <span
+                  className="text-3xl font-bold tracking-[0.5em] uppercase"
+                  style={{ color: colors.primary }}
+                >
+                  Turn {turnBannerNumber}
+                </span>
+              )}
+              <span
+                className="text-5xl font-extrabold tracking-wider"
+                style={{ color: colors.primary }}
+              >
+                {turnBannerText}
+              </span>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -173,6 +184,26 @@ export function TurnBanner() {
             exit={{ opacity: 0, scale: 0 }}
             transition={{ duration: 0.3, delay: 0.2 }}
           />
+
+          {/* Turn N subtitle — absolutely positioned well above the banner strip
+              so it stays clear of the decorative top line and doesn't push the
+              primary text off-center. */}
+          {turnBannerNumber != null && (
+            <motion.span
+              className="absolute text-3xl font-bold tracking-[0.5em] uppercase select-none"
+              style={{
+                top: "calc(50% - 110px)",
+                color: colors.primary,
+                textShadow: `0 0 16px ${colors.glow}, 0 0 32px ${colors.glowStrong}, 0 2px 4px rgba(0,0,0,0.6)`,
+              }}
+              initial={{ opacity: 0, y: -16, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -16, scale: 0.95 }}
+              transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.18 }}
+            >
+              Turn {turnBannerNumber}
+            </motion.span>
+          )}
 
           {/* Banner text — scales in with punch */}
           <motion.span

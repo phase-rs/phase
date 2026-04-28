@@ -832,6 +832,25 @@ pub(crate) fn resolve_player_for_context_ref(
                 .unwrap_or(ability.controller),
         };
     }
+    // CR 115.1d: `ParentTargetController` resolves the controller of the parent
+    // ability's targeted object. In a spell-resolution chain (no
+    // `current_trigger_event` set, so `resolve_event_context_target` returns
+    // None for this filter), the parent's chosen Object lives in
+    // `ability.targets` from chain target propagation — read it here. This is
+    // the Assassin's Trophy-shape pattern: "Destroy target permanent. Its
+    // controller may search their library …" — the sub-ability's filter is
+    // `ParentTargetController`, and we resolve to the destroyed permanent's
+    // controller. Note we deliberately read AFTER the trigger-event path so
+    // an actual triggered context (where the helper at `targeting.rs:265`
+    // succeeds) wins over chain inheritance.
+    if matches!(target_filter, TargetFilter::ParentTargetController) {
+        if let Some(player) = ability.targets.iter().find_map(|target| match target {
+            TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+            TargetRef::Player(player) => Some(*player),
+        }) {
+            return player;
+        }
+    }
     ability.controller
 }
 
@@ -2208,8 +2227,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CastingPermission, ControllerRef, DelayedTriggerCondition,
-        Duration, FilterProp, PlayerFilter, PtValue, QuantityExpr, QuantityRef, SpellContext,
-        TargetFilter, TargetRef, TypedFilter,
+        Duration, FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+        SpellContext, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::game_state::{ExileLink, ExileLinkKind, LinkedExileSnapshot};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -4659,7 +4678,9 @@ mod tests {
         let grant = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
-                    duration: Duration::UntilYourNextTurn,
+                    duration: Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
                     granted_to: PlayerId(0),
                 },
                 target: TargetFilter::TrackedSet {

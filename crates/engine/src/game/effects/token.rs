@@ -701,25 +701,24 @@ fn resolve_token_owner(
     ability: &ResolvedAbility,
     owner_filter: &TargetFilter,
 ) -> PlayerId {
-    match owner_filter {
-        TargetFilter::Controller => ability.controller,
-        TargetFilter::ParentTargetController => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
-                TargetRef::Player(pid) => Some(*pid),
-            })
-            .unwrap_or(ability.controller),
-        _ => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Player(pid) => Some(*pid),
-                TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
-            })
-            .unwrap_or(ability.controller),
+    // CR 115.1: Context-ref filters route through the central helper so chain
+    // target propagation cannot leak the parent's Player target into a sub
+    // CreateToken whose `owner: Controller`. The helper handles
+    // ParentTargetController's spell-chain Object lookup centrally.
+    if owner_filter.is_context_ref() {
+        return super::resolve_player_for_context_ref(state, ability, owner_filter);
     }
+    // Non-context-ref (e.g., explicit "target opponent creates a token"): the
+    // chosen Player target wins; falls back to the parent's targeted Object's
+    // controller for cases like "target creature's controller creates a token".
+    ability
+        .targets
+        .iter()
+        .find_map(|target| match target {
+            TargetRef::Player(pid) => Some(*pid),
+            TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
+        })
+        .unwrap_or(ability.controller)
 }
 
 #[allow(clippy::too_many_arguments)]

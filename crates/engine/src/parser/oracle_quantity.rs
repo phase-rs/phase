@@ -19,8 +19,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, CountScope, ObjectProperty, PlayerFilter, QuantityExpr, QuantityRef,
-    TargetFilter, ZoneRef,
+    AggregateFunction, CountScope, ObjectProperty, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, TargetFilter, ZoneRef,
 };
 use crate::types::mana::ManaColor;
 
@@ -170,7 +170,9 @@ pub(crate) fn canonicalize_quantity_ref(qty: QuantityRef) -> QuantityRef {
             zone: ZoneRef::Hand,
             card_types,
             scope: CountScope::Controller,
-        } if card_types.is_empty() => QuantityRef::HandSize,
+        } if card_types.is_empty() => QuantityRef::HandSize {
+            player: PlayerScope::Controller,
+        },
         QuantityRef::ZoneCardCount {
             zone: ZoneRef::Graveyard,
             card_types,
@@ -437,7 +439,13 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         .parse(lower)
         .map_or(lower, |(r, _)| r);
     if let Some(qty) = parse_quantity_ref(stripped) {
-        if !matches!(qty, QuantityRef::TargetPower | QuantityRef::TargetLifeTotal) {
+        if !matches!(
+            qty,
+            QuantityRef::TargetPower
+                | QuantityRef::LifeTotal {
+                    player: PlayerScope::Target
+                }
+        ) {
             return Some(QuantityExpr::Ref { qty });
         }
     }

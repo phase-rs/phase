@@ -37,9 +37,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, ConjureCard, ContinuousModification, ControllerRef, DamageSource,
     DelayedTriggerCondition, Duration, Effect, FilterProp, GameRestriction, MultiTargetSpec,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
-    TypedFilter, UnlessCost,
+    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -881,7 +881,9 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
                 value(
                     (
                         RestrictionExpiry::EndOfTurn,
-                        Some(Duration::UntilYourNextTurn),
+                        Some(Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        }),
                     ),
                     tag("until your next turn, "),
                 ),
@@ -1222,6 +1224,31 @@ fn try_parse_choose_one_of_inline(
     // enough that misreading intra-phrase "or" is unlikely. Each needle
     // literal appears exactly once — the separator's length is implied by
     // what's missing between the two returned halves.
+    //
+    // CR 202.3 + CR 107.1c: Comparator grammar ("less than or equal to",
+    // "greater than or equal to", "or fewer", "or more", "or less",
+    // "or greater") wraps a bare " or " that is structurally part of the
+    // comparator phrase, NOT a disjunction of imperative clauses. Splitting
+    // here truncates the dynamic-quantity comparator (e.g., Beseech the
+    // Queen's "with mana value less than or equal to the number of lands
+    // you control") into a malformed left half, and the trial parse against
+    // that half pollutes the parse_warnings buffer with spurious
+    // search-filter-suffix gaps. Skip this helper entirely for any clause
+    // that contains a comparator phrase — none of the false-positive cards
+    // are real binary-choice clauses anyway.
+    if [
+        "less than or",
+        "greater than or",
+        " or fewer",
+        " or more",
+        " or less",
+        " or greater",
+    ]
+    .iter()
+    .any(|needle| tp.lower.contains(needle))
+    {
+        return None;
+    }
     let (before_lower, after_lower) =
         split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
 
@@ -1257,7 +1284,13 @@ fn try_parse_choose_one_of_inline(
         return None;
     }
 
-    // Attempt to parse each branch independently as a clause.
+    // Attempt to parse each branch independently as a clause. Snapshot the
+    // warnings buffer so we can roll back any side-effect warnings emitted
+    // during these trial parses if the split is rejected — otherwise a
+    // failed trial pollutes the committed warnings buffer with spurious
+    // gaps from a malformed branch (e.g., "return a red" left half from
+    // splitting "return a red or green creature" at the wrong " or ").
+    let warnings_snapshot = super::oracle_warnings::snapshot_warnings();
     let left_clause = parse_effect_clause(left_orig, ctx);
     let right_clause = parse_effect_clause(right_orig, ctx);
 
@@ -1267,6 +1300,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::Unimplemented { .. })
         || matches!(right_clause.effect, Effect::Unimplemented { .. })
     {
+        super::oracle_warnings::truncate_warnings(warnings_snapshot);
         return None;
     }
 
@@ -1276,6 +1310,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::TargetOnly { .. })
         || matches!(right_clause.effect, Effect::TargetOnly { .. })
     {
+        super::oracle_warnings::truncate_warnings(warnings_snapshot);
         return None;
     }
 
@@ -5866,9 +5901,19 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
         match expr {
             QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::TargetLifeTotal => *qty = QuantityRef::LifeTotal,
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Target,
+                } => {
+                    *qty = QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    }
+                }
                 QuantityRef::TargetZoneCardCount { zone } => match zone {
-                    crate::types::ability::ZoneRef::Hand => *qty = QuantityRef::HandSize,
+                    crate::types::ability::ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        }
+                    }
                     crate::types::ability::ZoneRef::Graveyard => *qty = QuantityRef::GraveyardSize,
                     crate::types::ability::ZoneRef::Library => {
                         *qty = QuantityRef::ZoneCardCount {
@@ -7544,10 +7589,17 @@ fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
         alt((
             value(Duration::UntilEndOfTurn, tag("until end of turn, ")),
             value(
-                Duration::UntilYourNextTurn,
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
                 tag("until the end of your next turn, "),
             ),
-            value(Duration::UntilYourNextTurn, tag("until your next turn, ")),
+            value(
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                tag("until your next turn, "),
+            ),
         ))
         .parse(i)
     }) {
@@ -7577,20 +7629,34 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         (" until end of turn", Duration::UntilEndOfTurn),
         (
             " until the end of your next turn",
-            Duration::UntilYourNextTurn,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
         ),
         // CR 611.2a + CR 108.3: Third-person "their next turn" appears in grants
         // whose grantee is not the ability's controller (Suspend Aggression:
         // "its owner may play it"; Expedited Inheritance: "its controller may
         // ... They may play those cards"). Theme D's `granted_to` binds to the
-        // grantee, so `UntilYourNextTurn` is semantically "until the end of the
-        // grantee's next turn" at prune time.
+        // grantee, so `UntilNextTurnOf { Controller }` is semantically "until
+        // the end of the grantee's next turn" at prune time.
         (
             " until the end of their next turn",
-            Duration::UntilYourNextTurn,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
         ),
-        (" until their next turn", Duration::UntilYourNextTurn),
-        (" until your next turn", Duration::UntilYourNextTurn),
+        (
+            " until their next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until your next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
         (
             " until ~ leaves the battlefield",
             Duration::UntilHostLeavesPlay,
@@ -13831,7 +13897,9 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilYourNextTurn,
+                        duration: Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
                         ..
                     },
                     ..
@@ -13854,7 +13922,9 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilYourNextTurn,
+                        duration: Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
                         ..
                     },
                     ..
@@ -13876,7 +13946,9 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilYourNextTurn,
+                        duration: Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
                         ..
                     },
                     ..
@@ -13911,7 +13983,9 @@ mod tests {
                 *sub.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilYourNextTurn,
+                        duration: Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
                         ..
                     },
                     ..
@@ -14283,7 +14357,9 @@ mod tests {
                     *amount,
                     QuantityExpr::HalfRounded {
                         inner: Box::new(QuantityExpr::Ref {
-                            qty: QuantityRef::TargetLifeTotal,
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::Target
+                            },
                         }),
                         rounding: RoundingMode::Up,
                     },
@@ -15542,7 +15618,12 @@ mod tests {
 
         // First ability: the chained compound under UntilYourNextTurn.
         let first = &result.abilities[0];
-        assert_eq!(first.duration, Some(Duration::UntilYourNextTurn));
+        assert_eq!(
+            first.duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            })
+        );
 
         let Effect::GenericEffect {
             static_abilities, ..
@@ -15941,7 +16022,9 @@ mod tests {
         assert!(matches!(
             rhs,
             QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller
+                }
             }
         ));
     }
@@ -15963,7 +16046,9 @@ mod tests {
             cond,
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeTotal
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller
+                    }
                 },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Ref {
@@ -16059,7 +16144,10 @@ mod tests {
             Some(AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeTotal,
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
                     },
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 5 },
@@ -16075,7 +16163,10 @@ mod tests {
             Some(AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::HandSize,
+                        qty:
+                            QuantityRef::HandSize {
+                                player: PlayerScope::Controller,
+                            },
                     },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -16475,7 +16566,12 @@ mod tests {
                 }
             } if allowed_zones == vec![Zone::Hand]
         ));
-        assert_eq!(def.duration, Some(Duration::UntilYourNextTurn));
+        assert_eq!(
+            def.duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            })
+        );
     }
 
     #[test]

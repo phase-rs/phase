@@ -89,6 +89,7 @@ import {
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, additionalCostChoices } from "../viewmodel/costLabel.ts";
+import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { cardImageLookup } from "../services/cardImageLookup.ts";
 
@@ -725,23 +726,18 @@ function GamePageContent({
     }
   }, []);
 
-  // Auto-open graveyard/exile viewer when the engine is waiting for a target in that zone
+  // Auto-open graveyard/exile viewer when the engine is waiting for an object choice in that zone.
   useEffect(() => {
     if (!objects) return;
     const wf = engineWaitingFor;
-    if (
-      (wf?.type !== "TargetSelection" && wf?.type !== "TriggerTargetSelection")
-      || !canActForWaitingState
-    ) return;
+    if (!canActForWaitingState) return;
 
-    const legalTargets = wf.data.selection.current_legal_targets;
     // Collect distinct (zone, owner) groupings so we don't trap the user in one
     // graveyard when the effect can target either player's graveyard (e.g. Soul-Guide Lantern).
     const groups = new Set<string>();
     let firstHit: { zone: "graveyard" | "exile"; playerId: number } | null = null;
-    for (const t of legalTargets) {
-      if (!("Object" in t)) continue;
-      const obj = objects[t.Object];
+    for (const objectId of getWaitingForObjectChoiceIds(wf)) {
+      const obj = objects[objectId];
       if (!obj) continue;
       if (obj.zone !== "Graveyard" && obj.zone !== "Exile") continue;
       const zone: "graveyard" | "exile" = obj.zone === "Graveyard" ? "graveyard" : "exile";
@@ -749,7 +745,7 @@ function GamePageContent({
       if (!firstHit) firstHit = { zone, playerId: obj.owner };
     }
     // Only auto-open when there's a single zone+owner to open. Otherwise the
-    // zone pile glow (GraveyardPile hasTargetableCards) prompts the user to pick.
+    // zone control glow prompts the user to pick.
     if (groups.size === 1 && firstHit) {
       setViewingZone(firstHit);
     }

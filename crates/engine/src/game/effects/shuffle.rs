@@ -1,6 +1,4 @@
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -10,37 +8,18 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 608.2c: Resolve the shuffle's acting player from targets. When an
-    // explicit `TargetRef::Player` is present (propagated from an upstream
-    // SearchChoice or target-selected opponent), use it. Otherwise, for a
-    // subject-anchored `ParentTargetController` target, resolve against the
-    // first Object in targets (the parent target's controller). Falls back to
-    // the caster for plain `Controller` / `Any` targets.
-    let target_player = if let Some(pid) = ability.targets.iter().find_map(|t| match t {
-        TargetRef::Player(pid) => Some(*pid),
-        _ => None,
-    }) {
-        pid
-    } else if matches!(
-        &ability.effect,
-        Effect::Shuffle {
-            target: TargetFilter::ParentTargetController
-        }
-    ) {
-        ability
-            .targets
-            .iter()
-            .find_map(|t| match t {
-                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-                _ => None,
-            })
-            .unwrap_or(ability.controller)
-    } else if matches!(
-        &ability.effect,
-        Effect::Shuffle {
-            target: TargetFilter::Owner
-        }
-    ) {
+    // CR 608.2c + CR 115.1: Resolve the shuffle's acting player. The filter is
+    // the source of truth for *which* player. Mirror Draw/Mill/Discard:
+    // context-ref filters (Controller, etc.) MUST NOT consult `ability.targets`
+    // because chained sub-abilities inherit the parent's Player targets — a
+    // `Shuffle { target: Controller }` chained off a Player-targeting parent
+    // would otherwise shuffle the wrong library. `Owner` ("its owner's library")
+    // resolves against `source_id`, not targets, so it is handled separately.
+    let shuffle_target = match &ability.effect {
+        Effect::Shuffle { target } => target.clone(),
+        _ => TargetFilter::Controller,
+    };
+    let target_player = if matches!(shuffle_target, TargetFilter::Owner) {
         // CR 400.3: "its owner's library" resolves to the owner of source_id.
         state
             .objects
@@ -48,7 +27,7 @@ pub fn resolve(
             .map(|obj| obj.owner)
             .unwrap_or(ability.controller)
     } else {
-        ability.controller
+        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
     };
 
     // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
@@ -80,7 +59,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{Effect, TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -209,6 +188,8 @@ mod tests {
 
     #[test]
     fn shuffle_targets_specified_player() {
+        // CR 608.2c: For non-context-ref filters (e.g. `Any` from "target
+        // player shuffles their library"), the chosen TargetRef::Player wins.
         let mut state = GameState::new_two_player(42);
         for i in 0..5 {
             create_object(
@@ -222,13 +203,56 @@ mod tests {
         let p1_lib_before = state.players[1].library.clone();
         let p0_lib_before = state.players[0].library.clone();
 
-        let ability = make_shuffle_ability(vec![TargetRef::Player(PlayerId(1))]);
+        // Mirrors the parser's "target/that player shuffles" emission
+        // (`TargetFilter::Player`).
+        let ability = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.players[0].library, p0_lib_before);
         assert_eq!(state.players[1].library.len(), p1_lib_before.len());
+    }
+
+    #[test]
+    fn shuffle_controller_filter_does_not_inherit_parent_player_target() {
+        // CR 115.1 regression: a chained Shuffle whose `target` is the
+        // context-ref `Controller` must shuffle the spell controller's library,
+        // even when an inherited `TargetRef::Player` from the parent is in
+        // `ability.targets`. Mirrors the Discard / Draw / Mill guard.
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(1),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        let p1_lib_before = state.players[1].library.clone();
+        let p0_lib_before = state.players[0].library.clone();
+
+        // Inherited parent target = P1; filter = Controller (so the spell
+        // controller P0 must be the one whose library shuffles).
+        let ability = make_shuffle_ability(vec![TargetRef::Player(PlayerId(1))]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // P1's library is unchanged (parent target inherited, but ignored).
+        // P0's library size preserved (it was shuffled in place).
+        assert_eq!(
+            state.players[1].library, p1_lib_before,
+            "P1's library must NOT be shuffled — Controller filter resolves to caster (P0)"
+        );
+        assert_eq!(state.players[0].library.len(), p0_lib_before.len());
     }
 
     /// CR 608.2c + CR 701.24a: Assassin's Trophy-shape — `Effect::Shuffle

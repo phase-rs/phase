@@ -866,17 +866,35 @@ pub enum ManaSpendRestriction {
 }
 
 /// Duration for temporary effects.
+///
+/// Player-axis variants (`UntilNextTurnOf`, `UntilNextUntapStepOf`) are
+/// parameterized by `PlayerScope` per the workspace "Parameterize, don't
+/// proliferate" principle. `PlayerScope::Controller` recovers the legacy
+/// "until your next turn" / "controller's next untap step" semantics; future
+/// `Target` / `Opponent` / `AllPlayers` readings unblock cards whose duration
+/// is bound to a non-controller player.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Duration {
+    /// CR 514.2: Effect expires at end of turn (cleanup step).
     UntilEndOfTurn,
     /// CR 514.2: Effect expires at end of combat phase.
     UntilEndOfCombat,
-    UntilYourNextTurn,
+    /// CR 514.2 + CR 611.2a: Effect expires at the beginning of `player`'s
+    /// next turn. `PlayerScope::Controller` corresponds to the legacy
+    /// "until your next turn" reading.
+    UntilNextTurnOf {
+        player: PlayerScope,
+    },
+    /// CR 611.2a: Effect expires when the source object leaves the
+    /// battlefield.
     UntilHostLeavesPlay,
-    /// CR 502.3: Effect expires at the beginning of the affected permanent's
-    /// controller's next untap step. Used for "doesn't untap during its
-    /// controller's next untap step" effects.
-    UntilControllerNextUntapStep,
+    /// CR 502.3 + CR 611.2a: Effect expires at the beginning of `player`'s
+    /// next untap step. `PlayerScope::Controller` corresponds to the legacy
+    /// "controller's next untap step" reading used by exert / "doesn't
+    /// untap" effects.
+    UntilNextUntapStepOf {
+        player: PlayerScope,
+    },
     /// CR 611.2b: "for as long as [condition]" — effect persists while condition holds.
     ForAsLongAs {
         condition: StaticCondition,
@@ -976,7 +994,7 @@ pub enum CastingPermission {
     ///
     /// `granted_to` records the player the permission was granted to — i.e. the
     /// controller of the effect that created it (CR 611.2a/b). This is required
-    /// to correctly expire `Duration::UntilYourNextTurn` permissions at the
+    /// to correctly expire `Duration::UntilNextTurnOf` permissions at the
     /// grantee's next untap step and `Duration::UntilEndOfTurn` permissions at
     /// cleanup (CR 514.2). Cast-permission checks (`has_exile_cast_permission`)
     /// do not consult this field — it governs duration pruning only.
@@ -1026,7 +1044,7 @@ pub enum CastingPermission {
 /// to at resolution time. Resolved to a concrete `PlayerId` by
 /// `grant_permission::resolve` before the permission is written to the target
 /// `GameObject`. Drives both `granted_to` binding and, for durations scoped to
-/// that player (e.g., `UntilYourNextTurn`), the prune step in `layers.rs`.
+/// that player (e.g., `UntilNextTurnOf`), the prune step in `layers.rs`.
 ///
 /// Default is `AbilityController` for all pre-existing parser call sites.
 /// Additional variants support compound-exile patterns where multiple objects
@@ -1726,14 +1744,48 @@ pub enum TargetFilter {
     Owner,
 }
 
+/// CR 102 + CR 119 + CR 402: Player axis for player-scoped quantity references.
+///
+/// Parameterizes the player whose hand size, life total, or other per-player
+/// scalar is being read. Replaces sibling enum variants like
+/// `LifeTotal` / `TargetLifeTotal` / `OpponentLifeTotal` and
+/// `HandSize` / `OpponentHandSize` with a single parameterized form.
+///
+/// Categorical-boundary check (per the "Parameterize, don't proliferate"
+/// principle): every variant is a player-relativity choice within a single
+/// CR section. Aggregate scopes (`Opponent`, `AllPlayers`) compose
+/// `AggregateFunction` to express max/min/sum across a population — they do
+/// not introduce a new abstraction layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PlayerScope {
+    /// CR 109.5 / CR 113.6: The controller of the source ability or effect.
+    Controller,
+    /// CR 109.4 + CR 113.6 + CR 115.1: The first player target of the
+    /// resolving ability (read from `ability.targets`).
+    Target,
+    /// CR 102.2 + CR 102.3: All opponents of the controller, aggregated by
+    /// `aggregate`. Existing `OpponentLifeTotal` / `OpponentHandSize`
+    /// semantics correspond to `aggregate = Max`.
+    Opponent { aggregate: AggregateFunction },
+    /// CR 102.1: All players in the game (controller + opponents),
+    /// aggregated by `aggregate`. Reserved for future cards that read
+    /// "the highest life total among players" or similar cross-player
+    /// extrema that include the controller.
+    AllPlayers { aggregate: AggregateFunction },
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QuantityRef {
-    /// Number of cards in the controller's hand.
-    HandSize,
-    /// Controller's current life total.
-    LifeTotal,
+    /// CR 402: Number of cards in `player`'s hand. `PlayerScope::Controller`
+    /// is the default reading; `Target`, `Opponent { .. }`, and `AllPlayers`
+    /// cover targeted-player and cross-player aggregate variants.
+    HandSize { player: PlayerScope },
+    /// CR 119: `player`'s current life total. See `HandSize` for player-axis
+    /// semantics.
+    LifeTotal { player: PlayerScope },
     /// Number of cards in the controller's graveyard.
     GraveyardSize,
     /// Controller's life total minus the format's starting life total.
@@ -1824,8 +1876,6 @@ pub enum QuantityRef {
     },
     /// The power of the targeted permanent. Used for "equal to target's power".
     TargetPower,
-    /// CR 119.3 + CR 107.2: The life total of the targeted player.
-    TargetLifeTotal,
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
@@ -1983,12 +2033,6 @@ pub enum QuantityRef {
     /// clauses like "if an opponent discarded a card this turn" (Tinybones,
     /// Trinket Thief and similar).
     OpponentDiscardedCardThisTurn,
-    /// CR 119: Maximum life total among the controller's opponents.
-    /// Used for "an opponent has more life than you" cross-player comparisons.
-    OpponentLifeTotal,
-    /// CR 402: Maximum hand count among the controller's opponents.
-    /// Used for "an opponent has more cards in hand than you" cross-player comparisons.
-    OpponentHandSize,
     /// CR 309.7: Number of dungeons the controller has completed.
     DungeonsCompleted,
     /// CR 107.3m: The value of X paid for the spell that produced the source
@@ -3666,7 +3710,8 @@ pub enum Effect {
         /// produced amount references a player target (e.g., Jeska's Will mode 1
         /// "Add {R} for each card in target opponent's hand"). When set, the
         /// player target is surfaced as a target slot at cast time and
-        /// `TargetZoneCardCount`/`TargetLifeTotal` quantities resolve against it.
+        /// `TargetZoneCardCount` and `LifeTotal { player: Target }` quantities
+        /// resolve against it.
         /// `None` for the common case of mana abilities with no player target
         /// (Cabal Coffers, Reflecting Pool, fixed mana, etc.).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4154,7 +4199,7 @@ pub enum Effect {
     },
     /// CR 701.15a: Goad target creature — it must attack each combat if able and must
     /// attack a player other than the goading player if able. Duration is until the
-    /// goading player's next turn (UntilYourNextTurn).
+    /// goading player's next turn (UntilNextTurnOf).
     Goad {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -5802,8 +5847,6 @@ pub enum TriggerCondition {
     TwoOrMoreSpellsCastLastTurn,
     /// CR 603.4: "if it's your turn" — intervening-if requiring the controller's turn.
     DuringYourTurn,
-    /// CR 603.4: "if it's not your turn" / "if it isn't your turn"
-    NotYourTurn,
     /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
@@ -5817,27 +5860,18 @@ pub enum TriggerCondition {
 
     /// "if you cast it" — zoneless cast check (unlike CastFromZone which requires a specific zone).
     /// CR 701.57a: Used by Discover ETB triggers.
+    /// Negation ("if it wasn't cast") is expressed via `Not { Box::new(WasCast) }`.
     WasCast,
-
-    /// "if none of them were cast" / "if it wasn't cast" — true when the entering
-    /// creature was NOT cast (entered via ninjutsu, reanimation, flicker, etc.).
-    /// CR 601.2: Negation of WasCast — checks that `cast_from_zone` is `None`.
-    WasNotCast,
 
     /// "if it's attacking" — true when the trigger source object is currently an attacker.
     /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).
     SourceIsAttacking,
 
     /// CR 702.49 + CR 702.190a + CR 603.4 + CR 702.138b: "if its sneak/ninjutsu
-    /// cost was paid this turn" / "unless it escaped". True when the source
-    /// permanent entered via the specified cast/activation variant this turn.
-    /// When `negated` is true, the condition inverts — e.g. "sacrifice it unless
-    /// it escaped" gates the sacrifice on `cast_variant_paid != Some(Escape)`.
-    CastVariantPaid {
-        variant: CastVariantPaid,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        negated: bool,
-    },
+    /// cost was paid this turn". True when the source permanent entered via the
+    /// specified cast/activation variant this turn. Negation ("unless it escaped")
+    /// is expressed via `Not { Box::new(CastVariantPaid { variant }) }`.
+    CastVariantPaid { variant: CastVariantPaid },
 
     /// CR 601.2: "during each opponent's turn" — the trigger only fires when it is
     /// currently an opponent's turn. Used in conjunction with NthSpellThisTurn constraint.
@@ -5884,16 +5918,17 @@ pub enum TriggerCondition {
     IsMonarch,
     /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
     HasCityBlessing,
-    /// CR 309.7: True when the controller has completed at least one dungeon.
-    CompletedADungeon,
-    /// CR 309.7: True when the controller has NOT completed a specific dungeon.
-    /// Used by Acererak: "if you haven't completed Tomb of Annihilation"
-    NotCompletedDungeon {
-        dungeon: crate::game::dungeon::DungeonId,
+    /// CR 309.7: True when the controller has completed a dungeon.
+    /// `specific: None` matches "have you completed any dungeon"; `specific: Some(d)`
+    /// matches "have you completed `d`". Negation ("haven't completed Tomb of
+    /// Annihilation") is expressed via `Not { Box::new(CompletedDungeon { specific }) }`.
+    CompletedDungeon {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        specific: Option<crate::game::dungeon::DungeonId>,
     },
-    /// CR 611.2b: "if this [permanent] is tapped/untapped" — checks the source's tapped status.
-    /// When `negated` is true, condition is met when the source is *untapped*.
-    SourceIsTapped { negated: bool },
+    /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
+    /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
+    SourceIsTapped,
     /// CR 113.6b: "if this card is in [zone]" — true when the trigger source is in the given zone.
     SourceInZone { zone: crate::types::zones::Zone },
     /// CR 122.1: "if you put a counter on a permanent this turn" — true when the controller
@@ -5967,6 +6002,13 @@ pub enum TriggerCondition {
     And { conditions: Vec<TriggerCondition> },
     /// Any condition must be true
     Or { conditions: Vec<TriggerCondition> },
+    /// CR 603.4: True when the inner predicate is false. Used for "unless [phrase]"
+    /// intervening-if patterns ("you lose 4 life unless you attacked this turn"
+    /// → `Not { Box::new(AttackedThisTurn) }`). Mirrors `TargetFilter::Not` and
+    /// `StaticCondition::Not` so trigger-side negation composes uniformly with
+    /// `And`/`Or`. Replaces the prior per-leaf `negated: bool` fields and the
+    /// `NotYourTurn` / `WasNotCast` / `NotCompletedDungeon` sibling-pair variants.
+    Not { condition: Box<TriggerCondition> },
 }
 
 /// Condition that gates whether a replacement effect applies.
@@ -7218,7 +7260,9 @@ mod tests {
     #[test]
     fn quantity_expr_peel_up_to_passes_through_non_up_to() {
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::HandSize,
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
         };
         assert!(!expr.is_up_to());
         let (peeled, was_up_to) = expr.peel_up_to();
@@ -7232,13 +7276,18 @@ mod tests {
     #[test]
     fn quantity_expr_up_to_composes_with_ref_for_hand_size() {
         let expr = QuantityExpr::up_to(QuantityExpr::Ref {
-            qty: QuantityRef::HandSize,
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
         });
         let (max, up_to) = expr.peel_up_to();
         assert!(up_to);
         match max {
             QuantityExpr::Ref {
-                qty: QuantityRef::HandSize,
+                qty:
+                    QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
             } => {}
             other => panic!("expected Ref {{ HandSize }}, got {other:?}"),
         }
@@ -7720,7 +7769,12 @@ mod tests {
         let durations = vec![
             Duration::UntilEndOfTurn,
             Duration::UntilEndOfCombat,
-            Duration::UntilYourNextTurn,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller,
+            },
             Duration::UntilHostLeavesPlay,
             Duration::Permanent,
         ];

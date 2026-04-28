@@ -461,6 +461,8 @@ export interface Player {
   graveyard: ObjectId[];
   has_drawn_this_turn: boolean;
   lands_played_this_turn: number;
+  /** CR 500: per-player turn count, excluding skipped turns. */
+  turns_taken: number;
   can_look_at_top_of_library?: boolean;
   is_eliminated?: boolean;
   companion?: CompanionInfo;

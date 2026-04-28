@@ -737,6 +737,30 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         }
     }
 
+    // CR 903.3: Possessive commander reference ("your commander" /
+    // "their commander" / "your commanders"). The commander is identified by
+    // the IsCommander flag, not by a creature subtype. Effects like Command
+    // Beacon's "Put your commander into your hand from the command zone" need
+    // a typed target carrying IsCommander + the controller scope so the
+    // resolver can locate the right card.
+    if let Some((_poss, rest)) = strip_possessive(&lower) {
+        for word in &["commanders", "commander"] {
+            if let Ok((after, _)) =
+                tag::<_, _, nom_language::error::VerboseError<&str>>(*word).parse(rest)
+            {
+                let consumed = lower.len() - after.len();
+                return (
+                    TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::You),
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                    &text[consumed..],
+                );
+            }
+        }
+    }
+
     // Bare type phrase fallback: try parse_type_phrase before giving up.
     // Handles "other nonland permanents you own and control" after quantifier stripping.
     let (filter, rest) = parse_type_phrase(text);

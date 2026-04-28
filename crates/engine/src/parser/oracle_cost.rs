@@ -13,7 +13,8 @@ use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityCost, CostReduction, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+    AbilityCost, CostReduction, FilterProp, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
+    TypedFilter,
 };
 use crate::types::zones::Zone;
 
@@ -211,7 +212,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         if rest_lower == "your hand" {
             return AbilityCost::Discard {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 filter: None,
                 random: false,
@@ -946,7 +949,9 @@ mod tests {
             parse_oracle_cost("Discard your hand"),
             AbilityCost::Discard {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller
+                    },
                 },
                 filter: None,
                 random: false,

@@ -40,8 +40,9 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
     match restriction {
         GameRestriction::CastOnlyFromZones { expiry, .. }
         | GameRestriction::CantCastSpells { expiry, .. } => {
-            if let Some(crate::types::ability::Duration::UntilYourNextTurn) =
-                ability.duration.as_ref()
+            if let Some(crate::types::ability::Duration::UntilNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller,
+            }) = ability.duration.as_ref()
             {
                 *expiry = RestrictionExpiry::UntilPlayerNextTurn {
                     player: ability.controller,
@@ -121,7 +122,9 @@ mod tests {
             ObjectId(9),
             PlayerId(1),
         )
-        .duration(Duration::UntilYourNextTurn);
+        .duration(Duration::UntilNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        });
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();

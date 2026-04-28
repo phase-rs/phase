@@ -12,8 +12,8 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, ObjectProperty, PlayerFilter, QuantityExpr,
-    QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, ObjectProperty, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -383,8 +383,16 @@ fn resolve_ref(
     filter_ctx.recipient_id = ctx.recipient;
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
-        QuantityRef::HandSize => player.map_or(0, |p| usize_to_i32_saturating(p.hand.len())),
-        QuantityRef::LifeTotal => player.map_or(0, |p| p.life),
+        // CR 402: hand size for the scoped player(s).
+        QuantityRef::HandSize { player: scope } => {
+            resolve_per_player_scalar(state, *scope, controller, targets, |p| {
+                usize_to_i32_saturating(p.hand.len())
+            })
+        }
+        // CR 119: life total for the scoped player(s).
+        QuantityRef::LifeTotal { player: scope } => {
+            resolve_per_player_scalar(state, *scope, controller, targets, |p| p.life)
+        }
         // CR 122.1: Counter-kind lookup summed across scope players. Controller
         // scope resolves to a single player; Opponents/All may span multiple.
         // Per-player u32 is widened to u64 before summing; the i32::try_from
@@ -684,19 +692,6 @@ fn resolve_ref(
         QuantityRef::Devotion { colors } => u32_to_i32_saturating(
             crate::game::devotion::count_devotion(state, controller, colors),
         ),
-        QuantityRef::TargetLifeTotal => {
-            // CR 119.3 + CR 107.2: Find the first player target and return their life total.
-            targets
-                .iter()
-                .find_map(|t| {
-                    if let TargetRef::Player(pid) = t {
-                        state.players.iter().find(|p| p.id == *pid)
-                    } else {
-                        None
-                    }
-                })
-                .map_or(0, |p| p.life)
-        }
         QuantityRef::TargetZoneCardCount { zone } => {
             let target_player = targets.iter().find_map(|t| {
                 if let TargetRef::Player(pid) = t {
@@ -1151,22 +1146,6 @@ fn resolve_ref(
                 0
             }
         }
-        // CR 119.3: Maximum life total among opponents.
-        QuantityRef::OpponentLifeTotal => state
-            .players
-            .iter()
-            .filter(|p| p.id != controller)
-            .map(|p| p.life)
-            .max()
-            .unwrap_or(0),
-        // CR 402.1: Maximum hand size among opponents.
-        QuantityRef::OpponentHandSize => state
-            .players
-            .iter()
-            .filter(|p| p.id != controller)
-            .map(|p| usize_to_i32_saturating(p.hand.len()))
-            .max()
-            .unwrap_or(0),
         // CR 309.7: Number of dungeons the controller has completed.
         QuantityRef::DungeonsCompleted => state
             .dungeon_progress
@@ -1250,6 +1229,68 @@ fn scoped_players<'a>(
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
     })
+}
+
+/// CR 102 + CR 119 + CR 402: Resolve a per-player scalar through a `PlayerScope`.
+///
+/// Single authority for all `LifeTotal { player }` / `HandSize { player }`-style
+/// player-scoped quantity references. `extract` returns the scalar for a single
+/// player (e.g., `p.life`, `p.hand.len()`); the scope decides which players
+/// contribute and how to combine them.
+///
+/// - `Controller`: returns the controller's value, or 0 if not found.
+/// - `Target`: returns the first player target's value (CR 115.1), or 0.
+/// - `Opponent { aggregate }`: aggregates over `p.id != controller` (CR 102.2).
+/// - `AllPlayers { aggregate }`: aggregates over every player (CR 102.1).
+fn resolve_per_player_scalar<F>(
+    state: &GameState,
+    scope: PlayerScope,
+    controller: PlayerId,
+    targets: &[TargetRef],
+    mut extract: F,
+) -> i32
+where
+    F: FnMut(&crate::types::player::Player) -> i32,
+{
+    match scope {
+        PlayerScope::Controller => state
+            .players
+            .iter()
+            .find(|p| p.id == controller)
+            .map_or(0, &mut extract),
+        PlayerScope::Target => targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Player(pid) => state.players.iter().find(|p| p.id == *pid),
+                _ => None,
+            })
+            .map_or(0, &mut extract),
+        PlayerScope::Opponent { aggregate } => aggregate_over_players(
+            state.players.iter().filter(|p| p.id != controller),
+            aggregate,
+            &mut extract,
+        ),
+        PlayerScope::AllPlayers { aggregate } => {
+            aggregate_over_players(state.players.iter(), aggregate, &mut extract)
+        }
+    }
+}
+
+/// CR 107.3e: Reduce a player iterator to a single i32 by aggregate function.
+/// Returns 0 for an empty iterator (mirrors the prior `OpponentLifeTotal`
+/// `.unwrap_or(0)` semantics — there is always at least one opponent in a
+/// real game, but a 1-player test harness should not panic).
+fn aggregate_over_players<'a, I, F>(players: I, aggregate: AggregateFunction, mut extract: F) -> i32
+where
+    I: IntoIterator<Item = &'a crate::types::player::Player>,
+    F: FnMut(&crate::types::player::Player) -> i32,
+{
+    let values = players.into_iter().map(&mut extract);
+    match aggregate {
+        AggregateFunction::Max => values.max().unwrap_or(0),
+        AggregateFunction::Min => values.min().unwrap_or(0),
+        AggregateFunction::Sum => values.sum(),
+    }
 }
 
 /// Count players matching a PlayerFilter relative to the controller.
@@ -1620,7 +1661,9 @@ mod tests {
             );
         }
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::HandSize,
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
         };
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
@@ -2302,7 +2345,9 @@ mod tests {
         let state = GameState::new_two_player(42);
         // Player 1 starts at 20 life
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::TargetLifeTotal,
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            },
         };
         let ability = ResolvedAbility::new(
             Effect::LoseLife {
@@ -2630,7 +2675,9 @@ mod tests {
         let expr = QuantityExpr::Sum {
             exprs: vec![
                 QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize,
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 QuantityExpr::Fixed { value: 7 },
             ],

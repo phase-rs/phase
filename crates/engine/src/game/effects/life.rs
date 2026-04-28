@@ -330,6 +330,18 @@ fn resolve_life_loss_target(
     ability: &ResolvedAbility,
     target_filter: Option<&TargetFilter>,
 ) -> PlayerId {
+    // CR 115.1: When the filter is a context-ref (Controller, etc.) the acting
+    // player MUST come from state slots — not `ability.targets`, which inherits
+    // the parent's chosen Player target via chain target propagation. Mirrors
+    // the Draw/Mill/Discard guard in `resolve_player_for_context_ref`.
+    if let Some(filter) = target_filter {
+        if filter.is_context_ref() {
+            return super::resolve_player_for_context_ref(state, ability, filter);
+        }
+    }
+
+    // Non-context-ref filters (e.g., explicit Player target on "target opponent
+    // loses 2 life"): the chosen player is in `ability.targets`.
     if let Some(player) = ability.targets.iter().find_map(|target| match target {
         TargetRef::Player(player) => Some(*player),
         _ => None,
@@ -337,24 +349,9 @@ fn resolve_life_loss_target(
         return player;
     }
 
-    if matches!(target_filter, Some(TargetFilter::ParentTargetController)) {
-        if let Some(player) = ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
-            TargetRef::Player(player) => Some(*player),
-        }) {
-            return player;
-        }
-    }
-
-    target_filter
-        .and_then(|filter| {
-            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
-        })
-        .and_then(|target| match target {
-            TargetRef::Player(player) => Some(player),
-            TargetRef::Object(id) => state.objects.get(&id).map(|object| object.controller),
-        })
-        .unwrap_or(ability.controller)
+    // No filter and no Player target: defensive fallback to controller (matches
+    // historical behavior for `LoseLife { target: None }`).
+    ability.controller
 }
 
 /// CR 119.5: Set a player's life total to a specific number.
@@ -847,5 +844,37 @@ mod tests {
         resolve_gain(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.players[1].life, 25, "opponent still gains life");
+    }
+
+    #[test]
+    fn lose_life_controller_filter_does_not_inherit_parent_player_target() {
+        // CR 115.1 regression: a chained `LoseLife { target: Some(Controller) }`
+        // must hit the spell controller, not the parent's inherited Player
+        // target. Mirrors the Discard / Shuffle / Mill / Draw guard.
+        let mut state = GameState::new_two_player(42);
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: Some(TargetFilter::Controller),
+            },
+            vec![TargetRef::Player(PlayerId(1))], // inherited parent target
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].life,
+            p0_life_before - 2,
+            "P0 (controller) should lose life — Controller filter resolves to caster"
+        );
+        assert_eq!(
+            state.players[1].life, p1_life_before,
+            "P1 must not lose life despite being in ability.targets — Controller filter must not consult inherited targets"
+        );
     }
 }

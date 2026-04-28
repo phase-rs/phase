@@ -33,6 +33,7 @@ interface UiStoreState {
   isDragging: boolean;
   showTurnBanner: boolean;
   turnBannerText: string;
+  turnBannerNumber: number | null;
   focusedOpponent: number | null;
   pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
   mobileHandOpen: boolean;
@@ -60,7 +61,7 @@ interface UiStoreActions {
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
   setPreviewSticky: (sticky: boolean) => void;
   setDragging: (dragging: boolean) => void;
-  flashTurnBanner: (text: string) => void;
+  flashTurnBanner: (text: string, turnNumber: number) => void;
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
   setMobileHandOpen: (open: boolean) => void;
@@ -88,6 +89,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   isDragging: false,
   showTurnBanner: false,
   turnBannerText: "",
+  turnBannerNumber: null,
   focusedOpponent: null,
   pendingAbilityChoice: null,
   mobileHandOpen: false,
@@ -189,7 +191,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   setCombatClickHandler: (handler) => set({ combatClickHandler: handler }),
   setPreviewSticky: (sticky) => set({ previewSticky: sticky }),
   setDragging: (dragging) => set({ isDragging: dragging }),
-  flashTurnBanner: (text) => {
+  flashTurnBanner: (text, turnNumber) => {
     // Banner duration scales with both the global Animation Speed slider
     // (animationSpeedMultiplier) and the per-category Banner Pacing slider
     // (pacingMultipliers.banners). When animationSpeedMultiplier is 0
@@ -199,7 +201,7 @@ export const useUiStore = create<UiStore>()((set) => ({
     if (speed <= 0) return;
     const banner = prefs.pacingMultipliers.banners;
     const duration = TURN_BANNER_DURATION_MS * speed * banner;
-    set({ showTurnBanner: true, turnBannerText: text });
+    set({ showTurnBanner: true, turnBannerText: text, turnBannerNumber: turnNumber });
     setTimeout(() => set({ showTurnBanner: false }), duration);
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),

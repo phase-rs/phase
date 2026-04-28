@@ -10,7 +10,7 @@ use nom::Parser;
 
 use super::condition::parse_inner_condition;
 use super::error::OracleResult;
-use crate::types::ability::Duration;
+use crate::types::ability::{Duration, PlayerScope};
 
 /// Parse a duration phrase from Oracle text.
 ///
@@ -20,7 +20,12 @@ pub fn parse_duration(input: &str) -> OracleResult<'_, Duration> {
     alt((
         value(Duration::UntilEndOfTurn, tag("until end of turn")),
         value(Duration::UntilEndOfCombat, tag("until end of combat")),
-        value(Duration::UntilYourNextTurn, tag("until your next turn")),
+        value(
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            tag("until your next turn"),
+        ),
         value(Duration::UntilEndOfTurn, tag("this turn")),
         parse_for_as_long_as,
     ))
@@ -68,7 +73,12 @@ mod tests {
     #[test]
     fn test_parse_duration_next_turn() {
         let (rest, d) = parse_duration("until your next turn and").unwrap();
-        assert_eq!(d, Duration::UntilYourNextTurn);
+        assert_eq!(
+            d,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }
+        );
         assert_eq!(rest, " and");
     }
 
