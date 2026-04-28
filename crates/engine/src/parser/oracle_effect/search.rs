@@ -658,6 +658,44 @@ fn parse_search_filter_suffixes(text: &str, properties: &mut Vec<FilterProp>) {
             continue;
         }
 
+        // CR 201.2 + CR 608.2c: "with the same name as that {creature,card,…}" binds to
+        // the resolving ability's first object target (`SameNameAsParentTarget`). The
+        // demonstrative "that X" is a back-reference to a previously-targeted/exiled
+        // card carried via `TargetFilter::ParentTarget`. Chomp the noun so the
+        // dispatch loop continues at any trailing action chain ("…, reveal it, …").
+        if let Ok((rest, _)) =
+            tag::<_, _, VerboseError<&str>>("with the same name as that ").parse(remaining)
+        {
+            // Consume the demonstrative subject noun and any trailing modifier
+            // ("nontoken creature", "creature", "card") up to the next sentinel
+            // (',', '.') via `take_till` — drop the consumed noun and continue
+            // the dispatch loop at the sentinel position.
+            let (after_noun, _consumed_noun) =
+                nom::bytes::complete::take_till::<_, _, VerboseError<&str>>(|c: char| {
+                    c == ',' || c == '.'
+                })
+                .parse(rest)
+                .unwrap_or((rest, ""));
+            properties.push(FilterProp::SameNameAsParentTarget);
+            remaining = after_noun.trim_start();
+            continue;
+        }
+
+        // CR 608.2c: "with different names" / "with different name" — distinct-names
+        // constraint is already encoded on the search details upstream via
+        // `scan_distinct_names_clause`. The chomping arm here exists solely to
+        // consume the marker text so the dispatch loop does not emit a spurious
+        // "search-filter-suffix unmatched" warning. No FilterProp emitted.
+        if let Ok((rest, _)) = nom::sequence::pair(
+            tag::<_, _, VerboseError<&str>>("with different name"),
+            nom::combinator::opt(tag::<_, _, VerboseError<&str>>("s")),
+        )
+        .parse(remaining)
+        {
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Some((prop, consumed)) = parse_mana_value_suffix(remaining) {
             properties.push(prop);
             remaining = remaining[consumed..].trim_start();
