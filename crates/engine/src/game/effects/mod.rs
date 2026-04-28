@@ -155,14 +155,9 @@ fn matches_player_scope(
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
-                    // CR 608.2c + CR 109.5: Opponent of the controller whose zones changed
-                    // at any point during the current top-level resolution. Reads the
-                    // chain-accumulating `players_zone_changed_this_way` set (vs
-                    // per-effect `last_zone_changed_ids`) so all accepting opponents in
-                    // a `player_scope` iteration are visible — used by the Tempting
-                    // Offer cycle for the bonus-tutor-per-accepting-opponent step.
-                    PlayerFilter::OpponentZoneChangedThisWay => {
-                        p.id != controller && state.players_zone_changed_this_way.contains(&p.id)
+                    PlayerFilter::PerformedActionThisWay { relation, action } => {
+                        crate::game::players::matches_relation(p.id, controller, *relation)
+                            && crate::game::players::performed_action_this_way(state, p.id, *action)
                     }
                     PlayerFilter::OwnersOfCardsExiledBySource => {
                         crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
@@ -213,7 +208,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if let Some(cont) = state.pending_continuation.take() {
         let PendingContinuation { chain, parent_kind } = cont;
         let source_id = chain.source_id;
-        let _ = resolve_ability_chain(state, &chain, events, 0);
+        let _ = resolve_ability_chain(state, &chain, events, 1);
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved { kind, source_id });
         }
@@ -329,6 +324,52 @@ pub(crate) fn append_to_pending_continuation(
     } else {
         state.pending_continuation = Some(PendingContinuation::new(tail));
     }
+}
+
+fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
+    if let Some(existing) = state.pending_continuation.take() {
+        let PendingContinuation { chain, parent_kind } = existing;
+        super::ability_utils::append_to_sub_chain(&mut head, *chain);
+        state.pending_continuation = Some(PendingContinuation {
+            chain: Box::new(head),
+            parent_kind,
+        });
+    } else {
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(head)));
+    }
+}
+
+fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
+    matches!(
+        waiting_for,
+        WaitingFor::ScryChoice { .. }
+            | WaitingFor::DigChoice { .. }
+            | WaitingFor::SurveilChoice { .. }
+            | WaitingFor::RevealChoice { .. }
+            | WaitingFor::SearchChoice { .. }
+            | WaitingFor::TriggerTargetSelection { .. }
+            | WaitingFor::NamedChoice { .. }
+            | WaitingFor::MultiTargetSelection { .. }
+            | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::OpponentMayChoice { .. }
+            | WaitingFor::TributeChoice { .. }
+            | WaitingFor::DiscoverChoice { .. }
+            | WaitingFor::CascadeChoice { .. }
+            | WaitingFor::TopOrBottomChoice { .. }
+            | WaitingFor::ProliferateChoice { .. }
+            | WaitingFor::ExploreChoice { .. }
+            | WaitingFor::CopyRetarget { .. }
+            | WaitingFor::DistributeAmong { .. }
+            | WaitingFor::PayAmountChoice { .. }
+            | WaitingFor::RetargetChoice { .. }
+            | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::ManifestDreadChoice { .. }
+            | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::LearnChoice { .. }
+            | WaitingFor::PopulateChoice { .. }
+    )
 }
 
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
@@ -1045,14 +1086,10 @@ pub fn resolve_ability_chain(
         // coalesce into a single tracked set, while unrelated resolutions
         // stay isolated.
         state.chain_tracked_set_id = None;
-        // CR 608.2c + CR 109.5: Owners-of-zone-changed accumulator resets per
-        // top-level chain so "each opponent who [verbed] this way" only sees
-        // players who acted in the current resolution. Distinct from
-        // `last_zone_changed_ids` (per-effect) — this set accumulates across
-        // every effect AND every player_scope iteration in the chain so all
-        // accepting opponents in "each opponent may search" are visible to a
-        // downstream "for each opponent who searched this way" reference.
-        state.players_zone_changed_this_way.clear();
+        // CR 608.2c + CR 109.5: Player-action accumulator resets per
+        // top-level chain so "each opponent who searched this way" only sees
+        // players who acted in the current resolution.
+        state.player_actions_this_way.clear();
     }
 
     // BeginGame abilities are handled at game-start setup, not during stack resolution
@@ -1461,15 +1498,13 @@ pub fn resolve_ability_chain(
             _ => None,
         })
         .collect();
-    // CR 608.2c + CR 109.5: Accumulate owners of zone-changed objects across the
-    // chain for `PlayerFilter::OpponentZoneChangedThisWay`. Unlike
-    // `last_zone_changed_ids` (overwritten per effect), this set keeps every
-    // player who has acted in the current top-level resolution so the Tempting
-    // Offer cycle's "for each opponent who searches their library this way" sees
-    // every accepting opponent — not just the last `player_scope` iteration's.
-    for &id in &state.last_zone_changed_ids {
-        if let Some(obj) = state.objects.get(&id) {
-            state.players_zone_changed_this_way.insert(obj.owner);
+    // CR 608.2c + CR 109.5: Accumulate player actions across the chain for
+    // `PlayerFilter::PerformedActionThisWay`. This is distinct from
+    // `last_zone_changed_ids`: "searched this way" keys off the player action
+    // even when the search finds no card.
+    for event in &events[events_before..] {
+        if let GameEvent::PlayerPerformedAction { player_id, action } = event {
+            state.player_actions_this_way.insert((*player_id, *action));
         }
     }
 
@@ -1714,56 +1749,25 @@ pub fn resolve_ability_chain(
                 }
             }
         }
-        // If the effect resolver already set up a pending_continuation (e.g., clash
-        // injects modified context for optional_effect_performed), the sub_ability
-        // chain is already accounted for — skip to avoid double execution.
-        if state.pending_continuation.is_some() {
+        // If the effect resolver already set up a pending_continuation without
+        // opening a choice (e.g. clash injects modified context for
+        // optional_effect_performed), the sub_ability chain is already
+        // accounted for — skip to avoid double execution.
+        if state.pending_continuation.is_some() && !waits_for_resolution_choice(&state.waiting_for)
+        {
             return Ok(());
         }
         // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),
         // save the sub-ability as a continuation to execute after the player responds,
         // rather than immediately processing it (which would bypass the UI).
-        if matches!(
-            state.waiting_for,
-            WaitingFor::ScryChoice { .. }
-                | WaitingFor::DigChoice { .. }
-                | WaitingFor::SurveilChoice { .. }
-                | WaitingFor::RevealChoice { .. }
-                | WaitingFor::SearchChoice { .. }
-                | WaitingFor::TriggerTargetSelection { .. }
-                | WaitingFor::NamedChoice { .. }
-                | WaitingFor::MultiTargetSelection { .. }
-                | WaitingFor::OptionalEffectChoice { .. }
-                | WaitingFor::OpponentMayChoice { .. }
-                | WaitingFor::TributeChoice { .. }
-                | WaitingFor::DiscoverChoice { .. }
-                | WaitingFor::CascadeChoice { .. }
-                | WaitingFor::TopOrBottomChoice { .. }
-                | WaitingFor::ProliferateChoice { .. }
-                | WaitingFor::ExploreChoice { .. }
-                | WaitingFor::CopyRetarget { .. }
-                | WaitingFor::DistributeAmong { .. }
-                | WaitingFor::PayAmountChoice { .. }
-                | WaitingFor::RetargetChoice { .. }
-                | WaitingFor::ChooseFromZoneChoice { .. }
-                | WaitingFor::ManifestDreadChoice { .. }
-                | WaitingFor::DiscardChoice { .. }
-                | WaitingFor::EffectZoneChoice { .. }
-                | WaitingFor::CategoryChoice { .. }
-                | WaitingFor::LearnChoice { .. }
-                | WaitingFor::PopulateChoice { .. }
-        ) {
+        if waits_for_resolution_choice(&state.waiting_for) {
             let mut sub_clone = sub.as_ref().clone();
             if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
                 sub_clone.targets = ability.targets.clone();
             }
             // Propagate SpellContext so kicker/optional flags survive continuations.
             sub_clone.context = ability.context.clone();
-            debug_assert!(
-                state.pending_continuation.is_none(),
-                "pending_continuation overwritten before consumption — sub_ability chain will be lost"
-            );
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(sub_clone)));
+            prepend_to_pending_continuation(state, sub_clone);
             return Ok(());
         }
 
@@ -4203,41 +4207,26 @@ mod tests {
         assert_eq!(state.players[1].hand.len(), 1, "player 1 should have drawn");
     }
 
-    /// CR 608.2c + CR 109.5: Tempting Offer cycle's "for each opponent who
-    /// searches their library this way" relies on
-    /// `players_zone_changed_this_way` accumulating across player_scope
-    /// iterations. With three players, when each opponent independently moves
-    /// a card during a `player_scope: Opponent` ability, all opponents must
-    /// appear in the accumulator — not just the last iteration's owner — so
-    /// the downstream `PlayerCount { OpponentZoneChangedThisWay }` returns the
-    /// correct count.
+    /// CR 608.2c + CR 109.5: "for each opponent who searched their library
+    /// this way" relies on `player_actions_this_way` accumulating across
+    /// player_scope iterations.
     #[test]
-    fn players_zone_changed_this_way_accumulates_across_player_scope_iterations() {
+    fn player_actions_this_way_accumulates_across_player_scope_iterations() {
         use crate::types::format::FormatConfig;
 
         // 3-player game: P0 (controller), P1, P2 (opponents).
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
 
-        // Each opponent owns one library card to mill (mill = library → graveyard
-        // emits ZoneChanged events the accumulator picks up).
-        for (owner, card_id) in [(PlayerId(1), CardId(20)), (PlayerId(2), CardId(21))] {
-            create_object(
-                &mut state,
-                card_id,
-                owner,
-                format!("Lib {owner:?}"),
-                Zone::Library,
-            );
-        }
-
-        // Mill 1 with player_scope: Opponent — P1 mills 1 of P1's library, then
-        // P2 mills 1 of P2's library. Each iteration emits a ZoneChanged event;
-        // the accumulator should contain BOTH opponents after the loop.
+        // Search with player_scope: Opponent. Empty libraries still emit the
+        // SearchedLibrary action, which is exactly what "searched this way"
+        // means; no ZoneChanged event is required.
         let mut ability = ResolvedAbility::new(
-            Effect::Mill {
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-                destination: Zone::Graveyard,
+                reveal: false,
+                target_player: None,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -4248,41 +4237,40 @@ mod tests {
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
-        // Both opponents milled their own library card — both must appear in
-        // the chain accumulator.
+        let action = crate::types::events::PlayerActionKind::SearchedLibrary;
         assert!(
-            state.players_zone_changed_this_way.contains(&PlayerId(1)),
-            "P1 milled a card and must be in players_zone_changed_this_way"
+            state
+                .player_actions_this_way
+                .contains(&(PlayerId(1), action)),
+            "P1 searched and must be recorded in player_actions_this_way"
         );
         assert!(
-            state.players_zone_changed_this_way.contains(&PlayerId(2)),
-            "P2 milled a card and must be in players_zone_changed_this_way \
-             — failure means accumulation across player_scope iterations is broken \
-             (the LAST iteration's overwrite of last_zone_changed_ids was \
-             previously the bug pattern for the Tempting Offer cycle)"
+            state
+                .player_actions_this_way
+                .contains(&(PlayerId(2), action)),
+            "P2 searched and must be recorded in player_actions_this_way"
         );
     }
 
-    /// CR 608.2c + CR 109.5: `PlayerCount { OpponentZoneChangedThisWay }`
-    /// resolves to the count of opponents in the accumulator (excludes
-    /// controller). Direct unit test of the quantity resolver — proves Tempt's
-    /// bonus-tutor step gets the right repeat count.
+    /// CR 608.2c + CR 109.5: `PerformedActionThisWay` resolves to the count
+    /// of matching players in the chain-local action accumulator.
     #[test]
-    fn opponent_zone_changed_this_way_player_count_excludes_controller() {
+    fn performed_action_this_way_player_count_excludes_controller() {
         use crate::game::quantity::resolve_quantity;
         use crate::types::format::FormatConfig;
 
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
 
-        // Simulate the Tempt step-2 outcome: P0 (controller) searched for
-        // step 1, P1 took the offer, P2 declined. Set the accumulator
-        // directly to bypass the player_scope iteration mechanics.
-        state.players_zone_changed_this_way.insert(PlayerId(0));
-        state.players_zone_changed_this_way.insert(PlayerId(1));
+        let action = crate::types::events::PlayerActionKind::SearchedLibrary;
+        state.player_actions_this_way.insert((PlayerId(0), action));
+        state.player_actions_this_way.insert((PlayerId(1), action));
 
         let qty = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentZoneChangedThisWay,
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    action,
+                },
             },
         };
         let count = resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0));
@@ -4291,22 +4279,19 @@ mod tests {
         // accumulator (declined the offer).
         assert_eq!(
             count, 1,
-            "OpponentZoneChangedThisWay must exclude controller and count only \
-             opponents in players_zone_changed_this_way (P0 controller, P1 took \
-             offer, P2 declined → 1)"
+            "PerformedActionThisWay must exclude controller and count only \
+             opponents who performed the action"
         );
 
-        // All three accept: count = 2 (P1 + P2, excluding P0).
-        state.players_zone_changed_this_way.insert(PlayerId(2));
+        state.player_actions_this_way.insert((PlayerId(2), action));
         let count_all = resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0));
         assert_eq!(
             count_all, 2,
             "All opponents in accumulator → count of opponents (excl controller) is 2"
         );
 
-        // No opponents acted: count = 0 (only controller in set).
-        state.players_zone_changed_this_way.remove(&PlayerId(1));
-        state.players_zone_changed_this_way.remove(&PlayerId(2));
+        state.player_actions_this_way.remove(&(PlayerId(1), action));
+        state.player_actions_this_way.remove(&(PlayerId(2), action));
         let count_none = resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0));
         assert_eq!(
             count_none, 0,
@@ -4314,16 +4299,17 @@ mod tests {
         );
     }
 
-    /// CR 608.2c + CR 109.5: `players_zone_changed_this_way` clears at depth=0
+    /// CR 608.2c + CR 109.5: `player_actions_this_way` clears at depth=0
     /// chain entry — does NOT leak across unrelated top-level resolutions.
     #[test]
-    fn players_zone_changed_this_way_clears_at_top_level_chain_entry() {
+    fn player_actions_this_way_clears_at_top_level_chain_entry() {
         let mut state = GameState::new_two_player(42);
 
         // Pre-pollute the accumulator with stale state from a "previous"
         // resolution.
-        state.players_zone_changed_this_way.insert(PlayerId(0));
-        state.players_zone_changed_this_way.insert(PlayerId(1));
+        let action = crate::types::events::PlayerActionKind::SearchedLibrary;
+        state.player_actions_this_way.insert((PlayerId(0), action));
+        state.player_actions_this_way.insert((PlayerId(1), action));
 
         // Add one library card so Draw has something to draw — Draw itself
         // emits no ZoneChanged events (cards moving from library to hand DO
@@ -4352,8 +4338,8 @@ mod tests {
         // Shuffle emits no ZoneChanged events; the accumulator must be EMPTY
         // (cleared at depth=0 entry, not extended by stale state).
         assert!(
-            state.players_zone_changed_this_way.is_empty(),
-            "depth=0 chain entry must clear players_zone_changed_this_way; \
+            state.player_actions_this_way.is_empty(),
+            "depth=0 chain entry must clear player_actions_this_way; \
              leaking across top-level resolutions would cause spurious counts \
              in 'opponent who [verbed] this way' references on subsequent spells"
         );

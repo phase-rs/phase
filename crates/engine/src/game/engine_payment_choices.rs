@@ -28,14 +28,14 @@ pub(super) fn handle_optional_effect_choice(
         ability.optional = false;
         if accept {
             ability.context.optional_effect_performed = true;
-            effects::resolve_ability_chain(state, &ability, events, 0)
+            effects::resolve_ability_chain(state, &ability, events, 1)
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
         } else if let Some(ref sub) = ability.sub_ability {
             if matches!(sub.condition, Some(AbilityCondition::IfYouDo)) {
                 if let Some(ref else_branch) = sub.else_ability {
                     let mut else_resolved = else_branch.as_ref().clone();
                     else_resolved.context = ability.context.clone();
-                    effects::resolve_ability_chain(state, &else_resolved, events, 0)
+                    effects::resolve_ability_chain(state, &else_resolved, events, 1)
                         .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
                 }
             }
@@ -116,14 +116,14 @@ pub(super) fn handle_opponent_may_choice(
                 }
 
                 set_active_priority(state);
-                effects::resolve_ability_chain(state, &ability, events, 0)
+                effects::resolve_ability_chain(state, &ability, events, 1)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             } else {
                 if matches!(ability.effect, Effect::DealDamage { .. }) {
                     ability.targets = vec![TargetRef::Player(promptee)];
                 }
                 set_active_priority(state);
-                effects::resolve_ability_chain(state, &ability, events, 0)
+                effects::resolve_ability_chain(state, &ability, events, 1)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             }
         }
@@ -145,7 +145,7 @@ pub(super) fn handle_opponent_may_choice(
                     if let Some(ref else_branch) = sub.else_ability {
                         let mut else_resolved = else_branch.as_ref().clone();
                         else_resolved.context = ability.context.clone();
-                        effects::resolve_ability_chain(state, &else_resolved, events, 0)
+                        effects::resolve_ability_chain(state, &else_resolved, events, 1)
                             .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
                     }
                 }

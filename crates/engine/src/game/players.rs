@@ -1,4 +1,5 @@
-use crate::types::events::GameEvent;
+use crate::types::ability::PlayerRelation;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::game_state::LinkedExileSnapshot;
 use crate::types::identifiers::ObjectId;
@@ -48,6 +49,26 @@ pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
         .copied()
         .filter(|&id| id != player && is_alive(state, id))
         .collect()
+}
+
+/// CR 102.1 / CR 102.2 / CR 109.5: Match a player against a relation to the
+/// resolving effect's controller.
+pub fn matches_relation(player: PlayerId, controller: PlayerId, relation: PlayerRelation) -> bool {
+    match relation {
+        PlayerRelation::Controller => player == controller,
+        PlayerRelation::Opponent => player != controller,
+        PlayerRelation::All => true,
+    }
+}
+
+/// CR 608.2c + CR 109.5: Whether `player` performed `action` during the
+/// current top-level resolution.
+pub fn performed_action_this_way(
+    state: &GameState,
+    player: PlayerId,
+    action: PlayerActionKind,
+) -> bool {
+    state.player_actions_this_way.contains(&(player, action))
 }
 
 /// CR 101.4: APNAP (Active Player, Non-Active Player) ordering.

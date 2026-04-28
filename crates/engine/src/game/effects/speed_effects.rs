@@ -71,15 +71,13 @@ fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
-        // CR 608.2c + CR 109.5: Opponent-restricted variant. Reads the chain-
-        // accumulating set so all accepting opponents in a player_scope iteration
-        // are returned (Tempting Offer cycle).
-        PlayerFilter::OpponentZoneChangedThisWay => state
+        PlayerFilter::PerformedActionThisWay { relation, action } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
-                player.id != controller && state.players_zone_changed_this_way.contains(&player.id)
+                crate::game::players::matches_relation(player.id, controller, *relation)
+                    && crate::game::players::performed_action_this_way(state, player.id, *action)
             })
             .map(|player| player.id)
             .collect(),

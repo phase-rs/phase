@@ -1430,12 +1430,11 @@ pub(crate) fn resolve_player_count(
                             .last_zone_changed_ids
                             .iter()
                             .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
-                        // CR 608.2c + CR 109.5: Opponent-restricted variant that reads the
-                        // chain-accumulating set populated across player_scope iterations.
-                        // See `PlayerFilter::OpponentZoneChangedThisWay` doc for rationale.
-                        PlayerFilter::OpponentZoneChangedThisWay => {
-                            p.id != controller
-                                && state.players_zone_changed_this_way.contains(&p.id)
+                        PlayerFilter::PerformedActionThisWay { relation, action } => {
+                            crate::game::players::matches_relation(p.id, controller, *relation)
+                                && crate::game::players::performed_action_this_way(
+                                    state, p.id, *action,
+                                )
                         }
                         PlayerFilter::OwnersOfCardsExiledBySource => {
                             crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
