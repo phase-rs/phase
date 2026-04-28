@@ -89,7 +89,7 @@ fn main() -> Result<()> {
 
     for entry in WalkDir::new(&target).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.extension().map_or(true, |ext| ext != "rs") {
+        if path.extension().is_none_or(|ext| ext != "rs") {
             continue;
         }
         let rel = path.strip_prefix(&workspace_root).unwrap_or(path);

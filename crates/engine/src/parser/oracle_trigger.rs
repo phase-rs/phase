@@ -1394,37 +1394,58 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
-    // --- Shared combinator path: parse_inner_condition + bridge ---
-    // Handles ALL game-state conditions: control presence, life total, hand size,
-    // graveyard threshold, "you attacked this turn", "a creature died this turn",
-    // "you gained life", "no spells were cast last turn", counter added, etc.
-    if let Some(if_pos) = tp.find("if ") {
-        let cond_fragment = &lower[if_pos + "if ".len()..];
-        if let Ok((rest, sc)) = parse_inner_condition(cond_fragment) {
-            let rest_trimmed = rest.trim();
-            // Accept only if parser stopped at a clause boundary and there's
-            // no "otherwise" branch that depends on this condition.
-            let has_otherwise = rest_trimmed
-                .trim_start_matches('.')
-                .trim_start()
-                .starts_with("otherwise");
-            if !has_otherwise
-                && (rest_trimmed.is_empty()
-                    || rest_trimmed.starts_with(',')
-                    || rest_trimmed.starts_with('.'))
-            {
-                if let Some(trigger_cond) = static_condition_to_trigger_condition(&sc) {
-                    let consumed = cond_fragment.len() - rest.len();
-                    return (
-                        strip_condition_clause(text, if_pos, "if ".len() + consumed),
-                        Some(trigger_cond),
-                    );
-                }
-            }
-        }
+    // CR 603.4: Both `if` and trailing `unless` introduce intervening predicates.
+    // `unless` is the negation of `if` — wrap the parsed predicate in `Not`.
+    // Cost-form `unless` ("unless you pay {2}", "unless you sacrifice a creature")
+    // is already stripped upstream by `extract_unless_pay_modifier`.
+    if let Some(result) = try_extract_intervening(&tp, &lower, text, "if ", |c| c) {
+        return result;
+    }
+    if let Some(result) =
+        try_extract_intervening(&tp, &lower, text, " unless ", |c| TriggerCondition::Not {
+            condition: Box::new(c),
+        })
+    {
+        return result;
     }
 
     (text.to_string(), None)
+}
+
+/// Try to extract an intervening predicate introduced by `keyword`.
+///
+/// Runs `parse_inner_condition` on the fragment after `keyword`, accepts only
+/// if it stops at a clause boundary with no dangling `otherwise` branch (which
+/// would change the semantics from intervening-if to a conditional override
+/// pair), then bridges to `TriggerCondition` via `static_condition_to_trigger_condition`
+/// and applies `wrap`. Used for both `if X` (wrap = identity) and
+/// `unless X` (wrap = `Not`).
+fn try_extract_intervening(
+    tp: &TextPair<'_>,
+    lower: &str,
+    text: &str,
+    keyword: &str,
+    wrap: impl FnOnce(TriggerCondition) -> TriggerCondition,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let pos = tp.find(keyword)?;
+    let cond_fragment = &lower[pos + keyword.len()..];
+    let (rest, sc) = parse_inner_condition(cond_fragment).ok()?;
+    let rest_trimmed = rest.trim();
+    let after_dots = rest_trimmed.trim_start_matches('.').trim_start();
+    let has_otherwise = tag::<_, _, VerboseError<&str>>("otherwise")
+        .parse(after_dots)
+        .is_ok();
+    let at_boundary =
+        rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.');
+    if has_otherwise || !at_boundary {
+        return None;
+    }
+    let inner = static_condition_to_trigger_condition(&sc)?;
+    let consumed = cond_fragment.len() - rest.len();
+    Some((
+        strip_condition_clause(text, pos, keyword.len() + consumed),
+        Some(wrap(inner)),
+    ))
 }
 
 /// CR 702.49a: Parse "whenever you activate a ninjutsu ability" trigger.
@@ -8160,6 +8181,69 @@ mod tests {
             def.unless_pay.is_none(),
             "typed discard should fall through (UnlessCost::DiscardCard has no filter), got {:?}",
             def.unless_pay
+        );
+    }
+
+    #[test]
+    fn trigger_unless_intervening_attacked_this_turn() {
+        // Bellowing Saddlebrute (Raid) — "When this creature enters, you lose 4
+        // life unless you attacked this turn." The trailing intervening-unless
+        // wraps `AttackedThisTurn >= 1` in `Not`, leaving "you lose 4 life" as
+        // the effect.
+        let def = parse_trigger_line(
+            "When ~ enters, you lose 4 life unless you attacked this turn.",
+            "Bellowing Saddlebrute",
+        );
+        let cond = def
+            .condition
+            .expect("intervening unless should set condition");
+        match cond {
+            TriggerCondition::Not { condition } => match *condition {
+                TriggerCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::AttackedThisTurn,
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                } => {}
+                other => panic!("inner should be AttackedThisTurn >= 1, got {:?}", other),
+            },
+            other => panic!("expected TriggerCondition::Not, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_intervening_controls_creature() {
+        // Generic shape: "deals 3 damage to target player unless you control a
+        // creature" — IsPresent(Creature) wrapped in Not.
+        let def = parse_trigger_line(
+            "When ~ enters, ~ deals 3 damage to target player unless you control a creature.",
+            "Test",
+        );
+        match def.condition {
+            Some(TriggerCondition::Not { condition }) => match *condition {
+                TriggerCondition::ControlsType { .. } => {}
+                other => panic!("inner should be ControlsType, got {:?}", other),
+            },
+            other => panic!("expected Some(Not), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_intervening_does_not_swallow_unless_pay() {
+        // Sanity: "unless you pay {2}" must remain captured by
+        // extract_unless_pay_modifier — NOT routed through the new
+        // intervening-condition combinator. If parse_inner_condition somehow
+        // matched a cost phrase, the unless_pay slot would be lost.
+        let def = parse_trigger_line("When ~ enters, draw a card unless you pay {2}.", "Test");
+        assert!(
+            def.unless_pay.is_some(),
+            "unless-pay must be captured as alt-cost, not as intervening condition"
+        );
+        assert!(
+            def.condition.is_none(),
+            "no intervening condition should be set when unless-pay handled it"
         );
     }
 

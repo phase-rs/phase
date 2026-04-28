@@ -703,7 +703,7 @@ mod tests {
         let mut face = empty_face("Pest Infestation");
         let dynamic_count = QuantityExpr::Ref {
             qty: engine::types::ability::QuantityRef::HandSize {
-                player: PlayerScope::Controller,
+                player: engine::types::ability::PlayerScope::Controller,
             },
         };
         face.abilities
