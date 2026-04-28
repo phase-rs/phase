@@ -1,5 +1,5 @@
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -183,11 +183,7 @@ fn parse_search_filter_with_extras(tail: &str) -> (TargetFilter, Vec<TargetFilte
     // terminator (comma / period) before running the conjunction combinator,
     // so `" and "` inside e.g. `"put it onto the battlefield, then ..."` can't
     // pollute the filter split.
-    let filter_region_end = tail
-        .find(',')
-        .or_else(|| tail.find('.'))
-        .unwrap_or(tail.len());
-    let filter_region = &tail[..filter_region_end];
+    let filter_region = search_filter_region(tail);
 
     // Split on `" and a "` / `" and an "` / `" and basic "` at filter-region
     // boundaries only. The "and basic" branch preserves the supertype prefix so
@@ -203,6 +199,14 @@ fn parse_search_filter_with_extras(tail: &str) -> (TargetFilter, Vec<TargetFilte
         .map(|segment| parse_search_filter(segment))
         .collect();
     (primary, extras)
+}
+
+fn search_filter_region(text: &str) -> &str {
+    let filter_region_end = text
+        .find(',')
+        .or_else(|| text.find('.'))
+        .unwrap_or(text.len());
+    &text[..filter_region_end]
 }
 
 /// Split a filter-region string (no action chain) on `" and a "` / `" and an "`
@@ -363,8 +367,12 @@ pub(super) fn parse_seek_details(lower: &str) -> SeekDetails {
 pub(super) fn parse_search_filter(text: &str) -> TargetFilter {
     let type_text = text.trim();
 
+    if let Some(filter) = parse_search_filter_disjunction(type_text) {
+        return filter;
+    }
+
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
-    if !matches!(parsed_filter, TargetFilter::Any) {
+    if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
         parse_search_filter_suffixes(remainder, &mut suffix);
         return apply_search_suffix_constraints(normalize_search_filter(parsed_filter), &suffix);
@@ -385,6 +393,108 @@ pub(super) fn parse_search_filter(text: &str) -> TargetFilter {
     let (type_word, suffix_text) = split_search_type_word_and_suffix(clean);
 
     parse_search_filter_fallback(type_word, suffix_text, is_basic)
+}
+
+fn parse_search_filter_disjunction(text: &str) -> Option<TargetFilter> {
+    let filter_region = search_filter_region(text);
+    let segments = split_filter_disjunctions(filter_region);
+    if segments.len() < 2 {
+        return None;
+    }
+
+    let filters: Vec<TargetFilter> = segments
+        .into_iter()
+        .map(parse_search_filter)
+        .filter(search_filter_has_meaningful_content)
+        .collect();
+    (filters.len() >= 2).then(|| normalize_search_filter(TargetFilter::Or { filters }))
+}
+
+/// Split a single search-filter expression on disjunctive filter boundaries:
+/// `"basic land card or a Gate card"`, `"instant card or a card with flash"`,
+/// and bare subtype forms like `"Mountain or Cave card"`.
+///
+/// The bare `" or "` branch is intentionally narrow: it only fires when the
+/// left branch is not a core card-type word and the right branch has an
+/// explicit `card(s)` head. That keeps comparator suffixes such as `"or less"`
+/// and canonical core unions such as `"instant or sorcery card"` on the
+/// existing suffix/type-phrase paths.
+fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
+    #[derive(Clone, Copy)]
+    enum Disjunction {
+        OrA,
+        OrAn,
+        OrBasic,
+        BareOr,
+    }
+
+    let mut segments = Vec::new();
+    let mut remaining = filter_region;
+    loop {
+        let mut scan = (
+            take_until::<_, _, VerboseError<&str>>(" or "),
+            alt((
+                value(Disjunction::OrA, tag(" or a ")),
+                value(Disjunction::OrAn, tag(" or an ")),
+                value(Disjunction::OrBasic, tag(" or basic ")),
+                value(Disjunction::BareOr, tag(" or ")),
+            )),
+        );
+
+        let Ok((rest, (before, disjunction))) = scan.parse(remaining) else {
+            segments.push(remaining.trim());
+            break;
+        };
+
+        if matches!(disjunction, Disjunction::BareOr)
+            && !bare_search_disjunction_allowed(before.trim(), rest.trim_start())
+        {
+            if segments.is_empty() {
+                return vec![filter_region.trim()];
+            }
+            segments.push(remaining.trim());
+            break;
+        }
+
+        segments.push(before.trim());
+        remaining = match disjunction {
+            Disjunction::OrA | Disjunction::OrAn | Disjunction::BareOr => rest,
+            Disjunction::OrBasic => {
+                let start = filter_region.len() - rest.len() - "basic ".len();
+                &filter_region[start..]
+            }
+        };
+    }
+
+    segments
+}
+
+fn bare_search_disjunction_allowed(left: &str, right: &str) -> bool {
+    !left.is_empty()
+        && parse_search_builtin_type_word(left).is_none()
+        && parse_bare_search_disjunction_right(right).is_ok()
+}
+
+fn parse_bare_search_disjunction_right(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+    let (rest, _) = nom::combinator::opt(tag("basic ")).parse(input)?;
+    let (rest, _) =
+        take_till1::<_, _, VerboseError<&str>>(|c: char| c.is_whitespace()).parse(rest)?;
+    alt((value((), tag(" cards")), value((), tag(" card")))).parse(rest)
+}
+
+fn search_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any | TargetFilter::None => false,
+        TargetFilter::Typed(typed_filter) => {
+            !typed_filter.type_filters.is_empty() || !typed_filter.properties.is_empty()
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(search_filter_has_meaningful_content)
+        }
+        _ => true,
+    }
 }
 
 fn parse_search_filter_fallback(
@@ -830,6 +940,7 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 mod tests {
     use super::*;
     use crate::types::ability::Comparator;
+    use crate::types::keywords::Keyword;
 
     #[test]
     fn search_target_opponent_library() {
@@ -1051,6 +1162,170 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::Multicolored)));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_basic_land_or_gate_card() {
+        let filter = parse_search_filter("basic land card or a gate card, reveal it");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(basic_land) = &filters[0] else {
+            panic!("expected typed basic land branch, got {:?}", filters[0]);
+        };
+        assert!(basic_land.type_filters.contains(&TypeFilter::Land));
+        assert!(basic_land.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Basic
+            }
+        )));
+
+        let TargetFilter::Typed(gate) = &filters[1] else {
+            panic!("expected typed Gate branch, got {:?}", filters[1]);
+        };
+        assert!(gate.type_filters.contains(&TypeFilter::Land));
+        assert_eq!(gate.get_subtype(), Some("Gate"));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_mountain_or_cave_card() {
+        let filter = parse_search_filter("mountain or cave card, reveal it");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(mountain) = &filters[0] else {
+            panic!("expected typed Mountain branch, got {:?}", filters[0]);
+        };
+        assert!(mountain.type_filters.contains(&TypeFilter::Land));
+        assert_eq!(mountain.get_subtype(), Some("Mountain"));
+
+        let TargetFilter::Typed(cave) = &filters[1] else {
+            panic!("expected typed Cave branch, got {:?}", filters[1]);
+        };
+        assert!(cave.type_filters.contains(&TypeFilter::Land));
+        assert_eq!(cave.get_subtype(), Some("Cave"));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_or_an_article_variant() {
+        let filter = parse_search_filter("creature card or an artifact card, reveal it");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(creature) = &filters[0] else {
+            panic!("expected typed Creature branch, got {:?}", filters[0]);
+        };
+        assert!(creature.type_filters.contains(&TypeFilter::Creature));
+
+        let TargetFilter::Typed(artifact) = &filters[1] else {
+            panic!("expected typed Artifact branch, got {:?}", filters[1]);
+        };
+        assert!(artifact.type_filters.contains(&TypeFilter::Artifact));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_or_basic_variant() {
+        let filter = parse_search_filter("bird or basic land card, reveal it");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(bird) = &filters[0] else {
+            panic!("expected typed Bird branch, got {:?}", filters[0]);
+        };
+        assert_eq!(bird.get_subtype(), Some("Bird"));
+
+        let TargetFilter::Typed(basic_land) = &filters[1] else {
+            panic!("expected typed Basic Land branch, got {:?}", filters[1]);
+        };
+        assert!(basic_land.type_filters.contains(&TypeFilter::Land));
+        assert!(basic_land.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Basic
+            }
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_keeps_comparator_or_inside_disjunction_branch() {
+        let filter =
+            parse_search_filter("basic plains card or a creature card with mana value 1 or less");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(plains) = &filters[0] else {
+            panic!("expected typed Plains branch, got {:?}", filters[0]);
+        };
+        assert!(plains.type_filters.contains(&TypeFilter::Land));
+        assert_eq!(plains.get_subtype(), Some("Plains"));
+        assert!(plains.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Basic
+            }
+        )));
+
+        let TargetFilter::Typed(creature) = &filters[1] else {
+            panic!("expected typed Creature branch, got {:?}", filters[1]);
+        };
+        assert!(creature.type_filters.contains(&TypeFilter::Creature));
+        assert!(creature.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 1 }
+            }
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_instant_or_card_with_flash() {
+        let filter = parse_search_filter("instant card or a card with flash, reveal it");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(instant) = &filters[0] else {
+            panic!("expected typed Instant branch, got {:?}", filters[0]);
+        };
+        assert!(instant.type_filters.contains(&TypeFilter::Instant));
+
+        let TargetFilter::Typed(flash_card) = &filters[1] else {
+            panic!("expected typed Flash card branch, got {:?}", filters[1]);
+        };
+        assert!(flash_card.type_filters.contains(&TypeFilter::Card));
+        assert!(flash_card
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::WithKeyword { value } if *value == Keyword::Flash)));
+    }
+
+    #[test]
+    fn search_or_filter_does_not_split_mana_value_comparator_suffix() {
+        let filter = parse_search_filter("creature card with mana value 3 or less");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed creature filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 }
+            }
+        )));
     }
 
     #[test]
