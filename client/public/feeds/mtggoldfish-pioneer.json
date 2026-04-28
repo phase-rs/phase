@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-11T00:00:00Z",
+  "updated": "2026-05-12T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -283,129 +283,6 @@
       ]
     },
     {
-      "name": "Selesnya Company",
-      "author": "MTGGoldfish",
-      "colors": [
-        "G",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Abandoned Air Temple"
-        },
-        {
-          "count": 4,
-          "name": "Archon of Emeria"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Collected Company"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Innocence"
-        },
-        {
-          "count": 4,
-          "name": "Razorverge Thicket"
-        },
-        {
-          "count": 3,
-          "name": "Ouroboroid"
-        },
-        {
-          "count": 3,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Skyclave Apparition"
-        },
-        {
-          "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 4,
-          "name": "Brushland"
-        },
-        {
-          "count": 3,
-          "name": "Thalia, Guardian of Thraben"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 4,
-          "name": "Elvish Mystic"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 2,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 2,
-          "name": "The Wandering Emperor"
-        },
-        {
-          "count": 2,
-          "name": "Starting Town"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Aven Interrupter"
-        },
-        {
-          "count": 3,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 3,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "March of Otherworldly Light"
-        },
-        {
-          "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
-        },
-        {
-          "count": 3,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 2,
-          "name": "Aven Interrupter"
-        }
-      ]
-    },
-    {
       "name": "Golgari Midrange",
       "author": "MTGGoldfish",
       "colors": [
@@ -565,6 +442,129 @@
       ]
     },
     {
+      "name": "Selesnya Company",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 4,
+          "name": "Archon of Emeria"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Innocence"
+        },
+        {
+          "count": 4,
+          "name": "Razorverge Thicket"
+        },
+        {
+          "count": 3,
+          "name": "Ouroboroid"
+        },
+        {
+          "count": 3,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Skyclave Apparition"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 4,
+          "name": "Brushland"
+        },
+        {
+          "count": 3,
+          "name": "Thalia, Guardian of Thraben"
+        },
+        {
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 4,
+          "name": "Elvish Mystic"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 2,
+          "name": "Elspeth, Storm Slayer"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "The Wandering Emperor"
+        },
+        {
+          "count": 2,
+          "name": "Starting Town"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 3,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 3,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 1,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 1,
+          "name": "Elesh Norn, Mother of Machines"
+        },
+        {
+          "count": 3,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 2,
+          "name": "Aven Interrupter"
+        }
+      ]
+    },
+    {
       "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
@@ -576,8 +576,106 @@
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Get Lost"
+          "count": 4,
+          "name": "The Wandering Emperor"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
+          "name": "Dovin's Veto"
+        },
+        {
+          "count": 4,
+          "name": "Teferi, Hero of Dominaria"
+        },
+        {
+          "count": 4,
+          "name": "Seachrome Coast"
+        },
+        {
+          "count": 2,
+          "name": "Hall of Storm Giants"
+        },
+        {
+          "count": 4,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 4,
+          "name": "No More Lies"
+        },
+        {
+          "count": 4,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 4,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Memory Deluge"
+        },
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Field of Ruin"
+        },
+        {
+          "count": 4,
+          "name": "Temporary Lockdown"
+        },
+        {
+          "count": 2,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 4,
+          "name": "Ultima"
+        },
+        {
+          "count": 2,
+          "name": "Castle Ardenvale"
+        },
+        {
+          "count": 2,
+          "name": "Farewell"
+        },
+        {
+          "count": 4,
+          "name": "Demolition Field"
+        },
+        {
+          "count": 4,
+          "name": "Deserted Beach"
+        },
+        {
+          "count": 4,
+          "name": "Consult the Star Charts"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Yorion, Sky Nomad"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
         },
         {
           "count": 2,
@@ -585,137 +683,15 @@
         },
         {
           "count": 4,
-          "name": "Consult the Star Charts"
+          "name": "Destroy Evil"
         },
         {
           "count": 2,
-          "name": "Teferi, Hero of Dominaria"
+          "name": "Hallowed Moonlight"
         },
         {
           "count": 2,
-          "name": "Supreme Verdict"
-        },
-        {
-          "count": 2,
-          "name": "Restless Anchorage"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Memory Deluge"
-        },
-        {
-          "count": 2,
-          "name": "Field of Ruin"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 1,
-          "name": "Hall of Storm Giants"
-        },
-        {
-          "count": 2,
-          "name": "Fountainport"
-        },
-        {
-          "count": 4,
-          "name": "March of Otherworldly Light"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 2,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 4,
-          "name": "Floodfarm Verge"
-        },
-        {
-          "count": 1,
-          "name": "Elspeth, Storm Slayer"
-        },
-        {
-          "count": 2,
-          "name": "Stock Up"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 3,
-          "name": "The Wandering Emperor"
-        },
-        {
-          "count": 3,
-          "name": "Deserted Beach"
-        },
-        {
-          "count": 1,
-          "name": "Dovin's Veto"
-        },
-        {
-          "count": 3,
-          "name": "Temporary Lockdown"
-        },
-        {
-          "count": 4,
-          "name": "No More Lies"
-        },
-        {
-          "count": 2,
-          "name": "Beza, the Bounding Spring"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 1,
-          "name": "Get Lost"
-        },
-        {
-          "count": 1,
-          "name": "Kaheera, the Orphanguard"
-        },
-        {
-          "count": 1,
-          "name": "Temporary Lockdown"
-        },
-        {
-          "count": 3,
-          "name": "Kutzil's Flanker"
-        },
-        {
-          "count": 3,
-          "name": "Dovin's Veto"
-        },
-        {
-          "count": 3,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Beza, the Bounding Spring"
+          "name": "Spell Snare"
         }
       ]
     },
