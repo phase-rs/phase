@@ -1481,7 +1481,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("zone".into(), fmt_zone(zone)));
         }
         Effect::GainEnergy { amount } => {
-            d.push(("amount".into(), amount.to_string()));
+            d.push(("amount".into(), fmt_quantity(amount)));
         }
         Effect::GivePlayerCounter {
             counter_kind,

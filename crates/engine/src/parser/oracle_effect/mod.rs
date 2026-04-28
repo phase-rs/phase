@@ -17,7 +17,9 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::multispace1;
 use nom::combinator::value;
+use nom::multi::many1;
 use nom::sequence::preceded;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -1625,16 +1627,8 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
         return clause;
     }
 
-    // CR 122.1: "you get {E}{E}" — gain energy counters.
-    if scan_contains_phrase(tp.lower, "{e}")
-        && alt((tag::<_, _, VerboseError<&str>>("you get "), tag("get ")))
-            .parse(tp.lower)
-            .is_ok()
-    {
-        let amount = super::oracle_util::count_energy_symbols(tp.lower);
-        if amount > 0 {
-            return parsed_clause(Effect::GainEnergy { amount });
-        }
+    if let Some(clause) = try_parse_gain_energy(tp) {
+        return clause;
     }
 
     // CR 106.12: "don't lose [unspent] {color} mana as steps and phases end" —
@@ -2934,6 +2928,18 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     let duration = base_duration.or(for_each_duration);
     let base_no_duration_lower = base_no_duration.to_lowercase();
 
+    if let Some(effect) = parse_energy_gain_base(&base_no_duration_lower, quantity.clone()) {
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+        });
+    }
+
     // Delegate to parse_numeric_imperative_ast — it already handles draw, gain/lose life,
     // pump, scry, surveil, mill. Replace fixed counts with the for-each quantity, then
     // thread subject through for effects that carry a target.
@@ -3079,6 +3085,60 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
         }));
     }
 
+    None
+}
+
+fn try_parse_gain_energy(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("you get "), tag("get ")))
+        .parse(tp.lower)
+        .ok()?;
+    let rest = rest.trim_start();
+
+    if let Ok((qty_text, _)) = (
+        tag::<_, _, VerboseError<&str>>("an amount of {e}"),
+        multispace1,
+        tag("equal to "),
+    )
+        .parse(rest)
+    {
+        let qty_text = qty_text.trim().trim_end_matches('.');
+        let amount = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+            .or_else(|| {
+                crate::parser::oracle_quantity::parse_quantity_ref(qty_text)
+                    .map(|qty| QuantityExpr::Ref { qty })
+            })?;
+        return Some(parsed_clause(Effect::GainEnergy { amount }));
+    }
+
+    let effect = parse_energy_symbols_gain(rest, QuantityExpr::Fixed { value: 1 })?;
+    Some(parsed_clause(effect))
+}
+
+fn parse_energy_gain_base(input: &str, multiplier: QuantityExpr) -> Option<Effect> {
+    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("you get "), tag("get ")))
+        .parse(input)
+        .ok()?;
+    parse_energy_symbols_gain(rest, multiplier)
+}
+
+fn parse_energy_symbols_gain(input: &str, multiplier: QuantityExpr) -> Option<Effect> {
+    let input = input.trim_start();
+    let (after_symbols, symbols) = many1(tag::<_, _, VerboseError<&str>>("{e}"))
+        .parse(input)
+        .ok()?;
+    let symbol_count = symbols.len() as i32;
+    let amount = match (symbol_count, multiplier) {
+        (count, QuantityExpr::Fixed { value: 1 }) => QuantityExpr::Fixed { value: count },
+        (1, multiplier) => multiplier,
+        (count, multiplier) => QuantityExpr::Multiply {
+            factor: count,
+            inner: Box::new(multiplier),
+        },
+    };
+    let rest = after_symbols.trim().trim_end_matches('.');
+    if rest.is_empty() {
+        return Some(Effect::GainEnergy { amount });
+    }
     None
 }
 
@@ -17200,6 +17260,55 @@ mod tests {
         assert!(
             matches!(e, Effect::Populate),
             "expected Populate, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_gain_energy_fixed_symbols() {
+        let e = parse_effect("you get {e}{e}");
+        assert!(
+            matches!(
+                e,
+                Effect::GainEnergy {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                }
+            ),
+            "expected GainEnergy Fixed(2), got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_gain_energy_for_each_creature_you_control() {
+        let e = parse_effect("you get {e} for each creature you control");
+        assert_eq!(
+            e,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You)
+                        ),
+                    },
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn effect_gain_energy_equal_to_mana_spent_on_triggering_spell() {
+        let e = parse_effect(
+            "you get an amount of {e} equal to the amount of mana spent to cast that spell",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::GainEnergy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                    },
+                }
+            ),
+            "expected dynamic GainEnergy ManaSpentOnTriggeringSpell, got: {e:?}"
         );
     }
 

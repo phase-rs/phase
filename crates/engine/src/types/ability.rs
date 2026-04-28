@@ -4189,9 +4189,9 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 122.1: Gain energy counters. Amount is the number of {E} symbols in the Oracle text.
+    /// CR 122.1: Gain energy counters.
     GainEnergy {
-        amount: u32,
+        amount: QuantityExpr,
     },
     /// CR 122.1: Give player counters (poison, experience, rad, ticket, etc.).
     /// Poison counters route to the dedicated field via `Player::add_player_counters` (CR 104.3d).
