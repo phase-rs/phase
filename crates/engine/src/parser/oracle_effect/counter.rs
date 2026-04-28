@@ -954,7 +954,7 @@ mod tests {
 
     /// CR 122.1 + CR 208.3: "put a number of +1/+1 counters equal to its power
     /// on each creature you control named ~" (Gruff Triplets). The dynamic
-    /// count binds to the source's power via `QuantityRef::SelfPower`; the
+    /// count binds to the source's power via `QuantityRef::Power { scope: crate::types::ability::ObjectScope::Source }`; the
     /// counter type is "+1/+1", not the word "number"; the target is a mass
     /// filter for creatures with the same name (resolved via `normalize_self_refs`
     /// restoring the card name after the `named ~` re-expansion).
@@ -980,7 +980,9 @@ mod tests {
             matches!(
                 count,
                 QuantityExpr::Ref {
-                    qty: QuantityRef::SelfPower
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source
+                    }
                 }
             ),
             "count should be SelfPower, got {count:?}"

@@ -610,8 +610,14 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             None => format!("counters on {}", fmt_target(filter)),
         },
         QuantityRef::Variable { name } => name.clone(),
-        QuantityRef::SelfPower => "self power".into(),
-        QuantityRef::SelfToughness => "self toughness".into(),
+        QuantityRef::Power { scope } => match scope {
+            ObjectScope::Source => "self power".into(),
+            ObjectScope::Target => "target's power".into(),
+        },
+        QuantityRef::Toughness { scope } => match scope {
+            ObjectScope::Source => "self toughness".into(),
+            ObjectScope::Target => "target's toughness".into(),
+        },
         QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
             function,
@@ -630,7 +636,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("{func} {prop} of {}", fmt_target(filter))
         }
-        QuantityRef::TargetPower => "target's power".into(),
         QuantityRef::Devotion { colors } => {
             let c: Vec<_> = colors.iter().map(fmt_mana_color_full).collect();
             format!("devotion to {}", c.join("/"))
@@ -4134,11 +4139,16 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
         QuantityRef::Variable { .. } => ("Variable", Handled),
-        QuantityRef::SelfPower => ("SelfPower", Handled),
-        QuantityRef::SelfToughness => ("SelfToughness", Handled),
+        QuantityRef::Power { scope } => match scope {
+            ObjectScope::Source => ("SelfPower", Handled),
+            ObjectScope::Target => ("TargetPower", Handled),
+        },
+        QuantityRef::Toughness { scope } => match scope {
+            ObjectScope::Source => ("SelfToughness", Handled),
+            ObjectScope::Target => ("TargetToughness", Handled),
+        },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
-        QuantityRef::TargetPower => ("TargetPower", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypesInZone { .. } => ("DistinctCardTypesInZone", Handled),
         QuantityRef::DistinctCardTypesExiledBySource => {

@@ -448,8 +448,18 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
     .parse(input)?;
     // Property: "power " or "toughness "
     let (rest, qty) = alt((
-        value(QuantityRef::SelfPower, tag("power is ")),
-        value(QuantityRef::SelfToughness, tag("toughness is ")),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("power is "),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("toughness is "),
+        ),
     ))
     .parse(rest)?;
     let (rest, n) = parse_number(rest)?;
@@ -1101,16 +1111,36 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
     ))
     .parse(rest)?;
     let (rest, first) = alt((
-        value(QuantityRef::SelfPower, tag("power")),
-        value(QuantityRef::SelfToughness, tag("toughness")),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("toughness"),
+        ),
     ))
     .parse(rest)?;
     // Optional " or <other property>" disjunction — natural-language OR.
     let (rest, second) = opt(preceded(
         tag(" or "),
         alt((
-            value(QuantityRef::SelfPower, tag("power")),
-            value(QuantityRef::SelfToughness, tag("toughness")),
+            value(
+                QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source,
+                },
+                tag("power"),
+            ),
+            value(
+                QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source,
+                },
+                tag("toughness"),
+            ),
         )),
     ))
     .parse(rest)?;
@@ -2960,7 +2990,10 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SelfPower,
+                        qty:
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
                     },
                 comparator: Comparator::LE,
                 rhs: QuantityExpr::Fixed { value: 3 },
@@ -2978,7 +3011,10 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SelfPower,
+                        qty:
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
@@ -3199,8 +3235,12 @@ mod tests {
                         _ => None,
                     })
                     .collect();
-                assert!(pt_refs.contains(&QuantityRef::SelfPower));
-                assert!(pt_refs.contains(&QuantityRef::SelfToughness));
+                assert!(pt_refs.contains(&QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                }));
+                assert!(pt_refs.contains(&QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source
+                }));
             }
             other => panic!("expected Or, got {other:?}"),
         }
@@ -3231,7 +3271,9 @@ mod tests {
                 assert_eq!(
                     rhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SelfPower
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
                     }
                 );
             }

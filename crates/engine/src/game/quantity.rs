@@ -570,24 +570,24 @@ fn resolve_ref(
             })
             .unwrap_or(0),
         // CR 208.3 + CR 113.6: A creature's power/toughness from current state,
-        // falling back to Last Known Information if the source has left the battlefield.
-        QuantityRef::SelfPower => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.power)
-            .or_else(|| state.lki_cache.get(&source_id).and_then(|lki| lki.power))
-            .unwrap_or(0),
-        QuantityRef::SelfToughness => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.toughness)
-            .or_else(|| {
-                state
-                    .lki_cache
-                    .get(&source_id)
-                    .and_then(|lki| lki.toughness)
-            })
-            .unwrap_or(0),
+        // falling back to Last Known Information if the source has left the
+        // battlefield. Scoped via ObjectScope (Π-6).
+        QuantityRef::Power { scope } => resolve_object_pt(
+            state,
+            *scope,
+            source_id,
+            targets,
+            |obj| obj.power,
+            |lki| lki.power,
+        ),
+        QuantityRef::Toughness { scope } => resolve_object_pt(
+            state,
+            *scope,
+            source_id,
+            targets,
+            |obj| obj.toughness,
+            |lki| lki.toughness,
+        ),
         // CR 202.3 + CR 118.9: Mana value of the source object. Used by
         // alt-cost cast permissions ("pay life equal to its mana value rather
         // than paying its mana cost") where `source_id` is the spell being
@@ -664,20 +664,6 @@ fn resolve_ref(
                     }
                 })
                 .sum()
-        }
-        QuantityRef::TargetPower => {
-            // Find the first object target and return its power.
-            targets
-                .iter()
-                .find_map(|t| {
-                    if let TargetRef::Object(id) = t {
-                        state.objects.get(id)
-                    } else {
-                        None
-                    }
-                })
-                .and_then(|obj| obj.power)
-                .unwrap_or(0)
         }
         QuantityRef::Devotion { colors } => u32_to_i32_saturating(
             crate::game::devotion::count_devotion(state, controller, colors),
@@ -1203,6 +1189,44 @@ fn scoped_players<'a>(
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
     })
+}
+
+/// CR 208.3 + CR 113.6 + CR 400.7: Resolve a per-object scalar (power, toughness)
+/// through an `ObjectScope`, with LKI fallback for the source.
+///
+/// Single authority for `Power { scope }` / `Toughness { scope }` resolution
+/// (Π-6). `obj_extract` returns the property for a current object; `lki_extract`
+/// returns the same property from a Last Known Information snapshot. LKI fallback
+/// applies only to the source object — Target reads only the current state per
+/// CR 113.6 (a target's identity is captured on cast/announce).
+fn resolve_object_pt<F, G>(
+    state: &GameState,
+    scope: ObjectScope,
+    source_id: ObjectId,
+    targets: &[TargetRef],
+    obj_extract: F,
+    lki_extract: G,
+) -> i32
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
+    match scope {
+        ObjectScope::Source => state
+            .objects
+            .get(&source_id)
+            .and_then(&obj_extract)
+            .or_else(|| state.lki_cache.get(&source_id).and_then(&lki_extract))
+            .unwrap_or(0),
+        ObjectScope::Target => targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => state.objects.get(id),
+                _ => None,
+            })
+            .and_then(&obj_extract)
+            .unwrap_or(0),
+    }
 }
 
 /// CR 102 + CR 119 + CR 402: Resolve a per-player scalar through a `PlayerScope`.
@@ -2602,12 +2626,16 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::SelfPower,
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
 
         let expr_t = QuantityExpr::Ref {
-            qty: QuantityRef::SelfToughness,
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
     }

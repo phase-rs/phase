@@ -1872,10 +1872,15 @@ pub enum QuantityRef {
     },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
-    /// CR 208.1: The current power of the source object (post-layer).
-    SelfPower,
-    /// CR 208.1: The current toughness of the source object (post-layer).
-    SelfToughness,
+    /// CR 208.1 + CR 113.6: Current power of an object, scoped via ObjectScope
+    /// (Round Π-6). Replaces the `SelfPower` / `TargetPower` sibling pair.
+    /// `Source` reads the source object's power (post-layer); `Target` reads
+    /// the first object target's power.
+    Power { scope: ObjectScope },
+    /// CR 208.1 + CR 113.6: Current toughness of an object, scoped via
+    /// ObjectScope (Round Π-6). Mirrors `Power`. Replaces the `SelfToughness`
+    /// variant.
+    Toughness { scope: ObjectScope },
     /// CR 202.3: The mana value of the source object — i.e. the object passed
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
     /// is the spell-being-cast, so "pay life equal to its mana value" reads
@@ -1891,8 +1896,6 @@ pub enum QuantityRef {
         property: ObjectProperty,
         filter: TargetFilter,
     },
-    /// The power of the targeted permanent. Used for "equal to target's power".
-    TargetPower,
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.

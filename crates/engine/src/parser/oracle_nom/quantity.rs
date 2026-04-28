@@ -796,10 +796,30 @@ fn parse_scoped_zone_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)>
 /// identically.
 fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        value(QuantityRef::SelfPower, tag("its power")),
-        value(QuantityRef::SelfPower, tag("~'s power")),
-        value(QuantityRef::SelfPower, tag("this creature's power")),
-        value(QuantityRef::SelfPower, tag("this card's power")),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("its power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("~'s power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("this creature's power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("this card's power"),
+        ),
     ))
     .parse(input)
 }
@@ -809,10 +829,30 @@ fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// rationale.
 fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        value(QuantityRef::SelfToughness, tag("its toughness")),
-        value(QuantityRef::SelfToughness, tag("~'s toughness")),
-        value(QuantityRef::SelfToughness, tag("this creature's toughness")),
-        value(QuantityRef::SelfToughness, tag("this card's toughness")),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("its toughness"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("~'s toughness"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("this creature's toughness"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("this card's toughness"),
+        ),
     ))
     .parse(input)
 }
@@ -1075,7 +1115,7 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
 ///   - Saxon-genitive: "target creature's power" / "the target creature's power"
 ///   - Of-form: "the power of target creature [you control|an opponent controls]?"
 ///
-/// All variants resolve to the same `QuantityRef::TargetPower`. CR 107.1.
+/// All variants resolve to the same `QuantityRef::Power { scope: crate::types::ability::ObjectScope::Target }`. CR 107.1.
 /// Longest-first ordering: the controller-qualified of-form variants must come
 /// before the bare of-form so `alt`'s short-circuit doesn't strand the
 /// "you control" / "an opponent controls" suffix as un-consumed remainder
@@ -1083,18 +1123,34 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Soul's Majesty, Predator's Rapport, and similar.
 fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        value(QuantityRef::TargetPower, tag("target creature's power")),
-        value(QuantityRef::TargetPower, tag("the target creature's power")),
         value(
-            QuantityRef::TargetPower,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
+            tag("target creature's power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
+            tag("the target creature's power"),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
             tag("the power of target creature you control"),
         ),
         value(
-            QuantityRef::TargetPower,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
             tag("the power of target creature an opponent controls"),
         ),
         value(
-            QuantityRef::TargetPower,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
             tag("the power of target creature"),
         ),
     ))
@@ -1538,7 +1594,12 @@ mod tests {
     #[test]
     fn test_parse_quantity_ref_self_power() {
         let (rest, q) = parse_quantity_ref("its power").unwrap();
-        assert_eq!(q, QuantityRef::SelfPower);
+        assert_eq!(
+            q,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -1553,7 +1614,13 @@ mod tests {
             "this card's power",
         ] {
             let (rest, q) = parse_quantity_ref(phrase).unwrap();
-            assert_eq!(q, QuantityRef::SelfPower, "phrase: {phrase}");
+            assert_eq!(
+                q,
+                QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                },
+                "phrase: {phrase}"
+            );
             assert_eq!(rest, "", "phrase: {phrase}");
         }
     }
@@ -1836,7 +1903,9 @@ mod tests {
         assert_eq!(
             q,
             QuantityExpr::Ref {
-                qty: QuantityRef::SelfPower
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                }
             }
         );
         assert_eq!(rest, "");
@@ -1885,7 +1954,12 @@ mod tests {
     #[test]
     fn test_parse_target_power() {
         let (rest, q) = parse_quantity_ref("target creature's power").unwrap();
-        assert_eq!(q, QuantityRef::TargetPower);
+        assert_eq!(
+            q,
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -1959,7 +2033,9 @@ mod tests {
             q,
             QuantityExpr::HalfRounded {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::SelfPower,
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source
+                    },
                 }),
                 rounding: RoundingMode::Up,
             }

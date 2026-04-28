@@ -447,10 +447,11 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     if let Some(qty) = parse_quantity_ref(stripped) {
         if !matches!(
             qty,
-            QuantityRef::TargetPower
-                | QuantityRef::LifeTotal {
-                    player: PlayerScope::Target
-                }
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target
+            } | QuantityRef::LifeTotal {
+                player: PlayerScope::Target
+            }
         ) {
             return Some(QuantityExpr::Ref { qty });
         }
@@ -1005,7 +1006,9 @@ mod tests {
         assert!(matches!(
             qty,
             QuantityExpr::Ref {
-                qty: QuantityRef::SelfPower
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                }
             }
         ));
     }
@@ -1016,7 +1019,9 @@ mod tests {
         assert!(matches!(
             qty,
             QuantityExpr::Ref {
-                qty: QuantityRef::SelfToughness
+                qty: QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source
+                }
             }
         ));
     }

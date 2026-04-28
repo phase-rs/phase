@@ -8554,7 +8554,9 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
                         QuantityExpr::Ref {
                             qty: QuantityRef::EventContextSourcePower,
                         } => QuantityExpr::Ref {
-                            qty: QuantityRef::TargetPower,
+                            qty: QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Target,
+                            },
                         },
                         other => other.clone(),
                     };
@@ -9352,11 +9354,15 @@ fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
         .ok()?;
     if scan_contains_phrase(rest, "power") {
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::SelfPower,
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         })
     } else if scan_contains_phrase(rest, "toughness") {
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::SelfToughness,
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         })
     } else {
         None
@@ -10104,7 +10110,9 @@ mod tests {
                 e,
                 Effect::DealDamage {
                     amount: QuantityExpr::Ref {
-                        qty: QuantityRef::TargetPower,
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Target
+                        },
                     },
                     target: TargetFilter::ParentTarget,
                     damage_source: Some(DamageSource::Target),
@@ -10126,7 +10134,9 @@ mod tests {
                 clause.effect,
                 Effect::DealDamage {
                     amount: QuantityExpr::Ref {
-                        qty: QuantityRef::TargetPower,
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Target
+                        },
                     },
                     target: TargetFilter::ParentTarget,
                     damage_source: Some(DamageSource::Target),
@@ -11597,7 +11607,9 @@ mod tests {
                 e,
                 Effect::GainLife {
                     amount: QuantityExpr::Ref {
-                        qty: QuantityRef::TargetPower
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Target
+                        }
                     },
                     player: GainLifePlayer::TargetedController
                 }

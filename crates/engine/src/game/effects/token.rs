@@ -1121,7 +1121,9 @@ fn young_hero_role_statics() -> Vec<StaticDefinition> {
         // CR 603.4 intervening-if: SelfToughness ≤ 3 of the trigger source.
         .condition(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SelfToughness,
+                qty: QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source,
+                },
             },
             comparator: Comparator::LE,
             rhs: QuantityExpr::Fixed { value: 3 },
@@ -2095,7 +2097,9 @@ mod tests {
         assert!(matches!(
             lhs,
             QuantityExpr::Ref {
-                qty: QuantityRef::SelfToughness
+                qty: QuantityRef::Toughness {
+                    scope: crate::types::ability::ObjectScope::Source
+                }
             }
         ));
         assert_eq!(*comparator, Comparator::LE);

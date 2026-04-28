@@ -950,11 +950,15 @@ fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
     // Fall through to keyword-based matching for less common patterns
     if scan_contains(&rest_lower, "power") {
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::SelfPower,
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         })
     } else if scan_contains(&rest_lower, "toughness") {
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::SelfToughness,
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
         })
     } else {
         None
@@ -8079,7 +8083,9 @@ mod tests {
             unless_pay.cost,
             UnlessCost::DynamicGeneric {
                 quantity: QuantityExpr::Ref {
-                    qty: QuantityRef::SelfPower
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source
+                    }
                 }
             }
         );

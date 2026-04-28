@@ -1686,7 +1686,9 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
     }
     let amount = if lower.contains("equal to its power") || lower.contains("its power") {
         QuantityExpr::Ref {
-            qty: QuantityRef::TargetPower,
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
         }
     } else {
         // Try to parse a fixed amount: "its controller gains 3 life"

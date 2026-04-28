@@ -723,7 +723,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
 ///
 /// Power snapshot timing (CR 208.3 + CR 400.7): At resolution the source has already
 /// been exiled as a cost; CR 702.97a specifies "the power of the card you exiled",
-/// which is read from the exile-zone object via `QuantityRef::SelfPower` (with LKI
+/// which is read from the exile-zone object via `QuantityRef::Power { scope: crate::types::ability::ObjectScope::Source }` (with LKI
 /// fallback if the object is somehow gone). Non-battlefield zones do not run layer
 /// computation, so the read value equals the card's printed power — the correct
 /// target for "this card's power" in the graveyard reminder text. No new quantity
@@ -757,7 +757,9 @@ pub fn synthesize_scavenge(face: &mut CardFace) {
             let effect = Effect::PutCounter {
                 counter_type: "P1P1".to_string(),
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::SelfPower,
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
                 },
                 target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
             };
@@ -2293,7 +2295,9 @@ mod scavenge_synthesis_tests {
                 assert!(matches!(
                     count,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SelfPower
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
                     }
                 ));
                 assert!(

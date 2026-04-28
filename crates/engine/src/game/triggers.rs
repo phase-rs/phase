@@ -5739,7 +5739,9 @@ pub mod tests {
                     },
                     comparator: Comparator::GT,
                     rhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SelfPower,
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source,
+                        },
                     },
                 },
                 TriggerCondition::QuantityComparison {
@@ -5748,7 +5750,9 @@ pub mod tests {
                     },
                     comparator: Comparator::GT,
                     rhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SelfToughness,
+                        qty: QuantityRef::Toughness {
+                            scope: crate::types::ability::ObjectScope::Source,
+                        },
                     },
                 },
             ],

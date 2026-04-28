@@ -804,7 +804,9 @@ mod tests {
             Effect::PutCounterAll {
                 counter_type: "P1P1".to_string(),
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::SelfPower,
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
                 },
                 target,
             },
