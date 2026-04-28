@@ -1,0 +1,56 @@
+{
+  "ManaCost": [
+    {
+      "_ManaSymbol": "ManaCostGeneric",
+      "args": 1
+    }
+  ],
+  "Name": "Bonesplitter",
+  "Rules": [
+    {
+      "_Rule": "PermanentLayerEffect",
+      "args": [
+        {
+          "_Permanent": "HostPermanent"
+        },
+        [
+          {
+            "_StaticLayerEffect": "AdjustPT",
+            "args": [
+              2,
+              0
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "_Rule": "Equip",
+      "args": [
+        {
+          "_Permanents": "IsCardtype",
+          "args": "Creature"
+        },
+        {
+          "_Cost": "PayMana",
+          "args": [
+            {
+              "_ManaSymbol": "ManaCostGeneric",
+              "args": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Artifact"
+    ],
+    "Subtypes": [
+      "Equipment"
+    ],
+    "Supertypes": []
+  },
+  "_OracleCard": "Card"
+}

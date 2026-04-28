@@ -421,6 +421,14 @@ pub enum GainLifePlayer {
     Controller,
     /// The controller of the targeted permanent.
     TargetedController,
+    /// CR 115.2 + CR 601.2c + CR 119.3: An announced target player. The
+    /// engine resolves this via `ResolvedAbility::target_player()`, which
+    /// returns the first `TargetRef::Player` from `ability.targets` (and
+    /// falls back to controller when no Player target was announced).
+    /// Set by the parser/converter when the Oracle text is "target player
+    /// gains N life" rather than "you gain N life" or "[permanent's]
+    /// controller gains N life."
+    TargetPlayer,
 }
 
 /// How much life is gained — a fixed amount or derived from the targeted permanent.
@@ -5805,6 +5813,11 @@ pub enum AbilityCondition {
     /// Used when multiple independent checks gate the same resolution
     /// (e.g., Revolt + mana value threshold on Fatal Push).
     And { conditions: Vec<AbilityCondition> },
+    /// CR 608.2c: Compound condition — at least one inner condition must be true.
+    /// Mirrors `TriggerCondition::Or` / `StaticCondition::Or` for ability-level
+    /// conditions. Used when an intervening-if or sub-ability gate is satisfied
+    /// by any of several independent checks.
+    Or { conditions: Vec<AbilityCondition> },
     /// CR 608.2c: Logical negation — sub_ability executes when `condition` is false.
     /// Mirrors `TriggerCondition::Not` for ability-level conditions. Replaces the
     /// per-leaf `negated: bool` fields that existed on `RevealedHasCardType`,
@@ -5963,6 +5976,17 @@ pub enum TriggerCondition {
     /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
     SourceIsTapped,
+    /// CR 701.27g: "if this [permanent] is transformed" — checks the source's transformed status.
+    /// A "transformed permanent" is a double-faced permanent on the battlefield with its
+    /// back face up. Negation ("not transformed") is expressed via
+    /// `Not { Box::new(SourceIsTransformed) }`.
+    SourceIsTransformed,
+    /// CR 708.2: "if this [permanent] is face-up" — checks the source's face-up status.
+    /// Negation ("face-down") is expressed via `Not { Box::new(SourceIsFaceUp) }`.
+    SourceIsFaceUp,
+    /// CR 708.2: "if this [permanent] is face-down" — checks the source's face-down status.
+    /// Negation ("face-up") is expressed via `Not { Box::new(SourceIsFaceDown) }`.
+    SourceIsFaceDown,
     /// CR 113.6b: "if this card is in [zone]" — true when the trigger source is in the given zone.
     SourceInZone { zone: crate::types::zones::Zone },
     /// CR 122.1: "if you put a counter on a permanent this turn" — true when the controller
@@ -6036,11 +6060,14 @@ pub enum TriggerCondition {
     And { conditions: Vec<TriggerCondition> },
     /// Any condition must be true
     Or { conditions: Vec<TriggerCondition> },
-    /// CR 603.4: True when the inner predicate is false. Used for "unless [phrase]"
-    /// intervening-if patterns ("you lose 4 life unless you attacked this turn"
-    /// → `Not { Box::new(AttackedThisTurn) }`). Mirrors `TargetFilter::Not` and
-    /// `StaticCondition::Not` so trigger-side negation composes uniformly with
-    /// `And`/`Or`. Replaces the prior per-leaf `negated: bool` fields and the
+    /// CR 603.4 + CR 608.2c: Logical negation — the wrapped condition must
+    /// evaluate to false. Used for "unless [phrase]" intervening-if patterns
+    /// ("you lose 4 life unless you attacked this turn"
+    /// → `Not { Box::new(AttackedThisTurn) }`) and predicate-side negation
+    /// ("when ~ enters, if it isn't a [type]"). Mirrors the sibling wrapper
+    /// variants `TargetFilter::Not`, `StaticCondition::Not`, and
+    /// `AbilityCondition::Not` so trigger-side negation composes uniformly
+    /// with `And`/`Or`. Replaces per-leaf `negated: bool` fields and the
     /// `NotYourTurn` / `WasNotCast` / `NotCompletedDungeon` sibling-pair variants.
     Not { condition: Box<TriggerCondition> },
 }
@@ -6490,12 +6517,23 @@ pub enum DamageModification {
     Triple,
     /// amount + value (e.g. Torbran, +2)
     Plus { value: u32 },
-    /// amount.saturating_sub(value) (e.g. Benevolent Unicorn, -1)
+    /// amount.saturating_sub(value) (e.g. Benevolent Unicorn, -1).
+    /// CR 615.1 + CR 614.1a: Continuous prevention statics ("prevent that damage")
+    /// emit `Minus { value: u32::MAX }` — saturating-subtraction yields 0 for any
+    /// amount, and the replacement is not consumed (continuous, not shield-style).
+    /// This is distinct from `ShieldKind::Prevention { All }` (one-shot consumed
+    /// shield); the saturating-max sentinel covers the continuous case.
     Minus { value: u32 },
     /// CR 614.1a: Conditional — if amount < source's power, set amount = source's power.
     /// References the replacement source's (not the damage source's) current post-layer power.
     /// Used by Ojer Axonil: "deals damage equal to ~'s power instead."
     SetToSourcePower,
+    /// CR 614.1a: Replace the damage amount with a fixed constant.
+    /// "If [source] would deal damage to [target], it deals N damage to
+    /// [target] instead." Distinct from `Plus`/`Minus` (arithmetic) and
+    /// `SetToSourcePower` (dynamic) — this is a flat override of the
+    /// event's amount with `value`.
+    SetTo { value: u32 },
 }
 
 /// CR 614.1a: Quantity modification for replacement effects (tokens, counters).

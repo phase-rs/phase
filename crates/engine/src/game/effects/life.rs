@@ -40,6 +40,11 @@ pub fn resolve_gain(
             .map(|o| o.controller)
             .unwrap_or(ability.controller),
         GainLifePlayer::Controller => ability.controller,
+        // CR 115.2 + CR 601.2c: "Target player gains N life" — the
+        // chosen player is bound on `ability.targets` via the spell-
+        // announcement target slot. `target_player()` extracts the
+        // first `TargetRef::Player` and falls back to controller.
+        GainLifePlayer::TargetPlayer => ability.target_player(),
     };
 
     // CR 119.7: "If an effect says that a player can't gain life ... a replacement

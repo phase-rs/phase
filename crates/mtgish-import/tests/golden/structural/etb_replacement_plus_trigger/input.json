@@ -1,0 +1,81 @@
+{
+  "ManaCost": [
+    {
+      "_ManaSymbol": "ManaCostW"
+    }
+  ],
+  "Name": "Authority of the Consuls",
+  "Rules": [
+    {
+      "_Rule": "ReplaceWouldEnter",
+      "args": [
+        {
+          "_ReplacableEventWouldEnter": "APermanentWouldEnterTheBattlefield",
+          "args": {
+            "_Permanents": "And",
+            "args": [
+              {
+                "_Permanents": "IsCardtype",
+                "args": "Creature"
+              },
+              {
+                "_Permanents": "ControlledByAPlayer",
+                "args": {
+                  "_Players": "Opponent"
+                }
+              }
+            ]
+          }
+        },
+        [
+          {
+            "_ReplacementActionWouldEnter": "EntersTapped"
+          }
+        ]
+      ]
+    },
+    {
+      "_Rule": "TriggerA",
+      "args": [
+        {
+          "_Trigger": "WhenAPermanentEntersTheBattlefield",
+          "args": {
+            "_Permanents": "And",
+            "args": [
+              {
+                "_Permanents": "IsCardtype",
+                "args": "Creature"
+              },
+              {
+                "_Permanents": "ControlledByAPlayer",
+                "args": {
+                  "_Players": "Opponent"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "_Actions": "ActionList",
+          "args": [
+            {
+              "_Action": "GainLife",
+              "args": {
+                "_GameNumber": "Integer",
+                "args": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Enchantment"
+    ],
+    "Subtypes": [],
+    "Supertypes": []
+  },
+  "_OracleCard": "Card"
+}

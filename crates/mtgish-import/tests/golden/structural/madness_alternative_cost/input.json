@@ -1,0 +1,49 @@
+{
+  "CardPT": {
+    "Power": 4,
+    "Toughness": 4
+  },
+  "ManaCost": [
+    {
+      "_ManaSymbol": "ManaCostGeneric",
+      "args": 3
+    },
+    {
+      "_ManaSymbol": "ManaCostR"
+    },
+    {
+      "_ManaSymbol": "ManaCostR"
+    }
+  ],
+  "Name": "Reckless Wurm",
+  "Rules": [
+    {
+      "_Rule": "Trample"
+    },
+    {
+      "_Rule": "Madness",
+      "args": {
+        "_Cost": "PayMana",
+        "args": [
+          {
+            "_ManaSymbol": "ManaCostGeneric",
+            "args": 2
+          },
+          {
+            "_ManaSymbol": "ManaCostR"
+          }
+        ]
+      }
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Creature"
+    ],
+    "Subtypes": [
+      "Wurm"
+    ],
+    "Supertypes": []
+  },
+  "_OracleCard": "Card"
+}

@@ -1,0 +1,49 @@
+{
+  "CardPT": {
+    "Power": 0,
+    "Toughness": 0
+  },
+  "ManaCost": [
+    {
+      "_ManaSymbol": "ManaCostX"
+    }
+  ],
+  "Name": "Endless One",
+  "Rules": [
+    {
+      "_Rule": "AsPermanentEnters",
+      "args": [
+        {
+          "_Permanent": "ThisPermanent"
+        },
+        [
+          {
+            "_ReplacementActionWouldEnter": "EntersWithNumberCounters",
+            "args": [
+              {
+                "_GameNumber": "ValueX"
+              },
+              {
+                "_CounterType": "PTCounter",
+                "args": [
+                  1,
+                  1
+                ]
+              }
+            ]
+          }
+        ]
+      ]
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Creature"
+    ],
+    "Subtypes": [
+      "Eldrazi"
+    ],
+    "Supertypes": []
+  },
+  "_OracleCard": "Card"
+}

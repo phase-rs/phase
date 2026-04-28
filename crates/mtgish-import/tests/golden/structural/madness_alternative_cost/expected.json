@@ -1,0 +1,24 @@
+[
+  {
+    "keywords": [
+      "Trample",
+      {
+        "Madness": {
+          "type": "Cost",
+          "shards": [
+            "Red"
+          ],
+          "generic": 2
+        }
+      }
+    ],
+    "abilities": [],
+    "triggers": [],
+    "statics": [],
+    "replacements": [],
+    "additional_cost": null,
+    "casting_options": [],
+    "casting_restrictions": [],
+    "strive_cost": null
+  }
+]

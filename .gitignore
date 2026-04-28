@@ -49,6 +49,7 @@ data/*
 !data/standard-cards.txt
 !data/mtgjson/
 !data/engine-inventory.json
+!data/mtgish-cards.json
 data/mtgjson/AtomicCards.json
 data/mtgjson/Meta.json
 data/mtgjson/SetList.json

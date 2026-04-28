@@ -1,0 +1,31 @@
+{
+  "Name": "Alpine Meadow",
+  "Rules": [
+    {
+      "_Rule": "AsPermanentEnters",
+      "args": [
+        {
+          "_Permanent": "ThisPermanent"
+        },
+        [
+          {
+            "_ReplacementActionWouldEnter": "EntersTapped"
+          }
+        ]
+      ]
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Land"
+    ],
+    "Subtypes": [
+      "Mountain",
+      "Plains"
+    ],
+    "Supertypes": [
+      "Snow"
+    ]
+  },
+  "_OracleCard": "Card"
+}

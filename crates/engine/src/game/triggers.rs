@@ -1850,6 +1850,22 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceIsTapped => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.tapped),
+        // CR 701.27g: True when the trigger source is a transformed permanent (DFC
+        // with its back face up). Negation wraps via `Not { Box::new(SourceIsTransformed) }`.
+        TriggerCondition::SourceIsTransformed => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.transformed),
+        // CR 708.2: True when the trigger source is face-up. Face-up is the inverse
+        // of the GameObject `face_down` flag — there is no separate `face_up` field.
+        // Negation wraps via `Not { Box::new(SourceIsFaceUp) }`.
+        TriggerCondition::SourceIsFaceUp => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| !obj.face_down),
+        // CR 708.2: True when the trigger source is face-down. Negation wraps via
+        // `Not { Box::new(SourceIsFaceDown) }`.
+        TriggerCondition::SourceIsFaceDown => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.face_down),
         // CR 113.6b: True when the trigger source is in the specified zone.
         TriggerCondition::SourceInZone { zone } => source_id
             .and_then(|id| state.objects.get(&id))
@@ -1933,8 +1949,9 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::Or { conditions } => conditions
             .iter()
             .any(|c| check_trigger_condition(state, c, controller, source_id, trigger_event)),
-        // CR 603.4: Negate the inner intervening-if predicate. Used for "unless [phrase]"
-        // patterns; mirrors `TargetFilter::Not` and `StaticCondition::Not`.
+        // CR 603.4 + CR 608.2c: Logical negation — invert the wrapped condition's
+        // truth value. Used for "unless [phrase]" intervening-if patterns; mirrors
+        // `TargetFilter::Not` and `StaticCondition::Not`.
         TriggerCondition::Not { condition } => {
             !check_trigger_condition(state, condition, controller, source_id, trigger_event)
         }
@@ -4543,7 +4560,7 @@ pub mod tests {
     // === CR 603.6a + CR 611.2b: "When ~ enters untapped/tapped" ETB gating ===
     //
     // Gingerbread Cabin class ("When this land enters untapped, create a Food
-    // token.") relies on `SourceIsTapped { negated: true }` evaluating the
+    // token.") relies on `Not { Box::new(SourceIsTapped) }` evaluating the
     // post-replacement-pipeline tapped state of the source at trigger-check
     // time. The parser already attaches the condition; these tests guard the
     // runtime evaluator so an ETB tapped via the "enters tapped unless ..."
@@ -4618,6 +4635,108 @@ pub mod tests {
         assert!(check_trigger_condition(
             &state,
             &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    // === CR 701.27g + CR 708.2: Source-state predicates (Transformed/FaceUp/FaceDown) ===
+
+    #[test]
+    fn source_is_transformed_fires_when_object_transformed() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test DFC".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&src).unwrap().transformed = true;
+
+        let cond = TriggerCondition::SourceIsTransformed;
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        let cond_neg = TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::SourceIsTransformed),
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &cond_neg,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    #[test]
+    fn source_is_transformed_suppressed_when_object_front_face() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test DFC".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&src).unwrap().transformed = false;
+
+        let cond = TriggerCondition::SourceIsTransformed;
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    #[test]
+    fn source_is_face_up_inverse_of_face_down() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Morph Test".to_string(),
+            Zone::Battlefield,
+        );
+        // Face-up (default): SourceIsFaceUp fires, SourceIsFaceDown does not.
+        state.objects.get_mut(&src).unwrap().face_down = false;
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::SourceIsFaceUp,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::SourceIsFaceDown,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+
+        // Flip to face-down: predicates invert.
+        state.objects.get_mut(&src).unwrap().face_down = true;
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::SourceIsFaceUp,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::SourceIsFaceDown,
             PlayerId(0),
             Some(src),
             None,

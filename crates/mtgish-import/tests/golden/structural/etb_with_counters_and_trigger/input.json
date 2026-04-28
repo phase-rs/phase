@@ -1,0 +1,141 @@
+{
+  "CardPT": {
+    "Power": 6,
+    "Toughness": 6
+  },
+  "ManaCost": [
+    {
+      "_ManaSymbol": "ManaCostGeneric",
+      "args": 3
+    },
+    {
+      "_ManaSymbol": "ManaCostRW"
+    }
+  ],
+  "Name": "Belligerent Hatchling",
+  "Rules": [
+    {
+      "_Rule": "FirstStrike"
+    },
+    {
+      "_Rule": "AsPermanentEnters",
+      "args": [
+        {
+          "_Permanent": "ThisPermanent"
+        },
+        [
+          {
+            "_ReplacementActionWouldEnter": "EntersWithNumberCounters",
+            "args": [
+              {
+                "_GameNumber": "Integer",
+                "args": 4
+              },
+              {
+                "_CounterType": "PTCounter",
+                "args": [
+                  -1,
+                  -1
+                ]
+              }
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "_Rule": "TriggerA",
+      "args": [
+        {
+          "_Trigger": "WhenAPlayerCastsASpell",
+          "args": [
+            {
+              "_Players": "SinglePlayer",
+              "args": {
+                "_Player": "You"
+              }
+            },
+            {
+              "_Spells": "IsColor",
+              "args": {
+                "_Color": "Red"
+              }
+            }
+          ]
+        },
+        {
+          "_Actions": "ActionList",
+          "args": [
+            {
+              "_Action": "RemoveACounterOfTypeFromPermanent",
+              "args": [
+                {
+                  "_CounterType": "PTCounter",
+                  "args": [
+                    -1,
+                    -1
+                  ]
+                },
+                {
+                  "_Permanent": "ThisPermanent"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "_Rule": "TriggerA",
+      "args": [
+        {
+          "_Trigger": "WhenAPlayerCastsASpell",
+          "args": [
+            {
+              "_Players": "SinglePlayer",
+              "args": {
+                "_Player": "You"
+              }
+            },
+            {
+              "_Spells": "IsColor",
+              "args": {
+                "_Color": "White"
+              }
+            }
+          ]
+        },
+        {
+          "_Actions": "ActionList",
+          "args": [
+            {
+              "_Action": "RemoveACounterOfTypeFromPermanent",
+              "args": [
+                {
+                  "_CounterType": "PTCounter",
+                  "args": [
+                    -1,
+                    -1
+                  ]
+                },
+                {
+                  "_Permanent": "ThisPermanent"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Creature"
+    ],
+    "Subtypes": [
+      "Elemental"
+    ],
+    "Supertypes": []
+  },
+  "_OracleCard": "Card"
+}

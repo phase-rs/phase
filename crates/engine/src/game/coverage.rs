@@ -1215,6 +1215,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                     "player".into(),
                     match player {
                         GainLifePlayer::TargetedController => "target's controller",
+                        GainLifePlayer::TargetPlayer => "target player",
                         GainLifePlayer::Controller => unreachable!(),
                     }
                     .into(),
@@ -4097,7 +4098,6 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
-        AbilityCondition::Not { .. } => ("Not", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
         AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
@@ -4123,6 +4123,11 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
+        // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
+        // (effects/mod.rs), which short-circuits on the first true child.
+        AbilityCondition::Or { .. } => ("Or", Handled),
+        // CR 608.2c: Logical negation — handled by evaluate_condition (effects/mod.rs).
+        AbilityCondition::Not { .. } => ("Not", Handled),
         // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
         // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.

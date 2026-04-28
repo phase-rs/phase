@@ -1,0 +1,79 @@
+{
+  "CardPT": {
+    "Power": 6,
+    "Toughness": 6
+  },
+  "ManaCost": [
+    {
+      "_ManaSymbol": "ManaCostGeneric",
+      "args": 5
+    },
+    {
+      "_ManaSymbol": "ManaCostW"
+    },
+    {
+      "_ManaSymbol": "ManaCostW"
+    },
+    {
+      "_ManaSymbol": "ManaCostW"
+    }
+  ],
+  "Name": "Akroma, Angel of Wrath",
+  "Rules": [
+    {
+      "_Rule": "Flying"
+    },
+    {
+      "_Rule": "FirstStrike"
+    },
+    {
+      "_Rule": "Vigilance"
+    },
+    {
+      "_Rule": "Trample"
+    },
+    {
+      "_Rule": "Haste"
+    },
+    {
+      "_Rule": "Protection",
+      "args": {
+        "_Protectable": "FromColor",
+        "args": {
+          "_ProtectableColor": "Colors",
+          "args": [
+            {
+              "_Color": "Black"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "_Rule": "Protection",
+      "args": {
+        "_Protectable": "FromColor",
+        "args": {
+          "_ProtectableColor": "Colors",
+          "args": [
+            {
+              "_Color": "Red"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "Typeline": {
+    "Cardtypes": [
+      "Creature"
+    ],
+    "Subtypes": [
+      "Angel"
+    ],
+    "Supertypes": [
+      "Legendary"
+    ]
+  },
+  "_OracleCard": "Card"
+}

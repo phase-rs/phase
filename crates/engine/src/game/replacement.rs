@@ -208,6 +208,9 @@ fn damage_done_applier(
                 DamageModification::Double => amount.saturating_mul(2),
                 DamageModification::Triple => amount.saturating_mul(3),
                 DamageModification::Plus { value } => amount.saturating_add(value),
+                // CR 615.1 + CR 614.1a: Saturating subtract. `Minus { value: u32::MAX }`
+                // is the continuous prevent-all sentinel — yields 0 for any amount and
+                // is not consumed (continuous, not shield-style).
                 DamageModification::Minus { value } => amount.saturating_sub(value),
                 // CR 614.1a: Conditional — if amount < source's power, set to power.
                 // References the replacement source's (rid.source) post-layer power.
@@ -224,6 +227,8 @@ fn damage_done_applier(
                         amount
                     }
                 }
+                // CR 614.1a: Flat override — replace event amount with `value`.
+                DamageModification::SetTo { value } => value,
             };
             return ApplyResult::Modified(ProposedEvent::Damage {
                 source_id,
@@ -527,6 +532,37 @@ fn gain_life_applier(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
+    use crate::types::ability::QuantityModification;
+    // Branch 1: structured `quantity_modification` (Double / Plus / Minus).
+    // Used by Boon Reflection / Rhox Faithmender (Twice) and
+    // Hardened Heart-style "+N" replacements.
+    let qmod = state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|def| def.quantity_modification.clone());
+    if let Some(modification) = qmod {
+        if let ProposedEvent::LifeGain {
+            player_id,
+            amount,
+            applied,
+        } = event
+        {
+            let new_amount = match modification {
+                QuantityModification::Double => amount.saturating_mul(2),
+                QuantityModification::Plus { value } => amount.saturating_add(value),
+                QuantityModification::Minus { value } => amount.saturating_sub(value),
+            };
+            return ApplyResult::Modified(ProposedEvent::LifeGain {
+                player_id,
+                amount: new_amount,
+                applied,
+            });
+        }
+        // qmod set but event isn't LifeGain — fall through (no-op).
+    }
+
+    // Branch 2: legacy delta from execute body's `Effect::GainLife { amount: Fixed }`.
     let Some(delta) = gain_life_replacement_delta(state, rid) else {
         return ApplyResult::Modified(event);
     };

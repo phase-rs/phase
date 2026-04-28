@@ -851,6 +851,14 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Undaunted => "undaunted".to_string(),
         Keyword::Station => "station".to_string(),
         Keyword::Paradigm => "paradigm".to_string(),
+        Keyword::Replicate(_) => "replicate".to_string(),
+        Keyword::Awaken(_) => "awaken".to_string(),
+        Keyword::ForMirrodin => "for mirrodin!".to_string(),
+        Keyword::MoreThanMeetsTheEye(_) => "more than meets the eye".to_string(),
+        Keyword::Freerunning(_) => "freerunning".to_string(),
+        Keyword::Increment => "increment".to_string(),
+        Keyword::Specialize(_) => "specialize".to_string(),
+        Keyword::Offering(quality) => format!("{} offering", quality.to_lowercase()),
         Keyword::Unknown(s) => s.to_lowercase(),
     }
 }

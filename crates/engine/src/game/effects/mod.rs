@@ -2048,6 +2048,10 @@ fn evaluate_condition(
         AbilityCondition::And { conditions } => conditions
             .iter()
             .all(|c| evaluate_condition(c, state, ability)),
+        // CR 608.2c: Compound condition — at least one inner condition must be true.
+        AbilityCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| evaluate_condition(c, state, ability)),
         // CR 608.2c: Logical negation — true when the inner condition is false.
         AbilityCondition::Not { condition } => !evaluate_condition(condition, state, ability),
         // CR 730.2a: True when it's neither day nor night (no designation set yet).
