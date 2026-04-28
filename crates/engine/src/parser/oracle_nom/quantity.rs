@@ -1270,10 +1270,18 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// `CreaturesDiedThisTurn` quantity ref.
 fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((
+        // "creature that died" canonical forms
         tag("creature that died under your control this turn"),
         tag("creature that died under your control"),
         tag("creature that died this turn"),
         tag("creature that died"),
+        // CR 700.7: "creature put into [a/your] graveyard from the battlefield"
+        // is the long form of "died" — both reference the same battlefield→
+        // graveyard transition tracked in `zone_changes_this_turn`.
+        tag("creature put into your graveyard from the battlefield this turn"),
+        tag("creature put into your graveyard from the battlefield"),
+        tag("creature put into a graveyard from the battlefield this turn"),
+        tag("creature put into a graveyard from the battlefield"),
     ))
     .parse(input)?;
     Ok((rest, QuantityRef::CreaturesDiedThisTurn))
