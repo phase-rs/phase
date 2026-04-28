@@ -37,8 +37,8 @@ use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
 use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
-    extract_keyword_line, is_keyword_cost_line, parse_kicker_additional_cost_line,
-    parse_keyword_from_oracle,
+    extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
+    parse_kicker_additional_cost_line,
 };
 use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{
@@ -2461,7 +2461,7 @@ mod tests {
         TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind};
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
@@ -2505,6 +2505,82 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn kicker_and_or_line_sets_two_kicker_costs() {
+        let r = parse(
+            "Kicker {B} and/or {R}\nWhen ~ enters, if it was kicked twice, draw a card.",
+            "Test Kicker",
+            &[],
+            &["Creature"],
+            &[],
+        );
+
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Kicker { costs, repeatable } => {
+                assert!(!repeatable);
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(
+                    &costs[0],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { shards, generic: 0 }
+                    } if shards == &vec![ManaCostShard::Black]
+                ));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { shards, generic: 0 }
+                    } if shards == &vec![ManaCostShard::Red]
+                ));
+            }
+            other => panic!("expected two-cost Kicker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multikicker_line_sets_repeatable_kicker_cost() {
+        let r = parse(
+            "Multikicker {1}{G}\nWhen ~ enters, draw a card.",
+            "Test Multikicker",
+            &[],
+            &["Creature"],
+            &[],
+        );
+
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Kicker { costs, repeatable } => {
+                assert!(repeatable);
+                assert_eq!(costs.len(), 1);
+                assert!(matches!(
+                    &costs[0],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { shards, generic: 1 }
+                    } if shards == &vec![ManaCostShard::Green]
+                ));
+            }
+            other => panic!("expected repeatable Kicker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_mana_kicker_line_uses_oracle_cost_parser() {
+        let r = parse(
+            "Kicker—Sacrifice a land.\nWhen ~ enters, draw a card.",
+            "Test Nonmana Kicker",
+            &[],
+            &["Creature"],
+            &[],
+        );
+
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Kicker { costs, repeatable } => {
+                assert!(!repeatable);
+                assert_eq!(costs.len(), 1);
+                assert!(matches!(&costs[0], AbilityCost::Sacrifice { count: 1, .. }));
+            }
+            other => panic!("expected non-mana Kicker, got {other:?}"),
+        }
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
-use crate::types::mana::{ManaColor, ManaType};
+use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -1572,23 +1572,22 @@ fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondi
         Ok(_) => {
             // Reconstruct the enters-with text for downstream parsing.
             let enters_start = norm_lower.len() - after_kicker_clause.len() + 2; // skip ", "
-                                                                                 // CR 702.33d + CR 702.33f: The replacement applies when the spell
-                                                                                 // was kicked. The optional `with its [A]/[B] kicker` clause narrows
-                                                                                 // to a specific kicker position; resolving the parsed cost text
-                                                                                 // (e.g. "{1}{r}") into a `KickerVariant` requires the card's
-                                                                                 // `Keyword::Kicker` list, which is not available at this parser
-                                                                                 // layer. For now we emit `variant: None` (any kicker payment
-                                                                                 // satisfies the gate) and accept the over-trigger — the runtime
-                                                                                 // still gates on "was kicked at all", which is strictly more
-                                                                                 // correct than the previous unconditional `true` stub. Per-variant
-                                                                                 // resolution is a follow-up at the synthesis layer where card
-                                                                                 // keywords are visible.
-            let _ = cost_text; // reserved for future synthesis-time resolution
-            let condition = ReplacementCondition::CastViaKicker { variant: None };
+            let condition = ReplacementCondition::CastViaKicker {
+                variant: None,
+                kicker_cost: cost_text.as_deref().and_then(parse_lower_mana_cost),
+            };
             (Some(condition), &norm_lower[enters_start..])
         }
         Err(_) => (None, norm_lower),
     }
+}
+
+fn parse_lower_mana_cost(cost_text: &str) -> Option<ManaCost> {
+    let upper = cost_text.to_ascii_uppercase();
+    nom_primitives::parse_mana_cost
+        .parse(upper.as_str())
+        .ok()
+        .map(|(_, cost)| cost)
 }
 
 /// CR 603.4: Detect a trailing "if you cast it from [zone]" gate on a
@@ -4515,7 +4514,10 @@ mod tests {
         ));
         assert!(matches!(
             def.condition,
-            Some(ReplacementCondition::CastViaKicker { variant: None })
+            Some(ReplacementCondition::CastViaKicker {
+                variant: None,
+                kicker_cost: None
+            })
         ));
     }
 
@@ -4537,14 +4539,17 @@ mod tests {
                 ..
             } if counter_type == "P1P1"
         ));
-        // CR 702.33d + CR 702.33f: per-variant resolution is deferred (the
-        // parser layer cannot see the card's `Keyword::Kicker` list, so the
-        // {1}{R} cost text cannot be mapped to `KickerVariant::First` /
-        // `Second` here). The replacement still applies for any kicker
-        // payment — strictly more correct than the prior unconditional stub.
+        // CR 702.33d + CR 702.33f: per-variant resolution is deferred, but the
+        // parser keeps typed cost metadata so synthesis can map it to the card's
+        // positional `KickerVariant`.
         match &def.condition {
-            Some(ReplacementCondition::CastViaKicker { variant: None }) => {}
-            other => panic!("Expected CastViaKicker {{ variant: None }}, got {other:?}"),
+            Some(ReplacementCondition::CastViaKicker {
+                variant: None,
+                kicker_cost: Some(_),
+            }) => {}
+            other => panic!(
+                "Expected CastViaKicker {{ variant: None, kicker_cost: Some(_) }}, got {other:?}"
+            ),
         }
     }
 

@@ -3173,6 +3173,8 @@ mod tests {
                 casting_variant: CastingVariant::Normal,
                 distribute: None,
                 origin_zone: Zone::Hand,
+                additional_cost_flow: None,
+                declined_kickers: Vec::new(),
             })
         }
 
@@ -3415,6 +3417,8 @@ mod tests {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),

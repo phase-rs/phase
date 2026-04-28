@@ -21,6 +21,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
+use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
 /// Wrap `cond` in `AbilityCondition::Not` when `negated` is true; otherwise
@@ -129,11 +130,8 @@ pub(crate) fn strip_leading_general_conditional(text: &str) -> (Option<AbilityCo
 /// - "if it was kicked twice, [body]"             → min_count = 2
 /// - "if it was kicked three times, [body]"       → min_count = N (English/digit)
 /// - "if it was kicked with its {COST} kicker, [body]"
-///   → variant resolution deferred at this layer (the parser cannot see
-///   the card's `Keyword::Kicker` list to map cost text → position).
-///   Emits `additional_cost_paid_any()` so the trigger still gates on
-///   "kicked at all" — strictly more correct than the prior path,
-///   which dropped the entire condition (silent over-trigger).
+///   → parser records the printed cost; synthesis maps it to the card's
+///   positional `KickerVariant` once kicker declarations are visible.
 fn strip_quantified_kicker_conditional(
     text: &str,
     lower: &str,
@@ -153,17 +151,19 @@ fn strip_quantified_kicker_conditional(
         .ok()?;
 
     // Branch 1: "was kicked with its {COST} kicker, [body]" — per-variant.
-    // CR 702.33f: variant resolution deferred (see function-level comment).
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" with its ").parse(after_kicked) {
-        let (rest, _) = take_until::<_, _, VerboseError<&str>>(" kicker, ")
+        let cost_start = text.len() - rest.len();
+        let (rest, cost_text) = take_until::<_, _, VerboseError<&str>>(" kicker, ")
             .parse(rest)
             .ok()?;
         let (rest, _) = tag::<_, _, VerboseError<&str>>(" kicker, ")
             .parse(rest)
             .ok()?;
         let offset = text.len() - rest.len();
+        let cost =
+            parse_kicker_condition_mana_cost(&text[cost_start..cost_start + cost_text.len()])?;
         return Some((
-            AbilityCondition::additional_cost_paid_any(),
+            AbilityCondition::additional_cost_paid_kicker_cost(cost),
             text[offset..].to_string(),
         ));
     }
@@ -194,6 +194,13 @@ fn strip_quantified_kicker_conditional(
     }
 
     None
+}
+
+fn parse_kicker_condition_mana_cost(cost_text: &str) -> Option<ManaCost> {
+    nom_primitives::parse_mana_cost
+        .parse(cost_text.trim())
+        .ok()
+        .map(|(_, cost)| cost)
 }
 
 pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, String) {
@@ -1632,17 +1639,19 @@ mod tests {
         assert_eq!(body, "draw a card.");
     }
 
-    /// CR 702.33f: "if it was kicked with its {COST} kicker, …" — variant
-    /// resolution is deferred at this layer (parser cannot see the card's
-    /// kicker keyword list), so the condition collapses to "kicked at all".
-    /// Strictly more correct than the prior path, which dropped the entire
-    /// condition. Ana Battlemage's two per-kicker triggers.
+    /// CR 702.33f: "if it was kicked with its {COST} kicker, …" records the
+    /// printed mana cost so synthesis can map it to the positional kicker.
     #[test]
-    fn kicked_with_specific_kicker_emits_default_shape() {
+    fn kicked_with_specific_kicker_emits_cost_metadata() {
         let (cond, body) = strip_additional_cost_conditional(
             "If it was kicked with its {2}{U} kicker, target player discards three cards.",
         );
-        assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::additional_cost_paid_kicker_cost(
+                parse_kicker_condition_mana_cost("{2}{U}").unwrap()
+            ))
+        );
         assert_eq!(body, "target player discards three cards.");
     }
 }

@@ -5736,9 +5736,14 @@ pub enum AbilityCondition {
     ///   - `variant: None`, `min_count: N` (N >= 2) — "if it was kicked twice"
     ///     / "if it was kicked N times" (CR 702.33b/c). Evaluates against
     ///     `SpellContext.kickers_paid.len() >= N`.
+    ///   - `kicker_cost: Some(_)` — parser-only cue for "with its {COST}
+    ///     kicker" clauses. Database synthesis resolves this to `variant`
+    ///     once the card's kicker declarations are visible.
     AdditionalCostPaid {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kicker_cost: Option<ManaCost>,
         #[serde(
             default = "AbilityCondition::default_min_count",
             skip_serializing_if = "AbilityCondition::is_default_min_count"
@@ -5894,6 +5899,7 @@ impl AbilityCondition {
     pub fn additional_cost_paid_any() -> Self {
         AbilityCondition::AdditionalCostPaid {
             variant: None,
+            kicker_cost: None,
             min_count: 1,
         }
     }
@@ -5903,6 +5909,18 @@ impl AbilityCondition {
     pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
         AbilityCondition::AdditionalCostPaid {
             variant: Some(variant),
+            kicker_cost: None,
+            min_count: 1,
+        }
+    }
+
+    /// Parser-side representation for "if it was kicked with its {COST}
+    /// kicker". Database synthesis maps the printed cost to its positional
+    /// `KickerVariant` using the card's `AdditionalCost::Kicker` declaration.
+    pub fn additional_cost_paid_kicker_cost(cost: ManaCost) -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: Some(cost),
             min_count: 1,
         }
     }
@@ -5912,6 +5930,7 @@ impl AbilityCondition {
     pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
         AbilityCondition::AdditionalCostPaid {
             variant: None,
+            kicker_cost: None,
             min_count,
         }
     }
@@ -6268,6 +6287,8 @@ pub enum ReplacementCondition {
     CastViaKicker {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kicker_cost: Option<ManaCost>,
     },
     /// "as long as ~ is tapped/untapped" — replacement applies only while the
     /// source object is in the required tapped state.

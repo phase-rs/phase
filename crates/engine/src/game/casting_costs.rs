@@ -62,7 +62,9 @@ pub(crate) fn handle_decide_additional_cost(
                 None
             }
         }
-        AdditionalCost::Kicker { .. } => unreachable!("kicker costs are handled before generic optional costs"),
+        AdditionalCost::Kicker { .. } => {
+            unreachable!("kicker costs are handled before generic optional costs")
+        }
         AdditionalCost::Choice(preferred, fallback) => {
             if pay {
                 ability.context.additional_cost_paid = true;
@@ -2727,7 +2729,82 @@ mod tests {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn next_kicker_option_walks_independent_kicker_costs_by_position() {
+        let state = GameState::new_two_player(42);
+        let source_id = ObjectId(7);
+        let mut pending = make_pending(source_id);
+        pending.activation_ability_index = None;
+        pending.additional_cost_flow = Some(AdditionalCost::Kicker {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Blue],
+                        generic: 2,
+                    },
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 2,
+                    },
+                },
+            ],
+            repeatable: false,
+        });
+
+        let (variant, _, repeatable) =
+            next_kicker_option(&state, PlayerId(0), &pending).expect("first kicker option");
+        assert_eq!(variant, KickerVariant::First);
+        assert!(!repeatable);
+
+        pending
+            .ability
+            .context
+            .kickers_paid
+            .push(KickerVariant::First);
+        let (variant, _, repeatable) =
+            next_kicker_option(&state, PlayerId(0), &pending).expect("second kicker option");
+        assert_eq!(variant, KickerVariant::Second);
+        assert!(!repeatable);
+    }
+
+    #[test]
+    fn next_kicker_option_repeats_multikicker_first_variant() {
+        let state = GameState::new_two_player(42);
+        let source_id = ObjectId(7);
+        let mut pending = make_pending(source_id);
+        pending.activation_ability_index = None;
+        pending.additional_cost_flow = Some(AdditionalCost::Kicker {
+            costs: vec![AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 1,
+                },
+            }],
+            repeatable: true,
+        });
+
+        pending
+            .ability
+            .context
+            .kickers_paid
+            .push(KickerVariant::First);
+        pending
+            .ability
+            .context
+            .kickers_paid
+            .push(KickerVariant::First);
+
+        let (variant, _, repeatable) =
+            next_kicker_option(&state, PlayerId(0), &pending).expect("repeatable kicker option");
+        assert_eq!(variant, KickerVariant::First);
+        assert!(repeatable);
     }
 
     fn create_starting_town(state: &mut GameState, card_id: CardId) -> ObjectId {
@@ -4574,6 +4651,8 @@ mod tests {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         };
 
         let result = pay_additional_cost(
@@ -4683,6 +4762,8 @@ mod tests {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         };
 
         let mut events = Vec::new();
@@ -4761,6 +4842,8 @@ mod tests {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -4828,6 +4911,8 @@ mod tests {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -4928,6 +5013,8 @@ mod tests {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: Zone::Graveyard,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         };
 
         let result = pay_additional_cost(

@@ -341,6 +341,8 @@ mod tests {
             casting_variant: CastingVariant::Normal,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
+            additional_cost_flow: None,
+            declined_kickers: Vec::new(),
         })
     }
 

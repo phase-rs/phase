@@ -1831,16 +1831,26 @@ fn evaluate_condition(
         // counts read `kickers_paid` (populated by the casting flow, copied to
         // GameObject at cast resolution, and propagated back into the trigger's
         // resolved-ability context for ETB triggers).
-        AbilityCondition::AdditionalCostPaid { variant, min_count } => match variant {
-            Some(kicker) => ability.context.kickers_paid.contains(kicker),
-            None => {
-                if *min_count <= 1 {
-                    ability.context.additional_cost_paid
-                } else {
-                    ability.context.kickers_paid.len() >= *min_count as usize
+        AbilityCondition::AdditionalCostPaid {
+            variant,
+            kicker_cost,
+            min_count,
+        } => {
+            if kicker_cost.is_some() && variant.is_none() {
+                false
+            } else {
+                match variant {
+                    Some(kicker) => ability.context.kickers_paid.contains(kicker),
+                    None => {
+                        if *min_count <= 1 {
+                            ability.context.additional_cost_paid
+                        } else {
+                            ability.context.kickers_paid.len() >= *min_count as usize
+                        }
+                    }
                 }
             }
-        },
+        }
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
         }

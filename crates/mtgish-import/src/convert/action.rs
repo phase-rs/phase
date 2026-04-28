@@ -865,7 +865,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                         segments.push(ChainSegment {
                             condition: Some(engine::types::ability::AbilityCondition::Not {
                                 condition: Box::new(
-                                    engine::types::ability::AbilityCondition::AdditionalCostPaid,
+                                    engine::types::ability::AbilityCondition::additional_cost_paid_any(),
                                 ),
                             }),
                             effects: body_effects,
@@ -963,7 +963,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                         segments.push(ChainSegment {
                             condition: Some(engine::types::ability::AbilityCondition::Not {
                                 condition: Box::new(
-                                    engine::types::ability::AbilityCondition::AdditionalCostPaid,
+                                    engine::types::ability::AbilityCondition::additional_cost_paid_any(),
                                 ),
                             }),
                             effects: body_effects,

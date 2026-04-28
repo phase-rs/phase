@@ -1603,14 +1603,21 @@ fn evaluate_replacement_condition(
         // source permanent's spell was kicked. `kickers_paid` is populated at
         // cast resolution from `SpellContext.kickers_paid`. When `variant` is
         // `Some`, narrow to that specific kicker position; when `None`, any
-        // kicker payment satisfies the gate.
-        ReplacementCondition::CastViaKicker { variant } => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|o| match variant {
-                Some(v) => o.kickers_paid.contains(v),
-                None => !o.kickers_paid.is_empty(),
-            }),
+        // kicker payment satisfies the gate. `kicker_cost` is parser metadata
+        // that should be resolved by synthesis before runtime evaluation.
+        ReplacementCondition::CastViaKicker {
+            variant,
+            kicker_cost,
+        } => state.objects.get(&source_id).is_some_and(|o| {
+            if kicker_cost.is_some() && variant.is_none() {
+                false
+            } else {
+                match variant {
+                    Some(v) => o.kickers_paid.contains(v),
+                    None => !o.kickers_paid.is_empty(),
+                }
+            }
+        }),
         ReplacementCondition::SourceTappedState { tapped } => state
             .objects
             .get(&source_id)

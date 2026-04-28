@@ -1,21 +1,15 @@
 use std::str::FromStr;
 
-use nom::bytes::complete::{tag, take_until};
-use nom::Parser;
-use nom_language::error::VerboseError;
-
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
-use crate::parser::oracle_classifier::has_trigger_prefix;
-use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastVariantPaid, ChoiceType, ContinuousModification, ControllerRef, CounterTriggerFilter,
-    Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction,
-    NinjutsuVariant, PtValue, QuantityExpr, ReplacementDefinition, RuntimeHandler,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, NinjutsuVariant,
+    PtValue, QuantityExpr, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -462,53 +456,26 @@ pub fn synthesize_kicker(face: &mut CardFace) {
 }
 
 /// CR 702.33f: Conditions of the form "if it was kicked with its [A] kicker"
-/// are linked to the first or second kicker cost printed on the card. The
-/// parser can see the condition text before card-level additional-cost
-/// synthesis is complete, so this synthesis pass resolves the printed mana
-/// cost back to the positional `KickerVariant`.
+/// are linked to the first or second kicker cost printed on the card. Parser
+/// output carries the printed mana cost as typed metadata; this synthesis pass
+/// resolves it back to the positional `KickerVariant` once card-level kicker
+/// declarations are visible.
 pub fn resolve_kicker_condition_variants(face: &mut CardFace) {
-    let Some(oracle_text) = &face.oracle_text else {
-        return;
-    };
     let Some(additional_cost) = &face.additional_cost else {
         return;
     };
 
-    let mut trigger_index = 0;
-    for line in oracle_text.lines() {
-        let lower = line.to_lowercase();
-        if !has_trigger_prefix(&lower) {
-            continue;
-        }
-
-        if let Some(cost) = parse_specific_kicker_condition_cost(line, &lower) {
-            if let Some(variant) = kicker_variant_for_cost(additional_cost, &cost) {
-                if let Some(trigger) = face.triggers.get_mut(trigger_index) {
-                    if let Some(execute) = trigger.execute.as_mut() {
-                        replace_first_default_kicker_condition(execute, variant);
-                    }
-                }
-            }
-        }
-        trigger_index += 1;
+    for ability in &mut face.abilities {
+        resolve_ability_kicker_condition_variants(ability, additional_cost);
     }
-}
-
-fn parse_specific_kicker_condition_cost(raw: &str, lower: &str) -> Option<ManaCost> {
-    let (lower_after_anchor, _) =
-        take_until::<_, _, VerboseError<&str>>(" was kicked with its ")
-            .parse(lower)
-            .ok()?;
-    let (lower_cost, _) = tag::<_, _, VerboseError<&str>>(" was kicked with its ")
-        .parse(lower_after_anchor)
-        .ok()?;
-    let raw_cost = &raw[raw.len() - lower_cost.len()..];
-    let (raw_after_cost, cost) = nom_primitives::parse_mana_cost.parse(raw_cost).ok()?;
-    let lower_after_cost = &lower[raw.len() - raw_after_cost.len()..];
-    tag::<_, _, VerboseError<&str>>(" kicker")
-        .parse(lower_after_cost)
-        .ok()?;
-    Some(cost)
+    for trigger in &mut face.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            resolve_ability_kicker_condition_variants(execute, additional_cost);
+        }
+    }
+    for replacement in &mut face.replacements {
+        resolve_replacement_kicker_condition_variants(replacement, additional_cost);
+    }
 }
 
 fn kicker_variant_for_cost(
@@ -533,39 +500,79 @@ fn kicker_variant_for_cost(
     })
 }
 
-fn replace_first_default_kicker_condition(
+fn resolve_ability_kicker_condition_variants(
     ability: &mut AbilityDefinition,
-    variant: KickerVariant,
-) -> bool {
-    if ability
-        .condition
-        .as_ref()
-        .is_some_and(is_default_additional_cost_paid_condition)
-    {
-        ability.condition = Some(AbilityCondition::additional_cost_paid_kicker(variant));
-        return true;
+    additional_cost: &AdditionalCost,
+) {
+    if let Some(condition) = ability.condition.as_mut() {
+        resolve_condition_kicker_variant(condition, additional_cost);
     }
 
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        if replace_first_default_kicker_condition(sub_ability, variant) {
-            return true;
-        }
+        resolve_ability_kicker_condition_variants(sub_ability, additional_cost);
     }
 
-    ability
-        .mode_abilities
-        .iter_mut()
-        .any(|mode| replace_first_default_kicker_condition(mode, variant))
+    for mode in &mut ability.mode_abilities {
+        resolve_ability_kicker_condition_variants(mode, additional_cost);
+    }
 }
 
-fn is_default_additional_cost_paid_condition(condition: &AbilityCondition) -> bool {
-    matches!(
-        condition,
+fn resolve_condition_kicker_variant(
+    condition: &mut AbilityCondition,
+    additional_cost: &AdditionalCost,
+) {
+    match condition {
         AbilityCondition::AdditionalCostPaid {
-            variant: None,
-            min_count: 1
+            variant,
+            kicker_cost,
+            ..
+        } => {
+            resolve_kicker_cost_metadata(variant, kicker_cost, additional_cost);
         }
-    )
+        AbilityCondition::ConditionInstead { inner }
+        | AbilityCondition::Not { condition: inner } => {
+            resolve_condition_kicker_variant(inner, additional_cost);
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for condition in conditions {
+                resolve_condition_kicker_variant(condition, additional_cost);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_replacement_kicker_condition_variants(
+    replacement: &mut ReplacementDefinition,
+    additional_cost: &AdditionalCost,
+) {
+    if let Some(ReplacementCondition::CastViaKicker {
+        variant,
+        kicker_cost,
+    }) = replacement.condition.as_mut()
+    {
+        resolve_kicker_cost_metadata(variant, kicker_cost, additional_cost);
+    }
+
+    if let Some(execute) = replacement.execute.as_mut() {
+        resolve_ability_kicker_condition_variants(execute, additional_cost);
+    }
+}
+
+fn resolve_kicker_cost_metadata(
+    variant: &mut Option<KickerVariant>,
+    kicker_cost: &mut Option<ManaCost>,
+    additional_cost: &AdditionalCost,
+) {
+    if let (None, Some(resolved_variant)) = (
+        *variant,
+        kicker_cost
+            .as_ref()
+            .and_then(|cost| kicker_variant_for_cost(additional_cost, cost)),
+    ) {
+        *variant = Some(resolved_variant);
+        *kicker_cost = None;
+    }
 }
 
 /// CR 702.27a: Synthesize `additional_cost` from `Keyword::Buyback(BuybackCost)`.
@@ -1814,6 +1821,140 @@ fn build_oracle_face_inner(
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);
     synthesize_all(&mut face);
     face
+}
+
+#[cfg(test)]
+mod kicker_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCostShard;
+
+    #[test]
+    fn synthesize_kicker_sets_typed_kicker_additional_cost() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Kicker(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Blue],
+            })],
+            ..CardFace::default()
+        };
+
+        synthesize_kicker(&mut face);
+
+        match face.additional_cost.expect("additional_cost set") {
+            AdditionalCost::Kicker { costs, repeatable } => {
+                assert!(!repeatable);
+                assert_eq!(costs.len(), 1);
+                assert!(matches!(
+                    &costs[0],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 2, shards }
+                    } if shards == &vec![ManaCostShard::Blue]
+                ));
+            }
+            other => panic!("expected Kicker additional cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolves_specific_kicker_condition_to_position() {
+        let mut face = CardFace {
+            oracle_text: Some(
+                "Kicker {2}{U} and/or {2}{B}\nWhen ~ enters, if it was kicked with its {2}{U} kicker, draw a card."
+                    .to_string(),
+            ),
+            additional_cost: Some(AdditionalCost::Kicker {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 2,
+                            shards: vec![ManaCostShard::Blue],
+                        },
+                    },
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 2,
+                            shards: vec![ManaCostShard::Black],
+                        },
+                    },
+                ],
+                repeatable: false,
+            }),
+            triggers: vec![TriggerDefinition::new(TriggerMode::ChangesZone).execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .condition(AbilityCondition::additional_cost_paid_kicker_cost(
+                    ManaCost::Cost {
+                        generic: 2,
+                        shards: vec![ManaCostShard::Blue],
+                    },
+                )),
+            )],
+            ..CardFace::default()
+        };
+
+        resolve_kicker_condition_variants(&mut face);
+
+        let condition = face.triggers[0]
+            .execute
+            .as_ref()
+            .and_then(|ability| ability.condition.as_ref());
+        assert_eq!(
+            condition,
+            Some(&AbilityCondition::additional_cost_paid_kicker(
+                KickerVariant::First
+            ))
+        );
+    }
+
+    #[test]
+    fn resolves_specific_kicker_replacement_condition_to_position() {
+        let mut face = CardFace {
+            additional_cost: Some(AdditionalCost::Kicker {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::Red],
+                        },
+                    },
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::White],
+                        },
+                    },
+                ],
+                repeatable: false,
+            }),
+            replacements: vec![
+                ReplacementDefinition::new(ReplacementEvent::Moved).condition(
+                    ReplacementCondition::CastViaKicker {
+                        variant: None,
+                        kicker_cost: Some(ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::White],
+                        }),
+                    },
+                ),
+            ],
+            ..CardFace::default()
+        };
+
+        resolve_kicker_condition_variants(&mut face);
+
+        assert!(matches!(
+            face.replacements[0].condition,
+            Some(ReplacementCondition::CastViaKicker {
+                variant: Some(KickerVariant::Second),
+                kicker_cost: None
+            })
+        ));
+    }
 }
 
 #[cfg(test)]
