@@ -2340,23 +2340,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         }
 
         // CR 107.14: "{E} represents one energy counter." `Effect::GainEnergy`
-        // takes a static `u32` (the count of {E} symbols in Oracle text), so
-        // we accept literal integer quantities and strict-fail dynamic ones —
-        // the engine slot for "gain X energy" / "gain energy equal to ..."
-        // does not yet exist (would require widening `GainEnergy.amount` to
-        // `QuantityExpr`, which is an engine extension out of scope here).
-        Action::GetEnergy(n) => match quantity::convert(n)? {
-            QuantityExpr::Fixed { value } if value >= 0 => Effect::GainEnergy {
-                amount: value as u32,
-            },
-            other => {
-                return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "Effect::GainEnergy",
-                    needed_variant: format!(
-                        "GainEnergy.amount widened to QuantityExpr — got dynamic {other:?}"
-                    ),
-                });
-            }
+        // carries `QuantityExpr`, matching the engine resolver's dynamic
+        // quantity path for both fixed "{E}{E}" and "get X {E}" forms.
+        Action::GetEnergy(n) => Effect::GainEnergy {
+            amount: quantity::convert(n)?,
         },
 
         // CR 701.21: Sacrifice a single targeted permanent. Mirrors
@@ -5347,7 +5334,7 @@ mod tests {
     use super::*;
     use crate::convert::build_ability_from_actions;
     use crate::schema::types::{Condition, Cost, ManaSymbol, Permanent, Permanents};
-    use engine::types::ability::{AbilityKind, Effect, TypeFilter};
+    use engine::types::ability::{AbilityKind, Effect, QuantityRef, TypeFilter};
 
     #[test]
     fn player_may_cost_controller_of_target_spell_converts_to_dynamic_player_scope() {
@@ -5409,5 +5396,33 @@ mod tests {
             .type_filters
             .iter()
             .any(|filter| matches!(filter, TypeFilter::Creature)));
+    }
+
+    #[test]
+    fn get_energy_preserves_fixed_quantity() {
+        let effect = convert(&Action::GetEnergy(Box::new(GameNumber::Integer(2)))).unwrap();
+
+        assert_eq!(
+            effect,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+        );
+    }
+
+    #[test]
+    fn get_energy_preserves_dynamic_quantity() {
+        let effect = convert(&Action::GetEnergy(Box::new(GameNumber::ValueX))).unwrap();
+
+        assert_eq!(
+            effect,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+        );
     }
 }
