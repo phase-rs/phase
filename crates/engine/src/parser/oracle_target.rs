@@ -6,8 +6,8 @@ use nom::combinator::{opt, value};
 use nom::Parser;
 
 use crate::types::ability::{
-    AttachmentKind, ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality,
-    TargetFilter, TypeFilter, TypedFilter,
+    AttachmentKind, Comparator, ControllerRef, FilterProp, QuantityExpr, QuantityRef,
+    SharedQuality, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::identifiers::TrackedSetId;
@@ -1969,16 +1969,20 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
             }
         };
         let prop = match (is_le, is_equal) {
-            (true, true) => FilterProp::CmcLE {
+            (true, true) => FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: make_value(0),
             },
-            (true, false) => FilterProp::CmcLE {
+            (true, false) => FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: make_value(-1),
             },
-            (false, true) => FilterProp::CmcGE {
+            (false, true) => FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: make_value(0),
             },
-            (false, false) => FilterProp::CmcGE {
+            (false, false) => FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: make_value(1),
             },
         };
@@ -2001,14 +2005,32 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
     let (prop, after) = if let Ok((a, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
     {
-        (FilterProp::CmcGE { value }, a)
+        (
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value,
+            },
+            a,
+        )
     } else if let Ok((a, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
     {
-        (FilterProp::CmcLE { value }, a)
+        (
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value,
+            },
+            a,
+        )
     } else {
         // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
-        (FilterProp::CmcEQ { value }, after_num)
+        (
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value,
+            },
+            after_num,
+        )
     };
     Some((prop, text.len() - after.len()))
 }
@@ -3451,7 +3473,8 @@ mod tests {
         let (f, _) = parse_type_phrase("spell with mana value 4 or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::CmcGE {
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 4 },
             }]))
         );
@@ -3465,7 +3488,8 @@ mod tests {
         let (f, _) = parse_type_phrase("creature card with mana value x or less");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::Variable {
                         name: "X".to_string(),
@@ -3480,7 +3504,8 @@ mod tests {
         let (f, _) = parse_type_phrase("spell with mana value x or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::CmcGE {
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::Variable {
                         name: "X".to_string(),
@@ -4991,7 +5016,8 @@ mod tests {
                     assert!(
                         typed.properties.iter().any(|p| matches!(
                             p,
-                            FilterProp::CmcLE {
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
                                 value: QuantityExpr::Fixed { value: 2 }
                             }
                         )),
@@ -5084,7 +5110,8 @@ mod tests {
         );
         assert!(typed.properties.iter().any(|property| matches!(
             property,
-            FilterProp::CmcLE {
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextSourceManaValue
                 }

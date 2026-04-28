@@ -4408,7 +4408,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                     _ => TypedFilter::default(),
                 }
             };
-            base_tf = base_tf.properties(vec![FilterProp::CmcEQ {
+            base_tf = base_tf.properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::ChosenNumber,
                 },

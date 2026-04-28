@@ -722,7 +722,8 @@ mod tests {
         add_library_creature_with_cmc(&mut state, 4, PlayerId(0), "Behemoth", 8);
 
         let filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string(),
@@ -765,7 +766,8 @@ mod tests {
         add_library_creature_with_cmc(&mut state, 2, PlayerId(0), "NonZero", 2);
 
         let filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::CmcLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string(),

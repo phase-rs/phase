@@ -3329,11 +3329,14 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         let mv_filter = parse_mana_value_suffix(cursor).and_then(|(prop, consumed)| {
             let is_fixed = matches!(
                 &prop,
-                FilterProp::CmcGE {
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { .. }
-                } | FilterProp::CmcLE {
+                } | FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { .. }
-                } | FilterProp::CmcEQ {
+                } | FilterProp::Cmc {
+                    comparator: Comparator::EQ,
                     value: QuantityExpr::Fixed { .. }
                 },
             );
@@ -4587,11 +4590,13 @@ fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> 
         if let Some((n, after_n)) = parse_number(mv_rest) {
             let after_n = after_n.trim_start();
             if nom_tag_lower(after_n, after_n, "or greater").is_some() {
-                tf = tf.properties(vec![FilterProp::CmcGE {
+                tf = tf.properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { value: n as i32 },
                 }]);
             } else if nom_tag_lower(after_n, after_n, "or less").is_some() {
-                tf = tf.properties(vec![FilterProp::CmcLE {
+                tf = tf.properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { value: n as i32 },
                 }]);
             }
@@ -4736,11 +4741,13 @@ fn parse_cant_cast_mana_value(
     let after_n = after_n.trim_start();
 
     let prop = if nom_tag_lower(after_n, after_n, "or less").is_some() {
-        FilterProp::CmcLE {
+        FilterProp::Cmc {
+            comparator: Comparator::LE,
             value: QuantityExpr::Fixed { value: n as i32 },
         }
     } else if nom_tag_lower(after_n, after_n, "or greater").is_some() {
-        FilterProp::CmcGE {
+        FilterProp::Cmc {
+            comparator: Comparator::GE,
             value: QuantityExpr::Fixed { value: n as i32 },
         }
     } else {
@@ -8687,7 +8694,8 @@ mod tests {
             Some(TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::CmcLE {
+                    .properties(vec![FilterProp::Cmc {
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 3 },
                     }]),
             ))
@@ -9314,9 +9322,13 @@ mod tests {
         if let TargetFilter::Typed(tf) = &filter {
             assert!(tf.type_filters.contains(&TypeFilter::Permanent));
             assert!(
-                tf.properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::CmcLE { .. })),
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        ..
+                    }
+                )),
                 "Expected CmcLE property, got: {:?}",
                 tf.properties
             );
@@ -9695,7 +9707,8 @@ mod tests {
         let has_dynamic_cmc_le = tf.properties.iter().any(|p| {
             matches!(
                 p,
-                FilterProp::CmcLE {
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount { .. }
                     }
@@ -11410,7 +11423,8 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CmcLE {
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 3 }
                     }
                 )));
@@ -11538,7 +11552,8 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CmcGE {
+                    FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 5 }
                     }
                 )));
@@ -11764,7 +11779,8 @@ mod tests {
                     .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))));
                 assert!(tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CmcGE {
+                    FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 4 }
                     }
                 )));
@@ -12439,7 +12455,8 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(
-                    tf.properties.contains(&FilterProp::CmcGE {
+                    tf.properties.contains(&FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 6 },
                     }),
                     "Expected CmcGE(6) property, got {:?}",
@@ -12472,7 +12489,8 @@ mod tests {
                     tf.type_filters
                 );
                 assert!(
-                    tf.properties.contains(&FilterProp::CmcGE {
+                    tf.properties.contains(&FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 4 },
                     }),
                     "Expected CmcGE(4), got {:?}",
@@ -12505,7 +12523,8 @@ mod tests {
                     tf.properties
                 );
                 assert!(
-                    tf.properties.contains(&FilterProp::CmcGE {
+                    tf.properties.contains(&FilterProp::Cmc {
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 4 },
                     }),
                     "Expected CmcGE(4), got {:?}",
@@ -12530,9 +12549,16 @@ mod tests {
         match &def.affected {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(
-                    !tf.properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::CmcGE { .. } | FilterProp::CmcLE { .. })),
+                    !tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::GE,
+                            ..
+                        } | FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            ..
+                        }
+                    )),
                     "Did not expect any Cmc property, got {:?}",
                     tf.properties
                 );

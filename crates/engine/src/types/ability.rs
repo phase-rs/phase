@@ -1255,14 +1255,13 @@ pub enum FilterProp {
     /// Used for "creature with one or more counters on it" phrases where the
     /// counter type is unspecified (Nils, Discipline Enforcer's attack-tax class).
     HasAnyCounter,
-    /// Matches objects with converted mana cost >= N (for "mana value N or greater").
-    /// CR 202.3: Uses QuantityExpr to support both fixed and dynamic comparisons.
-    CmcGE {
-        value: QuantityExpr,
-    },
-    /// Matches objects with converted mana cost <= N (for "mana value N or less").
-    /// CR 202.3: Uses QuantityExpr to support both fixed and dynamic comparisons.
-    CmcLE {
+    /// Matches objects whose mana value satisfies `comparator` against `value`.
+    /// CR 202.3. Replaces the legacy `CmcGE`/`CmcLE`/`CmcEQ` sibling cluster;
+    /// the comparator axis is parameterized via the existing `Comparator` enum,
+    /// unlocking GT/LT/NE comparisons without further variant proliferation.
+    /// Supports both fixed and dynamic (e.g., X) thresholds via `QuantityExpr`.
+    Cmc {
+        comparator: Comparator,
         value: QuantityExpr,
     },
     InZone {
@@ -1470,11 +1469,6 @@ pub enum FilterProp {
     /// Contrast with TargetsOnly (CR 115.9c) which requires ALL targets to match (.all()).
     Targets {
         filter: Box<TargetFilter>,
-    },
-    /// Matches objects with converted mana cost == N (for "with mana value N" exact match).
-    /// CR 202.3: Uses QuantityExpr to support both fixed and dynamic comparisons.
-    CmcEQ {
-        value: QuantityExpr,
     },
     /// CR 107.3 + CR 202.1: Matches spells/objects whose printed mana cost contains
     /// an `{X}` shard. Used for "spell with {X} in its mana cost" qualifier on
@@ -7866,7 +7860,8 @@ mod tests {
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 3 },
             },
-            FilterProp::CmcGE {
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 4 },
             },
             FilterProp::InZone {

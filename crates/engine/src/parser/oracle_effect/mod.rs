@@ -5173,14 +5173,11 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         if let Ok((after_take, _)) = take_until::<_, _, E>("with mana value ").parse(rest) {
             if let Some((prop, _)) = super::oracle_target::parse_mana_value_suffix(after_take) {
                 if let TargetFilter::Typed(ref mut tf) = filter {
-                    if !tf.properties.iter().any(|p| {
-                        matches!(
-                            p,
-                            FilterProp::CmcLE { .. }
-                                | FilterProp::CmcGE { .. }
-                                | FilterProp::CmcEQ { .. }
-                        )
-                    }) {
+                    if !tf
+                        .properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Cmc { .. }))
+                    {
                         tf.properties.push(prop);
                     }
                 }
@@ -10530,7 +10527,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter { properties, .. }),
                 ..
             } if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
-                && properties.iter().any(|p| matches!(p, FilterProp::CmcGE { value: QuantityExpr::Fixed { value: 4 } }))
+                && properties.iter().any(|p| matches!(p, FilterProp::Cmc { comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 4 } }))
         ));
     }
 
@@ -11989,7 +11986,8 @@ mod tests {
                     assert!(
                         properties.iter().any(|p| matches!(
                             p,
-                            FilterProp::CmcLE {
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
                                 value: QuantityExpr::Ref {
                                     qty: QuantityRef::EventContextSourceManaValue
                                 }
@@ -14850,7 +14848,8 @@ mod tests {
             .is_some());
         assert!(tf.properties.iter().any(|p| matches!(
             p,
-            FilterProp::CmcLE {
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: QuantityExpr::Fixed { value: 3 }
             }
         )));
@@ -14869,7 +14868,8 @@ mod tests {
             .is_some());
         assert!(tf.properties.iter().any(|p| matches!(
             p,
-            FilterProp::CmcEQ {
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
                 value: QuantityExpr::Fixed { value: 2 }
             }
         )));
@@ -14890,7 +14890,8 @@ mod tests {
             };
             assert!(tf.properties.iter().any(|p| matches!(
                 p,
-                FilterProp::CmcLE {
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { value: 1 }
                 }
             )));
@@ -14913,7 +14914,8 @@ mod tests {
         assert_eq!(tf.get_subtype(), Some("Aura"));
         assert!(tf.properties.iter().any(|p| matches!(
             p,
-            FilterProp::CmcLE {
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextSourceManaValue
                 }
@@ -14998,7 +15000,8 @@ mod tests {
             };
             assert!(tf.properties.iter().any(|p| matches!(
                 p,
-                FilterProp::CmcLE {
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { value: 1 }
                 }
             )));
@@ -17725,7 +17728,8 @@ mod tests {
                 if let TargetFilter::Typed(tf) = filter {
                     assert!(tf.properties.iter().any(|p| matches!(
                         p,
-                        FilterProp::CmcLE {
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
                             value: QuantityExpr::Fixed { value: 2 }
                         }
                     )));
@@ -17748,7 +17752,8 @@ mod tests {
                 if let TargetFilter::Typed(tf) = filter {
                     assert!(tf.properties.iter().any(|p| matches!(
                         p,
-                        FilterProp::CmcGE {
+                        FilterProp::Cmc {
+                            comparator: Comparator::GE,
                             value: QuantityExpr::Fixed { value: 4 }
                         }
                     )));
@@ -17779,9 +17784,13 @@ mod tests {
             Some(AbilityCondition::TargetMatchesFilter { ref filter, .. }) => {
                 if let TargetFilter::Typed(tf) = filter {
                     assert!(
-                        tf.properties
-                            .iter()
-                            .any(|p| matches!(p, FilterProp::CmcLE { .. })),
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                ..
+                            }
+                        )),
                         "should have CmcLE property"
                     );
                 } else {
@@ -19203,7 +19212,8 @@ mod tests {
                 let has_cmc_le_damage = tf.properties.iter().any(|p| {
                     matches!(
                         p,
-                        FilterProp::CmcLE {
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
                             value: crate::types::ability::QuantityExpr::Ref {
                                 qty: crate::types::ability::QuantityRef::EventContextAmount,
                             },
@@ -19240,7 +19250,8 @@ mod tests {
         let has_source_mv = target.properties.iter().any(|p| {
             matches!(
                 p,
-                FilterProp::CmcLE {
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: crate::types::ability::QuantityExpr::Ref {
                         qty: crate::types::ability::QuantityRef::EventContextSourceManaValue,
                     },

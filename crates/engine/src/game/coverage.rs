@@ -6,8 +6,8 @@ use crate::game::triggers::build_trigger_registry;
 use crate::parser::oracle::is_commander_permission_sentence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, AggregateFunction, ChoiceType, ContinuousModification, ControllerRef,
-    CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
+    AdditionalCost, AggregateFunction, ChoiceType, Comparator, ContinuousModification,
+    ControllerRef, CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, SharedQuality, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
@@ -288,9 +288,17 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 fmt_quantity(count),
                 counter_type.as_str()
             )),
-            FilterProp::CmcGE { value } => parts.push(format!("mv {}+", fmt_quantity(value))),
-            FilterProp::CmcLE { value } => parts.push(format!("mv {}-", fmt_quantity(value))),
-            FilterProp::CmcEQ { value } => parts.push(format!("mv {}", fmt_quantity(value))),
+            FilterProp::Cmc { comparator, value } => {
+                let suffix = match comparator {
+                    Comparator::GE => "+",
+                    Comparator::LE => "-",
+                    Comparator::GT => ">",
+                    Comparator::LT => "<",
+                    Comparator::EQ => "",
+                    Comparator::NE => "≠",
+                };
+                parts.push(format!("mv {}{}", fmt_quantity(value), suffix))
+            }
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
             FilterProp::NameMatchesAnyPermanent { controller } => match controller {

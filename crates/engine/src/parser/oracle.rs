@@ -6975,7 +6975,8 @@ mod tests {
                     assert!(
                         tf.properties.iter().any(|p| matches!(
                             p,
-                            FilterProp::CmcLE {
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
                                 value: QuantityExpr::Fixed { value: 2 }
                             }
                         )),
@@ -7010,7 +7011,8 @@ mod tests {
                                 assert!(
                                     tf.properties.iter().any(|p| matches!(
                                         p,
-                                        FilterProp::CmcLE {
+                                        FilterProp::Cmc {
+                                            comparator: Comparator::LE,
                                             value: QuantityExpr::Fixed { value: 4 }
                                         }
                                     )),

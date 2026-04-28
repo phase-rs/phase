@@ -656,10 +656,12 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     if let Some((before, after)) = tp.rsplit_around(" if it has mana value ") {
         if let Some((comparator, threshold)) = parse_mana_value_threshold(after.lower) {
             let prop = match comparator {
-                Comparator::LE => FilterProp::CmcLE {
+                Comparator::LE => FilterProp::Cmc {
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { value: threshold },
                 },
-                Comparator::GE => FilterProp::CmcGE {
+                Comparator::GE => FilterProp::Cmc {
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { value: threshold },
                 },
                 _ => return (None, text.to_string()),
