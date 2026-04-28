@@ -8,8 +8,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, ChoiceType, ContinuousModification, ControllerRef,
     CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
-    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, PlayerFilter, PlayerScope,
-    PtValue, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, SharedQuality, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
     StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
@@ -589,14 +589,19 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("# of distinctly-named {}", fmt_target(filter))
         }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
-        QuantityRef::CountersOnSelf { counter_type } => {
-            format!("{counter_type} counters on self")
+        QuantityRef::CountersOn {
+            scope,
+            counter_type,
+        } => {
+            let scope_str = match scope {
+                ObjectScope::Source => "self",
+                ObjectScope::Target => "target",
+            };
+            match counter_type {
+                Some(ct) => format!("{ct} counters on {scope_str}"),
+                None => format!("counters on {scope_str} (any type)"),
+            }
         }
-        QuantityRef::CountersOnTarget { counter_type } => {
-            format!("{counter_type} counters on target")
-        }
-        QuantityRef::AnyCountersOnTarget => "counters on target (any type)".into(),
-        QuantityRef::AnyCountersOnSelf => "counters on self (any type)".into(),
         QuantityRef::CountersOnObjects {
             counter_type,
             filter,
@@ -1500,8 +1505,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::MiracleCast { .. } => {}
         // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.
         Effect::MadnessCast { .. } => {}
-        Effect::PutAtLibraryPosition { target, position } => {
+        Effect::PutAtLibraryPosition {
+            target,
+            count,
+            position,
+        } => {
             d.push(("target".into(), fmt_target(target)));
+            d.push(("count".into(), format!("{count:?}")));
             d.push(("position".into(), format!("{position:?}")));
         }
         Effect::PutOnTopOrBottom { target } => {
@@ -4121,10 +4131,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinctNames { .. } => ("ObjectCountDistinctNames", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
-        QuantityRef::CountersOnSelf { .. } => ("CountersOnSelf", Handled),
-        QuantityRef::CountersOnTarget { .. } => ("CountersOnTarget", Handled),
-        QuantityRef::AnyCountersOnTarget => ("AnyCountersOnTarget", Handled),
-        QuantityRef::AnyCountersOnSelf => ("AnyCountersOnSelf", Handled),
+        QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
         QuantityRef::Variable { .. } => ("Variable", Handled),
         QuantityRef::SelfPower => ("SelfPower", Handled),

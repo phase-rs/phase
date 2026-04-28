@@ -3211,42 +3211,107 @@ fn parse_clause_ast(text: &str, ctx: &ParseContext) -> ClauseAst {
     }
 }
 
+/// Peel an optional cardinality prefix from the noun phrase that precedes a
+/// positional placement terminator ("on top of" / "on the bottom of" / "into").
+///
+/// Returns `Some((Some(count), remainder))` when an explicit cardinality is
+/// recognized (e.g. "two cards from your hand" → `Fixed(2)` + "cards from your
+/// hand"), or `Some((None, input))` when the noun phrase has no leading
+/// quantity (the patcher leaves the existing `count: Fixed(1)` untouched).
+///
+/// Recognized prefixes (CR 701.24g positional placement, multi-card form):
+///   - `"x "` (with X-cost)     → `QuantityExpr::Ref { Variable("X") }`
+///   - numeric word/digit + " " → `QuantityExpr::Fixed { value: N }`
+///
+/// Cards like "put it on top" / "put that card on top" / "put target X on top"
+/// have no leading numeral and fall through to the `None` arm — the existing
+/// `count: Fixed(1)` is preserved. "Any number of …" forms are out of scope
+/// here; they involve a player-choice cardinality that is paired with a
+/// matching `MultiTargetSpec` and currently route through other effect
+/// paths (Brainstorm-class effects are handled at the trigger / sub-clause
+/// level, not by this patcher).
+fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)> {
+    // "x " — variable quantity bound to the spell's chosen X.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("x ").parse(input) {
+        return Some((
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+            rest,
+        ));
+    }
+    // Numeric ("two ", "three ", "1 ", …). `parse_number` accepts both English
+    // number words and digits per the oracle-parser SKILL.
+    if let Ok((after_num, n)) = nom_primitives::parse_number.parse(input) {
+        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" ").parse(after_num) {
+            return Some((Some(QuantityExpr::Fixed { value: n as i32 }), rest));
+        }
+    }
+    Some((None, input))
+}
+
 fn lower_clause_ast(ast: ClauseAst, ctx: &ParseContext) -> ParsedEffectClause {
     match ast {
         ClauseAst::Imperative { text } => {
             let mut clause = lower_imperative_clause(&text, ctx);
-            // CR 701.24g: "put target [type] on top/bottom of library" — the imperative
-            // parser returns PutAtLibraryPosition { target: Any } because it dispatches
-            // on the positional suffix without extracting the target phrase. Covers:
-            //   - "put target X on top of Y's library"
-            //   - "put target X on the bottom of Y's library"
-            //   - "put target X into Y's library Nth from the top"  (e.g. Teferi, Hero of Dominaria)
-            if let Effect::PutAtLibraryPosition { ref mut target, .. } = clause.effect {
-                if *target == TargetFilter::Any {
+            // CR 701.24g: "put [N] [type] on top/bottom of library" — the imperative
+            // parser returns PutAtLibraryPosition { target: Any, count: Fixed(1) }
+            // because it dispatches on the positional suffix without extracting the
+            // noun phrase. This patch re-inspects the imperative text and assigns
+            // both the target filter and the cardinality. Covers:
+            //   - "put target X on top of Y's library"           (count = 1)
+            //   - "put target X on the bottom of Y's library"    (count = 1)
+            //   - "put target X into Y's library Nth from top"   (count = 1)
+            //   - "put two cards from your hand on top of your library in any order"
+            //     (Cavalier of Gales / Brainstorm class — count = N, filter = Card+InZone:Hand)
+            if let Effect::PutAtLibraryPosition {
+                ref mut target,
+                ref mut count,
+                ..
+            } = clause.effect
+            {
+                let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
                     let lower = text.to_lowercase();
-                    let extracted_target = (|| -> Option<TargetFilter> {
-                        let (after_put, _) = tag::<_, _, VerboseError<&str>>("put ")
-                            .parse(lower.as_str())
-                            .ok()?;
-                        // Boundary terminators, in priority order. Each is a positional
-                        // placement phrase that follows the target noun phrase.
-                        let before = [" on top of", " on the bottom of", " into "]
-                            .iter()
-                            .find_map(|term| {
-                                take_until::<_, _, VerboseError<&str>>(*term)
-                                    .parse(after_put)
-                                    .ok()
-                                    .map(|(_, before)| before)
-                            })?;
-                        let (filter, _) = parse_target(before);
-                        if matches!(filter, TargetFilter::Any) {
-                            None
-                        } else {
-                            Some(filter)
+                    let (after_put, _) = tag::<_, _, VerboseError<&str>>("put ")
+                        .parse(lower.as_str())
+                        .ok()?;
+                    // Isolate the noun phrase before the first positional terminator.
+                    let before = [" on top of", " on the bottom of", " into "]
+                        .iter()
+                        .find_map(|term| {
+                            take_until::<_, _, VerboseError<&str>>(*term)
+                                .parse(after_put)
+                                .ok()
+                                .map(|(_, before)| before)
+                        })?;
+                    // Peel a leading cardinality, if present. Recognized forms:
+                    //   - "two cards ..."          → Fixed(2)
+                    //   - "x cards ..."            → Variable("X")
+                    //   - "any number of cards"   → AnyNumberOf
+                    // The remainder (e.g. "cards from your hand") is then handed to
+                    // `parse_target` for filter extraction. If no quantity prefix
+                    // matches, the noun phrase is fed to `parse_target` unchanged
+                    // (covers "target X" / "it" / "that card" — count stays 1).
+                    let (count_expr, after_count) =
+                        peel_put_at_library_count(before).unwrap_or((None, before));
+                    let (filter, _) = parse_target(after_count);
+                    let new_target = if matches!(filter, TargetFilter::Any) {
+                        None
+                    } else {
+                        Some(filter)
+                    };
+                    Some((new_target, count_expr))
+                })();
+                if let Some((maybe_filter, maybe_count)) = extracted {
+                    if *target == TargetFilter::Any {
+                        if let Some(filter) = maybe_filter {
+                            *target = filter;
                         }
-                    })();
-                    if let Some(filter) = extracted_target {
-                        *target = filter;
+                    }
+                    if let Some(c) = maybe_count {
+                        *count = c;
                     }
                 }
             }
@@ -10738,10 +10803,13 @@ mod tests {
                 matches!(
                     amount,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::CountersOnTarget { .. }
+                        qty: QuantityRef::CountersOn {
+                            scope: crate::types::ability::ObjectScope::Target,
+                            ..
+                        }
                     }
                 ),
-                "should produce CountersOnTarget quantity"
+                "should produce CountersOn(Target) quantity"
             );
         }
     }

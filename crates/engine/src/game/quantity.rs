@@ -12,8 +12,9 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, ObjectProperty, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter,
+    ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -508,14 +509,30 @@ fn resolve_ref(
         QuantityRef::PlayerCount { filter } => {
             resolve_player_count(state, filter, controller, source_id)
         }
-        QuantityRef::CountersOnSelf { counter_type } => state
-            .objects
-            .get(&source_id)
-            .map(|obj| {
-                let ct = parse_counter_type(counter_type);
-                u32_to_i32_saturating(obj.counters.get(&ct).copied().unwrap_or(0))
-            })
-            .unwrap_or(0),
+        // CR 122.1: Counters on an object, scoped via ObjectScope (Π-5).
+        // Replaces CountersOnSelf / CountersOnTarget / AnyCountersOnSelf /
+        // AnyCountersOnTarget. `counter_type = None` sums every type.
+        QuantityRef::CountersOn {
+            scope,
+            counter_type,
+        } => {
+            let object = match scope {
+                ObjectScope::Source => state.objects.get(&source_id),
+                ObjectScope::Target => targets.iter().find_map(|t| match t {
+                    TargetRef::Object(id) => state.objects.get(id),
+                    _ => None,
+                }),
+            };
+            object
+                .map(|obj| match counter_type {
+                    Some(ct) => {
+                        let kind = parse_counter_type(ct);
+                        u32_to_i32_saturating(obj.counters.get(&kind).copied().unwrap_or(0))
+                    }
+                    None => u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()),
+                })
+                .unwrap_or(0)
+        }
         // CR 107.3a + CR 601.2b + CR 107.3i: "X" resolves to the value chosen at
         // cast time, carried on the resolving ability's `chosen_x`
         // (CR 601.2b announcement; CR 107.3i makes all instances share the value).
@@ -619,44 +636,6 @@ fn resolve_ref(
                 AggregateFunction::Sum => values.sum(),
             }
         }
-        QuantityRef::CountersOnTarget { counter_type } => {
-            // Find the first object target and count counters of the given type.
-            let ct = parse_counter_type(counter_type);
-            targets
-                .iter()
-                .find_map(|t| {
-                    if let TargetRef::Object(id) = t {
-                        state.objects.get(id)
-                    } else {
-                        None
-                    }
-                })
-                .map(|obj| u32_to_i32_saturating(obj.counters.get(&ct).copied().unwrap_or(0)))
-                .unwrap_or(0)
-        }
-        // CR 122.1: Sum counters of every type on the source object.
-        // Used by bare "counter on it" / "counters on ~" phrasings where no
-        // specific counter type is named (Gemstone Mine, depletion lands).
-        // Mirrors `AnyCountersOnTarget` but resolves against `source_id`.
-        QuantityRef::AnyCountersOnSelf => state
-            .objects
-            .get(&source_id)
-            .map(|obj| u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()))
-            .unwrap_or(0),
-        // CR 122.1: Sum counters of every type on the first targeted object.
-        // Used by Nils-class attack-tax scaling — per the official ruling, ALL
-        // counters on the attacker (not just +1/+1 counters) count toward X.
-        QuantityRef::AnyCountersOnTarget => targets
-            .iter()
-            .find_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    state.objects.get(id)
-                } else {
-                    None
-                }
-            })
-            .map(|obj| u32_to_i32_saturating(obj.counters.values().copied().sum::<u32>()))
-            .unwrap_or(0),
         QuantityRef::CountersOnObjects {
             counter_type,
             filter,
@@ -2392,8 +2371,9 @@ mod tests {
             .insert(CounterType::Loyalty, 4);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::CountersOnSelf {
-                counter_type: "loyalty".to_string(),
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some("loyalty".to_string()),
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 4);
@@ -2423,7 +2403,10 @@ mod tests {
             .insert(CounterType::Generic("charge".to_string()), 3);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::AnyCountersOnSelf,
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: None,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
     }
@@ -2441,7 +2424,10 @@ mod tests {
             Zone::Battlefield,
         );
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::AnyCountersOnSelf,
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: None,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
     }

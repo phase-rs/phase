@@ -2252,17 +2252,23 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             }
         }
         // CR 701.24g: Place at a specific position — uses move_to_library_position,
-        // not ChangeZone which auto-shuffles per CR 401.3.
+        // not ChangeZone which auto-shuffles per CR 401.3. `count` defaults to
+        // `Fixed(1)` here; the cardinality patcher in `oracle_effect/mod.rs`
+        // upgrades it (and the target filter) by re-inspecting the imperative
+        // text once the clause has been lowered.
         PutImperativeAst::TopOfLibrary => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
         },
         PutImperativeAst::BottomOfLibrary => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
         },
         PutImperativeAst::NthFromTop { n } => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::NthFromTop { n },
         },
     }

@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
+assertion_line: 92
 expression: result
 ---
 {
@@ -31,6 +32,10 @@ expression: result
           "type": "PutAtLibraryPosition",
           "target": {
             "type": "ParentTarget"
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 1
           },
           "position": {
             "type": "Bottom"
@@ -96,6 +101,10 @@ expression: result
                 "zone": "Hand"
               }
             ]
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 2
           },
           "position": {
             "type": "Top"

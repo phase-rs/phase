@@ -1775,6 +1775,20 @@ pub enum PlayerScope {
     AllPlayers { aggregate: AggregateFunction },
 }
 
+/// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
+/// to read from when a `QuantityRef` (and future per-object conditions) is
+/// per-object. Mirrors `PlayerScope` for the player axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ObjectScope {
+    /// CR 109.5 / CR 113.6: The source object of the resolving ability —
+    /// "this creature", "~", "it" (when "it" anaphors back to the source).
+    Source,
+    /// CR 115.1: The first object target of the resolving ability — "that
+    /// creature", "the creature", "it" (when "it" anaphors back to a target).
+    Target,
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -1809,23 +1823,26 @@ pub enum QuantityRef {
     ///
     /// For counters on a *player* (experience, poison, rad, ticket), use
     /// [`QuantityRef::PlayerCounter`] instead.
-    CountersOnSelf { counter_type: String },
-    /// Count of counters of a given type on the previously targeted object.
-    /// Used for "for each [counter type] counter on that creature" anaphoric patterns.
-    /// Semantically distinct from CountersOnSelf: counts counters on a *targeted* object.
-    CountersOnTarget { counter_type: String },
-    /// CR 122.1: Total counters of any type on the previously targeted object.
-    /// Used for "the number of counters on that creature" where the counter type is
-    /// unspecified (e.g., Nils, Discipline Enforcer — per the Scryfall rulings, ALL
-    /// counters on the creature are considered, not just +1/+1 counters).
-    AnyCountersOnTarget,
-    /// CR 122.1: Total counters of any type on the source object.
-    /// Used for bare "counter on it" / "counters on ~" phrasings where no
-    /// specific counter type is named (Gemstone Mine: "When there are no
-    /// counters on ~, sacrifice it"; depletion-land cycle and similar).
-    /// Mirrors `CountersOnSelf` (which restricts to one type) and
-    /// `AnyCountersOnTarget` (which sums all types on a targeted object).
-    AnyCountersOnSelf,
+    /// CR 122.1: Count of counters on an object, parameterized by scope and
+    /// type filter (Round Π-5). Replaces the 4-variant cluster
+    /// `CountersOnSelf` / `CountersOnTarget` / `AnyCountersOnSelf` /
+    /// `AnyCountersOnTarget`.
+    ///
+    /// - `scope = Source`: counts on the source permanent ("counter on ~").
+    /// - `scope = Target`: counts on the first object target ("counter on
+    ///   that creature").
+    /// - `counter_type = Some(ct)`: only counters of type `ct`.
+    /// - `counter_type = None`: total counters of any type (e.g., Gemstone
+    ///   Mine "When there are no counters on ~"; Nils, Discipline Enforcer
+    ///   "the number of counters on that creature" per Scryfall ruling).
+    ///
+    /// For counters on a *player* (experience, poison, rad, ticket), use
+    /// [`QuantityRef::PlayerCounter`] instead.
+    CountersOn {
+        scope: ObjectScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter_type: Option<String>,
+    },
     /// CR 122.1: Total counters across all objects matching a filter.
     /// Used for phrases like "the number of +1/+1 counters on lands you control"
     /// (`counter_type: Some("P1P1")`) and "counters among artifacts and creatures
@@ -4182,8 +4199,16 @@ pub enum Effect {
     /// CR 701.24g: Put a card at a specific position in its owner's library.
     /// Unlike ChangeZone { destination: Library } which auto-shuffles (CR 401.3),
     /// this uses move_to_library_position for precise placement without shuffling.
+    ///
+    /// `count` carries the cardinality of the placement ("put **two** cards
+    /// from your hand on top of your library in any order" — Cavalier of Gales,
+    /// Brainstorm). Defaults to `Fixed(1)` for the dominant "put it on top" /
+    /// "put that card on the bottom" forms; the JSON shape stays unchanged via
+    /// `default_quantity_one`.
     PutAtLibraryPosition {
         target: TargetFilter,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         position: LibraryPosition,
     },
     /// CR 401.4: Target's owner puts it on top or bottom of their library (owner chooses).

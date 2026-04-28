@@ -2430,8 +2430,8 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         ContinuousModification, FilterProp, ManaSpendRestriction, ModalSelectionConstraint,
-        QuantityExpr, QuantityRef, ReplacementCondition, StaticCondition, TargetFilter, TypeFilter,
-        TypedFilter,
+        ObjectScope, QuantityExpr, QuantityRef, ReplacementCondition, StaticCondition,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind};
     use crate::types::mana::ManaCost;
@@ -5288,7 +5288,7 @@ mod tests {
             matches!(
                 &def.condition,
                 Some(AbilityCondition::QuantityCheck {
-                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOnSelf { counter_type } },
+                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 4 },
                 }) if counter_type == "quest"
@@ -5318,7 +5318,7 @@ mod tests {
             matches!(
                 &def.condition,
                 Some(AbilityCondition::QuantityCheck {
-                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOnSelf { counter_type } },
+                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 5 },
                 }) if counter_type == "hunger"
@@ -5348,7 +5348,7 @@ mod tests {
             matches!(
                 &def.condition,
                 Some(AbilityCondition::QuantityCheck {
-                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOnSelf { counter_type } },
+                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 3 },
                 }) if counter_type == "P1P1"
@@ -5373,7 +5373,7 @@ mod tests {
             matches!(
                 &def.condition,
                 Some(AbilityCondition::QuantityCheck {
-                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOnSelf { counter_type } },
+                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
                 }) if counter_type == "oil"
@@ -5398,7 +5398,7 @@ mod tests {
             matches!(
                 &def.condition,
                 Some(AbilityCondition::QuantityCheck {
-                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOnSelf { counter_type } },
+                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Fixed { value: 0 },
                 }) if counter_type == "ice"
@@ -5437,7 +5437,7 @@ mod tests {
             matches!(
                 &node2.condition,
                 Some(AbilityCondition::QuantityCheck {
-                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOnSelf { counter_type } },
+                    lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 4 },
                 }) if counter_type == "quest"

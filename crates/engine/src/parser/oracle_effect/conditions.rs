@@ -16,8 +16,8 @@ use super::{parse_effect_chain, scan_contains_phrase};
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
-    Duration, Effect, FilterProp, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter,
+    Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
@@ -600,7 +600,10 @@ fn build_counter_condition(
 ) -> AbilityCondition {
     AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
-            qty: QuantityRef::CountersOnSelf { counter_type },
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(counter_type),
+            },
         },
         comparator,
         rhs: QuantityExpr::Fixed { value: threshold },
@@ -1093,10 +1096,14 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         } => {
             let qty = QuantityExpr::Ref {
                 qty: match counters {
-                    CounterMatch::OfType(ct) => QuantityRef::CountersOnSelf {
-                        counter_type: ct.as_str().to_string(),
+                    CounterMatch::OfType(ct) => QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(ct.as_str().to_string()),
                     },
-                    CounterMatch::Any => QuantityRef::AnyCountersOnSelf,
+                    CounterMatch::Any => QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    },
                 },
             };
             Some(counter_threshold_to_condition(qty, *minimum, *maximum))
@@ -1437,7 +1444,11 @@ mod tests {
             AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::AnyCountersOnSelf,
+                        qty:
+                            QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: None,
+                            },
                     },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -1457,7 +1468,11 @@ mod tests {
             AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::AnyCountersOnSelf,
+                        qty:
+                            QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: None,
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -1481,7 +1496,11 @@ mod tests {
             AbilityCondition::QuantityCheck {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::CountersOnSelf { counter_type },
+                        qty:
+                            QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(counter_type),
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },

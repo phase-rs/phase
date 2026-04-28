@@ -19,8 +19,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, CountScope, ObjectProperty, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, TargetFilter, ZoneRef,
+    AggregateFunction, CountScope, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
 };
 use crate::types::mana::ManaColor;
 
@@ -56,7 +56,10 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
             .trim();
         let counter_type = normalize_counter_type(raw_type);
         if !counter_type.is_empty() {
-            return Some(QuantityRef::CountersOnSelf { counter_type });
+            return Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(counter_type),
+            });
         }
     }
 
@@ -74,7 +77,10 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
             .trim();
         let counter_type = normalize_counter_type(raw_type);
         if !counter_type.is_empty() {
-            return Some(QuantityRef::CountersOnTarget { counter_type });
+            return Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Target,
+                counter_type: Some(counter_type),
+            });
         }
     }
 
@@ -744,8 +750,9 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     if clause.contains("counter on") {
         let raw_type = clause.split("counter").next().unwrap_or("").trim();
         if !raw_type.is_empty() {
-            return Some(QuantityRef::CountersOnSelf {
-                counter_type: normalize_counter_type(raw_type),
+            return Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(normalize_counter_type(raw_type)),
             });
         }
     }
@@ -846,8 +853,11 @@ mod tests {
     fn for_each_counter_on_self_normalized() {
         let qty = parse_for_each_clause("+1/+1 counter on ~").unwrap();
         match qty {
-            QuantityRef::CountersOnSelf { counter_type } => assert_eq!(counter_type, "P1P1"),
-            other => panic!("Expected CountersOnSelf, got {other:?}"),
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(counter_type),
+            } => assert_eq!(counter_type, "P1P1"),
+            other => panic!("Expected CountersOn{{Source, P1P1}}, got {other:?}"),
         }
     }
 
@@ -856,7 +866,7 @@ mod tests {
         // Singular "counter on ~" (not "counters on ~")
         let qty = parse_for_each_clause("blight counter on it").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOnSelf { ref counter_type } if counter_type == "blight"),
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(ref counter_type) } if counter_type == "blight"),
             "singular counter form should produce CountersOnSelf"
         );
     }
@@ -865,7 +875,7 @@ mod tests {
     fn for_each_counter_on_that_creature() {
         let qty = parse_for_each_clause("+1/+1 counter on that creature").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "P1P1"),
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(ref counter_type) } if counter_type == "P1P1"),
             "counter on that creature should produce CountersOnTarget, not CountersOnSelf"
         );
     }
@@ -915,7 +925,7 @@ mod tests {
     fn quantity_ref_counters_on_target() {
         let qty = parse_quantity_ref("+1/+1 counters on that creature").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "P1P1"),
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(ref counter_type) } if counter_type == "P1P1"),
             "counters on that creature should produce CountersOnTarget"
         );
     }
@@ -924,7 +934,7 @@ mod tests {
     fn quantity_ref_singular_counter_on_target() {
         let qty = parse_quantity_ref("charge counter on that permanent").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "charge"),
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(ref counter_type) } if counter_type == "charge"),
             "singular counter on that permanent should produce CountersOnTarget"
         );
     }
@@ -1029,9 +1039,13 @@ mod tests {
         let qty = parse_cda_quantity("the number of +1/+1 counters on ~").unwrap();
         match qty {
             QuantityExpr::Ref {
-                qty: QuantityRef::CountersOnSelf { counter_type },
+                qty:
+                    QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type),
+                    },
             } => assert_eq!(counter_type, "P1P1"),
-            other => panic!("Expected CountersOnSelf, got {other:?}"),
+            other => panic!("Expected CountersOn{{Source, P1P1}}, got {other:?}"),
         }
     }
 

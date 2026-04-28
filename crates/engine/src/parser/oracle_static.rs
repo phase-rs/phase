@@ -28,8 +28,8 @@ use super::oracle_util::{
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
-    ContinuousModification, ControllerRef, FilterProp, QuantityExpr, QuantityRef, StaticCondition,
-    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+    StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -3117,8 +3117,17 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     //     that creature"). Detected by the typed QuantityRef.
     //   - Otherwise falls through to the canonical (per_affected, dynamic_qty) lattice.
     let scaling = match (per_affected.is_some(), dynamic_qty) {
-        (_, Some(QuantityRef::AnyCountersOnTarget)) => UnlessPayScaling::PerAffectedWithRef {
-            quantity: QuantityRef::AnyCountersOnTarget,
+        (
+            _,
+            Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Target,
+                counter_type: None,
+            }),
+        ) => UnlessPayScaling::PerAffectedWithRef {
+            quantity: QuantityRef::CountersOn {
+                scope: ObjectScope::Target,
+                counter_type: None,
+            },
         },
         (true, Some(qty)) => UnlessPayScaling::PerAffectedAndQuantityRef { quantity: qty },
         (true, None) => UnlessPayScaling::PerAffectedCreature,
@@ -3160,7 +3169,13 @@ fn parse_dynamic_x_clause(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
     .parse(input)
     {
-        return Ok(("", QuantityRef::AnyCountersOnTarget));
+        return Ok((
+            "",
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Target,
+                counter_type: None,
+            },
+        ));
     }
 
     // Delegate to the shared quantity-ref combinator which is case-sensitive on
@@ -13279,7 +13294,13 @@ mod tests {
         let (_cost, scaling) = extract_unless_pay(&def);
         match scaling {
             UnlessPayScaling::PerAffectedWithRef { quantity } => {
-                assert!(matches!(quantity, QuantityRef::AnyCountersOnTarget));
+                assert!(matches!(
+                    quantity,
+                    QuantityRef::CountersOn {
+                        scope: ObjectScope::Target,
+                        counter_type: None
+                    }
+                ));
             }
             other => panic!("expected PerAffectedWithRef, got {other:?}"),
         }
