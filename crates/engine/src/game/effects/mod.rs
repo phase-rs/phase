@@ -217,7 +217,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // remaining `repeat_for` iterations. Each resumed iteration may itself
     // pause and re-stash via the loop in `resolve_ability_chain`, producing a
     // chain of resumed iterations until the loop completes.
-    drain_pending_repeat_iteration(state, events);
+    if !waits_for_resolution_choice(&state.waiting_for) {
+        drain_pending_repeat_iteration(state, events);
+    }
 }
 
 /// CR 609.3 + CR 109.5: Resume a paused `repeat_for` loop. Each iteration
@@ -370,6 +372,48 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::PopulateChoice { .. }
     )
+}
+
+fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
+    matches!(
+        (parent, child),
+        (
+            Effect::SearchLibrary { .. },
+            Effect::ChangeZone {
+                origin: Some(crate::types::zones::Zone::Library),
+                ..
+            }
+        ) | (Effect::SearchLibrary { .. }, Effect::Shuffle { .. })
+            | (
+                Effect::ChangeZone {
+                    origin: Some(crate::types::zones::Zone::Library),
+                    ..
+                },
+                Effect::Shuffle { .. }
+            )
+    )
+}
+
+fn detach_after_player_scope_local_chain(
+    node: &mut ResolvedAbility,
+) -> Option<Box<ResolvedAbility>> {
+    let mut next = node.sub_ability.take()?;
+    if is_player_scope_local_continuation(&node.effect, &next.effect) {
+        let tail = detach_after_player_scope_local_chain(&mut next);
+        node.sub_ability = Some(next);
+        tail
+    } else {
+        Some(next)
+    }
+}
+
+fn split_player_scope_chain(
+    ability: &ResolvedAbility,
+) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
+    let mut scoped = ability.clone();
+    scoped.player_scope = None;
+    let tail = detach_after_player_scope_local_chain(&mut scoped);
+    (scoped, tail)
 }
 
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
@@ -1179,20 +1223,22 @@ pub fn resolve_ability_chain(
     let ability = ability.as_ref();
 
     // CR 608.2: player_scope iteration — when an ability has player_scope set,
-    // execute the entire effect chain once per matching player, temporarily
+    // execute the scoped instruction once per matching player, temporarily
     // overriding ability.controller for each iteration so effects like Discard,
-    // Draw, Mill target the correct player.
+    // Draw, Mill target the correct player. The unscoped tail then resumes
+    // once after the scoped loop, matching the printed instruction order.
     if let Some(ref scope) = ability.player_scope {
         let controller = ability.controller;
         let matching_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
             .into_iter()
             .filter(|pid| matches_player_scope(state, *pid, scope, controller, ability.source_id))
             .collect();
+        let (scoped_template, after_scope) = split_player_scope_chain(ability);
 
         let initial_waiting_for = state.waiting_for.clone();
+        let mut paused = false;
         for (i, pid) in matching_players.iter().enumerate() {
-            let mut scoped = ability.clone();
-            scoped.player_scope = None; // prevent re-entry
+            let mut scoped = scoped_template.clone();
             scoped.controller = *pid;
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
@@ -1200,24 +1246,28 @@ pub fn resolve_ability_chain(
             // remaining players resume after the choice resolves via continuation.
             if state.waiting_for != initial_waiting_for {
                 let remaining = &matching_players[i + 1..];
-                if !remaining.is_empty() {
-                    // Build continuation chain for remaining players in APNAP order.
-                    // Each remaining player gets a full clone (including sub_ability)
-                    // so their own chained effects resolve naturally when resumed.
-                    let mut tail: Option<Box<ResolvedAbility>> = None;
-                    for &remaining_pid in remaining.iter().rev() {
-                        let mut remaining_scoped = ability.clone();
-                        remaining_scoped.player_scope = None;
-                        remaining_scoped.controller = remaining_pid;
-                        // Append the previous tail after this player's sub_ability chain
-                        if let Some(prev) = tail {
-                            super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
-                        }
-                        tail = Some(Box::new(remaining_scoped));
+                let mut tail = after_scope.clone();
+                // Build continuation chain for remaining players in APNAP order.
+                // Each remaining player gets the scoped instruction only; the
+                // unscoped tail runs once after the final scoped iteration.
+                for &remaining_pid in remaining.iter().rev() {
+                    let mut remaining_scoped = scoped_template.clone();
+                    remaining_scoped.controller = remaining_pid;
+                    if let Some(prev) = tail {
+                        super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
                     }
+                    tail = Some(Box::new(remaining_scoped));
+                }
+                if tail.is_some() {
                     append_to_pending_continuation(state, tail);
                 }
+                paused = true;
                 break;
+            }
+        }
+        if !paused {
+            if let Some(after_scope) = after_scope {
+                resolve_ability_chain(state, &after_scope, events, depth + 1)?;
             }
         }
         return Ok(());
@@ -2308,6 +2358,7 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{ExileLink, ExileLinkKind, LinkedExileSnapshot};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaColor;
@@ -4046,6 +4097,73 @@ mod tests {
         assert!(
             state.players[1].hand.is_empty(),
             "opponent should have discarded their card"
+        );
+    }
+
+    #[test]
+    fn player_scope_runs_unscoped_tail_once_after_scoped_iterations() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "P1 Card".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(2),
+            "P2 Card".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "P0 Draw".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "P0 Extra".to_string(),
+            Zone::Library,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[1].hand.len(), 0);
+        assert_eq!(state.players[2].hand.len(), 0);
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "unscoped tail must resolve once after all opponent iterations"
         );
     }
 
