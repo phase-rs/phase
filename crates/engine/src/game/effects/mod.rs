@@ -969,6 +969,48 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
     }
 }
 
+fn previous_effect_amount_from_events(effect: &Effect, events: &[GameEvent]) -> Option<i32> {
+    let amount = match effect {
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::DamageDealt { amount, .. } => {
+                        Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
+                    }
+                    _ => None,
+                })
+                .sum()
+        }
+        Effect::LoseLife { .. } | Effect::PayCost { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged { amount, .. } if *amount < 0 => Some(-*amount),
+                _ => None,
+            })
+            .sum(),
+        Effect::GainLife { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
+                _ => None,
+            })
+            .sum(),
+        Effect::RemoveCounter { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CounterRemoved { count, .. } => {
+                    Some(crate::game::arithmetic::u32_to_i32_saturating(*count))
+                }
+                _ => None,
+            })
+            .sum(),
+        _ => 0,
+    };
+
+    (amount > 0).then_some(amount)
+}
+
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
 /// No SVar lookup, no parse_ability(). The depth is bounded by the data structure.
 pub fn resolve_ability_chain(
@@ -1380,41 +1422,17 @@ pub fn resolve_ability_chain(
         } // end shares_quality_failed else
     }
 
-    // CR 609.3: Extract numeric result from events emitted by this effect for
-    // PreviousEffectAmount in sub_abilities ("gain life equal to the life lost
-    // this way", "for each counter removed this way", etc.). Sum LifeChanged
-    // (life lost — taken as the absolute value), DamageDealt, and CR 122.1
-    // CounterRemoved events from this effect.
-    //
-    // Counter removal joins the same primitive because the conceptual shape is
-    // identical: "amount produced by the parent effect" — Coalition Relic and
-    // the Storage Counter cycle ("add one mana of any color for each charge
-    // counter removed this way") read the count of counters the parent
-    // `Effect::RemoveCounter` removed. The events-scan is the single source
-    // of truth that turns event traffic into a numeric "this way" amount.
+    // CR 609.3: Extract the numeric result emitted by this parent effect for
+    // `QuantityRef::PreviousEffectAmount` in sub-abilities. The event class is
+    // selected by the parent `Effect` so unrelated numeric side effects from the
+    // same resolution are not mixed together: damage to a battle removes defense
+    // counters and also deals damage, but "damage dealt this way" must read only
+    // `DamageDealt`; Coalition Relic's "counter removed this way" must read only
+    // `CounterRemoved`.
+    if let Some(amount) =
+        previous_effect_amount_from_events(&ability.effect, &events[events_before..])
     {
-        let mut amount_sum: i32 = 0;
-        for event in &events[events_before..] {
-            match event {
-                GameEvent::LifeChanged { amount, .. } => {
-                    // Life loss is negative; take absolute value for "life lost this way"
-                    amount_sum += amount.unsigned_abs() as i32;
-                }
-                GameEvent::DamageDealt { amount, .. } => {
-                    amount_sum += *amount as i32;
-                }
-                // CR 122.1 + CR 609.3: Count of counters removed by the
-                // preceding effect. Used by "for each counter removed this way"
-                // sub-abilities (Coalition Relic, Storage Counter cycle).
-                GameEvent::CounterRemoved { count, .. } => {
-                    amount_sum += *count as i32;
-                }
-                _ => {}
-            }
-        }
-        if amount_sum > 0 {
-            state.last_effect_amount = Some(amount_sum);
-        }
+        state.last_effect_amount = Some(amount);
     }
 
     // CR 608.2c: Populate last_zone_changed_ids for ZoneChangedThisWay condition evaluation.
@@ -2214,9 +2232,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CastingPermission, ControllerRef, DelayedTriggerCondition,
-        Duration, FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-        SpellContext, TargetFilter, TargetRef, TypedFilter,
+        Duration, FilterProp, GainLifePlayer, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, TargetFilter, TargetRef, TypedFilter,
     };
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::{ExileLink, ExileLinkKind, LinkedExileSnapshot};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaColor;
@@ -2346,6 +2366,73 @@ mod tests {
         assert_eq!(state.players[1].life, 18);
         // Controller drew a card
         assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    #[test]
+    fn previous_effect_amount_for_damage_ignores_counter_side_effects() {
+        let mut state = GameState::new_two_player(42);
+        let battle_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Test Siege".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let battle = state.objects.get_mut(&battle_id).unwrap();
+            battle.card_types.core_types.push(CoreType::Battle);
+            battle.defense = Some(5);
+            battle.base_defense = Some(5);
+            battle.counters.insert(CounterType::Defense, 5);
+        }
+
+        let sub = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(battle_id)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::CounterRemoved {
+                    counter_type: CounterType::Defense,
+                    count: 3,
+                    ..
+                }
+            )),
+            "damage to a battle must still emit the defense-counter side effect"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::DamageDealt { amount: 3, .. })),
+            "damage event must still be present for PreviousEffectAmount"
+        );
+        assert_eq!(
+            state.players[0].life, 23,
+            "sub-ability must use the damage amount only, not damage + counters removed"
+        );
     }
 
     #[test]

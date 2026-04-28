@@ -657,9 +657,10 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         }
         // CR 609.3 + CR 122.1: "[counter-type] counter[s] removed this way" — the
         // numeric amount of counters removed by the preceding `Effect::RemoveCounter`
-        // in the sub-ability chain. The events-scan in `effects/mod.rs` sums
-        // `GameEvent::CounterRemoved` events emitted by the parent and stamps
-        // `state.last_effect_amount`, which `PreviousEffectAmount` reads.
+        // in the sub-ability chain. The parent-effect-aware scan in
+        // `effects/mod.rs` reads `GameEvent::CounterRemoved` for RemoveCounter
+        // parents and stamps `state.last_effect_amount`, which
+        // `PreviousEffectAmount` reads.
         //
         // Class: Coalition Relic ("you may remove all charge counters from ~. If
         // you do, add one mana of any color for each charge counter removed this

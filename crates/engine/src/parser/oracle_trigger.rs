@@ -9625,9 +9625,10 @@ mod tests {
     /// This trigger composes four primitives that must all wire together:
     ///
     /// 1. CR 505.1: "precombat main phase" → `Phase::PreCombatMain`.
-    /// 2. CR 609.3 + CR 117.3a: "you may" → `optional: true` on both the
+    /// 2. CR 603.5 + CR 118.12: "you may" → `optional: true` on both the
     ///    trigger def AND its execute ability, routing through
-    ///    `WaitingFor::OptionalEffectChoice` at resolution.
+    ///    `WaitingFor::OptionalEffectChoice` at resolution; "If you do" checks
+    ///    whether the player chose to pay the optional cost.
     /// 3. CR 122.1: "remove all charge counters from ~" →
     ///    `Effect::RemoveCounter { counter_type: "charge", count: -1, target:
     ///    SelfRef }` (count=-1 is the "remove all" sentinel).
@@ -9636,9 +9637,10 @@ mod tests {
     ///    sub_ability with `condition: Some(IfYouDo)` and effect
     ///    `Effect::Mana { produced: AnyOneColor { count:
     ///    QuantityExpr::Ref { qty: PreviousEffectAmount }, color_options: <all
-    ///    five>, .. }, .. }`. The runtime events-scan in `effects/mod.rs` sums
-    ///    `GameEvent::CounterRemoved` events to populate `last_effect_amount`,
-    ///    which `PreviousEffectAmount` reads.
+    ///    five>, .. }, .. }`. The runtime parent-effect-aware scan in
+    ///    `effects/mod.rs` reads `GameEvent::CounterRemoved` for RemoveCounter
+    ///    parents to populate `last_effect_amount`, which
+    ///    `PreviousEffectAmount` reads.
     #[test]
     fn trigger_coalition_relic_charge_counter_drain() {
         use crate::types::ability::AbilityCondition;

@@ -15,8 +15,9 @@
 //!   2. `oracle_effect/mana.rs` extends the "mana of any color" branch to
 //!      consume a trailing "for each X" clause and build
 //!      `ManaProduction::AnyOneColor { count: QuantityExpr::Ref { qty }, .. }`.
-//!   3. `effects/mod.rs` events-scan adds `GameEvent::CounterRemoved { count, .. }`
-//!      to the `last_effect_amount` accumulator (CR 609.3 + CR 122.1).
+//!   3. `effects/mod.rs` derives `last_effect_amount` from the parent effect's
+//!      semantic event class, so `Effect::RemoveCounter` reads
+//!      `GameEvent::CounterRemoved { count, .. }` (CR 609.3 + CR 122.1).
 //!
 //! The trigger-AST shape (parser-level) is verified in
 //! `parser::oracle_trigger::tests::trigger_coalition_relic_charge_counter_drain`.
@@ -52,7 +53,7 @@ use engine::types::zones::Zone;
 /// tests. Bypassing it here focuses on what this commit unlocks — the
 /// `RemoveCounter` → `PreviousEffectAmount` → `AnyOneColor` chain.
 fn build_coalition_relic_drain(controller: PlayerId, source: ObjectId) -> ResolvedAbility {
-    // Sub-ability: gated by IfYouDo (CR 609.3 / CR 117.3a), produces N units
+    // Sub-ability: gated by IfYouDo (CR 118.12), produces N units
     // of AnyOneColor mana where N == counters removed by the parent.
     let mut sub = ResolvedAbility::new(
         Effect::Mana {
@@ -93,7 +94,7 @@ fn build_coalition_relic_drain(controller: PlayerId, source: ObjectId) -> Resolv
     );
     outer.kind = AbilityKind::Spell;
     outer.sub_ability = Some(Box::new(sub));
-    // CR 117.3a + CR 609.3: simulate the player having accepted the "you may"
+    // CR 603.5 + CR 118.12: simulate the player having accepted the "you may"
     // prompt — IfYouDo gating in `evaluate_condition` reads
     // `ability.context.optional_effect_performed`.
     outer.context.optional_effect_performed = true;
