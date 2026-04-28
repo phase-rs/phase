@@ -10,7 +10,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
-import { getPlayerZoneIds } from "../../viewmodel/gameStateView.ts";
+import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 
 interface ZoneViewerProps {
   zone: "graveyard" | "exile";
@@ -48,19 +48,14 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const isMyZone = playerId === currentPlayerId;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
-  const isHumanTargetSelection =
-    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-    && canActForWaitingState;
   const currentLegalTargets = useMemo(() => {
     const targets = new Set<number>();
-    if (!isHumanTargetSelection) return targets;
-    for (const target of waitingFor.data.selection.current_legal_targets) {
-      if ("Object" in target) {
-        targets.add(target.Object);
-      }
+    if (!canActForWaitingState) return targets;
+    for (const objectId of getWaitingForObjectChoiceIds(waitingFor)) {
+      targets.add(objectId);
     }
     return targets;
-  }, [isHumanTargetSelection, waitingFor]);
+  }, [canActForWaitingState, waitingFor]);
 
   return (
     <ModalPanelShell

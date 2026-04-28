@@ -3,6 +3,7 @@ import type {
   GameState,
   ObjectId,
   PlayerId,
+  WaitingFor,
 } from "../adapter/types";
 import {
   groupByName,
@@ -38,6 +39,24 @@ export function getPlayerZoneIds(
     return gameState.players[playerId]?.graveyard ?? [];
   }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
+}
+
+export function getWaitingForObjectChoiceIds(
+  waitingFor: WaitingFor | null | undefined,
+): ObjectId[] {
+  switch (waitingFor?.type) {
+    case "TargetSelection":
+    case "TriggerTargetSelection":
+      return waitingFor.data.selection.current_legal_targets.flatMap((target) =>
+        "Object" in target ? [target.Object] : [],
+      );
+    case "CopyTargetChoice":
+      return waitingFor.data.valid_targets;
+    case "ExploreChoice":
+      return waitingFor.data.choosable;
+    default:
+      return [];
+  }
 }
 
 export function buildPlayerBattlefieldView(
