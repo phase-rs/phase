@@ -5,10 +5,12 @@ pub mod filter;
 
 use std::collections::{HashMap, HashSet};
 
+use crate::game::combat;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
 use crate::types::actions::GameAction;
+use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -421,11 +423,11 @@ fn matches_waiting_target_choice(
 
 /// Returns the legal actions for the current game state.
 ///
-/// `TapLandForMana`/`UntapLandForMana` actions are filtered out — the frontend
-/// derives land tappability from game state. Non-land mana abilities (dorks,
-/// artifacts) are included so the frontend auto-pass system knows meaningful
-/// actions exist. The AI uses `candidate_actions()` which excludes mana abilities
-/// from priority candidates to keep the search tree clean.
+/// Mana actions are omitted from the flat list returned by [`legal_actions`].
+/// They are still exposed through `legal_actions_by_object` by
+/// [`legal_actions_full`] so the frontend can render and dispatch
+/// engine-authoritative mana affordances without treating them as meaningful
+/// priority decisions.
 /// Determines whether the frontend should auto-pass the current priority window.
 ///
 /// Returns `true` when auto-passing is recommended:
@@ -510,12 +512,12 @@ pub type LegalActionsFull = (
 /// Returns legal actions, spell costs, AND a per-permanent action grouping.
 ///
 /// `legal_actions_by_object` maps each permanent (or hand-zone card) to the
-/// subset of legal actions whose `source_object()` equals that id. The grouping
-/// is computed from the flat list via the engine-authoritative
-/// `GameAction::source_object()` method — the frontend uses this map directly
-/// instead of introspecting `GameAction` variants client-side.
+/// engine-authoritative actions the frontend may offer for that object. The
+/// grouped map includes mana actions that are intentionally absent from the
+/// flat `actions` list; auto-pass consumes the flat list, while board
+/// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
-    let mut actions: Vec<GameAction> = validated_candidate_actions(state)
+    let actions: Vec<GameAction> = validated_candidate_actions(state)
         .into_iter()
         .map(|candidate| candidate.action)
         .filter(|action| !action.is_mana_ability())
@@ -535,15 +537,11 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         }
     }
 
-    // CR 605.3a: Append activatable mana abilities so the frontend knows the player
-    // has meaningful actions beyond PassPriority. These are excluded from
-    // candidate_actions() to keep the AI search tree clean (see candidates.rs
-    // priority_actions), but the frontend needs them to avoid incorrect auto-pass.
-    actions.extend(activatable_mana_ability_actions(state));
-
     // Group by source object using the engine-authoritative classifier.
+    let mut grouped_actions = actions.clone();
+    grouped_actions.extend(activatable_object_mana_actions(state));
     let mut grouped: HashMap<ObjectId, Vec<GameAction>> = HashMap::new();
-    for action in &actions {
+    for action in &grouped_actions {
         if let Some(id) = action.source_object() {
             grouped.entry(id).or_default().push(action.clone());
         }
@@ -573,17 +571,25 @@ pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalAct
     }
 }
 
-/// CR 605.1b: Enumerate activatable mana abilities for the priority player.
+fn mana_action_player(state: &GameState) -> Option<PlayerId> {
+    match &state.waiting_for {
+        WaitingFor::Priority { player }
+        | WaitingFor::ManaPayment { player, .. }
+        | WaitingFor::UnlessPayment { player, .. } => Some(*player),
+        _ => None,
+    }
+}
+
+/// CR 605.3a: Enumerate activatable mana abilities for the acting player.
 ///
 /// Mirrors the per-ability scan pattern in `mana_sources::scan_mana_abilities` rather
 /// than using the single `mana_ability_index` derived field, since a permanent may have
 /// multiple mana abilities. Per-ability tap/sickness guards match `scan_mana_abilities`:
 /// only abilities with a tap cost component require the permanent to be untapped and
 /// free of summoning sickness (CR 302.6). Mana abilities don't use the stack (CR 605.3a).
-fn activatable_mana_ability_actions(state: &GameState) -> Vec<GameAction> {
-    let player = match &state.waiting_for {
-        WaitingFor::Priority { player } => *player,
-        _ => return Vec::new(),
+fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
+    let Some(player) = mana_action_player(state) else {
+        return Vec::new();
     };
 
     let mut actions = Vec::new();
@@ -591,17 +597,43 @@ fn activatable_mana_ability_actions(state: &GameState) -> Vec<GameAction> {
         let Some(obj) = state.objects.get(&obj_id) else {
             continue;
         };
-        if obj.controller != player || !obj.has_mana_ability {
+        if obj.controller != player {
             continue;
         }
+
+        let mut handled_indices = HashSet::new();
+        if obj.card_types.core_types.contains(&CoreType::Land) {
+            let options = mana_sources::activatable_land_mana_options(state, obj_id, player);
+            if options.len() == 1 {
+                actions.push(GameAction::TapLandForMana { object_id: obj_id });
+                if let Some(ability_index) = options[0].ability_index {
+                    handled_indices.insert(ability_index);
+                }
+            } else {
+                for option in options {
+                    if let Some(ability_index) = option.ability_index {
+                        if handled_indices.insert(ability_index) {
+                            actions.push(GameAction::ActivateAbility {
+                                source_id: obj_id,
+                                ability_index,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         for (idx, ability) in obj.abilities.iter().enumerate() {
+            if handled_indices.contains(&idx) {
+                continue;
+            }
             if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
                 continue;
             }
             // CR 302.6: Only tap-cost abilities are gated by tapped state and summoning
             // sickness. Free or mana-cost-only mana abilities are always activatable.
             if mana_sources::has_tap_component(&ability.cost)
-                && (obj.tapped || obj.has_summoning_sickness)
+                && (obj.tapped || combat::has_summoning_sickness(obj))
             {
                 continue;
             }
@@ -623,17 +655,128 @@ fn activatable_mana_ability_actions(state: &GameState) -> Vec<GameAction> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::{
         candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_for_viewer,
         legal_actions_full, validated_candidate_actions,
     };
-    use crate::types::ability::ManaContribution;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+        ResolvedAbility, UnlessCost,
+    };
     use crate::types::actions::GameAction;
-    use crate::types::game_state::{GameState, WaitingFor};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::{
+        CastingVariant, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
+    };
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn setup_priority() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state
+    }
+
+    fn create_land(state: &mut GameState, name: &str, subtypes: &[&str]) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types
+            .subtypes
+            .extend(subtypes.iter().map(|subtype| (*subtype).to_string()));
+        id
+    }
+
+    fn add_fixed_mana_ability(
+        state: &mut GameState,
+        object_id: ObjectId,
+        color: ManaColor,
+    ) -> usize {
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        let ability_index = obj.abilities.len();
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        ability_index
+    }
+
+    fn bucket_has(
+        grouped: &HashMap<ObjectId, Vec<GameAction>>,
+        object_id: ObjectId,
+        action: &GameAction,
+    ) -> bool {
+        grouped
+            .get(&object_id)
+            .is_some_and(|actions| actions.contains(action))
+    }
+
+    fn empty_effect(source_id: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "test".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            source_id,
+            PlayerId(0),
+        )
+    }
+
+    fn set_dummy_pending_cast(state: &mut GameState) {
+        let source_id = create_object(
+            state,
+            CardId(0),
+            PlayerId(0),
+            "Dummy Spell".to_string(),
+            Zone::Hand,
+        );
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            source_id,
+            CardId(0),
+            empty_effect(source_id),
+            ManaCost::generic(1),
+        )));
+        state.stack.push_back(StackEntry {
+            id: source_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+    }
 
     #[test]
     fn legal_actions_for_viewer_returns_empty_when_not_acting() {
@@ -719,9 +862,10 @@ mod tests {
 
     #[test]
     fn legal_actions_by_object_groups_flat_list_correctly() {
-        // Flat list and grouped map are derived from the same actions; every
-        // entry in the grouped map must equal source_object() of its actions,
-        // and every action with Some(id) must appear under that id exactly once.
+        // The grouped map may include mana actions that are intentionally
+        // absent from the flat list, but every grouped entry must still equal
+        // source_object() of its action, and every flat action with Some(id)
+        // must appear under that id.
         let state = GameState::new_two_player(42);
         let (flat, _, grouped) = legal_actions_full(&state);
 
@@ -754,6 +898,146 @@ mod tests {
         // Lookup for a non-existent object returns None (defensive — callers may
         // request hand-zone or battlefield ids that have no legal actions).
         assert!(!grouped.contains_key(&ObjectId(99_999)));
+    }
+
+    #[test]
+    fn legal_actions_by_object_exposes_engine_mana_sources_without_flat_actions() {
+        let mut state = setup_priority();
+        let fetch = create_land(&mut state, "Polluted Delta", &[]);
+        let forest = create_land(&mut state, "Forest", &["Forest"]);
+        let dual = create_land(&mut state, "Underground Sea", &[]);
+        let blue_idx = add_fixed_mana_ability(&mut state, dual, ManaColor::Blue);
+        let black_idx = add_fixed_mana_ability(&mut state, dual, ManaColor::Black);
+
+        let (flat, _, grouped) = legal_actions_full(&state);
+
+        assert!(
+            !bucket_has(
+                &grouped,
+                fetch,
+                &GameAction::TapLandForMana { object_id: fetch },
+            ),
+            "fetch land with no mana-producing subtype or explicit mana ability must not be tappable"
+        );
+        assert!(
+            bucket_has(
+                &grouped,
+                forest,
+                &GameAction::TapLandForMana { object_id: forest },
+            ),
+            "subtype-only basic land fallback must remain tappable"
+        );
+        assert!(bucket_has(
+            &grouped,
+            dual,
+            &GameAction::ActivateAbility {
+                source_id: dual,
+                ability_index: blue_idx,
+            },
+        ));
+        assert!(bucket_has(
+            &grouped,
+            dual,
+            &GameAction::ActivateAbility {
+                source_id: dual,
+                ability_index: black_idx,
+            },
+        ));
+        assert!(
+            !flat
+                .iter()
+                .any(|action| matches!(action, GameAction::TapLandForMana { object_id } if *object_id == forest)),
+            "flat legal actions stay free of land mana actions"
+        );
+        assert!(
+            !flat
+                .iter()
+                .any(|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == dual)),
+            "flat legal actions stay free of explicit mana abilities"
+        );
+    }
+
+    #[test]
+    fn legal_actions_by_object_exposes_nonland_mana_abilities_without_flat_actions() {
+        let mut state = setup_priority();
+        let rock = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rock)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let ability_index = add_fixed_mana_ability(&mut state, rock, ManaColor::Green);
+
+        let (flat, _, grouped) = legal_actions_full(&state);
+
+        assert!(bucket_has(
+            &grouped,
+            rock,
+            &GameAction::ActivateAbility {
+                source_id: rock,
+                ability_index,
+            },
+        ));
+        assert!(!flat.iter().any(
+            |action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == rock)
+        ));
+    }
+
+    #[test]
+    fn legal_actions_by_object_exposes_mana_actions_during_payment_states() {
+        for (waiting_for, needs_pending_cast) in [
+            (
+                WaitingFor::Priority {
+                    player: PlayerId(0),
+                },
+                false,
+            ),
+            (
+                WaitingFor::ManaPayment {
+                    player: PlayerId(0),
+                    convoke_mode: None,
+                },
+                true,
+            ),
+            (
+                WaitingFor::UnlessPayment {
+                    player: PlayerId(0),
+                    cost: UnlessCost::Fixed {
+                        cost: ManaCost::generic(1),
+                    },
+                    pending_effect: Box::new(empty_effect(ObjectId(0))),
+                    effect_description: None,
+                },
+                false,
+            ),
+        ] {
+            let mut state = setup_priority();
+            if needs_pending_cast {
+                set_dummy_pending_cast(&mut state);
+            }
+            state.waiting_for = waiting_for;
+            let forest = create_land(&mut state, "Forest", &["Forest"]);
+
+            let (_, _, grouped) = legal_actions_full(&state);
+
+            assert!(
+                bucket_has(
+                    &grouped,
+                    forest,
+                    &GameAction::TapLandForMana { object_id: forest },
+                ),
+                "mana actions must be exposed during {:?}",
+                state.waiting_for
+            );
+        }
     }
 
     #[test]

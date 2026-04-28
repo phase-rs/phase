@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameAction, GameObject } from "../../adapter/types.ts";
-import { collectObjectActions } from "../cardActionChoice.ts";
+import { collectObjectActions, isManaObjectAction } from "../cardActionChoice.ts";
 import { abilityChoiceLabel } from "../costLabel.ts";
 
 function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
@@ -76,6 +76,43 @@ describe("collectObjectActions", () => {
     expect(collectObjectActions(grouped, 999)).toEqual([]);
     // Missing map (e.g. pre-init): empty array, no crash.
     expect(collectObjectActions(undefined, 1)).toEqual([]);
+  });
+});
+
+describe("isManaObjectAction", () => {
+  it("recognizes only engine-provided mana actions", () => {
+    const object = makeGameObject({
+      abilities: [
+        { effect: { type: "Mana" } },
+        { effect: { type: "Draw" } },
+      ],
+    });
+
+    expect(isManaObjectAction({ type: "TapLandForMana", data: { object_id: 1 } }, object)).toBe(true);
+    expect(
+      isManaObjectAction(
+        { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } },
+        object,
+      ),
+    ).toBe(true);
+    expect(
+      isManaObjectAction(
+        { type: "ActivateAbility", data: { source_id: 1, ability_index: 1 } },
+        object,
+      ),
+    ).toBe(false);
+    expect(
+      isManaObjectAction(
+        { type: "ActivateAbility", data: { source_id: 1, ability_index: 99 } },
+        object,
+      ),
+    ).toBe(false);
+    expect(
+      isManaObjectAction(
+        { type: "PlayLand", data: { object_id: 1, card_id: 100 } },
+        object,
+      ),
+    ).toBe(false);
   });
 });
 

@@ -399,10 +399,10 @@ impl GameAction {
 
     /// CR 605.3a: Whether this action is a mana ability activation.
     ///
-    /// Mana abilities are excluded from `legal_actions()` because they do not
-    /// represent meaningful priority decisions — the frontend derives land
-    /// tappability from game state directly. The engine's `apply()` validates
-    /// mana actions independently, so they bypass the server's pre-validation.
+    /// Mana abilities are excluded from the flat `legal_actions()` result
+    /// because they do not represent meaningful priority decisions. They are
+    /// still exposed through the engine-authored per-object action grouping so
+    /// frontends can render mana affordances without inferring them locally.
     pub fn is_mana_ability(&self) -> bool {
         matches!(
             self,
