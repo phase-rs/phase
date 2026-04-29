@@ -8,10 +8,34 @@ echo "  [rust] cargo fmt --check"
 cargo fmt --all -- --check
 
 echo "  [rust] cargo clippy"
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
 
 echo "  [rust] parser combinator gate"
 ./scripts/check-parser-combinators.sh
+
+echo "  [rust] cargo nextest"
+PROPTEST_CASES="${PROPTEST_CASES:-32}" cargo nextest run --workspace --exclude phase-tauri --features engine/proptest
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+echo "  [cards] oracle-gen"
+cargo run --profile tool --bin oracle-gen --features cli -- data/ --stats --names-out "$tmpdir/card-names.json" > "$tmpdir/card-data.json"
+
+echo "  [cards] card-data-validate"
+cargo run --profile tool --bin card-data-validate -- "$tmpdir/card-data.json"
+
+echo "  [cards] coverage-report"
+mkdir -p "$tmpdir/data"
+cp "$tmpdir/card-data.json" "$tmpdir/data/card-data.json"
+cp "$tmpdir/card-names.json" "$tmpdir/data/card-names.json"
+cargo run --profile tool --bin coverage-report -- "$tmpdir/data" --all > "$tmpdir/coverage-data.json"
+
+echo "  [cards] coverage regression check"
+./scripts/coverage-regression-check.sh \
+  "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-data.json" \
+  "$tmpdir/coverage-data.json" \
+  --fail-on-engine
 
 # Frontend
 echo "  [client] pnpm lint"

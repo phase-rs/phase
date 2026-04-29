@@ -8320,15 +8320,17 @@ mod tests {
                 restriction,
                 ActivationRestriction::RequiresCondition {
                     condition: Some(ParsedCondition::YouCastSpellThisTurn {
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters,
-                            ..
-                        }))
+                        filter: Some(TargetFilter::Or { filters })
                     })
-                } if type_filters == &vec![TypeFilter::AnyOf(vec![
-                    TypeFilter::Instant,
-                    TypeFilter::Sorcery,
-                ])]
+                } if filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                        if type_filters == &vec![TypeFilter::Instant]
+                )) && filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                        if type_filters == &vec![TypeFilter::Sorcery]
+                ))
             )));
     }
 
