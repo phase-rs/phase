@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-05-12T00:00:00Z",
+  "updated": "2026-05-13T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -1024,11 +1024,11 @@
       ]
     },
     {
-      "name": "5c Elementals",
+      "name": "Jeskai Control",
       "author": "MTGGoldfish",
       "colors": [
+        "W",
         "U",
-        "G",
         "R"
       ],
       "tags": [
@@ -1037,177 +1037,133 @@
       "main": [
         {
           "count": 2,
-          "name": "Bounce Off"
-        },
-        {
-          "count": 2,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 1,
-          "name": "Cori Mountain Monastery"
+          "name": "Mistrise Village"
         },
         {
           "count": 3,
-          "name": "Roaming Throne"
+          "name": "Three Steps Ahead"
+        },
+        {
+          "count": 1,
+          "name": "Traumatic Critique"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
         },
         {
           "count": 3,
-          "name": "Flamebraider"
-        },
-        {
-          "count": 1,
-          "name": "Pit of Offerings"
-        },
-        {
-          "count": 2,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 1,
-          "name": "Cavern of Souls"
+          "name": "Great Hall of the Biblioplex"
         },
         {
           "count": 4,
-          "name": "Starting Town"
-        },
-        {
-          "count": 1,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 1,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 1,
-          "name": "Breeding Pool"
+          "name": "Consult the Star Charts"
         },
         {
           "count": 4,
-          "name": "Ashling, Rekindled"
+          "name": "Floodfarm Verge"
         },
         {
-          "count": 2,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Sunderflock"
+          "count": 4,
+          "name": "Hallowed Fountain"
         },
         {
           "count": 3,
-          "name": "Vibrance"
+          "name": "Jeskai Revelation"
         },
         {
-          "count": 4,
-          "name": "Secluded Courtyard"
+          "count": 3,
+          "name": "Get Lost"
         },
         {
           "count": 1,
-          "name": "Sear"
+          "name": "Mountain"
         },
         {
-          "count": 2,
+          "count": 1,
+          "name": "Mathemagics"
+        },
+        {
+          "count": 1,
           "name": "Island"
         },
         {
-          "count": 1,
-          "name": "Ill-Timed Explosion"
-        },
-        {
-          "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 3,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 1,
-          "name": "Restless Vinestalk"
-        },
-        {
-          "count": 3,
-          "name": "Deceit"
-        },
-        {
-          "count": 1,
-          "name": "Wistfulness"
-        },
-        {
-          "count": 1,
-          "name": "Flamebraider"
-        },
-        {
-          "count": 3,
-          "name": "Wistfulness"
-        },
-        {
-          "count": 1,
-          "name": "Vibrance"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Ygra, Eater of All"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Pit of Offerings"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Ill-Timed Explosion"
+          "count": 4,
+          "name": "No More Lies"
         },
         {
           "count": 2,
-          "name": "Broadside Barrage"
+          "name": "Day of Judgment"
+        },
+        {
+          "count": 3,
+          "name": "Lightning Helix"
+        },
+        {
+          "count": 2,
+          "name": "Sacred Foundry"
         },
         {
           "count": 1,
-          "name": "Spell Pierce"
+          "name": "Meticulous Archive"
         },
+        {
+          "count": 4,
+          "name": "Resonating Lute"
+        },
+        {
+          "count": 4,
+          "name": "Stock Up"
+        },
+        {
+          "count": 2,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 3,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 2,
+          "name": "Sunbillow Verge"
+        },
+        {
+          "count": 1,
+          "name": "Petrified Hamlet"
+        }
+      ],
+      "sideboard": [
         {
           "count": 2,
           "name": "Disdainful Stroke"
         },
         {
           "count": 2,
-          "name": "Beza, the Bounding Spring"
+          "name": "Negate"
         },
         {
-          "count": 1,
-          "name": "Spell Pierce"
+          "count": 2,
+          "name": "Torpor Orb"
         },
         {
-          "count": 1,
-          "name": "Bounce Off"
+          "count": 2,
+          "name": "Untimely Malfunction"
+        },
+        {
+          "count": 2,
+          "name": "Authority of the Consuls"
+        },
+        {
+          "count": 2,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 3,
+          "name": "Voice of Victory"
         }
       ]
     },

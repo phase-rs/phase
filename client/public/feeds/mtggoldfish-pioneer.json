@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-12T00:00:00Z",
+  "updated": "2026-05-13T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -144,141 +144,6 @@
         {
           "count": 1,
           "name": "Ral Zarek, Guest Lecturer"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Academic Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 1,
-          "name": "Experimental Synthesizer"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 3,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 3,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 3,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 3,
-          "name": "Flow State"
-        },
-        {
-          "count": 3,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Cori-Steel Cutter"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Spider-Sense"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Octopus Form"
-        },
-        {
-          "count": 1,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Charm"
         }
       ]
     },
@@ -438,6 +303,141 @@
         {
           "count": 2,
           "name": "Duress"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Prowess",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Academic Dispute"
+        },
+        {
+          "count": 3,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 3,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 1,
+          "name": "Experimental Synthesizer"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 3,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 3,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 3,
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 3,
+          "name": "Flow State"
+        },
+        {
+          "count": 3,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Cori-Steel Cutter"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 2,
+          "name": "Scorching Shot"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Spider-Sense"
+        },
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Octopus Form"
+        },
+        {
+          "count": 1,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 1,
+          "name": "Prismari Charm"
         }
       ]
     },
@@ -810,10 +810,10 @@
       "author": "MTGGoldfish",
       "colors": [
         "U",
-        "W",
-        "G",
         "B",
-        "R"
+        "R",
+        "G",
+        "W"
       ],
       "tags": [
         "metagame"
@@ -824,20 +824,20 @@
           "name": "Watery Grave"
         },
         {
-          "count": 1,
-          "name": "Niv-Mizzet Reborn"
-        },
-        {
-          "count": 1,
-          "name": "Temple Garden"
-        },
-        {
           "count": 4,
           "name": "Sylvan Caryatid"
         },
         {
           "count": 1,
-          "name": "Swamp"
+          "name": "Bleachbone Verge"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 1,
+          "name": "Wastewood Verge"
         },
         {
           "count": 4,
@@ -845,7 +845,7 @@
         },
         {
           "count": 1,
-          "name": "Kaervek, the Spiteful"
+          "name": "Culling Ritual"
         },
         {
           "count": 1,
@@ -853,15 +853,19 @@
         },
         {
           "count": 1,
-          "name": "Supreme Verdict"
+          "name": "Elesh Norn, Mother of Machines"
         },
         {
-          "count": 1,
-          "name": "Sunbillow Verge"
+          "count": 3,
+          "name": "Vanishing Verse"
         },
         {
           "count": 1,
           "name": "Floodfarm Verge"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
         },
         {
           "count": 1,
@@ -873,11 +877,15 @@
         },
         {
           "count": 1,
-          "name": "Sacred Foundry"
+          "name": "Plains"
         },
         {
           "count": 2,
           "name": "Jetmir's Garden"
+        },
+        {
+          "count": 2,
+          "name": "North Wind Avatar"
         },
         {
           "count": 2,
@@ -892,28 +900,12 @@
           "name": "Kolaghan's Command"
         },
         {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Culling Ritual"
-        },
-        {
-          "count": 1,
-          "name": "Overgrown Tomb"
+          "count": 4,
+          "name": "Leyline Binding"
         },
         {
           "count": 3,
           "name": "Lightning Helix"
-        },
-        {
-          "count": 1,
-          "name": "Niv-Mizzet, Supreme"
-        },
-        {
-          "count": 3,
-          "name": "Omnath, Locus of Creation"
         },
         {
           "count": 1,
@@ -925,11 +917,27 @@
         },
         {
           "count": 1,
-          "name": "Pillage the Bog"
+          "name": "Niv-Mizzet Reborn"
         },
         {
           "count": 1,
-          "name": "Raugrin Triome"
+          "name": "Niv-Mizzet, Supreme"
+        },
+        {
+          "count": 4,
+          "name": "Fabled Passage"
+        },
+        {
+          "count": 3,
+          "name": "Omnath, Locus of Creation"
+        },
+        {
+          "count": 1,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 1,
+          "name": "Pillage the Bog"
         },
         {
           "count": 1,
@@ -937,11 +945,19 @@
         },
         {
           "count": 1,
-          "name": "Spara's Headquarters"
+          "name": "Putrefy"
         },
         {
           "count": 1,
-          "name": "Forest"
+          "name": "Raugrin Triome"
+        },
+        {
+          "count": 4,
+          "name": "Ancient Cornucopia"
+        },
+        {
+          "count": 1,
+          "name": "Spara's Headquarters"
         },
         {
           "count": 2,
@@ -949,15 +965,19 @@
         },
         {
           "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
+          "name": "Sunbillow Verge"
         },
         {
           "count": 1,
-          "name": "Blood Crypt"
+          "name": "Supreme Verdict"
         },
         {
           "count": 1,
-          "name": "Bleachbone Verge"
+          "name": "Forest"
+        },
+        {
+          "count": 1,
+          "name": "Temple Garden"
         },
         {
           "count": 1,
@@ -972,8 +992,8 @@
           "name": "Valki, God of Lies"
         },
         {
-          "count": 1,
-          "name": "Wastewood Verge"
+          "count": 2,
+          "name": "Breeding Pool"
         },
         {
           "count": 1,
@@ -992,38 +1012,18 @@
           "name": "Ziatora's Proving Ground"
         },
         {
-          "count": 2,
-          "name": "North Wind Avatar"
-        },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
           "count": 1,
-          "name": "Putrefy"
-        },
-        {
-          "count": 2,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 2,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 4,
-          "name": "Leyline Binding"
-        },
-        {
-          "count": 4,
-          "name": "Ancient Cornucopia"
+          "name": "Sacred Foundry"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Dovin's Veto"
+          "count": 1,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 1,
+          "name": "Illness in the Ranks"
         },
         {
           "count": 1,
@@ -1031,23 +1031,19 @@
         },
         {
           "count": 1,
+          "name": "Yorion, Sky Nomad"
+        },
+        {
+          "count": 1,
+          "name": "Niv-Mizzet Reborn"
+        },
+        {
+          "count": 2,
           "name": "Rest in Peace"
         },
         {
           "count": 1,
-          "name": "Maelstrom Pulse"
-        },
-        {
-          "count": 1,
-          "name": "Unmoored Ego"
-        },
-        {
-          "count": 1,
-          "name": "Yorion, Sky Nomad"
-        },
-        {
-          "count": 2,
-          "name": "Clarion Conqueror"
+          "name": "Sphinx's Revelation"
         },
         {
           "count": 1,
@@ -1055,19 +1051,19 @@
         },
         {
           "count": 1,
-          "name": "Beza, the Bounding Spring"
+          "name": "Unmoored Ego"
         },
         {
           "count": 1,
-          "name": "Niv-Mizzet Reborn"
-        },
-        {
-          "count": 1,
-          "name": "Sphinx's Revelation"
+          "name": "Maelstrom Pulse"
         },
         {
           "count": 2,
-          "name": "Illness in the Ranks"
+          "name": "Dovin's Veto"
+        },
+        {
+          "count": 2,
+          "name": "Clarion Conqueror"
         }
       ]
     },
