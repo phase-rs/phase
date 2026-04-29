@@ -1051,6 +1051,40 @@ mod tests {
     }
 
     #[test]
+    fn cost_reduction_other_equipment_you_control() {
+        let result = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each other equipment you control",
+        );
+        let reduction = result.expect("should parse cost reduction");
+        assert_eq!(reduction.amount_per, 1);
+        match &reduction.count {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(
+                        tf.type_filters.iter().any(
+                            |filter| matches!(filter, TypeFilter::Subtype(name) if name == "Equipment")
+                        ),
+                        "expected Equipment subtype, got {:?}",
+                        tf.type_filters
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|property| matches!(property, FilterProp::Another)),
+                        "expected Another property, got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("Expected typed ObjectCount filter, got {:?}", other),
+            },
+            other => panic!("Expected ObjectCount, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn cost_reduction_spell_variant() {
         let result = try_parse_cost_reduction(
             "this spell costs {1} less to cast for each creature you control",

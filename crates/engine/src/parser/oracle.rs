@@ -33,7 +33,7 @@ use super::oracle_classifier::{
     lower_starts_with, should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
 use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
 pub use super::oracle_keyword::keyword_display_name;
@@ -810,11 +810,25 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        let lower = line.to_lowercase();
+
+        // Pre-keyword activated ability: "Equip {cost}" / "Equip — {cost}"
+        // (but not "Equipped ...").
+        // This must run before keyword-only extraction because MTGJSON keyword
+        // names can match exact printed equip costs, but equip is an activated
+        // ability and still needs the synthesized activation body.
+        if lower_starts_with(&lower, "equip") && !lower_starts_with(&lower, "equipped") {
+            if let Some(ability) = try_parse_equip(&line) {
+                result.abilities.push(ability);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 1b: keyword-only line — extract any keywords for the union set
         // Guard: "{Keyword} abilities you activate cost {N} less" is a static ability,
         // not a keyword line. Don't let keyword extraction consume it.
-        let lower_guard = line.to_lowercase();
-        let is_ability_cost_static = is_ability_activate_cost_static(&lower_guard);
+        let is_ability_cost_static = is_ability_activate_cost_static(&lower);
         if !is_ability_cost_static {
             if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
                 result.extracted_keywords.extend(extracted);
@@ -822,8 +836,6 @@ pub fn parse_oracle_text(
                 continue;
             }
         }
-
-        let lower = line.to_lowercase();
 
         // Normalize card self-references for static parsing (replace card name with ~)
         let static_line = normalize_self_refs_for_static(&line, card_name);
@@ -870,15 +882,6 @@ pub fn parse_oracle_text(
         if is_commander_permission_sentence(&line) {
             i += 1;
             continue;
-        }
-
-        // Priority 3: "Equip {cost}" / "Equip — {cost}" (but not "Equipped ...")
-        if lower_starts_with(&lower, "equip") && !lower_starts_with(&lower, "equipped") {
-            if let Some(ability) = try_parse_equip(&line) {
-                result.abilities.push(ability);
-                i += 1;
-                continue;
-            }
         }
 
         // CR 702.6: Named equip variant — "<Flavor Name> — Equip {cost}"
@@ -1812,9 +1815,10 @@ pub fn parse_oracle_text(
 /// pattern) does not slice off the first 5 bytes of "Equipment" and parse the
 /// remainder ("ment you control...") as a malformed activated ability cost.
 fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
+    let (activation_line, cost_reduction) = split_trailing_self_cost_reduction(line);
     // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
     // "equip" is always ASCII so byte length == char length.
-    let rest = line.get("equip".len()..)?;
+    let rest = activation_line.get("equip".len()..)?;
     // Word-boundary guard: the keyword "equip" must terminate before a
     // non-keyword character. Permitted continuations: whitespace, em-dash,
     // hyphen, `{` (mana cost), or end-of-string. Anything else (e.g. 'm' from
@@ -1838,20 +1842,36 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     }
 
     let cost = parse_oracle_cost(cost_text);
-    Some(
-        AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Attach {
-                attachment: crate::types::ability::TargetFilter::SelfRef,
-                target: crate::types::ability::TargetFilter::Typed(
-                    TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
-                ),
-            },
-        )
-        .cost(cost)
-        .description(line.to_string())
-        .sorcery_speed(),
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Attach {
+            attachment: crate::types::ability::TargetFilter::SelfRef,
+            target: crate::types::ability::TargetFilter::Typed(
+                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
+            ),
+        },
     )
+    .cost(cost)
+    .description(line.to_string())
+    .sorcery_speed();
+    ability.cost_reduction = cost_reduction;
+    Some(ability)
+}
+
+fn split_trailing_self_cost_reduction(
+    line: &str,
+) -> (&str, Option<crate::types::ability::CostReduction>) {
+    let lower = line.to_lowercase();
+    let Some(((), reduction_text)) = nom_on_lower(line, &lower, |input| {
+        value((), (take_until(". this ability costs "), tag(". "))).parse(input)
+    }) else {
+        return (line, None);
+    };
+    let Some(reduction) = try_parse_cost_reduction(reduction_text) else {
+        return (line, None);
+    };
+    let activation_len = line.len() - ". ".len() - reduction_text.len();
+    (line[..activation_len].trim(), Some(reduction))
 }
 
 /// Try to parse a planeswalker loyalty line: "+N:", "−N:", "0:", "[+N]:", "[−N]:", "[0]:"
@@ -2533,7 +2553,7 @@ mod tests {
         PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReplacementCondition,
         StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
-    use crate::types::keywords::{FlashbackCost, KeywordKind};
+    use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
@@ -8179,6 +8199,106 @@ mod tests {
         // "equipped" → caller's separate guard handles this, but defending
         // try_parse_equip itself is fail-safe.
         assert!(super::try_parse_equip("Equipped creature gets +2/+0.").is_none());
+    }
+
+    #[test]
+    fn plate_armor_equip_cost_reduction_stays_on_equip_ability() {
+        let result = parse(
+            "Equipped creature gets +3/+3 and has ward {1}.\n\
+             Equip {3}. This ability costs {1} less to activate for each other Equipment you control.",
+            "Plate Armor",
+            &[Keyword::Equip(ManaCost::Cost {
+                generic: 3,
+                shards: vec![],
+            })],
+            &["Artifact"],
+            &["Equipment"],
+        );
+
+        assert_eq!(result.abilities.len(), 1);
+        let equip = &result.abilities[0];
+        assert_eq!(
+            equip.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 3,
+                    shards: vec![],
+                },
+            })
+        );
+        let reduction = equip
+            .cost_reduction
+            .as_ref()
+            .expect("equip ability should carry cost reduction");
+        assert_eq!(reduction.amount_per, 1);
+        match &reduction.count {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(
+                        tf.controller,
+                        Some(crate::types::ability::ControllerRef::You)
+                    );
+                    assert!(
+                        tf.type_filters.iter().any(
+                            |filter| matches!(filter, TypeFilter::Subtype(name) if name == "Equipment")
+                        ),
+                        "expected Equipment subtype, got {:?}",
+                        tf.type_filters
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|property| matches!(property, FilterProp::Another)),
+                        "expected Another property, got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("expected typed ObjectCount filter, got {:?}", other),
+            },
+            other => panic!("expected ObjectCount cost reduction, got {:?}", other),
+        }
+
+        assert_eq!(result.statics.len(), 1);
+        let static_def = &result.statics[0];
+        assert!(
+            static_def.modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddPower { value: 3 }
+            )),
+            "missing +3 power modification: {:?}",
+            static_def.modifications
+        );
+        assert!(
+            static_def.modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddToughness { value: 3 }
+            )),
+            "missing +3 toughness modification: {:?}",
+            static_def.modifications
+        );
+        assert!(
+            static_def.modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+                        generic: 1,
+                        shards,
+                    })),
+                } if shards.is_empty()
+            )),
+            "missing ward {{1}} modification: {:?}",
+            static_def.modifications
+        );
+        assert!(
+            result
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            "unexpected DynamicQty warning: {:?}",
+            result.parse_warnings
+        );
     }
 
     /// Regression: pin the broader "Equipment you control have equip {N}"
