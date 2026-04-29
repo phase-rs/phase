@@ -353,10 +353,11 @@ fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) 
 /// - Delirium: 4+ card types in graveyard
 /// - Spell mastery: 2+ instant/sorcery in graveyard
 /// - Revolt: a permanent you controlled left the battlefield this turn
+/// - Ferocious: you control a creature with power 4 or greater
 fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::StaticCondition> {
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, CountScope, QuantityExpr, QuantityRef, StaticCondition,
-        TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+        CardTypeSetSource, ControllerRef, CountScope, FilterProp, QuantityExpr, QuantityRef,
+        StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
     };
 
     match word {
@@ -420,6 +421,22 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
                 rhs: QuantityExpr::Fixed { value: 1 },
             })
         }
+        // allow-noncombinator: semantic mapping after ability-word parser has classified the word
+        "ferocious" => Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::PowerGE {
+                                value: QuantityExpr::Fixed { value: 4 },
+                            }]),
+                    ),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
         "max speed" => Some(StaticCondition::HasMaxSpeed),
         _ => None,
     }
@@ -2581,9 +2598,9 @@ pub(super) fn parse_activated_with_self_ref_fallback(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityCondition, AggregateFunction, Comparator, ContinuousModification, FilterProp,
-        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint, ObjectScope,
-        ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+        AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
+        FilterProp, ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
+        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
         ReplacementCondition, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
@@ -7558,6 +7575,68 @@ mod tests {
             },
             other => panic!("expected ConditionInstead on sub, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn ferocious_ability_word_applies_power_condition_to_spell_effect() {
+        use crate::types::ability::{AbilityCondition, QuantityRef};
+
+        let r = parse_oracle_text(
+            "You gain 5 life.\nFerocious \u{2014} You gain 10 life instead if you control a creature with power 4 or greater.",
+            "Feed the Clan",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert!(r
+            .parse_warnings
+            .iter()
+            .all(|warning| { warning.split_whitespace().next() != Some("Swallow:Condition_If") }));
+        let base = r
+            .abilities
+            .first()
+            .expect("expected base gain-life ability");
+        let ferocious = base
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional ferocious branch");
+        assert!(matches!(
+            *ferocious.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 10 },
+                ..
+            }
+        ));
+        let Some(AbilityCondition::ConditionInstead { inner }) = ferocious.condition.as_ref()
+        else {
+            panic!(
+                "expected ferocious ConditionInstead, got {:?}",
+                ferocious.condition
+            );
+        };
+        let AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        } = inner.as_ref()
+        else {
+            panic!("expected ferocious QuantityCheck, got {inner:?}");
+        };
+        assert_eq!(*comparator, Comparator::GE);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected ObjectCount lhs, got {lhs:?}");
+        };
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed creature filter");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.properties.contains(&FilterProp::PowerGE {
+            value: QuantityExpr::Fixed { value: 4 },
+        }));
     }
 
     #[test]
