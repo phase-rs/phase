@@ -1285,10 +1285,14 @@ fn parse_enters_with_counters(
         parse_count_expr(after_prefix).unwrap_or((QuantityExpr::Fixed { value: 1 }, after_prefix));
     rewrite_variable_x_to_cost_x_paid(&mut count_expr);
     // Next word(s) before "counter" are the counter type
-    let (_, (counter_type_raw, _)) = nom_primitives::split_once_on(rest, "counter").ok()?;
+    let (_, (counter_type_raw, after_counter)) =
+        nom_primitives::split_once_on(rest, "counter").ok()?;
     let counter_type_raw = counter_type_raw.trim();
     let counter_type =
         crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
+    if let Some(for_each_count) = parse_enters_counter_for_each_suffix(after_counter) {
+        count_expr = for_each_count;
+    }
     // CR 122.6: For "a number of counters equal to [quantity]", parse the dynamic expression
     if dynamic_remainder.is_some() {
         if let Ok((_, (_, qty_text))) = nom_primitives::split_once_on(work_text, "equal to ") {
@@ -1390,6 +1394,17 @@ fn extract_enters_with_only_if_suffix(text: &str) -> Option<ReplacementCondition
     let (rest, condition) = parse_inner_condition(condition_text).ok()?;
     rest.trim().is_empty().then_some(())?;
     replacement_condition_from_static(condition)
+}
+
+fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityExpr> {
+    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>("s"))
+        .parse(after_counter)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" on it for each ")
+        .parse(rest)
+        .ok()?;
+    let clause = rest.trim().trim_end_matches('.');
+    super::oracle_quantity::parse_for_each_clause_expr(clause)
 }
 
 fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, QuantityExpr)>> {
@@ -3568,8 +3583,8 @@ fn parse_generic_unless_condition(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Comparator, ControllerRef, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementCondition, ShieldKind,
+        Comparator, ControllerRef, CountScope, QuantityExpr, QuantityModification, QuantityRef,
+        ReplacementCondition, ShieldKind, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -4463,6 +4478,32 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
                 active_player_req: None,
             })
+        ));
+    }
+
+    #[test]
+    fn enters_with_counter_for_each_creature_card_in_graveyard() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it for each creature card in your graveyard.",
+            "Golgari Grave-Troll",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        ref card_types,
+                        scope: CountScope::Controller,
+                    }
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "P1P1"
+                && card_types.contains(&TypeFilter::Creature)
         ));
     }
 
