@@ -118,6 +118,14 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
         // Non-zone predicates (`AlternateCostWasPaid`, `WasKicked`, `WasForetold`,
         // `WasBargained`, etc.) need separate engine slots and strict-fail.
         Condition::CastSpellPassesFilter(spells) => spells_to_cast_zone_ability(spells)?,
+        // CR 700.4 + CR 603.4: Morbid-style "if a creature died this turn".
+        // mtgish's variant name includes planeswalkers, but the existing engine
+        // primitive is explicitly creature-scoped, so only lower the broad
+        // creature filter and strict-fail narrower predicates.
+        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
+            require_broad_creature_died_filter(filter)?;
+            morbid_ability_condition()
+        }
         // CR 608.2c: "if target spell [matches predicate]" — the announced
         // spell target is an object on the stack, so reuse the existing
         // Spells -> TargetFilter converter and gate the sub-ability against
@@ -288,6 +296,11 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
             Zone::Graveyard,
             "Condition::DeadPermanentPassesFilter/predicate",
         )?,
+        // CR 700.4 + CR 603.4: Morbid-style intervening-if condition.
+        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
+            require_broad_creature_died_filter(filter)?;
+            morbid_trigger_condition()
+        }
 
         _ => {
             return Err(ConversionGap::UnknownVariant {
@@ -357,6 +370,12 @@ pub fn convert_static(c: &Condition) -> ConvResult<StaticCondition> {
         Condition::APlayerPassesFilter(player_set, predicate) => {
             convert_aplayer_predicate_static(player_set, predicate)?
         }
+        // CR 700.4 + CR 613: Continuous effects can use the same event-state
+        // quantity primitive as the native Oracle parser's static condition path.
+        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
+            require_broad_creature_died_filter(filter)?;
+            morbid_static_condition()
+        }
         _ => {
             return Err(ConversionGap::UnknownVariant {
                 path: String::new(),
@@ -364,6 +383,50 @@ pub fn convert_static(c: &Condition) -> ConvResult<StaticCondition> {
             });
         }
     })
+}
+
+fn require_broad_creature_died_filter(filter: &Permanents) -> ConvResult<()> {
+    match filter {
+        Permanents::IsCardtype(CardType::Creature) => Ok(()),
+        other => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "QuantityRef::CreaturesDiedThisTurn",
+            needed_variant: format!("filtered creature-died predicate: {other:?}"),
+        }),
+    }
+}
+
+fn morbid_quantity_lhs() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::CreaturesDiedThisTurn,
+    }
+}
+
+fn morbid_quantity_rhs() -> QuantityExpr {
+    QuantityExpr::Fixed { value: 1 }
+}
+
+fn morbid_ability_condition() -> AbilityCondition {
+    AbilityCondition::QuantityCheck {
+        lhs: morbid_quantity_lhs(),
+        comparator: Comparator::GE,
+        rhs: morbid_quantity_rhs(),
+    }
+}
+
+fn morbid_trigger_condition() -> TriggerCondition {
+    TriggerCondition::QuantityComparison {
+        lhs: morbid_quantity_lhs(),
+        comparator: Comparator::GE,
+        rhs: morbid_quantity_rhs(),
+    }
+}
+
+fn morbid_static_condition() -> StaticCondition {
+    StaticCondition::QuantityComparison {
+        lhs: morbid_quantity_lhs(),
+        comparator: Comparator::GE,
+        rhs: morbid_quantity_rhs(),
+    }
 }
 
 /// Classify the permanent-axis of a `Condition::PermanentPassesFilter`'s
@@ -2804,6 +2867,10 @@ pub fn convert_parsed(c: &Condition) -> ConvResult<ParsedCondition> {
         // the surrounding-action layer (`Action::Unless`, the `IsNot*`
         // condition variants). `ParsedCondition::Not` is reachable only via
         // those upstream paths, not from a direct `Condition::Not`.
+        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
+            require_broad_creature_died_filter(filter)?;
+            Ok(ParsedCondition::CreatureDiedThisTurn)
+        }
         // No general-purpose timing or arbitrary-event form exists in
         // `ParsedCondition`. Strict-fail with the variant tag so the report
         // tracks remaining shapes by name.
@@ -2998,7 +3065,7 @@ fn card_type_to_core(ct: &CardType) -> ConvResult<CoreType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::types::Color;
+    use crate::schema::types::{Color, CreatureType};
     use engine::types::ability::{FilterProp, TypedFilter};
 
     #[test]
@@ -3140,6 +3207,74 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 2 },
             }
         );
+    }
+
+    #[test]
+    fn creature_died_this_turn_lowers_to_trigger_quantity_condition() {
+        let condition = Condition::ACreatureOrPlaneswalkerDiedThisTurn(Box::new(
+            Permanents::IsCardtype(CardType::Creature),
+        ));
+
+        let converted = convert_trigger(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CreaturesDiedThisTurn,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+    }
+
+    #[test]
+    fn creature_died_this_turn_lowers_to_ability_quantity_condition() {
+        let condition = Condition::ACreatureOrPlaneswalkerDiedThisTurn(Box::new(
+            Permanents::IsCardtype(CardType::Creature),
+        ));
+
+        let converted = convert_ability(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CreaturesDiedThisTurn,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+    }
+
+    #[test]
+    fn creature_died_this_turn_lowers_to_parsed_condition() {
+        let condition = Condition::ACreatureOrPlaneswalkerDiedThisTurn(Box::new(
+            Permanents::IsCardtype(CardType::Creature),
+        ));
+
+        let converted = convert_parsed(&condition).unwrap();
+
+        assert_eq!(converted, ParsedCondition::CreatureDiedThisTurn);
+    }
+
+    #[test]
+    fn filtered_creature_died_this_turn_stays_strict() {
+        let condition =
+            Condition::ACreatureOrPlaneswalkerDiedThisTurn(Box::new(Permanents::And(vec![
+                Permanents::IsCardtype(CardType::Creature),
+                Permanents::IsNonCreatureType(CreatureType::Zombie),
+            ])));
+
+        let err = convert_trigger(&condition).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConversionGap::EnginePrerequisiteMissing { engine_type, .. }
+                if engine_type == "QuantityRef::CreaturesDiedThisTurn"
+        ));
     }
 
     #[test]
