@@ -3212,6 +3212,9 @@ pub enum LibraryPosition {
 pub enum DamageSource {
     /// The first resolved object target is the damage source.
     Target,
+    /// CR 120.3 + CR 603.7c: The triggering event's source object is the
+    /// damage source.
+    TriggeringSource,
 }
 
 /// A single conjured card entry: card name + quantity.

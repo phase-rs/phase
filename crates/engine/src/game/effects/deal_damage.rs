@@ -480,20 +480,28 @@ pub fn resolve(
             _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
         };
 
-    // CR 120.3: Determine damage source. When DamageSource::Target, the first resolved
-    // object target is the damage source (e.g., "target creature deals damage to itself").
-    let ctx = if matches!(damage_source, Some(DamageSource::Target)) {
-        ability
+    // CR 120.3: Determine damage source.
+    let ctx = match damage_source {
+        // "Target creature deals damage..." — the first resolved object target
+        // is the damage source, not the ability source.
+        Some(DamageSource::Target) => ability
             .targets
             .iter()
             .find_map(|t| match t {
                 TargetRef::Object(id) => DamageContext::from_source(state, *id),
                 _ => None,
             })
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller))
-    } else {
-        DamageContext::from_source(state, ability.source_id)
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller))
+            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        // "That creature/permanent deals damage..." inside a triggered ability
+        // binds the damage source to the triggering event object.
+        Some(DamageSource::TriggeringSource) => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| DamageContext::from_source(state, id))
+            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        None => DamageContext::from_source(state, ability.source_id)
+            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
     };
 
     // Resolve effective targets: use explicit targets if present, otherwise derive
@@ -851,7 +859,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{QuantityExpr, TargetFilter, TypedFilter};
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::WaitingFor;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1339,6 +1348,49 @@ mod tests {
         // CR 702.15b: Source controller gains life equal to damage dealt.
         assert_eq!(state.players[1].life, 17); // 20 - 3
         assert_eq!(state.players[0].life, 23); // 20 + 3
+    }
+
+    #[test]
+    fn triggering_source_damage_uses_event_source_context() {
+        let mut state = GameState::new_two_player(42);
+        let ability_source = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let triggering_source =
+            make_source_with_keyword(&mut state, crate::types::keywords::Keyword::Lifelink);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: triggering_source,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                triggering_source,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: Some(DamageSource::TriggeringSource),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ability_source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].life, 18);
+        assert_eq!(
+            state.players[0].life, 22,
+            "lifelink must come from the triggering source, not the ability source"
+        );
     }
 
     #[test]

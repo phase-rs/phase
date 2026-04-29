@@ -1993,6 +1993,17 @@ fn permanent_deals_damage_effect(
             target: damage_recipient_to_filter(recipient)?,
             damage_source: Some(DamageSource::Target),
         }),
+        Permanent::ThatEnteringPermanent
+        | Permanent::Trigger_ThatArtifact
+        | Permanent::Trigger_ThatCreature
+        | Permanent::Trigger_ThatCreatureOrPlaneswalker
+        | Permanent::Trigger_ThatLand
+        | Permanent::Trigger_ThatPermanent
+        | Permanent::Trigger_ThatVehicle => Ok(Effect::DealDamage {
+            amount: quantity::convert(amount)?,
+            target: damage_recipient_to_filter(recipient)?,
+            damage_source: Some(DamageSource::TriggeringSource),
+        }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "Effect::DealDamage.damage_source",
             needed_variant: format!("permanent source ref: {other:?}"),
@@ -6240,7 +6251,7 @@ mod tests {
     #[test]
     fn non_source_damage_ref_remains_engine_prerequisite() {
         let err = convert(&Action::PermanentDealsDamage(
-            Box::new(Permanent::Trigger_ThatPermanent),
+            Box::new(Permanent::Trigger_ThatDeadPermanent),
             Box::new(GameNumber::Integer(3)),
             Box::new(DamageRecipient::Ref_AnyTarget),
         ))
@@ -6253,6 +6264,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn trigger_source_damage_uses_triggering_source_context() {
+        let effect = convert(&Action::PermanentDealsDamage(
+            Box::new(Permanent::ThatEnteringPermanent),
+            Box::new(GameNumber::Integer(2)),
+            Box::new(DamageRecipient::Player(Box::new(Player::You))),
+        ))
+        .unwrap();
+
+        let Effect::DealDamage { damage_source, .. } = effect else {
+            panic!("expected DealDamage, got {effect:?}");
+        };
+        assert_eq!(damage_source, Some(DamageSource::TriggeringSource));
     }
 
     #[test]
