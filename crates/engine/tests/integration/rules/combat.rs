@@ -52,6 +52,49 @@ fn blocked_creature_and_blocker_exchange_damage() {
     );
 }
 
+#[test]
+fn decayed_attacker_sacrifices_at_end_of_combat() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_id = scenario
+        .add_creature(P0, "Decayed Zombie", 2, 2)
+        .with_keyword(Keyword::Decayed)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker_id, AttackTarget::Player(P1))],
+        })
+        .expect("decayed creature should be able to attack");
+
+    assert!(
+        runner.state().stack.len() == 1,
+        "decayed attack trigger should be on the stack"
+    );
+
+    for _ in 0..40 {
+        if runner.state().objects[&attacker_id].zone == Zone::Graveyard {
+            break;
+        }
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            runner
+                .act(GameAction::DeclareBlockers {
+                    assignments: vec![],
+                })
+                .expect("declaring no blockers should succeed");
+        } else if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert_eq!(runner.state().objects[&attacker_id].zone, Zone::Graveyard);
+}
+
 /// CR 510.1b: First strike damage resolves before regular damage
 #[test]
 fn first_strike_kills_before_regular_damage() {

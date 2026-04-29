@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef, Effect, ModalChoice,
-    PlayerFilter, ResolvedAbility, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
+    AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef, DelayedTriggerCondition,
+    Effect, ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -362,6 +362,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 has_exploit,
                 firebending_n,
                 ward_costs,
+                has_decayed,
                 matched_triggers,
             ) = {
                 let obj = match state.objects.get(&obj_id) {
@@ -399,6 +400,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         && obj.has_keyword(&Keyword::Exploit),
                     fb_n,
                     wards,
+                    obj.has_keyword(&Keyword::Decayed),
                     collect_matching_triggers(
                         state,
                         event,
@@ -503,6 +505,45 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                                 .insert(crate::types::events::BendingType::Fire);
                         }
                     }
+                }
+            }
+
+            // CR 702.147a: Decayed means "When this creature attacks, sacrifice
+            // it at end of combat." The keyword creates a normal triggered
+            // ability on attack; when that trigger resolves, it creates the
+            // one-shot delayed trigger for the end of combat step.
+            if let GameEvent::AttackersDeclared { attacker_ids, .. } = event {
+                if has_decayed && attacker_ids.contains(&obj_id) {
+                    let delayed_sacrifice = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Sacrifice {
+                            target: TargetFilter::SelfRef,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    );
+                    let decayed_effect = Effect::CreateDelayedTrigger {
+                        condition: DelayedTriggerCondition::AtNextPhase {
+                            phase: Phase::EndCombat,
+                        },
+                        effect: Box::new(delayed_sacrifice),
+                        uses_tracked_set: false,
+                    };
+                    let decayed_ability =
+                        ResolvedAbility::new(decayed_effect, Vec::new(), obj_id, controller);
+                    let decayed_trigger = TriggerDefinition::new(TriggerMode::Attacks)
+                        .description("Decayed".to_string());
+                    pending.push(PendingTrigger {
+                        source_id: obj_id,
+                        controller,
+                        condition: decayed_trigger.condition,
+                        ability: decayed_ability,
+                        timestamp,
+                        target_constraints: Vec::new(),
+                        trigger_event: Some(event.clone()),
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: decayed_trigger.description,
+                    });
                 }
             }
 

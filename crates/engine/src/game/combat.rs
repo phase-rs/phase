@@ -442,6 +442,10 @@ pub fn validate_blockers_for_player(
         if blocker.tapped {
             return Err(format!("{:?} is tapped", blocker_id));
         }
+        // CR 702.147a: Decayed means "This creature can't block."
+        if blocker.has_keyword(&Keyword::Decayed) {
+            return Err(format!("{:?} has decayed and can't block", blocker_id));
+        }
         if super::functioning_abilities::active_static_definitions(state, blocker).any(|sd| {
             matches!(
                 sd.mode,
@@ -769,6 +773,11 @@ pub fn validate_blockers_for_player(
             }
             // Tapped creatures can't block (CR 509.1a)
             if obj.tapped {
+                continue;
+            }
+            // CR 702.147a: Decayed creatures can't block, so an unassigned
+            // decayed MustBlock creature cannot make the declaration illegal.
+            if obj.has_keyword(&Keyword::Decayed) {
                 continue;
             }
             if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
@@ -1545,6 +1554,10 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     }) {
         return false;
     }
+    // CR 702.147a: Decayed means "This creature can't block."
+    if blocker.has_keyword(&Keyword::Decayed) {
+        return false;
+    }
     // CR 509.1b + CR 301.5a + CR 303.4: scan every battlefield static whose
     // `affected` filter matches the attacker — covers intrinsic, Equipment-
     // granted, and Aura-granted `CantBeBlocked*` uniformly. Mirrors the
@@ -1792,6 +1805,7 @@ pub fn get_valid_blocker_ids(state: &GameState) -> Vec<ObjectId> {
             if defending_players.contains(&obj.controller)
                 && obj.card_types.core_types.contains(&CoreType::Creature)
                 && !obj.tapped
+                && !obj.has_keyword(&Keyword::Decayed)
             {
                 Some(*id)
             } else {
@@ -2698,6 +2712,34 @@ mod tests {
             .static_definitions
             .push(StaticDefinition::new(StaticMode::CantBlock));
 
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn decayed_creature_cant_block() {
+        let mut state = setup();
+        state.combat = Some(CombatState::default());
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Decayed Zombie", 2, 2);
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Decayed);
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+
+        assert!(!get_valid_blocker_ids(&state).contains(&blocker));
+        assert!(!can_block_pair(&state, blocker, attacker));
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
     }
 
