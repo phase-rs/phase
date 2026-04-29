@@ -1779,7 +1779,7 @@ mod tests {
     use crate::types::game_state::TransientContinuousEffect;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaColor;
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
@@ -2620,6 +2620,82 @@ mod tests {
             "expected 2 base + P1 hand size 4, not P0 hand size 1"
         );
         assert_eq!(final_bear.toughness, Some(6));
+    }
+
+    /// CR 107.4 + CR 202.1 + CR 613.4c: Light from Within-style statics count
+    /// mana symbols in each affected creature's own mana cost. Hybrid and
+    /// Phyrexian symbols that contain the color count through
+    /// `ManaCostShard::contributes_to`.
+    #[test]
+    fn dynamic_pt_counts_recipient_mana_cost_symbols_per_creature() {
+        let mut state = setup();
+        let white_bear = make_creature(&mut state, "White Bear", 2, 2, PlayerId(0));
+        let hybrid_bear = make_creature(&mut state, "Hybrid Bear", 2, 2, PlayerId(0));
+        let blue_bear = make_creature(&mut state, "Blue Bear", 2, 2, PlayerId(0));
+
+        state.objects.get_mut(&white_bear).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 1,
+        };
+        state.objects.get_mut(&hybrid_bear).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::WhiteBlack,
+                ManaCostShard::TwoWhite,
+                ManaCostShard::PhyrexianWhite,
+            ],
+            generic: 0,
+        };
+        state.objects.get_mut(&blue_bear).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        };
+
+        let light = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Light from Within".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&light).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.timestamp = ts;
+
+            let qty = QuantityExpr::Ref {
+                qty: QuantityRef::ManaSymbolsInManaCost {
+                    scope: crate::types::ability::ObjectScope::Recipient,
+                    color: ManaColor::White,
+                },
+            };
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }))
+                    .modifications(vec![
+                        ContinuousModification::AddDynamicPower { value: qty.clone() },
+                        ContinuousModification::AddDynamicToughness { value: qty },
+                    ]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        let white = state.objects.get(&white_bear).unwrap();
+        assert_eq!(white.power, Some(4));
+        assert_eq!(white.toughness, Some(4));
+
+        let hybrid = state.objects.get(&hybrid_bear).unwrap();
+        assert_eq!(hybrid.power, Some(5));
+        assert_eq!(hybrid.toughness, Some(5));
+
+        let blue = state.objects.get(&blue_bear).unwrap();
+        assert_eq!(blue.power, Some(2));
+        assert_eq!(blue.toughness, Some(2));
     }
 
     #[test]

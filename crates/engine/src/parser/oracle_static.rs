@@ -10612,6 +10612,47 @@ mod tests {
     }
 
     #[test]
+    fn static_for_each_mana_symbol_in_its_mana_cost_emits_recipient_symbol_count() {
+        let def = parse_static_line(
+            "Each creature you control gets +1/+1 for each white mana symbol in its mana cost.",
+        )
+        .expect("mana-symbol-count anthem static must parse");
+
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected dynamic power");
+        assert_eq!(
+            dyn_pow,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::ManaSymbolsInManaCost {
+                    scope: ObjectScope::Recipient,
+                    color: ManaColor::White,
+                },
+            }
+        );
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicToughness {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSymbolsInManaCost {
+                        scope: ObjectScope::Recipient,
+                        color: ManaColor::White,
+                    }
+                }
+            }
+        )));
+        assert!(!def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddPower { .. })));
+    }
+
+    #[test]
     fn static_enchanted_creature_dynamic_where_x() {
         // Dynamic grant: "enchanted creature gets +X/+X, where X is the number of cards in your hand"
         let def = parse_static_line(

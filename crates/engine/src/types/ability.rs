@@ -2009,6 +2009,16 @@ pub enum QuantityRef {
     /// static/layered boosts by binding to the affected object rather than the
     /// Aura, Equipment, or anthem source.
     ObjectColorCount { scope: ObjectScope },
+    /// CR 107.4 + CR 202.1: Count colored mana symbols in an object's mana
+    /// cost. Hybrid, monocolored hybrid, Phyrexian, hybrid Phyrexian, and
+    /// colorless hybrid symbols count when they contain `color`, via
+    /// `ManaCostShard::contributes_to`. `Recipient` preserves per-affected
+    /// layer boosts such as "gets +1/+1 for each white mana symbol in its mana
+    /// cost" by binding to the object currently receiving the effect.
+    ManaSymbolsInManaCost {
+        scope: ObjectScope,
+        color: ManaColor,
+    },
     /// CR 202.3: The mana value of the source object — i.e. the object passed
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
     /// is the spell-being-cast, so "pay life equal to its mana value" reads

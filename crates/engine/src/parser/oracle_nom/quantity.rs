@@ -1344,6 +1344,7 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_object_colors_for_each,
+        parse_mana_symbols_in_object_mana_cost_for_each,
         parse_distinct_card_types_in_zone,
         parse_foretold_cards_owned_in_exile,
         parse_zone_card_count,
@@ -1367,6 +1368,20 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_for_each_controlled_type,
     ))
     .parse(input)
+}
+
+/// CR 107.4 + CR 202.1: Parse
+/// "<color> mana symbol[s] in <object>'s mana cost" into a scoped per-object
+/// mana-cost symbol count. The `"its"` form is recipient-relative so static
+/// layer boosts bind to each affected object.
+fn parse_mana_symbols_in_object_mana_cost_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, color) = super::primitives::parse_color(input)?;
+    let (rest, _) = tag(" mana symbol").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" in ").parse(rest)?;
+    let (rest, scope) = parse_object_color_scope(rest)?;
+    let (rest, _) = tag(" mana cost").parse(rest)?;
+    Ok((rest, QuantityRef::ManaSymbolsInManaCost { scope, color }))
 }
 
 /// CR 105.1 + CR 105.2: Parse "for each [of] <object>'s colors" into a
@@ -2018,6 +2033,19 @@ mod tests {
             q,
             QuantityRef::ObjectColorCount {
                 scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_for_each_mana_symbols_in_recipient_mana_cost() {
+        let (rest, q) = parse_for_each("for each white mana symbol in its mana cost").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ManaSymbolsInManaCost {
+                scope: crate::types::ability::ObjectScope::Recipient,
+                color: ManaColor::White,
             }
         );
         assert_eq!(rest, "");

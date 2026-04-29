@@ -667,6 +667,15 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Recipient => "recipient's colors".into(),
             ObjectScope::EventSource => "event source's colors".into(),
         },
+        QuantityRef::ManaSymbolsInManaCost { scope, color } => {
+            let scope_str = match scope {
+                ObjectScope::Source => "self",
+                ObjectScope::Target => "target",
+                ObjectScope::Recipient => "recipient",
+                ObjectScope::EventSource => "event source",
+            };
+            format!("{color:?} mana symbols in {scope_str}'s mana cost")
+        }
         QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
             function,
@@ -4264,6 +4273,12 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetObjectColorCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
+        },
+        QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
+            ObjectScope::Source => ("SourceManaSymbolsInManaCost", Handled),
+            ObjectScope::Target => ("TargetManaSymbolsInManaCost", Handled),
+            ObjectScope::Recipient => ("RecipientManaSymbolsInManaCost", Handled),
+            ObjectScope::EventSource => ("EventSourceManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),

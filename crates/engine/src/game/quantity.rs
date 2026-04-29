@@ -20,7 +20,7 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaColor;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -129,6 +129,10 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             } => filter_uses_recipient(filter),
             QuantityRef::ObjectColorCount {
                 scope: ObjectScope::Recipient,
+            }
+            | QuantityRef::ManaSymbolsInManaCost {
+                scope: ObjectScope::Recipient,
+                ..
             } => true,
             _ => false,
         },
@@ -672,6 +676,9 @@ fn resolve_ref(
         // see color-changing effects correctly when this resolves in layer 7c.
         QuantityRef::ObjectColorCount { scope } => {
             resolve_object_color_count(state, *scope, ctx, targets)
+        }
+        QuantityRef::ManaSymbolsInManaCost { scope, color } => {
+            resolve_mana_symbols_in_mana_cost(state, *scope, *color, ctx, targets)
         }
         // CR 202.3 + CR 118.9: Mana value of the source object. Used by
         // alt-cost cast permissions ("pay life equal to its mana value rather
@@ -1424,6 +1431,26 @@ fn resolve_object_color_count(
         });
     colors
         .map(|colors| usize_to_i32_saturating(colors.iter().copied().collect::<HashSet<_>>().len()))
+        .unwrap_or(0)
+}
+
+fn resolve_mana_symbols_in_mana_cost(
+    state: &GameState,
+    scope: ObjectScope,
+    color: ManaColor,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+) -> i32 {
+    object_for_scope(state, scope, ctx, targets)
+        .map(|obj| match &obj.mana_cost {
+            ManaCost::Cost { shards, .. } => usize_to_i32_saturating(
+                shards
+                    .iter()
+                    .filter(|shard| shard.contributes_to(color))
+                    .count(),
+            ),
+            ManaCost::NoCost | ManaCost::SelfManaCost => 0,
+        })
         .unwrap_or(0)
 }
 
