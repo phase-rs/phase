@@ -5,7 +5,7 @@ use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityKind, ControllerRef, Effect, EffectError, EffectKind, FilterProp,
     PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, TargetFilter,
-    TargetRef, TypeFilter, UnlessCost,
+    TargetRef, UnlessCost,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
@@ -2069,27 +2069,13 @@ fn evaluate_condition(
                     // CR 400.7: Check last-known information for past-tense conditions.
                     // Try LKI cache first, fall back to current state if object still exists.
                     if let Some(lki) = state.lki_cache.get(&id) {
-                        // LKI snapshot has core types — check type_filters against LKI
-                        match filter {
-                            TargetFilter::Typed(tf) => {
-                                use crate::types::card_type::CoreType;
-                                tf.type_filters.iter().all(|req| {
-                                    let ct = match req {
-                                        TypeFilter::Creature => Some(CoreType::Creature),
-                                        TypeFilter::Land => Some(CoreType::Land),
-                                        TypeFilter::Artifact => Some(CoreType::Artifact),
-                                        TypeFilter::Enchantment => Some(CoreType::Enchantment),
-                                        TypeFilter::Instant => Some(CoreType::Instant),
-                                        TypeFilter::Sorcery => Some(CoreType::Sorcery),
-                                        TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
-                                        TypeFilter::Battle => Some(CoreType::Battle),
-                                        _ => None,
-                                    };
-                                    ct.map(|ct| lki.card_types.contains(&ct)).unwrap_or(true)
-                                })
-                            }
-                            _ => true,
-                        }
+                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                            state,
+                            id,
+                            lki,
+                            filter,
+                            &crate::game::filter::FilterContext::from_ability(ability),
+                        )
                     } else {
                         // Object still exists — check current state.
                         // CR 107.3a + CR 601.2b: ability-context filter evaluation.

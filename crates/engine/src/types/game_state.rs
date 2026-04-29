@@ -137,6 +137,18 @@ pub struct LKISnapshot {
     /// Used by `TriggerCondition::WasType` for "if it was a creature" patterns.
     #[serde(default)]
     pub card_types: Vec<CoreType>,
+    /// CR 400.7: Subtypes as they last existed in the public zone.
+    #[serde(default)]
+    pub subtypes: Vec<String>,
+    /// CR 400.7: Supertypes as they last existed in the public zone.
+    #[serde(default)]
+    pub supertypes: Vec<Supertype>,
+    /// CR 400.7: Keywords as they last existed in the public zone.
+    #[serde(default)]
+    pub keywords: Vec<Keyword>,
+    /// CR 400.7: Colors as they last existed in the public zone.
+    #[serde(default)]
+    pub colors: Vec<ManaColor>,
     /// CR 400.7: Counters as they last existed on the object.
     /// Used by `TriggerCondition::HadCounters` for "if it had counters on it" patterns.
     #[serde(default)]

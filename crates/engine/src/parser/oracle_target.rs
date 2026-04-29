@@ -236,6 +236,25 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "her")) {
         return (TargetFilter::ParentTarget, rest);
     }
+    if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value(
+                TargetFilter::ParentTargetController,
+                tag::<_, _, nom_language::error::VerboseError<&str>>("that creature's controller"),
+            ),
+            value(
+                TargetFilter::ParentTargetController,
+                tag("that permanent's controller"),
+            ),
+            value(
+                TargetFilter::ParentTargetController,
+                tag("that land's controller"),
+            ),
+        ))
+        .parse(input)
+    }) {
+        return (filter, rest);
+    }
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("on ").parse(lower.as_str())
     {
@@ -4537,6 +4556,20 @@ mod tests {
         // `resolve_counter_placement_target` in `oracle_effect/counter.rs`).
         let (filter, rest) = parse_target("that creature");
         assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_that_creature_controller_uses_parent_target_controller() {
+        let (filter, rest) = parse_target("that creature's controller");
+        assert_eq!(filter, TargetFilter::ParentTargetController);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_that_land_controller_uses_parent_target_controller() {
+        let (filter, rest) = parse_target("that land's controller");
+        assert_eq!(filter, TargetFilter::ParentTargetController);
         assert_eq!(rest, "");
     }
 

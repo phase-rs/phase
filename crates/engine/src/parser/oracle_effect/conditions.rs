@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, value};
+use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -872,6 +872,31 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    if let Ok((rest, _)) =
+        tag::<_, _, VerboseError<&str>>("if that land was nonbasic, ").parse(lower.as_str())
+    {
+        let body_start = text.len() - rest.len();
+        return (
+            Some(nonbasic_land_lki_condition()),
+            text[body_start..].to_string(),
+        );
+    }
+
+    if let Some((before, after)) = tp.rsplit_around(" if that land was ") {
+        if all_consuming(alt((
+            tag::<_, _, VerboseError<&str>>("nonbasic."),
+            tag("nonbasic"),
+        )))
+        .parse(after.lower.trim())
+        .is_ok()
+        {
+            return (
+                Some(nonbasic_land_lki_condition()),
+                before.original.trim_end_matches('.').trim().to_string(),
+            );
+        }
+    }
+
     for (pattern, negated) in &[
         (" if it's ", false),
         (" if it is ", false),
@@ -904,6 +929,17 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
     }
 
     (None, text.to_string())
+}
+
+fn nonbasic_land_lki_condition() -> AbilityCondition {
+    AbilityCondition::TargetMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+            FilterProp::NotSupertype {
+                value: Supertype::Basic,
+            },
+        ])),
+        use_lki: true,
+    }
 }
 
 /// Parse "N or less" / "N or greater" from mana value threshold text.

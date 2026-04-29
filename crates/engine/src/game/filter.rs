@@ -13,7 +13,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::game_state::{GameState, SpellCastRecord, ZoneChangeRecord};
+use crate::types::game_state::{GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -245,6 +245,41 @@ pub fn matches_target_filter_on_zone_change_record(
         ctx.source_controller,
         ctx.ability,
     )
+}
+
+/// CR 400.7 + CR 608.2c: Evaluate a target filter against last-known information.
+///
+/// This reuses the zone-change snapshot evaluator because both paths answer the
+/// same question: did the object have the requested characteristics at the last
+/// moment it existed in the relevant public zone?
+pub fn matches_target_filter_on_lki_snapshot(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let record = ZoneChangeRecord {
+        object_id,
+        name: lki.name.clone(),
+        core_types: lki.card_types.clone(),
+        subtypes: lki.subtypes.clone(),
+        supertypes: lki.supertypes.clone(),
+        keywords: lki.keywords.clone(),
+        power: lki.power,
+        toughness: lki.toughness,
+        colors: lki.colors.clone(),
+        mana_value: lki.mana_value,
+        controller: lki.controller,
+        owner: lki.owner,
+        from_zone: None,
+        to_zone: Zone::Battlefield,
+        attachments: vec![],
+        linked_exile_snapshot: vec![],
+        is_token: false,
+        combat_status: Default::default(),
+    };
+    matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
 
 /// CR 603.4 + CR 603.6 + CR 603.10: Evaluate a trigger condition whose
@@ -2126,7 +2161,9 @@ pub fn player_matches_target_filter(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ChosenAttribute, ControllerRef, FilterProp, TargetFilter};
+    use crate::types::ability::{
+        ChosenAttribute, Comparator, ControllerRef, FilterProp, TargetFilter,
+    };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
@@ -4081,6 +4118,95 @@ mod tests {
         let filter =
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Historic]));
         assert!(!matches_target_filter(&state, obj, &filter, source));
+    }
+
+    #[test]
+    fn lki_snapshot_filter_matches_cmc_property() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let lki = crate::types::game_state::LKISnapshot {
+            name: "Returned Creature".into(),
+            power: Some(2),
+            toughness: Some(2),
+            mana_value: 3,
+            controller: PlayerId(1),
+            owner: PlayerId(1),
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            counters: Default::default(),
+        };
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }]));
+
+        assert!(matches_target_filter_on_lki_snapshot(
+            &state,
+            ObjectId(700),
+            &lki,
+            &filter,
+            &FilterContext::from_source(&state, source),
+        ));
+    }
+
+    #[test]
+    fn lki_snapshot_filter_matches_nonbasic_land_property() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let mut lki = crate::types::game_state::LKISnapshot {
+            name: "Destroyed Land".into(),
+            power: None,
+            toughness: None,
+            mana_value: 0,
+            controller: PlayerId(1),
+            owner: PlayerId(1),
+            card_types: vec![CoreType::Land],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            counters: Default::default(),
+        };
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: Supertype::Basic,
+                }]),
+            );
+        let ctx = FilterContext::from_source(&state, source);
+
+        assert!(matches_target_filter_on_lki_snapshot(
+            &state,
+            ObjectId(701),
+            &lki,
+            &filter,
+            &ctx,
+        ));
+
+        lki.supertypes.push(Supertype::Basic);
+        assert!(!matches_target_filter_on_lki_snapshot(
+            &state,
+            ObjectId(701),
+            &lki,
+            &filter,
+            &ctx,
+        ));
     }
 
     /// CR 700.6: `FilterProp::Historic` on a zone-change snapshot must read

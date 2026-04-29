@@ -4772,7 +4772,9 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target } => {
-            *target = TargetFilter::ParentTarget;
+            if !matches!(target, TargetFilter::ParentTargetController) {
+                *target = TargetFilter::ParentTarget;
+            }
         }
         Effect::Attach { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
             *target = TargetFilter::ParentTarget;
@@ -9125,16 +9127,17 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
                         },
                         "",
                     ));
-                } else if let Some((target, _ecr_rem)) = parse_event_context_ref(target_phrase) {
+                } else if let Some((target, ecr_rem)) = parse_event_context_ref(target_phrase) {
+                    let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
                     #[cfg(debug_assertions)]
-                    types::assert_no_compound_remainder(_ecr_rem, target_phrase);
+                    types::assert_no_compound_remainder(ecr_rem, target_phrase);
                     return Some((
                         Effect::DealDamage {
                             amount: qty,
                             target,
                             damage_source: None,
                         },
-                        "",
+                        ecr_rem,
                     ));
                 } else {
                     let (target, remainder) = parse_target(target_phrase);
@@ -9244,6 +9247,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
 
     // CR 608.2k: Check for event-context references before standard target parsing.
     if let Some((target, ecr_rem)) = parse_event_context_ref(after_to) {
+        let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
         return Some((
             Effect::DealDamage {
                 amount: amount.clone(),
@@ -9268,6 +9272,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
     }
 
     let (target, rem) = parse_target(after_to);
+    let (target, rem) = refine_damage_target_remainder(target, rem);
     Some((
         Effect::DealDamage {
             amount,
@@ -10139,6 +10144,7 @@ mod tests {
         DoublePTMode, Duration, FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution,
         ManaProduction, PaymentCost, TypeFilter, ZoneRef,
     };
+    use crate::types::card_type::Supertype;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerCounterKind;
@@ -15001,6 +15007,41 @@ mod tests {
             Some(AbilityCondition::additional_cost_paid_any()),
             "Expected AdditionalCostPaid condition"
         );
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::DealDamage {
+                    target: TargetFilter::ParentTargetController,
+                    ..
+                }
+            ),
+            "Expected damage rider to target parent target's controller, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn parse_nonbasic_land_damage_condition_targets_land_controller() {
+        let def = parse_effect_chain(
+            "Destroy target land. If that land was nonbasic, ~ deals 2 damage to the land's controller.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
+        assert!(matches!(
+            sub.condition,
+            Some(AbilityCondition::TargetMatchesFilter { use_lki: true, .. })
+        ));
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::DealDamage {
+                    target: TargetFilter::ParentTargetController,
+                    ..
+                }
+            ),
+            "Expected damage rider to target land controller, got {:?}",
+            sub.effect
+        );
     }
 
     #[test]
@@ -18971,6 +19012,60 @@ mod tests {
         let (cond, text) = strip_mana_value_conditional("Destroy target creature");
         assert!(cond.is_none());
         assert_eq!(text, "Destroy target creature");
+    }
+
+    #[test]
+    fn strip_target_supertype_conditional_leading_nonbasic_land_uses_lki() {
+        let (cond, text) =
+            strip_target_supertype_conditional("If that land was nonbasic, ~ deals 2 damage.");
+        assert!(cond.is_some(), "should extract nonbasic land condition");
+        assert_eq!(text, "~ deals 2 damage.");
+        match cond.unwrap() {
+            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                assert!(use_lki);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed filter");
+                };
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|f| matches!(f, TypeFilter::Land)));
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::NotSupertype {
+                        value: Supertype::Basic
+                    }
+                )));
+            }
+            other => panic!("expected TargetMatchesFilter, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_target_supertype_conditional_suffix_nonbasic_land_uses_lki() {
+        let (cond, text) =
+            strip_target_supertype_conditional("~ deals 2 damage if that land was nonbasic.");
+        assert!(cond.is_some(), "should extract nonbasic land condition");
+        assert_eq!(text, "~ deals 2 damage");
+        match cond.unwrap() {
+            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                assert!(use_lki);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed filter");
+                };
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|f| matches!(f, TypeFilter::Land)));
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::NotSupertype {
+                        value: Supertype::Basic
+                    }
+                )));
+            }
+            other => panic!("expected TargetMatchesFilter, got: {other:?}"),
+        }
     }
 
     // --- Fatal Push integration test ---

@@ -66,6 +66,10 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                 owner: obj.owner,
                 // CR 400.7: Capture core types for "if it was a creature" patterns.
                 card_types: obj.card_types.core_types.clone(),
+                subtypes: obj.card_types.subtypes.clone(),
+                supertypes: obj.card_types.supertypes.clone(),
+                keywords: obj.keywords.clone(),
+                colors: obj.color.clone(),
                 // CR 400.7: Capture counters for "if it had counters on it" patterns.
                 counters: obj.counters.clone(),
             };

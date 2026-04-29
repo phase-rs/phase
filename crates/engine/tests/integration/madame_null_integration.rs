@@ -195,6 +195,10 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             controller: PlayerId(0),
             owner: PlayerId(0),
             card_types: vec![],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
             counters: HashMap::new(),
         },
     );

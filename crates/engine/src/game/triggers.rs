@@ -2901,6 +2901,10 @@ pub mod tests {
                 controller: PlayerId(0),
                 owner: PlayerId(0),
                 card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
                 counters,
             },
         );
