@@ -859,6 +859,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::PostReplacementSourceController => "PostReplacementSourceController",
         TargetFilter::DefendingPlayer => "DefendingPlayer",
         TargetFilter::HasChosenName => "HasChosenName",
+        TargetFilter::ChosenDamageSource => "ChosenDamageSource",
         TargetFilter::Named { .. } => "Named",
         TargetFilter::Owner => "Owner",
     }

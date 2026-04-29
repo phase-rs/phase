@@ -349,6 +349,16 @@ pub struct BattlefieldEntryRecord {
     pub controller: PlayerId,
 }
 
+/// CR 609.7a: A source of damage chosen while creating a prevention or
+/// replacement effect. The original filter is retained so property-based
+/// choices such as "red source of your choice" recheck source qualities when
+/// damage would be dealt (CR 609.7b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChosenDamageSource {
+    pub source_id: ObjectId,
+    pub source_filter: TargetFilter,
+}
+
 /// CR 120.1: Snapshot of a damage event for "was dealt damage by" queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageRecord {
@@ -1130,6 +1140,13 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
     },
+    /// CR 609.7a: Player must choose a source of damage from currently
+    /// represented legal source objects.
+    DamageSourceChoice {
+        player: PlayerId,
+        source_filter: TargetFilter,
+        options: Vec<ObjectId>,
+    },
     /// Player must choose modes for a modal spell (e.g. "Choose one —").
     ModeChoice {
         player: PlayerId,
@@ -1831,6 +1848,7 @@ impl WaitingFor {
             | WaitingFor::BetweenGamesSideboard { player, .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
             | WaitingFor::NamedChoice { player, .. }
+            | WaitingFor::DamageSourceChoice { player, .. }
             | WaitingFor::ModeChoice { player, .. }
             | WaitingFor::DiscardToHandSize { player, .. }
             | WaitingFor::OptionalCostChoice { player, .. }
@@ -2607,6 +2625,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_named_choice: Option<ChoiceValue>,
 
+    /// CR 609.7a-b: The most recently chosen damage source and its source
+    /// filter. Set by `DamageSourceChoice`, consumed by prevention/replacement
+    /// continuation effects, and then cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_chosen_damage_source: Option<ChosenDamageSource>,
+
     /// All creature subtypes seen across loaded cards. Used by Changeling CDA
     /// to grant every creature type at runtime.
     #[serde(default)]
@@ -2959,6 +2983,7 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_optional_effect: None,
             last_named_choice: None,
+            last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
             card_face_registry: Arc::new(HashMap::new()),

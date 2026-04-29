@@ -545,6 +545,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. } => super::filter::matches_target_filter(
             state,
             object_id,

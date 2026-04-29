@@ -15,8 +15,8 @@ use crate::convert::quantity::convert as convert_quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
     ArtifactType, CardType, CardtypeVariable, CheckHasable, Color, Comparison, CounterType,
-    CreatureType, CreatureTypeVariable, EnchantmentType, LandType, NameFilter, Permanent,
-    Permanents, PlaneswalkerType, Player, Players, SuperType,
+    CreatureType, CreatureTypeVariable, DamageSources, EnchantmentType, LandType, NameFilter,
+    Permanent, Permanents, PlaneswalkerType, Player, Players, SuperType,
 };
 
 /// Translate a `Permanents` filter to an engine `TargetFilter`. Returns
@@ -447,6 +447,72 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
     })
 }
 
+/// CR 609.7 + CR 120.7: Translate mtgish damage-source predicates to the
+/// engine's source-object filter language. These filters describe which source
+/// objects are legal for a damage-source choice or replacement shield.
+pub(crate) fn damage_sources_to_filter(sources: &DamageSources) -> ConvResult<TargetFilter> {
+    Ok(match sources {
+        DamageSources::AnyDamageSource => TargetFilter::Any,
+        DamageSources::And(parts) => {
+            let mut filters = Vec::with_capacity(parts.len());
+            for part in parts {
+                filters.push(damage_sources_to_filter(part)?);
+            }
+            TargetFilter::And { filters }
+        }
+        DamageSources::Or(parts) => {
+            let mut filters = Vec::with_capacity(parts.len());
+            for part in parts {
+                filters.push(damage_sources_to_filter(part)?);
+            }
+            TargetFilter::Or { filters }
+        }
+        DamageSources::IsColor(color) => match concrete_color(color) {
+            Some(color) => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+            ),
+            None if matches!(color, Color::TheChosenColor) => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::IsChosenColor]),
+            ),
+            None => {
+                return Err(ConversionGap::MalformedIdiom {
+                    idiom: "DamageSources/IsColor",
+                    path: String::new(),
+                    detail: format!("non-concrete color: {color:?}"),
+                });
+            }
+        },
+        DamageSources::IsCardtype(ct) => {
+            TargetFilter::Typed(TypedFilter::default().with_type(card_type(ct)))
+        }
+        DamageSources::IsNonCardtype(ct) => TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::default().with_type(card_type(ct)),
+            )),
+        },
+        DamageSources::IsCreatureType(creature_type) => TargetFilter::Typed(
+            TypedFilter::default()
+                .with_type(TypeFilter::Subtype(creature_type_name(creature_type))),
+        ),
+        DamageSources::IsNonCreatureType(creature_type) => TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Subtype(creature_type_name(creature_type))),
+            )),
+        },
+        DamageSources::ControlledByAPlayer(players) => {
+            TargetFilter::Typed(TypedFilter::default().controller(players_to_controller(players)?))
+        }
+        DamageSources::IsNamed(name_filter) => name_filter_to_filter(name_filter)?,
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "TargetFilter",
+                needed_variant: format!("DamageSources::{}", damage_sources_variant_tag(other)),
+            });
+        }
+    })
+}
+
 /// Build a battlefield-scoped TypedFilter carrying a single property.
 /// The most common shape — used by every status predicate.
 fn prop_filter(prop: FilterProp) -> TargetFilter {
@@ -713,6 +779,17 @@ fn variant_tag(p: &Permanents) -> String {
         .ok()
         .and_then(|v| {
             v.get("_Permanents")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn damage_sources_variant_tag(s: &DamageSources) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| {
+            v.get("_DamageSources")
                 .and_then(|t| t.as_str())
                 .map(String::from)
         })

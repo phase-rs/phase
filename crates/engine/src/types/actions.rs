@@ -122,6 +122,10 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// CR 609.7a: Choose a source of damage for a prevention or replacement effect.
+    ChooseDamageSource {
+        source: ObjectId,
+    },
     SelectModes {
         indices: Vec<usize>,
     },
@@ -340,6 +344,8 @@ pub enum GameAction {
     },
     /// CR 605.3b: Answer the `WaitingFor::ChooseManaColor` prompt.
     /// Shape mirrors the prompt variant (`SingleColor` or `Combination`).
+    /// `AnyCombination` prompts submit a `Combination` vector with one entry
+    /// per produced mana unit.
     ChooseManaColor {
         choice: super::game_state::ManaChoice,
     },
@@ -449,6 +455,7 @@ impl GameAction {
             GameAction::PlayFaceDown { object_id, .. } => Some(*object_id),
             GameAction::TurnFaceUp { object_id } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
+            GameAction::ChooseDamageSource { source } => Some(*source),
             GameAction::TapForConvoke { object_id, .. } => Some(*object_id),
             GameAction::ChooseLegend { keep } => Some(*keep),
             GameAction::CastPreparedCopy { source } => Some(*source),

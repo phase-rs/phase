@@ -1813,6 +1813,10 @@ pub enum TargetFilter {
     /// Matches objects whose name equals the source's ChosenAttribute::CardName.
     /// Used for "card with the chosen name" patterns.
     HasChosenName,
+    /// CR 609.7a: Matches the object stored as the source's chosen damage source.
+    /// Resolution-time prevention effects should resolve this to `SpecificObject`
+    /// when the shield is created so global shields do not depend on a live source.
+    ChosenDamageSource,
     /// Matches objects with a specific hardcoded name.
     /// Used for "card named [literal]" patterns.
     Named {
@@ -4031,6 +4035,14 @@ pub enum Effect {
         #[serde(default)]
         persist: bool,
     },
+    /// CR 609.7a + CR 120.7: Choose a specific source of damage matching a
+    /// source-object filter. This is object/source selection, not a named
+    /// string choice, because the chosen source is an ObjectId and prevention
+    /// shields need to recheck the source's properties when damage would be dealt.
+    ChooseDamageSource {
+        #[serde(default = "default_target_filter_any")]
+        source_filter: TargetFilter,
+    },
     /// CR 701.60a: Suspect target creature — it gains menace and "can't block."
     Suspect {
         #[serde(default = "default_target_filter_any")]
@@ -4935,6 +4947,7 @@ impl Effect {
             | Effect::Cleanup { .. }
             | Effect::RevealTop { .. }
             | Effect::Choose { .. }
+            | Effect::ChooseDamageSource { .. }
             | Effect::SolveCase
             | Effect::SetClassLevel { .. }
             | Effect::CreateDelayedTrigger { .. }
@@ -5074,6 +5087,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ExileTop { .. } => "ExileTop",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
+        Effect::ChooseDamageSource { .. } => "ChooseDamageSource",
         Effect::Suspect { .. } => "Suspect",
         Effect::Connive { .. } => "Connive",
         Effect::PhaseOut { .. } => "PhaseOut",
@@ -5232,6 +5246,7 @@ pub enum EffectKind {
     ExileTop,
     TargetOnly,
     Choose,
+    ChooseDamageSource,
     Suspect,
     Connive,
     PhaseOut,
@@ -5400,6 +5415,7 @@ impl From<&Effect> for EffectKind {
             Effect::ExileTop { .. } => EffectKind::ExileTop,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
+            Effect::ChooseDamageSource { .. } => EffectKind::ChooseDamageSource,
             Effect::Suspect { .. } => EffectKind::Suspect,
             Effect::Connive { .. } => EffectKind::Connive,
             Effect::PhaseOut { .. } => EffectKind::PhaseOut,

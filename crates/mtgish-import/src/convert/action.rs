@@ -3282,6 +3282,13 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 persist: true,
             }
         }
+        // CR 609.7a + CR 120.7: choose a specific source of damage. The
+        // `DamageSources` payload constrains the legal option set. Downstream
+        // `SingleDamageSource::TheChosenDamageSource` replacement events read
+        // the selected ObjectId through `TargetFilter::ChosenDamageSource`.
+        Action::ChooseADamageSource(sources) => Effect::ChooseDamageSource {
+            source_filter: filter_mod::damage_sources_to_filter(sources)?,
+        },
 
         // CR 608.2d strict-fails — each gets its own refined tag so the
         // report attributes the missing engine prerequisite to the exact
@@ -5916,10 +5923,14 @@ mod tests {
     use crate::convert::build_ability_from_actions;
     use crate::schema::types::{
         CardInGraveyard, Cards, Color, Comparison, Condition, Cost, CounterType, CreatableToken,
-        ManaSymbol, Permanent, Permanents, ReplacementActionWouldEnter, TokenCopyEffects,
-        TokenFlag,
+        DamageSources, ManaSymbol, Permanent, Permanents, ReplacementActionWouldEnter,
+        TokenCopyEffects, TokenFlag,
     };
-    use engine::types::ability::{AbilityKind, Comparator, Effect, QuantityRef, TypeFilter};
+    use engine::types::ability::{
+        AbilityKind, Comparator, Effect, FilterProp, QuantityRef, TargetFilter, TypeFilter,
+        TypedFilter,
+    };
+    use engine::types::mana::ManaColor;
 
     #[test]
     fn player_may_cost_controller_of_target_spell_converts_to_dynamic_player_scope() {
@@ -5942,6 +5953,25 @@ mod tests {
         assert_eq!(*payer, TargetFilter::ParentTargetController);
         let sub = ability.sub_ability.as_ref().expect("expected paid body");
         assert!(matches!(sub.effect.as_ref(), Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn choose_damage_source_lowers_to_dedicated_source_choice() {
+        let effect = convert(&Action::ChooseADamageSource(DamageSources::IsColor(
+            Color::Red,
+        )))
+        .unwrap();
+
+        assert_eq!(
+            effect,
+            Effect::ChooseDamageSource {
+                source_filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::HasColor {
+                        color: ManaColor::Red,
+                    }
+                ]),),
+            }
+        );
     }
 
     #[test]

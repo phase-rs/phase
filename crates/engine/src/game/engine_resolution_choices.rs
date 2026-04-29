@@ -4,7 +4,9 @@ use crate::types::ability::{
 };
 use crate::types::actions::{GameAction, LearnOption};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ActionResult, GameState, PendingContinuation, WaitingFor};
+use crate::types::game_state::{
+    ActionResult, ChosenDamageSource, GameState, PendingContinuation, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -41,6 +43,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DiscardChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::NamedChoice { .. }
+            | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseDungeon { .. }
             | WaitingFor::ChooseDungeonRoom { .. }
@@ -1107,6 +1110,29 @@ pub(super) fn handle_resolution_choice(
                 effects::drain_pending_continuation(state, events);
             }
             state.last_named_choice = None;
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::DamageSourceChoice {
+                player,
+                source_filter,
+                options,
+            },
+            GameAction::ChooseDamageSource { source },
+        ) => {
+            if !options.contains(&source) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid damage source choice".to_string(),
+                ));
+            }
+
+            state.last_chosen_damage_source = Some(ChosenDamageSource {
+                source_id: source,
+                source_filter,
+            });
+            set_priority(state, player);
+            effects::drain_pending_continuation(state, events);
+            state.last_chosen_damage_source = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (

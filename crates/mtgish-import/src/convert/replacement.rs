@@ -16,7 +16,8 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::convert::filter::{
-    artifact_type_name, convert as convert_permanents, convert_permanent, land_type_name,
+    artifact_type_name, convert as convert_permanents, convert_permanent, damage_sources_to_filter,
+    land_type_name,
 };
 use crate::convert::mana;
 use crate::convert::quantity;
@@ -30,7 +31,7 @@ use crate::schema::types::{
     ReplacableEventWouldPutIntoGraveyard, ReplacementActionWouldDealDamage,
     ReplacementActionWouldDraw, ReplacementActionWouldEnter, ReplacementActionWouldEnterCost,
     ReplacementActionWouldGainLife, ReplacementActionWouldPutCounters,
-    ReplacementActionWouldPutIntoGraveyard, SingleDamageRecipient,
+    ReplacementActionWouldPutIntoGraveyard, SingleDamageRecipient, SingleDamageSource,
 };
 
 /// CR 702.138: `Rule::AsPermanentEscapes(target, actions)` — Theros
@@ -260,18 +261,22 @@ fn event_to_damage_filters(
             target_filter: None,
             combat_scope: None,
         },
-        // Source-typed damage events. We don't yet decompose `DamageSources`
-        // into a `TargetFilter`; emit unfiltered to keep the structural
-        // shape valid (the engine will apply broadly until source filtering
-        // lands).
-        E::DamageWouldBeDealtByASourceToRecipient(_src, recipient) => DamageEventFilters {
-            source_filter: None,
+        // Source-typed damage events narrow the replacement's damage source.
+        E::DamageWouldBeDealtByASource(src) => DamageEventFilters {
+            source_filter: Some(damage_sources_to_filter(src)?),
+            target_filter: None,
+            combat_scope: None,
+        },
+        E::DamageWouldBeDealtByASourceToRecipient(src, recipient) => DamageEventFilters {
+            source_filter: Some(damage_sources_to_filter(src)?),
             target_filter: recipient_to_damage_target_filter(recipient),
             combat_scope: None,
         },
-        E::DamageWouldBeDealtByASourceToARecipient(_src, _recipients) => {
-            DamageEventFilters::default()
-        }
+        E::DamageWouldBeDealtByASourceToARecipient(src, _recipients) => DamageEventFilters {
+            source_filter: Some(damage_sources_to_filter(src)?),
+            target_filter: None,
+            combat_scope: None,
+        },
         E::DamageWouldBeDealtByAPermanentToRecipient(_perm, recipient) => DamageEventFilters {
             source_filter: None,
             target_filter: recipient_to_damage_target_filter(recipient),
@@ -284,6 +289,16 @@ fn event_to_damage_filters(
         E::DamageWouldBeDealtByAPermanentToARecipient(_perms, _recipients) => {
             DamageEventFilters::default()
         }
+        E::DamageWouldBeDealtBySource(src) => DamageEventFilters {
+            source_filter: Some(single_damage_source_to_filter(src)),
+            target_filter: None,
+            combat_scope: None,
+        },
+        E::DamageWouldBeDealtBySourceToRecipient(src, recipient) => DamageEventFilters {
+            source_filter: Some(single_damage_source_to_filter(src)),
+            target_filter: recipient_to_damage_target_filter(recipient),
+            combat_scope: None,
+        },
         // CR 614.2 + CR 510.1a: Noncombat damage to a multi-recipient
         // list. Same handling as the single-recipient variant but with
         // an unfiltered target slot.
@@ -309,6 +324,13 @@ fn event_to_damage_filters(
             target_filter: recipient_to_damage_target_filter(recipient),
             combat_scope: Some(CombatDamageScope::NoncombatOnly),
         },
+        E::NoncombatDamageWouldBeDealtByASourceToARecipient(src, _recipients) => {
+            DamageEventFilters {
+                source_filter: Some(damage_sources_to_filter(src)?),
+                target_filter: None,
+                combat_scope: Some(CombatDamageScope::NoncombatOnly),
+            }
+        }
         other => {
             return Err(ConversionGap::UnknownVariant {
                 path: String::new(),
@@ -339,6 +361,12 @@ fn recipient_to_damage_target_filter(r: &SingleDamageRecipient) -> Option<Damage
         // closest engine analogue for "to a permanent / creature").
         SingleDamageRecipient::Permanent(_) => Some(DamageTargetFilter::CreatureOnly),
         _ => None,
+    }
+}
+
+fn single_damage_source_to_filter(source: &SingleDamageSource) -> TargetFilter {
+    match source {
+        SingleDamageSource::TheChosenDamageSource => TargetFilter::ChosenDamageSource,
     }
 }
 
@@ -2618,6 +2646,17 @@ fn damage_event_to_prevent_scope(
         | E::DamageWouldBeDealtByAPermanentToRecipient(perms, _) => {
             (PreventionScope::AllDamage, Some(convert_permanents(perms)?))
         }
+        E::DamageWouldBeDealtByASource(sources)
+        | E::DamageWouldBeDealtByASourceToARecipient(sources, _)
+        | E::DamageWouldBeDealtByASourceToRecipient(sources, _) => (
+            PreventionScope::AllDamage,
+            Some(damage_sources_to_filter(sources)?),
+        ),
+        E::DamageWouldBeDealtBySource(source)
+        | E::DamageWouldBeDealtBySourceToRecipient(source, _) => (
+            PreventionScope::AllDamage,
+            Some(single_damage_source_to_filter(source)),
+        ),
         // CR 614.x: `Or` over a list of inner events — the engine has no
         // OR slot on `Effect::PreventDamage`. Strict-fail (rather than
         // expanding into multiple effects, which only the action-list
@@ -2676,12 +2715,12 @@ fn future_damage_event_to_prevent_params(
         | E::NextAmountOfDamageThatWouldBeDealtThisTurnToRecipient(g, _) => {
             (amount_from(g)?, PreventionScope::AllDamage, None)
         }
-        E::NextAmountOfDamageThatWouldBeDealtThisTurnBySourceToARecipient(g, _src, _)
-        | E::NextAmountOfDamageThatWouldBeDealtThisTurnBySourceToRecipient(g, _src, _) => {
-            // CR 614.1a: typed-source filter not yet decomposed (no
-            // `DamageSources` → `TargetFilter` bridge); leave unfiltered.
-            (amount_from(g)?, PreventionScope::AllDamage, None)
-        }
+        E::NextAmountOfDamageThatWouldBeDealtThisTurnBySourceToARecipient(g, src, _)
+        | E::NextAmountOfDamageThatWouldBeDealtThisTurnBySourceToRecipient(g, src, _) => (
+            amount_from(g)?,
+            PreventionScope::AllDamage,
+            Some(single_damage_source_to_filter(src)),
+        ),
         E::NextAmountOfDamageThatWouldBeDealtThisTurnBySpellToRecipient(g, _spell, _) => {
             // CR 614.1a: spell-source filter not yet decomposed; leave
             // unfiltered. Source narrowing is a future extension.
@@ -2716,16 +2755,18 @@ fn future_damage_event_to_prevent_params(
             PreventionScope::AllDamage,
             None,
         ),
-        // Source-by-spell / source-by-anonymous-source — engine has no
-        // typed bridge from `Spells`/`SingleDamageSource` to a
-        // `TargetFilter` yet; leave unfiltered.
-        E::NextTimeDamageWouldBeDealtThisTurnByASpellToRecipient(_, _)
-        | E::NextTimeDamageWouldBeDealtThisTurnBySource(_)
-        | E::NextTimeDamageWouldBeDealtThisTurnBySourceToARecipient(_, _)
-        | E::NextTimeDamageWouldBeDealtThisTurnBySourceToRecipient(_, _) => (
+        // Source-by-spell has no `Spells` → `TargetFilter` bridge yet; leave unfiltered.
+        E::NextTimeDamageWouldBeDealtThisTurnByASpellToRecipient(_, _) => (
             PreventionAmount::Next(u32::MAX),
             PreventionScope::AllDamage,
             None,
+        ),
+        E::NextTimeDamageWouldBeDealtThisTurnBySource(src)
+        | E::NextTimeDamageWouldBeDealtThisTurnBySourceToARecipient(src, _)
+        | E::NextTimeDamageWouldBeDealtThisTurnBySourceToRecipient(src, _) => (
+            PreventionAmount::Next(u32::MAX),
+            PreventionScope::AllDamage,
+            Some(single_damage_source_to_filter(src)),
         ),
         E::NextDistributedDamageThisTurn => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
@@ -2758,8 +2799,9 @@ mod tests {
 
     use super::*;
     use crate::schema::types::{
-        CardType, Condition, CopyEffect, CopyEffects, GameNumber, Permanent, Permanents,
-        ReplacementActionWouldEnter, Rule, SuperType,
+        CardType, Condition, CopyEffect, CopyEffects, FutureReplacableEventWouldDealDamage,
+        GameNumber, Permanent, Permanents, ReplacementActionWouldDealDamage,
+        ReplacementActionWouldEnter, Rule, SingleDamageSource, SuperType,
     };
 
     #[test]
@@ -2790,6 +2832,26 @@ mod tests {
                 decline: Some(decline),
             } if matches!(&*decline.effect, Effect::Tap { target } if *target == TargetFilter::SelfRef)
         ));
+    }
+
+    #[test]
+    fn future_prevent_damage_from_chosen_source_uses_dynamic_source_filter() {
+        let effect = convert_create_future_replace_would_deal_damage(
+            &FutureReplacableEventWouldDealDamage::NextTimeDamageWouldBeDealtThisTurnBySource(
+                Box::new(SingleDamageSource::TheChosenDamageSource),
+            ),
+            &[ReplacementActionWouldDealDamage::PreventThatDamage],
+        )
+        .unwrap();
+
+        let Effect::PreventDamage {
+            damage_source_filter,
+            ..
+        } = effect
+        else {
+            panic!("expected PreventDamage, got {effect:?}");
+        };
+        assert_eq!(damage_source_filter, Some(TargetFilter::ChosenDamageSource));
     }
 
     #[test]

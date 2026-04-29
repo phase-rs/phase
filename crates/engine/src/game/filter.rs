@@ -543,6 +543,12 @@ fn filter_inner_for_object(
             });
             chosen_name.is_some_and(|name| obj.name == name)
         }
+        // CR 609.7a: "the chosen source" — match the ObjectId selected by
+        // the prior damage-source choice while its continuation resolves.
+        TargetFilter::ChosenDamageSource => state
+            .last_chosen_damage_source
+            .as_ref()
+            .is_some_and(|choice| choice.source_id == object_id),
         // "card named [literal]" — static name match.
         TargetFilter::Named { name } => obj.name == *name,
         // CR 400.3: Owner is a player-resolving filter (resolves to the owner of
@@ -686,6 +692,7 @@ fn zone_change_filter_inner(
             });
             chosen_name.is_some_and(|name| record.name == name)
         }
+        TargetFilter::ChosenDamageSource => false,
         TargetFilter::Named { name } => record.name == *name,
 
         // CR 603.10a + CR 603.6e + CR 702.6: `AttachedTo` against a zone-change
@@ -921,6 +928,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
         | TargetFilter::Owner => false,
     }
@@ -1069,6 +1077,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
         | TargetFilter::Owner => false,
     }

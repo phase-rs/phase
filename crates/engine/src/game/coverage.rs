@@ -245,6 +245,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         }
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
         TargetFilter::HasChosenName => "card with the chosen name".into(),
+        TargetFilter::ChosenDamageSource => "chosen damage source".into(),
         TargetFilter::Named { name } => format!("card named {name}"),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
         TargetFilter::Or { filters } => filters
@@ -1364,6 +1365,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if *persist {
                 d.push(("persist".into(), "yes".into()));
             }
+        }
+        Effect::ChooseDamageSource { source_filter } => {
+            d.push(("source".into(), fmt_target(source_filter)));
         }
         Effect::Mana { produced, .. } => {
             d.push(("mana".into(), fmt_mana_production(produced)));

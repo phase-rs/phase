@@ -126,6 +126,10 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::NamedChoice { options, .. }, GameAction::ChooseOption { choice }) => {
             !options.is_empty() && !options.iter().any(|option| option == choice)
         }
+        (
+            WaitingFor::DamageSourceChoice { options, .. },
+            GameAction::ChooseDamageSource { source },
+        ) => !options.contains(source),
         (WaitingFor::LearnChoice { hand_cards, .. }, GameAction::LearnDecision { choice }) => {
             match choice {
                 crate::types::actions::LearnOption::Rummage { card_id } => {

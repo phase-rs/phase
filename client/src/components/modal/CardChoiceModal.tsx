@@ -36,6 +36,7 @@ type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type CrewVehicle = Extract<WaitingFor, { type: "CrewVehicle" }>;
 type StationTarget = Extract<WaitingFor, { type: "StationTarget" }>;
 type SaddleMount = Extract<WaitingFor, { type: "SaddleMount" }>;
+type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 const CHOICE_CARD_IMAGE_CLASS = "";
 const SCRY_CARD_IMAGE_CLASS = "";
 
@@ -116,6 +117,9 @@ export function CardChoiceModal() {
     case "NamedChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
+    case "DamageSourceChoice":
+      if (!canActForWaitingState) return null;
+      return <DamageSourceModal data={waitingFor.data} />;
     case "VoteChoice":
       if (!canActForWaitingState) return null;
       return <VoteChoiceModal data={waitingFor.data} />;
@@ -1748,6 +1752,50 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
               whileHover={{ scale: 1.05, y: -6 }}
               onClick={() =>
                 dispatch({ type: "ChooseLegend", data: { keep: id } })
+              }
+              {...hoverProps(id)}
+            >
+              <CardImage
+                cardName={obj.name}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Damage Source Choice Modal ─────────────────────────────────────────────
+
+function DamageSourceModal({ data }: { data: DamageSourceChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title="Damage Source"
+      subtitle="Choose a source"
+    >
+      <ScrollableCardStrip>
+        {data.options.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          return (
+            <motion.button
+              key={id}
+              className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: 0.85, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() =>
+                dispatch({ type: "ChooseDamageSource", data: { source: id } })
               }
               {...hoverProps(id)}
             >

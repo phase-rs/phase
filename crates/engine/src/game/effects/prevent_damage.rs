@@ -17,6 +17,33 @@ fn resolve_source_filter(
     source_id: ObjectId,
 ) -> TargetFilter {
     match filter {
+        TargetFilter::ChosenDamageSource => state
+            .last_chosen_damage_source
+            .as_ref()
+            .map(|choice| TargetFilter::And {
+                filters: vec![
+                    TargetFilter::SpecificObject {
+                        id: choice.source_id,
+                    },
+                    resolve_source_filter(&choice.source_filter, state, source_id),
+                ],
+            })
+            .unwrap_or(TargetFilter::None),
+        TargetFilter::Not { filter: inner } => TargetFilter::Not {
+            filter: Box::new(resolve_source_filter(inner, state, source_id)),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|inner| resolve_source_filter(inner, state, source_id))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|inner| resolve_source_filter(inner, state, source_id))
+                .collect(),
+        },
         TargetFilter::Typed(tf) => {
             let has_chosen_ref = tf
                 .properties
@@ -153,8 +180,10 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{PreventionAmount, ShieldKind};
+    use crate::types::ability::{PreventionAmount, ShieldKind, TypedFilter};
+    use crate::types::game_state::ChosenDamageSource;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -210,6 +239,58 @@ mod tests {
             ReplacementEvent::DamageDone
         );
         assert!(!obj.replacement_definitions[0].is_consumed);
+    }
+
+    #[test]
+    fn chosen_damage_source_resolves_to_specific_source_and_rechecked_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Prevention Spell".to_string(),
+            Zone::Stack,
+        );
+        let chosen = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Red Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&chosen).unwrap().color = vec![ManaColor::Red];
+        let source_filter =
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }]),
+            );
+        state.last_chosen_damage_source = Some(ChosenDamageSource {
+            source_id: chosen,
+            source_filter: source_filter.clone(),
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].damage_source_filter,
+            Some(TargetFilter::And {
+                filters: vec![TargetFilter::SpecificObject { id: chosen }, source_filter],
+            })
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub mod change_zone;
 pub mod choose;
 pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
+pub mod choose_damage_source;
 pub mod choose_from_zone;
 pub mod clash;
 pub mod cleanup;
@@ -351,6 +352,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::NamedChoice { .. }
+            | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::MultiTargetSelection { .. }
             | WaitingFor::OptionalEffectChoice { .. }
             | WaitingFor::OpponentMayChoice { .. }
@@ -537,6 +539,7 @@ pub fn resolve_effect(
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
+        Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::Connive { .. } => connive::resolve(state, ability, events),
         Effect::PhaseOut { .. } => phase_out::resolve(state, ability, events),
