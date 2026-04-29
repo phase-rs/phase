@@ -95,6 +95,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
             // while it remains in exile. Once it changes zones, the new object
             // is no longer a foretold card.
             obj_mut.foretold = false;
+            obj_mut.face_down = false;
             obj_mut.casting_permissions.retain(|p| {
                 !matches!(
                     p,
@@ -110,6 +111,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                         // permission so a later return-to-exile doesn't
                         // inherit a stale turn_plotted value.
                         | crate::types::ability::CastingPermission::Plotted { .. }
+                        | crate::types::ability::CastingPermission::Foretold { .. }
                 )
             });
             state.exile_links.retain(|link| link.exiled_id != object_id);

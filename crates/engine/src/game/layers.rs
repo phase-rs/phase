@@ -88,7 +88,10 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             | CastingPermission::WarpExile { .. }
             // CR 702.170d: Plotted persists across turns (that is the whole
             // point of Plot — cast "on a later turn"); never pruned at cleanup.
-            | CastingPermission::Plotted { .. } => true,
+            | CastingPermission::Plotted { .. }
+            // CR 702.143a: Foretold permissions likewise persist while the
+            // card remains in exile so it can be cast on a later turn.
+            | CastingPermission::Foretold { .. } => true,
         });
     }
 }
@@ -115,7 +118,8 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
             | CastingPermission::WarpExile { .. }
             // CR 702.170d: Plotted persists across turns; never pruned at the
             // untap step. Retention is zone-scoped (see zones::apply_zone_exit_cleanup).
-            | CastingPermission::Plotted { .. } => true,
+            | CastingPermission::Plotted { .. }
+            | CastingPermission::Foretold { .. } => true,
         });
     }
 }

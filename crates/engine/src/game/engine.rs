@@ -968,6 +968,7 @@ fn apply_action(
             GameAction::PassPriority
             | GameAction::PlayLand { .. }
             | GameAction::CastSpell { .. }
+            | GameAction::Foretell { .. }
             | GameAction::CastSpellAsSneak { .. }
             | GameAction::CastSpellForFree { .. }
             | GameAction::CastSpellAsMiracle { .. }
@@ -1036,6 +1037,14 @@ fn apply_action(
                 return Err(EngineError::NotYourPriority);
             }
             casting::handle_cast_spell(state, *player, object_id, card_id, &mut events)?
+        }
+        (WaitingFor::Priority { player }, GameAction::Foretell { object_id, card_id }) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            casting::handle_foretell(state, *player, object_id, card_id, &mut events)?
         }
         // CR 602.1: Activated abilities have a cost and an effect, written as "[Cost]: [Effect.]"
         (

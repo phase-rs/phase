@@ -85,7 +85,8 @@ pub enum ManaPip {
 /// may be spent on a given spell.
 #[derive(Debug, Clone, Default)]
 pub struct SpellMeta {
-    /// Core type names (e.g., "Creature", "Instant") — case-insensitive matching.
+    /// Supertype and core type names (e.g., "Legendary", "Creature", "Instant")
+    /// used by type-word spend restrictions.
     pub types: Vec<String>,
     /// Subtypes (e.g., "Elf", "Goblin") — case-insensitive matching.
     pub subtypes: Vec<String>,
@@ -968,8 +969,18 @@ mod tests {
             keyword_kinds: vec![],
             cast_from_zone: None,
         };
+        let legendary_spell = SpellMeta {
+            types: vec!["Legendary".to_string(), "Creature".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
         assert!(restriction.allows_spell(&creature_spell));
         assert!(!restriction.allows_spell(&instant_spell));
+
+        let legendary_restriction = ManaRestriction::OnlyForSpellType("Legendary".to_string());
+        assert!(legendary_restriction.allows_spell(&legendary_spell));
+        assert!(!legendary_restriction.allows_spell(&creature_spell));
     }
 
     #[test]

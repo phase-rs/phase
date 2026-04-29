@@ -7638,9 +7638,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
             target: target.clone(),
             enters_attacking: *enters_attacking,
             tapped: *tapped,
-            count: QuantityExpr::Fixed {
-                value: count as i32,
-            },
+            count: count.clone(),
             extra_keywords: extra_keywords.clone(),
             additional_modifications: additional_modifications.clone(),
         }),
@@ -7667,9 +7665,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
             colors: colors.clone(),
             keywords: keywords.clone(),
             tapped: *tapped,
-            count: QuantityExpr::Fixed {
-                value: count as i32,
-            },
+            count: count.clone(),
             owner: owner.clone(),
             attach_to: attach_to.clone(),
             enters_attacking: *enters_attacking,
@@ -7687,7 +7683,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
 /// Match an `Unimplemented` effect whose description is
 /// "create <N> of those tokens" (optionally with a trailing modifier like
 /// "that are tapped and attacking" or "instead"). Returns the parsed count.
-fn match_create_of_those_tokens(effect: &Effect) -> Option<u32> {
+fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
     let Effect::Unimplemented { name, description } = effect else {
         return None;
     };
@@ -7696,13 +7692,35 @@ fn match_create_of_those_tokens(effect: &Effect) -> Option<u32> {
     }
     let text = description.as_deref()?;
     let lower = text.to_lowercase();
-    let rest = lower.strip_prefix("create ")?;
-    let (count, after) = crate::parser::oracle_util::parse_number(rest)?;
+    let (_, rest) = nom_on_lower(text, &lower, |i| value((), tag("create ")).parse(i))?;
+    let rest_lower = rest.to_lowercase();
+    let (count, after) = if let Some((_, after)) =
+        nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
+    {
+        (
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            after,
+        )
+    } else {
+        let (count, after) = crate::parser::oracle_util::parse_number(rest)?;
+        (
+            QuantityExpr::Fixed {
+                value: count as i32,
+            },
+            after,
+        )
+    };
     let after = after.trim_start();
-    // Accept "of those tokens" with optional trailing modifier.
-    let tail = after.strip_prefix("of those tokens")?;
+    let after_lower = after.to_lowercase();
+    let (_, tail) = nom_on_lower(after, &after_lower, |i| {
+        value((), tag("of those tokens")).parse(i)
+    })?;
     // Accept end, or a comma/whitespace-prefixed modifier.
-    if tail.is_empty() || tail.starts_with(' ') || tail.starts_with(',') || tail.starts_with('.') {
+    if tail.is_empty() || matches!(tail.chars().next(), Some(' ' | ',' | '.')) {
         Some(count)
     } else {
         None
@@ -15656,6 +15674,42 @@ mod tests {
             })
         );
         assert_eq!(text, "those tokens enter tapped and attacking");
+    }
+
+    #[test]
+    fn foretold_instead_rewrites_those_tokens_with_x_count() {
+        let def = parse_effect_chain(
+            "Create a 4/4 white Angel Warrior creature token with flying and vigilance. If this spell was foretold, create X of those tokens instead.",
+            AbilityKind::Spell,
+        );
+        let Effect::Token {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected base token effect, got {:?}", def.effect);
+        };
+
+        let sub = def.sub_ability.as_ref().expect("expected instead sub");
+        assert!(matches!(
+            sub.condition,
+            Some(AbilityCondition::ConditionInstead { ref inner })
+                if matches!(
+                    &**inner,
+                    AbilityCondition::CastVariantPaid {
+                        variant: crate::types::ability::CastVariantPaid::Foretell
+                    }
+                )
+        ));
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Token {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name }
+                },
+                ..
+            } if name == "X"
+        ));
     }
 
     #[test]

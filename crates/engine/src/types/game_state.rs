@@ -2163,6 +2163,13 @@ pub enum CastingVariant {
     /// strictly greater than `turn_plotted`. Zeroes the mana cost and routes
     /// through the normal cast pipeline; no special resolution-time behavior.
     Plot,
+    /// CR 702.143a-c: Cast from exile via a foretold card's foretell cost on a
+    /// turn after it was foretold. Detected at cast preparation when the
+    /// exile-zone source has a `CastingPermission::Foretold { .. }`. The
+    /// permission supplies the alternative mana cost; stack finalization tags
+    /// the source with `CastVariantPaid::Foretell` so "if this spell was
+    /// foretold" clauses can evaluate while the spell resolves.
+    Foretell,
     /// CR 702.96a-c: Cast from hand via Overload's alternative cost. The
     /// printed mana cost is replaced by `Keyword::Overload(cost)` at cast
     /// preparation (mirrors `Evoke`/`Warp`). Per CR 702.96b, every "target"

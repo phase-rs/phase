@@ -1599,6 +1599,15 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         }
     }
 
+    if tag::<_, _, VerboseError<&str>>("this spell was foretold")
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some(AbilityCondition::CastVariantPaid {
+            variant: CastVariantPaid::Foretell,
+        });
+    }
+
     // CR 400.7 + CR 608.2c: "a[n] [type] was [verb]'d this way" — references the
     // LKI of the parent target (the object acted on by the preceding effect).
     // Shredder's Technique: "If an enchantment was destroyed this way, you lose 2 life."

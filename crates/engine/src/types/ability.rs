@@ -1026,7 +1026,7 @@ pub enum CastingPermission {
     /// CR 715.5: After Adventure resolves to exile, creature face castable from exile.
     AdventureCreature,
     /// Card may be cast from exile for the specified cost by its owner.
-    /// Building block for Airbending, Foretell, Suspend, and similar "cast from exile" mechanics.
+    /// Building block for Airbending, Suspend, and similar "cast from exile" mechanics.
     /// `cast_transformed` causes the spell to resolve to its back face (CR 712.14a); used
     /// by Siege victory triggers (CR 310.11b: "cast it transformed without paying its mana cost").
     ExileWithAltCost {
@@ -1090,6 +1090,12 @@ pub enum CastingPermission {
     /// "later turn" check. Persists for as long as the card remains in exile
     /// (cleared by `zones::apply_zone_exit_cleanup` when the card leaves exile).
     Plotted { turn_plotted: u32 },
+    /// CR 702.143a-d: Foretell — card was exiled from its owner's hand by the
+    /// foretell special action, became a foretold card in exile, and may be
+    /// cast on a later turn for its foretell cost. `turn_foretold` is stamped
+    /// when the special action resolves; the permission is scoped to the exile
+    /// zone and cleared when the object leaves exile.
+    Foretold { cost: ManaCost, turn_foretold: u32 },
 }
 
 /// CR 611.2a + CR 108.3: Identifies which player a `CastingPermission` is granted
@@ -2875,13 +2881,6 @@ pub enum PaymentCost {
     Energy {
         amount: QuantityExpr,
     },
-    /// CR 118.1 + CR 118.12: Non-resource cost instructions paid while a spell or
-    /// ability resolves. Reuses the engine's existing `AbilityCost` taxonomy so
-    /// resolution-time costs such as "discard a card" do not grow a parallel
-    /// payment hierarchy.
-    AbilityCost {
-        cost: AbilityCost,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -2941,6 +2940,9 @@ pub enum CastVariantPaid {
     /// escaped" intervening-if on Phlage, Titan of Fire's Fury and any future
     /// escape-gated ETB trigger.
     Escape,
+    /// CR 702.143c: The spell or permanent was a foretold card before it was
+    /// cast. Read by "if this spell was foretold" instead/condition clauses.
+    Foretell,
 }
 
 impl From<NinjutsuVariant> for CastVariantPaid {

@@ -1621,6 +1621,14 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // (`FilterProp::InZone { Stack }`), and on-resolution bookkeeping all see
     // the spell as living on the stack.
     super::zones::move_to_zone(state, object_id, Zone::Stack, events);
+    if casting_variant == CastingVariant::Foretell {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.cast_variant_paid = Some((
+                crate::types::ability::CastVariantPaid::Foretell,
+                state.turn_number,
+            ));
+        }
+    }
 
     // CR 601.2i: Update the existing stack entry (pushed at announcement) with
     // the finalized ability and the actual mana spent. The entry must still be

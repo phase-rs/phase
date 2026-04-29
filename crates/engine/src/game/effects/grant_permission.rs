@@ -110,6 +110,10 @@ pub fn resolve(
             if let CastingPermission::Plotted { turn_plotted } = &mut granted {
                 *turn_plotted = state.turn_number;
             }
+            if let CastingPermission::Foretold { turn_foretold, .. } = &mut granted {
+                *turn_foretold = state.turn_number;
+                obj.foretold = true;
+            }
             obj.casting_permissions.push(granted);
         }
     }

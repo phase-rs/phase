@@ -1,7 +1,7 @@
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode, ChoiceType,
-    ContinuousModification, Duration, Effect, GameRestriction, QuantityExpr, ResolvedAbility,
-    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode, CastingPermission,
+    ChoiceType, ContinuousModification, Duration, Effect, GameRestriction, QuantityExpr,
+    ResolvedAbility, RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
@@ -35,6 +35,8 @@ use super::restrictions;
 use super::speed::{effective_speed, set_speed};
 use super::stack;
 use super::targeting;
+
+const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
 
 pub(crate) fn variable_speed_payment_range(cost: &AbilityCost, max_speed: u8) -> Option<(u8, u8)> {
     match cost {
@@ -361,6 +363,90 @@ fn has_aftermath_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Aftermath)
 }
 
+fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
+    obj.keywords.iter().find_map(|keyword| match keyword {
+        Keyword::Foretell(cost) => Some(cost.clone()),
+        _ => None,
+    })
+}
+
+fn can_pay_special_action_cost_after_auto_tap(
+    state: &GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+) -> bool {
+    let mut simulated = state.clone();
+    pay_unless_cost(&mut simulated, player, cost, &mut Vec::new()).is_ok()
+}
+
+/// CR 702.143a-b: A player may foretell a card from hand any time they have
+/// priority during their turn by paying {2}. This is a special action and does
+/// not use the stack.
+pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+    if state.active_player != player {
+        return false;
+    }
+
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if obj.owner != player || obj.zone != Zone::Hand || foretell_cost(obj).is_none() {
+        return false;
+    }
+
+    let cost = ManaCost::generic(FORETELL_SPECIAL_ACTION_COST);
+    can_pay_special_action_cost_after_auto_tap(state, player, &cost)
+}
+
+/// CR 702.143a-b: Pay {2}, exile the hand card, mark it foretold in exile, and
+/// grant the later-turn foretell-cost casting permission.
+pub fn handle_foretell(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if state.active_player != player {
+        return Err(EngineError::ActionNotAllowed(
+            "Foretell is legal only during your turn".to_string(),
+        ));
+    }
+
+    let foretell_cost = {
+        let obj = state
+            .objects
+            .get(&object_id)
+            .ok_or_else(|| EngineError::InvalidAction("Card not found".to_string()))?;
+        if obj.card_id != card_id || obj.owner != player || obj.zone != Zone::Hand {
+            return Err(EngineError::InvalidAction(
+                "Card is not in your hand".to_string(),
+            ));
+        }
+        foretell_cost(obj).ok_or_else(|| {
+            EngineError::ActionNotAllowed("Card does not have foretell".to_string())
+        })?
+    };
+
+    pay_unless_cost(
+        state,
+        player,
+        &ManaCost::generic(FORETELL_SPECIAL_ACTION_COST),
+        events,
+    )?;
+    super::zones::move_to_zone(state, object_id, Zone::Exile, events);
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.foretold = true;
+        obj.face_down = true;
+        obj.casting_permissions.push(CastingPermission::Foretold {
+            cost: foretell_cost,
+            turn_foretold: state.turn_number,
+        });
+    }
+
+    Ok(WaitingFor::Priority { player })
+}
+
 // CR 702.34 (Flashback) / CR 702.127 (Aftermath) / CR 702.138 (Escape) / CR 702.180 (Harmonize):
 // graveyard-cast alternative costs. Sneak (CR 702.190a) is a HAND-cast
 // alt-cost and is deliberately NOT listed here — including it would
@@ -490,16 +576,20 @@ pub(super) fn build_spell_meta(
     object_id: ObjectId,
 ) -> Option<SpellMeta> {
     state.objects.get(&object_id).map(|obj| SpellMeta {
-        types: obj
-            .card_types
-            .core_types
-            .iter()
-            .map(|ct| format!("{ct:?}"))
-            .collect(),
+        types: object_type_names(obj),
         subtypes: obj.card_types.subtypes.clone(),
         keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
         cast_from_zone: Some(pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone)),
     })
+}
+
+fn object_type_names(obj: &crate::game::game_object::GameObject) -> Vec<String> {
+    obj.card_types
+        .supertypes
+        .iter()
+        .map(|st| st.to_string())
+        .chain(obj.card_types.core_types.iter().map(|ct| ct.to_string()))
+        .collect()
 }
 
 fn effective_spell_keyword_kinds(
@@ -536,6 +626,9 @@ fn has_exile_cast_permission(obj: &crate::game::game_object::GameObject, turn_nu
         // conditions are enforced separately by sorcery-speed timing).
         crate::types::ability::CastingPermission::Plotted { turn_plotted } => {
             turn_number > *turn_plotted
+        }
+        crate::types::ability::CastingPermission::Foretold { turn_foretold, .. } => {
+            turn_number > *turn_foretold
         }
     })
 }
@@ -971,6 +1064,7 @@ fn prepare_spell_cast_with_variant_override(
             crate::types::ability::CastingPermission::ExileWithAltCost { cost, .. } => {
                 Some(cost.clone())
             }
+            crate::types::ability::CastingPermission::Foretold { cost, .. } => Some(cost.clone()),
             crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
                 Some(crate::types::mana::ManaCost::zero())
             }
@@ -1095,12 +1189,19 @@ fn prepare_spell_cast_with_variant_override(
             .casting_permissions
             .iter()
             .any(|p| matches!(p, crate::types::ability::CastingPermission::Plotted { .. }));
+    let is_foretell_cast = obj.zone == Zone::Exile
+        && obj
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, crate::types::ability::CastingPermission::Foretold { .. }));
 
     let casting_variant = variant_override.unwrap_or_else(|| {
         if is_suspend_cast {
             CastingVariant::Suspend
         } else if is_plot_cast {
             CastingVariant::Plot
+        } else if is_foretell_cast {
+            CastingVariant::Foretell
         } else if escape_cost.is_some() {
             CastingVariant::Escape
         } else if harmonize_cost.is_some() {
@@ -3196,12 +3297,7 @@ pub(super) fn activation_source_types(
         .objects
         .get(&source_id)
         .map(|obj| {
-            let types = obj
-                .card_types
-                .core_types
-                .iter()
-                .map(|ct| format!("{ct:?}"))
-                .collect();
+            let types = object_type_names(obj);
             let subtypes = obj.card_types.subtypes.clone();
             (types, subtypes)
         })
@@ -4672,14 +4768,14 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        ActivationRestriction, BasicLandType, ChosenAttribute, ChosenSubtypeKind,
-        ContinuousModification, ControllerRef, FilterProp, GameRestriction, ManaContribution,
-        ManaProduction, ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr,
-        RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        ActivationRestriction, BasicLandType, CastVariantPaid, CastingPermission, ChosenAttribute,
+        ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, GameRestriction,
+        ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+        QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
     use crate::types::mana::{
@@ -4712,6 +4808,156 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    fn foretell_test_cost() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::White],
+            generic: 0,
+        }
+    }
+
+    fn add_foretell_sorcery(state: &mut GameState) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(143),
+            PlayerId(0),
+            "Foretell Test".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.keywords.push(Keyword::Foretell(foretell_test_cost()));
+        object_id
+    }
+
+    #[test]
+    fn foretell_special_action_exiles_and_grants_later_turn_permission() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_foretell_sorcery(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let waiting = handle_foretell(
+            &mut state,
+            PlayerId(0),
+            object_id,
+            CardId(143),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            waiting,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+        assert!(!state.players[0].hand.contains(&object_id));
+        assert!(state.exile.contains(&object_id));
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        let obj = state.objects.get(&object_id).unwrap();
+        assert!(obj.foretold);
+        assert!(obj.face_down);
+        assert!(matches!(
+            obj.casting_permissions.as_slice(),
+            [CastingPermission::Foretold { cost, turn_foretold }]
+                if *cost == foretell_test_cost() && *turn_foretold == state.turn_number
+        ));
+    }
+
+    #[test]
+    fn foretell_cast_uses_foretell_cost_only_after_current_turn() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_foretell_sorcery(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+        handle_foretell(
+            &mut state,
+            PlayerId(0),
+            object_id,
+            CardId(143),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert!(
+            prepare_spell_cast(&state, PlayerId(0), object_id).is_err(),
+            "foretold card is not castable during the same turn"
+        );
+
+        state.turn_number += 1;
+        let prepared = prepare_spell_cast(&state, PlayerId(0), object_id).unwrap();
+        assert_eq!(prepared.casting_variant, CastingVariant::Foretell);
+        assert_eq!(prepared.mana_cost, foretell_test_cost());
+    }
+
+    #[test]
+    fn foretell_cast_tags_stack_spell_for_resolution_conditions() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_foretell_sorcery(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+        handle_foretell(
+            &mut state,
+            PlayerId(0),
+            object_id,
+            CardId(143),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        state.turn_number += 1;
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            object_id,
+            CardId(143),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let WaitingFor::ChooseXValue { .. } = waiting else {
+            panic!("foretell cost with X should prompt for X, got {waiting:?}");
+        };
+        state.waiting_for = waiting;
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseX { value: 0 })
+            .unwrap();
+
+        let obj = state.objects.get(&object_id).unwrap();
+        assert_eq!(
+            obj.cast_variant_paid,
+            Some((CastVariantPaid::Foretell, state.turn_number))
+        );
+        let entry = state.stack.back().expect("spell is on stack");
+        assert!(matches!(
+            entry.kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Foretell,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn spell_meta_includes_supertypes_for_restricted_mana() {
+        let mut state = setup_game_at_main_phase();
+        let commander_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Frodo, Adventurous Hobbit".to_string(),
+            Zone::Command,
+        );
+        let commander = state.objects.get_mut(&commander_id).unwrap();
+        commander.card_types.supertypes.push(Supertype::Legendary);
+        commander.card_types.core_types.push(CoreType::Creature);
+        commander.is_commander = true;
+
+        let meta = build_spell_meta(&state, PlayerId(0), commander_id).unwrap();
+
+        assert!(meta
+            .types
+            .iter()
+            .any(|type_name| type_name.eq_ignore_ascii_case("Legendary")));
+        assert!(ManaRestriction::OnlyForSpellType("Legendary".to_string()).allows_spell(&meta));
     }
 
     #[test]

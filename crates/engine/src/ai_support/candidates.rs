@@ -1926,6 +1926,28 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
+    // CR 702.143a-b: Foretell is a priority-time special action from hand
+    // during the player's own turn. It does not use the stack; the runtime
+    // handler pays {2}, exiles the card, marks it foretold, and grants the
+    // later-turn foretell-cost cast permission.
+    if is_active {
+        for &object_id in &state.players[player.0 as usize].hand {
+            let Some(obj) = state.objects.get(&object_id) else {
+                continue;
+            };
+            if casting::can_foretell_card(state, player, object_id) {
+                actions.push(candidate(
+                    GameAction::Foretell {
+                        object_id,
+                        card_id: obj.card_id,
+                    },
+                    TacticalClass::Ability,
+                    Some(player),
+                ));
+            }
+        }
+    }
+
     // CR 702.122a: Crew actions for Vehicles (keyword action, not ActivateAbility).
     // Unlike Equip/Saddle, Crew has no "Activate only as a sorcery" restriction —
     // it can be activated any time the controller has priority.

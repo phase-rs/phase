@@ -40,6 +40,14 @@ pub enum GameAction {
         card_id: CardId,
         targets: Vec<ObjectId>,
     },
+    /// CR 702.143a-b: Foretell special action — during your turn while you
+    /// have priority, pay {2} and exile this card from your hand. The card
+    /// becomes foretold in exile and may be cast on a later turn for its
+    /// foretell cost.
+    Foretell {
+        object_id: ObjectId,
+        card_id: CardId,
+    },
     ActivateAbility {
         source_id: ObjectId,
         ability_index: usize,
@@ -439,6 +447,7 @@ impl GameAction {
         match self {
             GameAction::PlayLand { object_id, .. } => Some(*object_id),
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
+            GameAction::Foretell { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsSneak { hand_object, .. } => Some(*hand_object),
             GameAction::CastSpellForFree { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMiracle { object_id, .. } => Some(*object_id),
@@ -623,6 +632,13 @@ mod tests {
                     object_id: oid,
                     card_id: cid,
                     targets: vec![],
+                },
+                Some(oid),
+            ),
+            (
+                GameAction::Foretell {
+                    object_id: oid,
+                    card_id: cid,
                 },
                 Some(oid),
             ),
