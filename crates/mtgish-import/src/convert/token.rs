@@ -784,7 +784,7 @@ fn simple_color(c: &Color) -> Option<ManaColor> {
     })
 }
 
-fn pt_to_values(pt: &PT) -> ConvResult<(PtValue, PtValue)> {
+pub(crate) fn pt_to_values(pt: &PT) -> ConvResult<(PtValue, PtValue)> {
     use PT as P;
     Ok(match pt {
         P::PT(p, t) => (PtValue::Fixed(*p), PtValue::Fixed(*t)),

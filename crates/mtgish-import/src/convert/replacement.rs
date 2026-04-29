@@ -1,31 +1,36 @@
 //! mtgish `AsPermanentEnters` and friends → engine `ReplacementDefinition`
 //! (Phase 9 narrow slice).
 //!
-//! Covers ETB-tapped and ETB-with-N-counters — the two highest-frequency
-//! shapes. Other replacement events (damage, draw, gain-life, etc.) and
-//! the "enter as a copy" / "enter transformed" / etc. variants land later.
+//! Covers ETB-tapped, ETB-with-N-counters, and battlefield-permanent
+//! enter-as-copy shapes. Other replacement events (damage, draw, gain-life,
+//! etc.) and face-down / transformed / attached ETB variants land later.
 
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, QuantityExpr, QuantityModification,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
+    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, QuantityExpr,
+    QuantityModification, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    TargetFilter,
 };
+use engine::types::card_type::Supertype;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
-use crate::convert::filter::{convert as convert_permanents, convert_permanent};
+use crate::convert::filter::{
+    artifact_type_name, convert as convert_permanents, convert_permanent, land_type_name,
+};
 use crate::convert::mana;
 use crate::convert::quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
+use crate::convert::static_effect;
 use crate::schema::types::{
-    Condition, CounterType, Expiration, FutureReplacableEventWouldDealDamage, GameNumber,
-    Permanent, Permanents, Player, Players, ReplacableEventWouldDealDamage,
-    ReplacableEventWouldDraw, ReplacableEventWouldEnter, ReplacableEventWouldGainLife,
-    ReplacableEventWouldPutCounters, ReplacableEventWouldPutIntoGraveyard,
-    ReplacementActionWouldDealDamage, ReplacementActionWouldDraw, ReplacementActionWouldEnter,
-    ReplacementActionWouldEnterCost, ReplacementActionWouldGainLife,
-    ReplacementActionWouldPutCounters, ReplacementActionWouldPutIntoGraveyard,
-    SingleDamageRecipient,
+    Condition, CopyEffect, CopyEffects, CounterType, Expiration,
+    FutureReplacableEventWouldDealDamage, GameNumber, Permanent, Permanents, Player, Players,
+    ReplacableEventWouldDealDamage, ReplacableEventWouldDraw, ReplacableEventWouldEnter,
+    ReplacableEventWouldGainLife, ReplacableEventWouldPutCounters,
+    ReplacableEventWouldPutIntoGraveyard, ReplacementActionWouldDealDamage,
+    ReplacementActionWouldDraw, ReplacementActionWouldEnter, ReplacementActionWouldEnterCost,
+    ReplacementActionWouldGainLife, ReplacementActionWouldPutCounters,
+    ReplacementActionWouldPutIntoGraveyard, SingleDamageRecipient,
 };
 
 /// CR 702.138: `Rule::AsPermanentEscapes(target, actions)` — Theros
@@ -1498,6 +1503,29 @@ fn build_replacement_exec(
                 needed_variant: "ETB action: enters untapped (override default-tapped)".into(),
             });
         }
+        // CR 614.1c + CR 707.9a: "As/you may have ~ enter as a copy of
+        // [permanent]" is an ETB replacement whose post-zone-change action
+        // asks the controller to choose the copied object, then applies the
+        // existing layer-1 BecomeCopy primitive. Copy exception clauses lower
+        // to the same ContinuousModification list used by the native parser.
+        A::EnterAsACopyOfAPermanent(perms, copy_effects) => Effect::BecomeCopy {
+            target: convert_permanents(perms)?,
+            duration: None,
+            mana_value_limit: None,
+            additional_modifications: convert_copy_effects(copy_effects)?,
+        },
+        A::EnterAsACopyOfPermanent(perm, copy_effects) => Effect::BecomeCopy {
+            target: convert_permanent(perm)?,
+            duration: None,
+            mana_value_limit: None,
+            additional_modifications: convert_copy_effects(copy_effects)?,
+        },
+        A::EnterAsACopyOfAPermanentUntil(perms, copy_effects, expiration) => Effect::BecomeCopy {
+            target: convert_permanents(perms)?,
+            duration: Some(static_effect::expiration_to_duration(expiration)?),
+            mana_value_limit: None,
+            additional_modifications: convert_copy_effects(copy_effects)?,
+        },
         // CR 614.12 + CR 614.12a: As-enters choice gates — the player
         // makes a named choice "before the permanent enters the
         // battlefield." Each wireable arm emits `Effect::Choose { ..,
@@ -1763,14 +1791,11 @@ fn build_replacement_exec(
         // `Unless` and `MayActions` are handled by the early-return guards above.
         A::Unless(_, _) => unreachable!("Unless handled by early-return guard"),
         A::MayActions(_) => unreachable!("MayActions handled by early-return guard"),
-        // CR 707.x: "Enters as a copy" / face-down / transformed /
-        // attached / attacking / blocking — bespoke ETB modifier shapes
-        // that need dedicated engine primitives.
+        // CR 707.x / CR 614.12: Remaining copy-source zones plus face-down /
+        // transformed / attached / attacking / blocking modifier shapes need
+        // dedicated engine primitives or converter-side source filters.
         A::EnterAsACopyOfACardInAPlayersGraveyard(_, _, _)
         | A::EnterAsACopyOfACardInExile(_, _)
-        | A::EnterAsACopyOfAPermanent(_, _)
-        | A::EnterAsACopyOfAPermanentUntil(_, _, _)
-        | A::EnterAsACopyOfPermanent(_, _)
         | A::EnterAsCopyOfExiled(_, _)
         | A::EntersAsFaceDownArtifactCreature(_, _)
         | A::EntersAsFaceDownCreatureWithAbilitiesAndNotedName(_, _, _)
@@ -1823,6 +1848,126 @@ fn build_replacement_exec(
         ReplacementMode::Mandatory,
         AbilityDefinition::new(AbilityKind::Spell, effect),
     ))
+}
+
+/// CR 707.9b: Lower mtgish copy-exception clauses onto the engine's existing
+/// `Effect::BecomeCopy.additional_modifications` channel. Unsupported
+/// "keep original characteristic" shapes strict-fail because they need a
+/// source-relative override primitive, not a no-op.
+fn convert_copy_effects(effects: &CopyEffects) -> ConvResult<Vec<ContinuousModification>> {
+    let list = match effects {
+        CopyEffects::NoCopyEffects => return Ok(Vec::new()),
+        CopyEffects::CopyEffects(list) if list.is_empty() => return Ok(Vec::new()),
+        CopyEffects::CopyEffects(list) => list,
+    };
+
+    let mut modifications = Vec::new();
+    for effect in list {
+        match effect {
+            CopyEffect::AddSupertypes(supertypes) => {
+                modifications.extend(supertypes.iter().map(|supertype| {
+                    ContinuousModification::AddSupertype {
+                        supertype: supertype_to_engine(supertype),
+                    }
+                }));
+            }
+            CopyEffect::RemoveSupertypes(supertypes) => {
+                modifications.extend(supertypes.iter().map(|supertype| {
+                    ContinuousModification::RemoveSupertype {
+                        supertype: supertype_to_engine(supertype),
+                    }
+                }));
+            }
+            CopyEffect::AddCardtypes(card_types) => {
+                for card_type in card_types {
+                    modifications.push(ContinuousModification::AddType {
+                        core_type: static_effect::card_type_to_core(card_type)?,
+                    });
+                }
+            }
+            CopyEffect::AddCreatureTypes(creature_types) => {
+                modifications.extend(creature_types.iter().map(|creature_type| {
+                    ContinuousModification::AddSubtype {
+                        subtype: format!("{creature_type:?}"),
+                    }
+                }));
+            }
+            CopyEffect::AddArtifactTypes(artifact_types) => {
+                modifications.extend(artifact_types.iter().map(|artifact_type| {
+                    ContinuousModification::AddSubtype {
+                        subtype: artifact_type_name(artifact_type),
+                    }
+                }));
+            }
+            CopyEffect::AddLandTypes(land_types) => {
+                modifications.extend(land_types.iter().map(|land_type| {
+                    ContinuousModification::AddSubtype {
+                        subtype: land_type_name(land_type),
+                    }
+                }));
+            }
+            CopyEffect::AddAbility(rules) => {
+                for rule in rules {
+                    modifications.push(static_effect::rule_to_grant_mod(
+                        rule,
+                        "ReplacementActionWouldEnter/copy-effect",
+                    )?);
+                }
+            }
+            CopyEffect::AddColor(color) => {
+                modifications.extend(static_effect::settable_color_to_add_mods(color)?);
+            }
+            CopyEffect::SetColor(color) => {
+                modifications.extend(static_effect::settable_color_to_set_mod(color)?);
+            }
+            CopyEffect::SetName(name) => {
+                modifications.push(ContinuousModification::SetName { name: name.clone() });
+            }
+            CopyEffect::SetPT(pt) => {
+                let (power, toughness) = crate::convert::token::pt_to_values(pt)?;
+                let (
+                    engine::types::ability::PtValue::Fixed(power),
+                    engine::types::ability::PtValue::Fixed(toughness),
+                ) = (power, toughness)
+                else {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "Effect::BecomeCopy",
+                        needed_variant: "dynamic SetPT copy override".into(),
+                    });
+                };
+                modifications.push(ContinuousModification::SetPower { value: power });
+                modifications.push(ContinuousModification::SetToughness { value: toughness });
+            }
+            other => {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "Effect::BecomeCopy",
+                    needed_variant: format!("copy-effect override ({})", copy_effect_tag(other)),
+                });
+            }
+        }
+    }
+    Ok(modifications)
+}
+
+fn supertype_to_engine(st: &crate::schema::types::SuperType) -> Supertype {
+    match st {
+        crate::schema::types::SuperType::Basic => Supertype::Basic,
+        crate::schema::types::SuperType::Legendary => Supertype::Legendary,
+        crate::schema::types::SuperType::Ongoing => Supertype::Ongoing,
+        crate::schema::types::SuperType::Snow => Supertype::Snow,
+        crate::schema::types::SuperType::World => Supertype::World,
+    }
+}
+
+fn copy_effect_tag(e: &CopyEffect) -> String {
+    serde_json::to_value(e)
+        .ok()
+        .and_then(|v| {
+            v.get("_CopyEffect")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 /// CR 614.1d: Map an mtgish `Condition` (the "unless X" gate of an
@@ -2605,11 +2750,17 @@ fn expiration_tag(e: &Expiration) -> String {
 #[cfg(test)]
 mod tests {
     use engine::types::ability::{
-        AbilityCost, Effect, QuantityExpr, ReplacementMode, TargetFilter,
+        AbilityCost, ContinuousModification, Duration, Effect, QuantityExpr, ReplacementMode,
+        TargetFilter,
     };
+    use engine::types::card_type::{CoreType, Supertype};
+    use engine::types::keywords::Keyword;
 
     use super::*;
-    use crate::schema::types::{Condition, GameNumber, Permanent, ReplacementActionWouldEnter};
+    use crate::schema::types::{
+        CardType, Condition, CopyEffect, CopyEffects, GameNumber, Permanent, Permanents,
+        ReplacementActionWouldEnter, Rule, SuperType,
+    };
 
     #[test]
     fn as_enters_may_pay_life_unless_tapped_lowers_to_single_cost_gate() {
@@ -2655,6 +2806,103 @@ mod tests {
             err,
             ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "ReplacementDefinition",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn as_enters_copy_permanent_lowers_to_optional_become_copy() {
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::MayActions(vec![
+                ReplacementActionWouldEnter::EnterAsACopyOfAPermanent(
+                    Box::new(Permanents::IsNonCardtype(CardType::Land)),
+                    CopyEffects::NoCopyEffects,
+                ),
+            ])],
+        )
+        .unwrap();
+
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            defs[0].mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = defs[0].execute.as_ref().expect("copy execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::BecomeCopy {
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications,
+                ..
+            } if additional_modifications.is_empty()
+        ));
+    }
+
+    #[test]
+    fn as_enters_copy_permanent_lowers_copy_exceptions() {
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::MayActions(vec![
+                ReplacementActionWouldEnter::EnterAsACopyOfAPermanent(
+                    Box::new(Permanents::IsCardtype(CardType::Creature)),
+                    CopyEffects::CopyEffects(vec![
+                        CopyEffect::RemoveSupertypes(vec![SuperType::Legendary]),
+                        CopyEffect::AddCardtypes(vec![CardType::Artifact]),
+                        CopyEffect::AddAbility(vec![Rule::Myriad]),
+                    ]),
+                ),
+            ])],
+        )
+        .unwrap();
+
+        let execute = defs[0].execute.as_ref().expect("copy execute");
+        let Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("expected BecomeCopy, got {:?}", execute.effect);
+        };
+        assert!(
+            additional_modifications.contains(&ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            })
+        );
+        assert!(
+            additional_modifications.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Artifact
+            })
+        );
+        assert!(
+            additional_modifications.contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Myriad
+            })
+        );
+    }
+
+    #[test]
+    fn as_enters_copy_permanent_until_lowers_duration() {
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::MayActions(vec![
+                ReplacementActionWouldEnter::EnterAsACopyOfAPermanentUntil(
+                    Box::new(Permanents::IsCardtype(CardType::Creature)),
+                    CopyEffects::NoCopyEffects,
+                    Expiration::UntilEndOfTurn,
+                ),
+            ])],
+        )
+        .unwrap();
+
+        let execute = defs[0].execute.as_ref().expect("copy execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::BecomeCopy {
+                duration: Some(Duration::UntilEndOfTurn),
                 ..
             }
         ));

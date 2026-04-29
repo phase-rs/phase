@@ -12,13 +12,15 @@ use engine::types::ability::{
     TriggerCondition, TypedFilter, ZoneRef,
 };
 use engine::types::card_type::CoreType;
+use engine::types::mana::ManaColor;
 use engine::types::zones::Zone;
 
+use crate::convert::filter::concrete_color;
 use crate::convert::mana;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
-    CardType, Cards, Comparison, Condition, GameNumber, Permanent, Permanents, Player, Players,
-    Spells,
+    CardType, Cards, ColorList, Comparison, Condition, GameNumber, Permanent, Permanents, Player,
+    Players, Spells,
 };
 
 /// CR 608.2c + CR 700.4: Convert an mtgish `Condition` for use as an
@@ -1468,6 +1470,22 @@ pub fn convert_player_predicate_trigger(
                 rhs,
             }
         }
+        // CR 700.5: devotion to one or more colors is controller-relative.
+        Players::DevotionToColorsIs(colors, cmp) => {
+            require_you_player(player, "Players::DevotionToColorsIs (trigger)")?;
+            let (comparator, rhs) = comparison_to_pair(cmp)?;
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: engine::types::ability::DevotionColors::Fixed(
+                            devotion_color_list(colors)?,
+                        ),
+                    },
+                },
+                comparator,
+                rhs,
+            }
+        }
 
         // CR 508.1a: "if [player] attacked this turn".
         Players::AttackedThisTurn => {
@@ -1724,6 +1742,21 @@ pub fn convert_player_predicate_ability(
                     qty: QuantityRef::DistinctCardTypesInZone {
                         zone: ZoneRef::Graveyard,
                         scope: CountScope::Controller,
+                    },
+                },
+                comparator,
+                rhs,
+            }
+        }
+        Players::DevotionToColorsIs(colors, cmp) => {
+            require_you_player(player, "Players::DevotionToColorsIs (ability)")?;
+            let (comparator, rhs) = comparison_to_pair(cmp)?;
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: engine::types::ability::DevotionColors::Fixed(
+                            devotion_color_list(colors)?,
+                        ),
                     },
                 },
                 comparator,
@@ -2028,6 +2061,21 @@ pub fn convert_player_predicate_static(
                 rhs,
             }
         }
+        Players::DevotionToColorsIs(colors, cmp) => {
+            require_you_player(player, "Players::DevotionToColorsIs (static)")?;
+            let (comparator, rhs) = comparison_to_pair(cmp)?;
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: engine::types::ability::DevotionColors::Fixed(
+                            devotion_color_list(colors)?,
+                        ),
+                    },
+                },
+                comparator,
+                rhs,
+            }
+        }
 
         // Direct StaticCondition analogs.
         Players::IsTheMonarch => {
@@ -2197,6 +2245,40 @@ fn require_any_card(cards: &Cards, idiom: &'static str) -> ConvResult<()> {
             idiom,
             path: String::new(),
             detail: format!("non-trivial Cards filter: {other:?}"),
+        }),
+    }
+}
+
+fn devotion_color_list(colors: &ColorList) -> ConvResult<Vec<ManaColor>> {
+    match colors {
+        ColorList::AllColors => Ok(ManaColor::ALL.to_vec()),
+        ColorList::Colors(colors) => {
+            let mapped = colors
+                .iter()
+                .map(|color| {
+                    concrete_color(color).ok_or_else(|| ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "DevotionColors",
+                        needed_variant: format!("non-concrete devotion color: {color:?}"),
+                    })
+                })
+                .collect::<ConvResult<Vec<_>>>()?;
+            if mapped.is_empty() {
+                return Err(ConversionGap::MalformedIdiom {
+                    idiom: "Players::DevotionToColorsIs",
+                    path: String::new(),
+                    detail: "empty color list".into(),
+                });
+            }
+            Ok(mapped)
+        }
+        ColorList::TheChosenColor => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "DevotionColors",
+            needed_variant: "chosen devotion color".into(),
+        }),
+        ColorList::Colorless => Err(ConversionGap::MalformedIdiom {
+            idiom: "Players::DevotionToColorsIs",
+            path: String::new(),
+            detail: "devotion is defined for colors, not colorless".into(),
         }),
     }
 }
@@ -2883,6 +2965,7 @@ fn card_type_to_core(ct: &CardType) -> ConvResult<CoreType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::types::Color;
     use engine::types::ability::{FilterProp, TypedFilter};
 
     #[test]
@@ -3022,6 +3105,32 @@ mod tests {
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
+            }
+        );
+    }
+
+    #[test]
+    fn devotion_condition_lowers_to_quantity_comparison() {
+        let predicate = Players::DevotionToColorsIs(
+            ColorList::Colors(vec![Color::Blue, Color::Black]),
+            Box::new(Comparison::GreaterThanOrEqualTo(Box::new(GameNumber::Integer(7)))),
+        );
+
+        let converted = convert_player_predicate_ability(&Player::You, &predicate).unwrap();
+
+        assert_eq!(
+            converted,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: engine::types::ability::DevotionColors::Fixed(vec![
+                            ManaColor::Blue,
+                            ManaColor::Black
+                        ]),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
             }
         );
     }

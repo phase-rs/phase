@@ -255,7 +255,7 @@ fn toughness_set_mod(qty: QuantityExpr) -> ContinuousModification {
     }
 }
 
-fn card_type_to_core(
+pub(crate) fn card_type_to_core(
     ct: &crate::schema::types::CardType,
 ) -> ConvResult<engine::types::card_type::CoreType> {
     use crate::schema::types::CardType as C;
@@ -725,7 +725,10 @@ fn rule_tag(r: &Rule) -> String {
 /// player effects, …) strict-fail with `MalformedIdiom`. Closing those
 /// requires their own engine plumbing (`GrantReplacement`, gated wrapper
 /// statics) and is deferred.
-fn rule_to_grant_mod(rule: &Rule, idiom: &'static str) -> ConvResult<ContinuousModification> {
+pub(crate) fn rule_to_grant_mod(
+    rule: &Rule,
+    idiom: &'static str,
+) -> ConvResult<ContinuousModification> {
     if let Some(kw) = keyword_try_convert(rule, idiom)? {
         return Ok(ContinuousModification::AddKeyword { keyword: kw });
     }
@@ -778,7 +781,9 @@ fn rule_to_grant_mod(rule: &Rule, idiom: &'static str) -> ConvResult<ContinuousM
 /// AddColor>`. Only the `SimpleColorList` payload maps cleanly today —
 /// chosen-color and ALL-colors variants need engine-side chosen-attribute
 /// integration / a dedicated `SetAllColors` modification and strict-fail.
-fn settable_color_to_add_mods(color: &SettableColor) -> ConvResult<Vec<ContinuousModification>> {
+pub(crate) fn settable_color_to_add_mods(
+    color: &SettableColor,
+) -> ConvResult<Vec<ContinuousModification>> {
     use engine::types::mana::ManaColor;
     match color {
         SettableColor::SimpleColorList(colors) => Ok(colors
@@ -805,7 +810,9 @@ fn settable_color_to_add_mods(color: &SettableColor) -> ConvResult<Vec<Continuou
 /// `settable_color_to_add_mods`: only `SimpleColorList` maps cleanly;
 /// chosen-attribute / Devoid / AllColors strict-fail until engine grows
 /// dedicated arms.
-fn settable_color_to_set_mod(color: &SettableColor) -> ConvResult<Vec<ContinuousModification>> {
+pub(crate) fn settable_color_to_set_mod(
+    color: &SettableColor,
+) -> ConvResult<Vec<ContinuousModification>> {
     use engine::types::mana::ManaColor;
     match color {
         SettableColor::SimpleColorList(colors) => {
