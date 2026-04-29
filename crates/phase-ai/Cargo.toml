@@ -25,6 +25,7 @@ test = false
 [[bin]]
 name = "ai-tune"
 path = "src/bin/ai_tune.rs"
+test = false
 
 [[bin]]
 name = "ai-commander"

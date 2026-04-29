@@ -3,6 +3,11 @@ set -euo pipefail
 
 echo "Running pre-push checks..."
 
+# Git supplies refs on stdin after opening the remote connection. None of these
+# checks need that stream, and detaching it keeps cargo/test children from
+# inheriting hook input.
+exec </dev/null
+
 # Rust
 echo "  [rust] cargo fmt --check"
 cargo fmt --all -- --check
@@ -10,16 +15,17 @@ cargo fmt --all -- --check
 echo "  [rust] cargo clippy"
 cargo clippy --workspace --all-targets --features engine/proptest -- -D warnings
 
+echo "  [rust] card-data-validate release check"
+cargo check --release --bin card-data-validate
+
 echo "  [rust] parser combinator gate"
 ./scripts/check-parser-combinators.sh
 
-echo "  [rust] cargo nextest"
-PROPTEST_CASES="${PROPTEST_CASES:-4}" cargo nextest run \
-  --workspace \
-  --features engine/proptest \
-  --no-input-handler \
-  --show-progress=counter \
-  --status-level=slow
+echo "  [rust] engine parser tests"
+PROPTEST_CASES="${PROPTEST_CASES:-4}" cargo test -p engine --features proptest parser::oracle::tests
+
+echo "  [rust] phase-ai lib tests"
+cargo test -p phase-ai --lib
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT

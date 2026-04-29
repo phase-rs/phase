@@ -2026,12 +2026,12 @@ pub(super) fn parse_utility_imperative_ast(
         nom_on_lower(text, lower, parse_explicit_targeted_attach)
     {
         if rem.trim().is_empty() && nom_primitives::scan_contains(&attachment_text, "target ") {
-            let (attachment, attachment_rem) = parse_target(&attachment_text);
-            let (target, target_rem) = parse_attach_recipient(&target_text);
+            let (attachment, _attachment_rem) = parse_target(&attachment_text);
+            let (target, _target_rem) = parse_attach_recipient(&target_text);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(attachment_rem, text);
+            super::types::assert_no_compound_remainder(_attachment_rem, text);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(target_rem, text);
+            super::types::assert_no_compound_remainder(_target_rem, text);
             return Some(UtilityImperativeAst::Attach { attachment, target });
         }
     }
