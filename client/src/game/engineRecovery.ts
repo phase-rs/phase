@@ -87,7 +87,7 @@ export async function attemptStateRehydrate(): Promise<boolean> {
     // None (our case — we got here because it WAS None). The engine refuses
     // restore when `MULTIPLAYER_MODE` is set, but we've already short-
     // circuited non-ai/non-local modes above.
-    adapter.restoreState(snapshot);
+    await adapter.restoreState(snapshot);
     debugLog(
       `engine-recovery: rehydrated from ${usedIdbFallback ? "IDB" : "store"}`,
       "warn",

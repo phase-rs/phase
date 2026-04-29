@@ -165,7 +165,7 @@ export const useGameStore = create<GameStore>()(
 
     resumeGame: async (gameId, adapter, savedState) => {
       await adapter.initialize();
-      adapter.restoreState(savedState);
+      await adapter.restoreState(savedState);
       const state = await adapter.getState();
       const legalResult = await adapter.getLegalActions();
       const savedCheckpoints = await loadCheckpoints(gameId);
@@ -265,7 +265,7 @@ export const useGameStore = create<GameStore>()(
       const previous = stateHistory[stateHistory.length - 1];
 
       // Sync WASM engine state with the restored client state
-      adapter.restoreState(previous);
+      await adapter.restoreState(previous);
       const legalResult = await adapter.getLegalActions();
 
       set({

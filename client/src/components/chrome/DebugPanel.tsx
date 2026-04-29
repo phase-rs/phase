@@ -51,12 +51,15 @@ async function readImportFile(file: File): Promise<string> {
   }
 
   const archive = unzipSync(new Uint8Array(await file.arrayBuffer()));
-  const jsonFilename = Object.keys(archive).find((name) => name.toLowerCase().endsWith(".json"));
-  if (!jsonFilename) {
-    throw new Error("ZIP does not contain a JSON file");
+  const importFilename = Object.keys(archive).find((name) => {
+    const lowerName = name.toLowerCase();
+    return lowerName.endsWith(".json") || lowerName.endsWith(".txt");
+  });
+  if (!importFilename) {
+    throw new Error("ZIP does not contain a JSON or text file");
   }
 
-  return strFromU8(archive[jsonFilename]);
+  return strFromU8(archive[importFilename]);
 }
 
 /** Ring buffer of captured console output, shared across mount/unmount cycles. */

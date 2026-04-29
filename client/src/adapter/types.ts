@@ -1159,6 +1159,6 @@ export interface EngineAdapter {
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
   getAiAction(difficulty: string, playerId: number): Promise<GameAction | null> | GameAction | null;
-  restoreState(state: GameState): void;
+  restoreState(state: GameState): void | Promise<void>;
   dispose(): void;
 }

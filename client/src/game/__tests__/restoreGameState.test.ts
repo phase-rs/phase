@@ -42,13 +42,16 @@ function createMockState(overrides: Partial<GameState> = {}): GameState {
 }
 
 function createMockAdapter(state: GameState): EngineAdapter {
+  let currentState = state;
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
     initializeGame: vi.fn().mockResolvedValue({ events: [] }),
     submitAction: vi.fn().mockResolvedValue({ events: [] }),
-    getState: vi.fn().mockResolvedValue(state),
+    getState: vi.fn().mockImplementation(() => Promise.resolve(currentState)),
     getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
-    restoreState: vi.fn(),
+    restoreState: vi.fn().mockImplementation(async (nextState: GameState) => {
+      currentState = nextState;
+    }),
     getAiAction: vi.fn().mockReturnValue(null),
     dispose: vi.fn(),
   };
@@ -80,7 +83,7 @@ describe("restoreGameState", () => {
   it("replaces active game state, clears stale histories, and persists the restored state", async () => {
     const oldState = createMockState({ turn_number: 3 });
     const importedState = createMockState({ turn_number: 9 });
-    const adapter = createMockAdapter(importedState);
+    const adapter = createMockAdapter(oldState);
     const event: GameEvent = { type: "PriorityPassed", data: { player_id: 0 } };
 
     useGameStore.setState({

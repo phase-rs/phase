@@ -316,7 +316,7 @@ export class WasmAdapter implements EngineAdapter {
     return this.getAiAction(seat.difficulty, seat.playerId);
   }
 
-  restoreState(state: GameState): void {
+  restoreState(state: GameState): void | Promise<void> {
     this.assertInitialized();
     const json = JSON.stringify(state);
     if (this.engine) {
@@ -330,10 +330,9 @@ export class WasmAdapter implements EngineAdapter {
           () => { /* card DB is best-effort for resume */ },
         );
       }
-      this.engine.restoreState(json);
-    } else {
-      this.fallback!.restoreState(json);
+      return this.engine.restoreState(json);
     }
+    this.fallback!.restoreState(json);
   }
 
   /**

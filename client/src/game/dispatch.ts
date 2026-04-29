@@ -523,7 +523,7 @@ export async function restoreGameState(state: GameState): Promise<string | null>
   if (!adapter) return "No adapter available";
 
   try {
-    adapter.restoreState(state);
+    await adapter.restoreState(state);
   } catch (err) {
     return err instanceof Error ? err.message : "Failed to restore state";
   }
