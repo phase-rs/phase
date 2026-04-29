@@ -22,6 +22,13 @@ use mtgish_import::report::{Ctx, ImportReport};
 use mtgish_import::schema::types::{Card, DoorInfo, FlipInfo, OracleCard};
 use serde_json::{json, Value};
 
+const CLASS_IDENTICAL: &str = "identical";
+const CLASS_MTGISH_MORE_COMPLETE: &str = "mtgish_more_complete";
+const CLASS_MTGISH_LESS_COMPLETE: &str = "mtgish_less_complete";
+const CLASS_IMPLEMENTED_SEMANTIC_REVIEW: &str = "implemented_semantic_review";
+const CLASS_UNIMPLEMENTED_SHAPE_DIVERGENCE: &str = "unimplemented_shape_divergence";
+const CLASS_MIXED: &str = "mixed";
+
 struct Args {
     mtgish_path: PathBuf,
     native_path: PathBuf,
@@ -66,6 +73,17 @@ fn run() -> Result<Value> {
     let mut clean_cards_with_diff = 0usize;
     let mut missing_native_faces = Vec::new();
     let mut diffs = Vec::new();
+    let mut cards_by_class = std::collections::BTreeMap::<&'static str, usize>::new();
+    for class in [
+        CLASS_IDENTICAL,
+        CLASS_MTGISH_MORE_COMPLETE,
+        CLASS_MTGISH_LESS_COMPLETE,
+        CLASS_IMPLEMENTED_SEMANTIC_REVIEW,
+        CLASS_UNIMPLEMENTED_SHAPE_DIVERGENCE,
+        CLASS_MIXED,
+    ] {
+        cards_by_class.insert(class, 0);
+    }
 
     for raw in raw_values {
         cards_total += 1;
@@ -93,6 +111,7 @@ fn run() -> Result<Value> {
         let face_names = converted_face_names(&card);
         let face_count = face_names.len().max(stubs.len());
         let mut card_diffs = Vec::new();
+        let mut card_classes = Vec::new();
 
         for idx in 0..face_count {
             let face_name = face_names
@@ -115,11 +134,14 @@ fn run() -> Result<Value> {
                 .map(project_mtgish_stub)
                 .unwrap_or(empty_stub);
             let native = project_native_face(native_face);
+            let face_class = classify_face(&native, &mtgish);
             let mtgish = canonicalize(mtgish);
             let native = canonicalize(native);
             if mtgish == native {
+                card_classes.push(CLASS_IDENTICAL);
                 continue;
             }
+            card_classes.push(face_class);
 
             let divergences = classify_value(&native, &mtgish)
                 .into_iter()
@@ -135,17 +157,23 @@ fn run() -> Result<Value> {
             card_diffs.push(json!({
                 "face_index": idx,
                 "face_name": face_name,
+                "classification": face_class,
                 "divergences": divergences,
             }));
         }
 
         if !card_diffs.is_empty() {
             clean_cards_with_diff += 1;
+            let card_class = classify_card(&card_classes);
+            *cards_by_class.entry(card_class).or_insert(0) += 1;
             diffs.push(json!({
                 "card_name": display_name,
                 "kind": "structural-diff",
+                "classification": card_class,
                 "faces": card_diffs,
             }));
+        } else {
+            *cards_by_class.entry(CLASS_IDENTICAL).or_insert(0) += 1;
         }
     }
 
@@ -155,8 +183,11 @@ fn run() -> Result<Value> {
             "clean_cards": clean_total,
             "clean_percent": percent(clean_total, cards_total),
             "compared_faces": compared_faces,
+            "clean_cards_with_any_structural_diff": clean_cards_with_diff,
             "clean_cards_with_diff": clean_cards_with_diff,
+            "clean_cards_requiring_semantic_review": semantic_review_count(&cards_by_class),
             "missing_native_faces": missing_native_faces.len(),
+            "cards_by_classification": cards_by_class,
         },
         "missing_native_faces": missing_native_faces,
         "diffs": diffs,
@@ -243,6 +274,55 @@ fn project_native_face(face: &Value) -> Value {
 
 fn field_or_empty_array(face: &Value, field: &str) -> Value {
     face.get(field).cloned().unwrap_or_else(|| json!([]))
+}
+
+fn classify_face(native: &Value, mtgish: &Value) -> &'static str {
+    let native_unimplemented = contains_unimplemented(native);
+    let mtgish_unimplemented = contains_unimplemented(mtgish);
+    match (native_unimplemented, mtgish_unimplemented) {
+        (true, false) => CLASS_MTGISH_MORE_COMPLETE,
+        (false, true) => CLASS_MTGISH_LESS_COMPLETE,
+        (false, false) => CLASS_IMPLEMENTED_SEMANTIC_REVIEW,
+        (true, true) => CLASS_UNIMPLEMENTED_SHAPE_DIVERGENCE,
+    }
+}
+
+fn classify_card(classes: &[&'static str]) -> &'static str {
+    let mut meaningful = classes
+        .iter()
+        .copied()
+        .filter(|class| *class != CLASS_IDENTICAL);
+    let Some(first) = meaningful.next() else {
+        return CLASS_IDENTICAL;
+    };
+    if meaningful.all(|class| class == first) {
+        first
+    } else {
+        CLASS_MIXED
+    }
+}
+
+fn semantic_review_count(classes: &std::collections::BTreeMap<&'static str, usize>) -> usize {
+    [
+        CLASS_MTGISH_LESS_COMPLETE,
+        CLASS_IMPLEMENTED_SEMANTIC_REVIEW,
+        CLASS_UNIMPLEMENTED_SHAPE_DIVERGENCE,
+        CLASS_MIXED,
+    ]
+    .into_iter()
+    .filter_map(|class| classes.get(class))
+    .sum()
+}
+
+fn contains_unimplemented(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            matches!(map.get("type"), Some(Value::String(s)) if s == "Unimplemented")
+                || map.values().any(contains_unimplemented)
+        }
+        Value::Array(values) => values.iter().any(contains_unimplemented),
+        _ => false,
+    }
 }
 
 fn display_name_from_raw(raw: &Value) -> String {
