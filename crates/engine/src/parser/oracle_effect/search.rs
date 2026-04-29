@@ -819,6 +819,60 @@ fn basic_land_type_any_of() -> TypeFilter {
     )
 }
 
+fn capitalize_subtype_word(word: &str) -> String {
+    word.split('-')
+        .map(capitalize)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn parse_search_suffix_subtype_redeclaration(text: &str) -> Option<(&str, Vec<TypeFilter>)> {
+    let (rest, subtype) = take_till1::<_, _, VerboseError<&str>>(|c: char| c.is_whitespace())
+        .parse(text)
+        .ok()?;
+    if !subtype.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+        return None;
+    }
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
+    let (rest, core_type) = alt((
+        value(
+            Some(TypeFilter::Creature),
+            tag::<_, _, VerboseError<&str>>("creature"),
+        ),
+        value(
+            Some(TypeFilter::Artifact),
+            tag::<_, _, VerboseError<&str>>("artifact"),
+        ),
+        value(
+            Some(TypeFilter::Enchantment),
+            tag::<_, _, VerboseError<&str>>("enchantment"),
+        ),
+        value(
+            Some(TypeFilter::Instant),
+            tag::<_, _, VerboseError<&str>>("instant"),
+        ),
+        value(
+            Some(TypeFilter::Sorcery),
+            tag::<_, _, VerboseError<&str>>("sorcery"),
+        ),
+        value(
+            Some(TypeFilter::Land),
+            tag::<_, _, VerboseError<&str>>("land"),
+        ),
+        value(None, tag::<_, _, VerboseError<&str>>("cards")),
+        value(None, tag::<_, _, VerboseError<&str>>("card")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let mut filters = Vec::new();
+    if let Some(core_type) = core_type {
+        filters.push(core_type);
+    }
+    filters.push(TypeFilter::Subtype(capitalize_subtype_word(subtype)));
+    Some((rest, filters))
+}
+
 /// Parse property suffixes from search filter text ("with mana value ...", "with a different name ...").
 /// Reuses the existing suffix parsers from oracle_target.
 fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints) {
@@ -950,6 +1004,14 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             tag::<_, _, VerboseError<&str>>("with a basic land type").parse(remaining)
         {
             suffix.type_filters.push(basic_land_type_any_of());
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Some((rest, type_filters)) = parse_search_suffix_subtype_redeclaration(remaining) {
+            for type_filter in type_filters {
+                suffix.type_filters.push(type_filter);
+            }
             remaining = rest.trim_start();
             continue;
         }
@@ -1405,6 +1467,41 @@ mod tests {
         };
         assert!(equipment.type_filters.contains(&TypeFilter::Artifact));
         assert_eq!(equipment.get_subtype(), Some("Equipment"));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_trailing_subtype_card() {
+        let filter = parse_search_filter("spider hero card, reveal it");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed
+            .type_filters
+            .iter()
+            .any(|ty| matches!(ty, TypeFilter::Subtype(subtype) if subtype == "Spider")));
+        assert!(typed
+            .type_filters
+            .iter()
+            .any(|ty| matches!(ty, TypeFilter::Subtype(subtype) if subtype == "Hero")));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_hyphenated_subtype_creature() {
+        let filter = parse_search_filter("legendary team-up creature, reveal it");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary
+            }
+        )));
+        assert!(typed
+            .type_filters
+            .iter()
+            .any(|ty| matches!(ty, TypeFilter::Subtype(subtype) if subtype == "Team-Up")));
     }
 
     #[test]
