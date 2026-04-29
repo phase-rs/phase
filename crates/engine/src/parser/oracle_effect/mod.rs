@@ -17261,6 +17261,26 @@ mod tests {
     }
 
     #[test]
+    fn bridge_you_control_artifact_and_enchantment() {
+        let result =
+            try_nom_condition_as_ability_condition("you control an artifact and an enchantment");
+        match result {
+            Some(AbilityCondition::And { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(conditions.iter().all(|condition| matches!(
+                    condition,
+                    AbilityCondition::QuantityCheck {
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                )));
+            }
+            other => panic!("expected And(ObjectCount GE 1, ObjectCount GE 1), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn bridge_source_tapped_maps_to_ability_condition() {
         // CR 611.2b: SourceIsTapped bridges to AbilityCondition::SourceIsTapped.
         let result = try_nom_condition_as_ability_condition("~ is tapped");

@@ -42,6 +42,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_source_state_conditions,
         parse_player_state_conditions,
         parse_you_have_conditions,
+        parse_compound_control_presence,
         parse_control_conditions,
         parse_opponent_poison_conditions,
         parse_defending_player_comparison_conditions,
@@ -60,6 +61,44 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_unless_pay_condition,
     ))
     .parse(input)
+}
+
+/// CR 603.4: Parse "you control a/an [type] and a/an [type]" as a compound
+/// presence check. This keeps two independent control predicates composable
+/// instead of hard-coding card text such as "artifact and enchantment".
+fn parse_compound_control_presence(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, first) = parse_control_presence_tail(rest)?;
+    let (rest, _) = tag(" and ").parse(rest)?;
+    let (rest, second) = parse_control_presence_tail(rest)?;
+    Ok((
+        rest,
+        StaticCondition::And {
+            conditions: vec![first, second],
+        },
+    ))
+}
+
+fn parse_control_presence_tail(input: &str) -> OracleResult<'_, StaticCondition> {
+    let _ = alt((parse_article, value((), tag("another ")))).parse(input)?;
+
+    let (filter, remainder) = parse_type_phrase(input);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+            )],
+        }));
+    }
+    let filter = inject_controller_you(filter);
+    let consumed = input.len() - remainder.len();
+    Ok((
+        &input[consumed..],
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        },
+    ))
 }
 
 /// Helper: tag with potential leading whitespace trimmed.
@@ -2109,6 +2148,22 @@ mod tests {
         let (rest, c) = parse_inner_condition("you control an artifact").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    #[test]
+    fn test_you_control_compound_presence() {
+        let (rest, c) =
+            parse_inner_condition("you control an artifact and an enchantment").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert!(conditions
+                    .iter()
+                    .all(|c| matches!(c, StaticCondition::IsPresent { filter: Some(_) })));
+            }
+            other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
+        }
     }
 
     #[test]

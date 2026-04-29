@@ -1427,6 +1427,27 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
             })
         }
         StaticCondition::SourceIsTapped => Some(AbilityCondition::SourceIsTapped),
+        // CR 608.2c: Compound static predicates map recursively to ability
+        // conditions. If any child is unmappable, reject the whole compound so
+        // the parser does not silently drop part of the condition.
+        StaticCondition::And { conditions } => {
+            let mapped: Option<Vec<_>> = conditions
+                .iter()
+                .map(static_condition_to_ability_condition)
+                .collect();
+            Some(AbilityCondition::And {
+                conditions: mapped?,
+            })
+        }
+        StaticCondition::Or { conditions } => {
+            let mapped: Option<Vec<_>> = conditions
+                .iter()
+                .map(static_condition_to_ability_condition)
+                .collect();
+            Some(AbilityCondition::Or {
+                conditions: mapped?,
+            })
+        }
         // CR 122.1 + CR 608.2c: Counter-threshold gate on the source object.
         // Maps to `QuantityCheck { CountersOn(Self|AnyCountersOnSelf), Comparator, Fixed }`
         // so the existing sub-ability condition evaluator handles it without
@@ -1470,8 +1491,6 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
-        | StaticCondition::And { .. }
-        | StaticCondition::Or { .. }
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::CompletedADungeon
         | StaticCondition::ControlsCommander
