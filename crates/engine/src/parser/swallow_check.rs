@@ -839,6 +839,10 @@ fn detect_dynamic_qty(cleaned: &str, original: &str, ast_json: &str) {
         "\"dynamic_count\":{",
         "ObjectCount",
         "ZoneCardCount",
+        // Bloom Tender / Faeburrow Elder class: "For each color among
+        // permanents you control, add one mana of that color" is captured as
+        // a dynamic mana-production carrier, not a QuantityExpr count.
+        "DistinctColorsAmongPermanents",
         // CR 702.122: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.

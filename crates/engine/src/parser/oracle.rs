@@ -7528,6 +7528,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
+        let oracle =
+            "Vivid — {T}: For each color among permanents you control, add one mana of that color.";
+        let parsed = parse(oracle, "Bloom Tender", &[], &["Creature"], &[]);
+
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            "unexpected dynamic quantity warning: {:?}",
+            parsed.parse_warnings
+        );
+
+        let ability = parsed
+            .abilities
+            .first()
+            .expect("expected parsed mana ability");
+        assert!(matches!(
+            &*ability.effect,
+            Effect::Mana {
+                produced: crate::types::ability::ManaProduction::DistinctColorsAmongPermanents { .. },
+                ..
+            }
+        ));
+    }
+
     // ------------------------------------------------------------------
     // merge_ability_condition — single-authority merge for ability-word
     // plus literal-if condition composition.
