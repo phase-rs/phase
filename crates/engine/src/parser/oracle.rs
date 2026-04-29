@@ -7747,6 +7747,36 @@ mod tests {
     }
 
     #[test]
+    fn instant_or_sorcery_cast_activation_restriction_does_not_emit_condition_warning() {
+        let oracle = "{T}: You gain 2 life. Activate only if you've cast an instant or sorcery spell this turn.";
+        let parsed = parse(oracle, "Potioner's Trove", &[], &["Artifact"], &[]);
+
+        assert_eq!(parsed.parse_warnings, Vec::<String>::new());
+        let gain_life_ability = parsed
+            .abilities
+            .iter()
+            .find(|ability| matches!(*ability.effect, Effect::GainLife { .. }))
+            .expect("expected gain-life ability");
+        assert!(gain_life_ability
+            .activation_restrictions
+            .iter()
+            .any(|restriction| matches!(
+                restriction,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::YouCastSpellThisTurn {
+                        filter: Some(TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            ..
+                        }))
+                    })
+                } if type_filters == &vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ])]
+            )));
+    }
+
+    #[test]
     fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
         let oracle =
             "Vivid — {T}: For each color among permanents you control, add one mana of that color.";

@@ -722,6 +722,21 @@ fn evaluate_condition(
                 .unwrap_or(0)
                 >= *count
         }
+        ParsedCondition::YouCastSpellThisTurn { filter } => state
+            .spells_cast_this_turn_by_player
+            .get(&player)
+            .is_some_and(|spells| {
+                spells.iter().any(|record| {
+                    filter.as_ref().map_or(true, |filter| {
+                        crate::game::filter::spell_record_matches_filter(
+                            record,
+                            filter,
+                            player,
+                            &state.all_creature_types,
+                        )
+                    })
+                })
+            }),
         ParsedCondition::YouCastNoncreatureSpellThisTurn => state
             .spells_cast_this_turn_by_player
             .get(&player)
@@ -1304,6 +1319,36 @@ mod tests {
             PlayerId(0),
             ObjectId(1),
             "a creature died this turn"
+        ));
+    }
+
+    #[test]
+    fn evaluates_cast_instant_or_sorcery_this_turn_condition() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            vec![crate::types::game_state::SpellCastRecord {
+                core_types: vec![CoreType::Instant],
+                supertypes: Vec::new(),
+                subtypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                mana_value: 1,
+                has_x_in_cost: false,
+            }],
+        );
+
+        assert!(parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(1),
+            "you've cast an instant or sorcery spell this turn"
+        ));
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(1),
+            ObjectId(1),
+            "you've cast an instant or sorcery spell this turn"
         ));
     }
 

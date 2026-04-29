@@ -2731,6 +2731,12 @@ pub enum ParsedCondition {
     YouAttackedWithAtLeast {
         count: u32,
     },
+    /// CR 602.5b + CR 109.2b: True when the player cast a spell matching
+    /// `filter` this turn. `None` matches any spell.
+    YouCastSpellThisTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     YouCastNoncreatureSpellThisTurn,
     YouCastSpellCountAtLeast {
         count: u32,
