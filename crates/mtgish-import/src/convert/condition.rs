@@ -8,8 +8,8 @@
 
 use engine::types::ability::{
     AbilityCondition, AggregateFunction, CardTypeSetSource, Comparator, ControllerRef, CountScope,
-    FilterProp, ParsedCondition, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TriggerCondition, TypedFilter, ZoneRef,
+    FilterProp, ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TriggerCondition, TypedFilter, ZoneRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::mana::ManaColor;
@@ -1144,24 +1144,6 @@ fn require_you_player(player: &Player, idiom: &'static str) -> ConvResult<()> {
             detail: format!("non-You player axis: {other:?}"),
         }),
     }
-}
-
-/// CR 109.4: Reject anything other than `Players::You` on an
-/// `APlayerPassesFilter` player-set axis. Used by surfaces (currently
-/// `ParsedCondition`) that have no `Opponent*`-prefixed analog and so can
-/// only collapse the existential to the controller's singular form.
-fn require_you_players(player_set: &Players, idiom: &'static str) -> ConvResult<()> {
-    if matches!(
-        player_set,
-        Players::SinglePlayer(p) if matches!(&**p, Player::You)
-    ) {
-        return Ok(());
-    }
-    Err(ConversionGap::MalformedIdiom {
-        idiom,
-        path: String::new(),
-        detail: format!("non-You Players axis: {player_set:?}"),
-    })
 }
 
 /// Bind `ControllerRef::You` onto the converted filter. Mirrors the
@@ -2782,8 +2764,7 @@ pub fn convert_parsed(c: &Condition) -> ConvResult<ParsedCondition> {
         // sets (Opponent, AnyPlayer) have no `You*`-prefixed ParsedCondition
         // counterpart and strict-fail.
         Condition::APlayerPassesFilter(player_set, predicate) => {
-            require_you_players(player_set, "Condition::APlayerPassesFilter (parsed)")?;
-            convert_player_predicate_parsed(predicate)
+            convert_aplayer_predicate_parsed(player_set, predicate)
         }
         // CR 601.3 + CR 602.5 + CR 608.2c: Compound parsed conditions —
         // `ParsedCondition::{And,Or,Not}` was added to the engine in
@@ -2905,6 +2886,39 @@ fn convert_player_predicate_parsed(predicate: &Players) -> ConvResult<ParsedCond
             });
         }
     })
+}
+
+fn convert_aplayer_predicate_parsed(
+    player_set: &Players,
+    predicate: &Players,
+) -> ConvResult<ParsedCondition> {
+    if matches!(
+        player_set,
+        Players::SinglePlayer(p) if matches!(&**p, Player::You)
+    ) {
+        return convert_player_predicate_parsed(predicate);
+    }
+
+    match (player_set, predicate) {
+        (Players::Opponent, Players::SearchedTheirLibraryThisTurn) => {
+            Ok(ParsedCondition::OpponentSearchedLibraryThisTurn)
+        }
+        (Players::Opponent, Players::LostLifeThisTurn) => Ok(ParsedCondition::PlayerCountAtLeast {
+            filter: PlayerFilter::OpponentLostLife,
+            minimum: 1,
+        }),
+        (Players::Opponent, Players::GainedLifeThisTurn) => {
+            Ok(ParsedCondition::PlayerCountAtLeast {
+                filter: PlayerFilter::OpponentGainedLife,
+                minimum: 1,
+            })
+        }
+        (other, _) => Err(ConversionGap::MalformedIdiom {
+            idiom: "Condition::APlayerPassesFilter (parsed)",
+            path: String::new(),
+            detail: format!("non-You Players axis: {other:?}"),
+        }),
+    }
 }
 
 /// CR 614.1d: "you control N (or more) [type/subtype] permanents" → one of
@@ -3139,6 +3153,36 @@ mod tests {
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 7 },
+            }
+        );
+    }
+
+    #[test]
+    fn opponent_searched_library_condition_lowers_to_parsed_condition() {
+        let condition = Condition::APlayerPassesFilter(
+            Box::new(Players::Opponent),
+            Box::new(Players::SearchedTheirLibraryThisTurn),
+        );
+
+        let converted = convert_parsed(&condition).unwrap();
+
+        assert_eq!(converted, ParsedCondition::OpponentSearchedLibraryThisTurn);
+    }
+
+    #[test]
+    fn opponent_lost_life_condition_lowers_to_player_count_parsed_condition() {
+        let condition = Condition::APlayerPassesFilter(
+            Box::new(Players::Opponent),
+            Box::new(Players::LostLifeThisTurn),
+        );
+
+        let converted = convert_parsed(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            ParsedCondition::PlayerCountAtLeast {
+                filter: PlayerFilter::OpponentLostLife,
+                minimum: 1,
             }
         );
     }
