@@ -2337,6 +2337,16 @@ fn strip_once_per_turn_suffix(
     condition_text: &mut String,
     restrictions: &mut Vec<ActivationRestriction>,
 ) {
+    if strip_condition_suffix(
+        condition_text,
+        " and only as a sorcery",
+        ActivationRestriction::AsSorcery,
+        restrictions,
+    ) {
+        strip_once_per_turn_suffix(condition_text, restrictions);
+        return;
+    }
+
     let lower = condition_text.to_lowercase();
     if lower.ends_with(" and only once each turn") {
         let stripped_len = condition_text.len() - " and only once each turn".len();
@@ -2351,6 +2361,32 @@ fn strip_once_per_turn_suffix(
             .to_string();
         restrictions.push(ActivationRestriction::OnlyOnce);
     }
+}
+
+fn strip_condition_suffix(
+    condition_text: &mut String,
+    suffix: &'static str,
+    restriction: ActivationRestriction,
+    restrictions: &mut Vec<ActivationRestriction>,
+) -> bool {
+    let lower = condition_text.to_lowercase();
+    let suffix_len = match take_until::<_, _, VerboseError<&str>>(suffix).parse(lower.as_str()) {
+        Ok((rest, _))
+            if all_consuming(tag::<_, _, VerboseError<&str>>(suffix))
+                .parse(rest)
+                .is_ok() =>
+        {
+            suffix.len()
+        }
+        Err(_) => return false,
+        _ => return false,
+    };
+    let stripped_len = condition_text.len() - suffix_len;
+    *condition_text = condition_text[..stripped_len]
+        .trim_end_matches(|c: char| c == ',' || c.is_whitespace()) // allow-noncombinator: structural punctuation cleanup after suffix parse
+        .to_string();
+    restrictions.push(restriction);
+    true
 }
 
 /// Strip trailing "X can't be 0." / " X can't be 0." constraint annotations from Oracle text.
@@ -3615,6 +3651,28 @@ mod tests {
             )),
             "expected RequiresCondition with OpponentLostLife"
         );
+    }
+
+    #[test]
+    fn parses_activate_only_if_condition_and_only_as_sorcery() {
+        let r = parse(
+            "{2}{G}{G}: Return this card from your graveyard to the battlefield. Activate only if there are four or more card types among cards in your graveyard and only as a sorcery.",
+            "Delirium Test",
+            &[],
+            &["Creature"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let restrictions = &r.abilities[0].activation_restrictions;
+        assert!(restrictions.contains(&ActivationRestriction::AsSorcery));
+        assert!(restrictions.iter().any(|restriction| matches!(
+            restriction,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::GraveyardCardTypeCountAtLeast { count: 4 })
+            }
+        )));
+        assert_eq!(r.parse_warnings, Vec::<String>::new());
     }
 
     #[test]
