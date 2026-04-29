@@ -224,6 +224,7 @@ mod tests {
                     target: TargetFilter::Any,
                     card_filter: TargetFilter::Any,
                     count: None,
+                    choice_optional: false,
                 },
             ),
         );
@@ -286,6 +287,7 @@ mod tests {
                         properties: vec![],
                     }),
                     count: None,
+                    choice_optional: false,
                 },
             )
             .sub_ability(AbilityDefinition::new(
