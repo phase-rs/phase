@@ -13236,6 +13236,41 @@ mod tests {
     }
 
     #[test]
+    fn effect_becomes_color_and_attacks_if_able_chains_requirement() {
+        let def = parse_effect_chain(
+            "Target creature becomes red until end of turn and attacks this turn if able.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::GenericEffect {
+                target: Some(TargetFilter::Typed(tf)),
+                static_abilities,
+                duration: Some(Duration::UntilEndOfTurn),
+            } if tf.type_filters.contains(&TypeFilter::Creature)
+                && static_abilities.len() == 1
+                && static_abilities[0]
+                    .modifications
+                    .contains(&ContinuousModification::SetColor {
+                        colors: vec![ManaColor::Red],
+                    })
+        ));
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("attack requirement should be chained");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::GenericEffect {
+                static_abilities,
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            } if static_abilities.len() == 1
+                && static_abilities[0].mode == StaticMode::MustAttack
+        ));
+    }
+
+    #[test]
     fn effect_target_creature_cant_block_uses_rule_static() {
         let e = parse_effect("Target creature can't block this turn");
         assert!(matches!(

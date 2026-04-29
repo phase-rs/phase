@@ -16,6 +16,7 @@ use crate::types::ability::{
 use crate::types::game_state::DayNight;
 use crate::types::statics::StaticMode;
 
+use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_static::{parse_continuous_modifications, parse_static_line_multi};
@@ -1282,6 +1283,10 @@ fn build_become_clause(
         });
     }
 
+    if let Some(clause) = try_parse_become_and_attack_if_able(&application, become_text) {
+        return Some(clause);
+    }
+
     let animation = parse_animation_spec(become_text)?;
     let modifications = animation_modifications(&animation);
     if modifications.is_empty() {
@@ -1305,6 +1310,83 @@ fn build_become_clause(
         condition: None,
         optional: false,
     })
+}
+
+fn try_parse_become_and_attack_if_able(
+    application: &SubjectApplication,
+    become_text: &str,
+) -> Option<ParsedEffectClause> {
+    let lower = become_text.to_lowercase();
+    let (before_attack, attack_duration, rest) = nom_primitives::scan_preceded(&lower, |i| {
+        preceded(
+            tag::<_, _, VerboseError<&str>>("and "),
+            parse_attack_if_able_duration,
+        )
+        .parse(i)
+    })?;
+    if !rest.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    let animation_text = become_text[..before_attack.trim_end().len()].trim();
+    let (animation_text, animation_duration) = super::strip_trailing_duration(animation_text);
+    let animation_duration = animation_duration?;
+    let animation = parse_animation_spec(animation_text)?;
+    let modifications = animation_modifications(&animation);
+    if modifications.is_empty() {
+        return None;
+    }
+
+    let affected = static_affected_for_application(application);
+    let attack_effect = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::new(StaticMode::MustAttack)
+            .affected(affected.clone())
+            .description("attacks if able".to_string())],
+        duration: Some(attack_duration.clone()),
+        target: application.target.clone(),
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(animation_text.to_string())],
+            duration: Some(animation_duration.clone()),
+            target: application.target.clone(),
+        },
+        duration: Some(animation_duration),
+        sub_ability: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            attack_effect,
+        ))),
+        distribute: None,
+        multi_target: application.multi_target.clone(),
+        condition: None,
+        optional: false,
+    })
+}
+
+fn parse_attack_if_able_duration(input: &str) -> OracleResult<'_, Duration> {
+    alt((
+        value(
+            Duration::UntilEndOfTurn,
+            alt((
+                tag("attacks this turn if able"),
+                tag("attack this turn if able"),
+            )),
+        ),
+        value(
+            Duration::UntilEndOfCombat,
+            alt((
+                tag("attacks this combat if able"),
+                tag("attack this combat if able"),
+                tag("attacks that combat if able"),
+                tag("attack that combat if able"),
+            )),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 119.5: Parse "life total becomes N" into SetLifeTotal effect.
