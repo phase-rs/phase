@@ -34,6 +34,7 @@ use engine::types::ability::{
 };
 use engine::types::card_type::CoreType;
 use engine::types::statics::{StaticMode, TriggerCause};
+use engine::types::zones::Zone;
 use engine::types::{Keyword, TriggerDefinition};
 
 use crate::provenance::{CardProvenance, ProvenanceEntry, ProvenanceSlot};
@@ -42,6 +43,16 @@ use crate::schema::types::{
     Abilities, Card, CardType, DoorInfo, FlipInfo, OracleCard, Permanents, Rule,
 };
 use result::{ConvResult, ConversionGap};
+
+const ALL_SOURCE_ZONES: [Zone; 7] = [
+    Zone::Library,
+    Zone::Hand,
+    Zone::Battlefield,
+    Zone::Graveyard,
+    Zone::Stack,
+    Zone::Exile,
+    Zone::Command,
+];
 
 /// Per-face conversion accumulator. Mirrors the relevant subset of
 /// `engine::CardFace`. The casting-metadata fields (`additional_cost`,
@@ -973,20 +984,57 @@ fn convert_rule(
             return Ok(());
         }
 
-        // Zone-scoped wrappers — for now we ignore the zone (TODO: thread it
-        // into AbilityDefinition.activation_zone) and just dispatch the inner
-        // rule. Loses fidelity, but unlocks many flashback/graveyard activated
-        // shapes whose inner Activated rule already converts.
-        Rule::FromGraveyard(inner)
-        | Rule::FromExile(inner)
-        | Rule::FromExileOrBattlefield(inner)
-        | Rule::FromHand(inner)
-        | Rule::FromAnyZone(inner)
-        | Rule::FromCommandZone(inner)
-        | Rule::FromCommandZoneOrBattlefield(inner)
-        | Rule::FromGraveyardOrBattlefield(inner)
-        | Rule::FromStack(inner) => {
-            return convert_rule(inner, face, idx, stub, ctx);
+        // CR 113.6 / CR 603.6f / CR 602.1: Zone-scoped wrappers decorate
+        // the produced inner definitions with the zones where the source
+        // functions. Shapes without an engine zone slot strict-fail rather
+        // than importing as battlefield-only.
+        Rule::FromGraveyard(inner) => {
+            return convert_zone_scoped_rule(inner, &[Zone::Graveyard], face, idx, stub, ctx);
+        }
+        Rule::FromExile(inner) => {
+            return convert_zone_scoped_rule(inner, &[Zone::Exile], face, idx, stub, ctx);
+        }
+        Rule::FromHand(inner) => {
+            return convert_zone_scoped_rule(inner, &[Zone::Hand], face, idx, stub, ctx);
+        }
+        Rule::FromCommandZone(inner) => {
+            return convert_zone_scoped_rule(inner, &[Zone::Command], face, idx, stub, ctx);
+        }
+        Rule::FromStack(inner) => {
+            return convert_zone_scoped_rule(inner, &[Zone::Stack], face, idx, stub, ctx);
+        }
+        Rule::FromExileOrBattlefield(inner) => {
+            return convert_zone_scoped_rule(
+                inner,
+                &[Zone::Exile, Zone::Battlefield],
+                face,
+                idx,
+                stub,
+                ctx,
+            );
+        }
+        Rule::FromCommandZoneOrBattlefield(inner) => {
+            return convert_zone_scoped_rule(
+                inner,
+                &[Zone::Command, Zone::Battlefield],
+                face,
+                idx,
+                stub,
+                ctx,
+            );
+        }
+        Rule::FromGraveyardOrBattlefield(inner) => {
+            return convert_zone_scoped_rule(
+                inner,
+                &[Zone::Graveyard, Zone::Battlefield],
+                face,
+                idx,
+                stub,
+                ctx,
+            );
+        }
+        Rule::FromAnyZone(inner) => {
+            return convert_zone_scoped_rule(inner, &ALL_SOURCE_ZONES, face, idx, stub, ctx);
         }
         _ => {}
     }
@@ -1394,6 +1442,29 @@ pub(crate) fn build_ability_from_actions(
             ability.player_scope = Some(player_scope);
             Ok(ability)
         }
+        A::ScopedConditional {
+            inner,
+            player_scope,
+            condition,
+        } => {
+            let mut ability = build_ability_from_actions(kind, cost, *inner)?;
+            if ability.else_ability.is_some() {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "AbilityDefinition::player_scope condition",
+                    needed_variant:
+                        "outer scoped predicate that skips inner IfElse without taking else branch"
+                            .into(),
+                });
+            }
+            ability.condition = Some(match ability.condition.take() {
+                Some(existing) => engine::types::ability::AbilityCondition::And {
+                    conditions: vec![existing, condition],
+                },
+                None => condition,
+            });
+            ability.player_scope = Some(player_scope);
+            Ok(ability)
+        }
     }
 }
 
@@ -1435,18 +1506,10 @@ fn convert_activate_modifier(
             }
         }
         // CR 602.5 + CR 602.5b: "Activate only if [condition]" gates the
-        // begin-to-activate step (CR 602.1a), NOT resolution. Bridge the
-        // inner Condition through `convert_parsed` and emit
-        // `ActivationRestriction::RequiresCondition { condition: Some(_) }`.
-        // Engine evaluates `None` as always-pass via `is_none_or` in
-        // restrictions.rs:494, so a translation gap propagates as the rule's
-        // strict-fail rather than silently lifting the gate.
-        M::ActivateOnlyIf(condition) => {
-            let parsed = crate::convert::condition::convert_parsed(condition)?;
-            vec![ActivationRestriction::RequiresCondition {
-                condition: Some(parsed),
-            }]
-        }
+        // begin-to-activate step (CR 602.1a), NOT resolution. Timing predicates
+        // belong on first-class `ActivationRestriction` variants; remaining
+        // source/controller predicates route through `RequiresCondition`.
+        M::ActivateOnlyIf(condition) => convert_activate_only_if_condition(condition)?,
         _ => {
             return Err(ConversionGap::UnknownVariant {
                 path: String::new(),
@@ -1461,6 +1524,86 @@ fn convert_activate_modifier(
             });
         }
     })
+}
+
+fn convert_activate_only_if_condition(
+    condition: &crate::schema::types::Condition,
+) -> ConvResult<Vec<ActivationRestriction>> {
+    let mut restrictions = Vec::new();
+    append_activation_condition_restrictions(condition, &mut restrictions)?;
+    Ok(restrictions)
+}
+
+fn append_activation_condition_restrictions(
+    condition: &crate::schema::types::Condition,
+    restrictions: &mut Vec<ActivationRestriction>,
+) -> ConvResult<()> {
+    use crate::schema::types::{Condition as C, Player, Players};
+
+    match condition {
+        C::And(parts) => {
+            for part in parts {
+                append_activation_condition_restrictions(part, restrictions)?;
+            }
+            Ok(())
+        }
+        C::PlayerPassesFilter(player, predicate) => match (player.as_ref(), predicate.as_ref()) {
+            (Player::You, Players::IsTheirTurn) => {
+                push_unique_activation_restriction(
+                    restrictions,
+                    ActivationRestriction::DuringYourTurn,
+                );
+                Ok(())
+            }
+            _ => append_parsed_activation_condition(condition, restrictions),
+        },
+        C::IsDuringUpkeep => {
+            push_unique_activation_restriction(
+                restrictions,
+                ActivationRestriction::DuringYourUpkeep,
+            );
+            Ok(())
+        }
+        C::IsDuringCombat => {
+            push_unique_activation_restriction(restrictions, ActivationRestriction::DuringCombat);
+            Ok(())
+        }
+        C::IsBeforeAttackersDeclared => {
+            push_unique_activation_restriction(
+                restrictions,
+                ActivationRestriction::BeforeAttackersDeclared,
+            );
+            Ok(())
+        }
+        C::IsBeforeCombatDamageStep => {
+            push_unique_activation_restriction(
+                restrictions,
+                ActivationRestriction::BeforeCombatDamage,
+            );
+            Ok(())
+        }
+        _ => append_parsed_activation_condition(condition, restrictions),
+    }
+}
+
+fn append_parsed_activation_condition(
+    condition: &crate::schema::types::Condition,
+    restrictions: &mut Vec<ActivationRestriction>,
+) -> ConvResult<()> {
+    let parsed = crate::convert::condition::convert_parsed(condition)?;
+    restrictions.push(ActivationRestriction::RequiresCondition {
+        condition: Some(parsed),
+    });
+    Ok(())
+}
+
+fn push_unique_activation_restriction(
+    restrictions: &mut Vec<ActivationRestriction>,
+    restriction: ActivationRestriction,
+) {
+    if !restrictions.contains(&restriction) {
+        restrictions.push(restriction);
+    }
 }
 
 /// Extract the inner `Actions` from a tuple newtype struct (`WasKicked`,
@@ -2328,6 +2471,135 @@ fn recurse_rules(
     Ok(inner)
 }
 
+/// Convert one nested rule, then scope every produced definition to the
+/// zones where the source card functions. This mirrors the condition-wrapper
+/// pattern: wrappers decorate typed engine definitions instead of being
+/// transparent.
+fn convert_zone_scoped_rule(
+    inner_rule: &Rule,
+    zones: &[Zone],
+    face: &str,
+    idx: usize,
+    stub: &mut EngineFaceStub,
+    ctx: &mut Ctx,
+) -> ConvResult<()> {
+    let mut inner = EngineFaceStub::default();
+    convert_rule(inner_rule, face, idx, &mut inner, ctx)?;
+    apply_zone_scope(zones, &mut inner)?;
+    extend_stub(stub, inner);
+    Ok(())
+}
+
+fn apply_zone_scope(zones: &[Zone], inner: &mut EngineFaceStub) -> ConvResult<()> {
+    for ability in &mut inner.abilities {
+        if ability.kind != AbilityKind::Activated {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "AbilityDefinition",
+                needed_variant: format!(
+                    "zone-scoped {:?} ability source in {:?}",
+                    ability.kind, zones
+                ),
+            });
+        }
+        if zones.len() != 1 {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "AbilityDefinition::activation_zone",
+                needed_variant: format!("multi-zone activated ability source in {zones:?}"),
+            });
+        }
+        let zone = zones[0];
+        match ability.activation_zone {
+            None => ability.activation_zone = Some(zone),
+            Some(existing) if existing == zone => {}
+            Some(existing) => {
+                return Err(ConversionGap::MalformedIdiom {
+                    idiom: "Rule::From*/activation_zone",
+                    path: String::new(),
+                    detail: format!("conflicting zones: existing {existing:?}, wrapper {zone:?}"),
+                });
+            }
+        }
+    }
+
+    for trigger in &mut inner.triggers {
+        constrain_zone_list(
+            &mut trigger.trigger_zones,
+            zones,
+            "TriggerDefinition::trigger_zones",
+        )?;
+    }
+    for static_def in &mut inner.statics {
+        constrain_zone_list(
+            &mut static_def.active_zones,
+            zones,
+            "StaticDefinition::active_zones",
+        )?;
+    }
+
+    if !inner.replacements.is_empty() {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ReplacementDefinition",
+            needed_variant: "source active zones".into(),
+        });
+    }
+    if !inner.keywords.is_empty() {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "Keyword",
+            needed_variant: format!("zone-scoped keyword wrapper in {zones:?}"),
+        });
+    }
+    if inner.additional_cost.is_some()
+        || !inner.casting_options.is_empty()
+        || !inner.casting_restrictions.is_empty()
+        || inner.strive_cost.is_some()
+    {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "CardFace",
+            needed_variant: format!("zone-scoped casting metadata in {zones:?}"),
+        });
+    }
+
+    Ok(())
+}
+
+fn constrain_zone_list(
+    existing: &mut Vec<Zone>,
+    zones: &[Zone],
+    engine_type: &'static str,
+) -> ConvResult<()> {
+    if existing.is_empty() {
+        *existing = zones.to_vec();
+        return Ok(());
+    }
+
+    let constrained: Vec<Zone> = existing
+        .iter()
+        .copied()
+        .filter(|zone| zones.contains(zone))
+        .collect();
+    if constrained.is_empty() {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "Rule::From*/zone intersection",
+            path: String::new(),
+            detail: format!("{engine_type}: existing {existing:?}, wrapper {zones:?}"),
+        });
+    }
+    *existing = constrained;
+    Ok(())
+}
+
+fn extend_stub(stub: &mut EngineFaceStub, inner: EngineFaceStub) {
+    stub.keywords.extend(inner.keywords);
+    stub.abilities.extend(inner.abilities);
+    stub.triggers.extend(inner.triggers);
+    stub.statics.extend(inner.statics);
+    stub.replacements.extend(inner.replacements);
+    stub.additional_cost = inner.additional_cost.or(stub.additional_cost.take());
+    stub.casting_options.extend(inner.casting_options);
+    stub.casting_restrictions.extend(inner.casting_restrictions);
+    stub.strive_cost = inner.strive_cost.or(stub.strive_cost.take());
+}
+
 /// Decorate the produced items with the wrapper's condition. Dispatches
 /// on the inner body's shape:
 ///
@@ -2550,4 +2822,158 @@ fn creature_type_name(ct: &crate::schema::types::CreatureType) -> String {
         .ok()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| format!("{ct:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::types::ability::{
+        AbilityCondition, Comparator, GainLifePlayer, PlayerFilter, QuantityExpr,
+    };
+    use engine::types::triggers::TriggerMode;
+
+    fn draw_ability(kind: AbilityKind) -> AbilityDefinition {
+        AbilityDefinition::new(
+            kind,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+    }
+
+    #[test]
+    fn zone_scope_sets_activated_ability_activation_zone() {
+        let mut stub = EngineFaceStub::default();
+        stub.abilities.push(draw_ability(AbilityKind::Activated));
+
+        apply_zone_scope(&[Zone::Graveyard], &mut stub).expect("scope graveyard ability");
+
+        assert_eq!(stub.abilities[0].activation_zone, Some(Zone::Graveyard));
+    }
+
+    #[test]
+    fn zone_scope_sets_trigger_zones() {
+        let mut stub = EngineFaceStub::default();
+        stub.triggers
+            .push(TriggerDefinition::new(TriggerMode::SpellCast));
+
+        apply_zone_scope(&[Zone::Exile, Zone::Battlefield], &mut stub)
+            .expect("scope trigger zones");
+
+        assert_eq!(
+            stub.triggers[0].trigger_zones,
+            vec![Zone::Exile, Zone::Battlefield]
+        );
+    }
+
+    #[test]
+    fn zone_scope_supports_all_source_zones_for_triggers() {
+        let mut stub = EngineFaceStub::default();
+        stub.triggers
+            .push(TriggerDefinition::new(TriggerMode::SpellCast));
+
+        apply_zone_scope(&ALL_SOURCE_ZONES, &mut stub).expect("scope any-zone trigger");
+
+        assert_eq!(stub.triggers[0].trigger_zones, ALL_SOURCE_ZONES);
+    }
+
+    #[test]
+    fn zone_scope_sets_static_active_zones() {
+        let mut stub = EngineFaceStub::default();
+        stub.statics
+            .push(StaticDefinition::new(StaticMode::Continuous));
+
+        apply_zone_scope(&[Zone::Command], &mut stub).expect("scope static zones");
+
+        assert_eq!(stub.statics[0].active_zones, vec![Zone::Command]);
+    }
+
+    #[test]
+    fn zone_scope_rejects_spell_ability_source() {
+        let mut stub = EngineFaceStub::default();
+        stub.abilities.push(draw_ability(AbilityKind::Spell));
+
+        let err = apply_zone_scope(&[Zone::Hand], &mut stub).expect_err("spell source must fail");
+
+        assert!(
+            matches!(
+                err,
+                ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "AbilityDefinition",
+                    ..
+                }
+            ),
+            "expected AbilityDefinition gap, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_conditional_rejects_inner_else_branch() {
+        let conv = action::ActionsConversion::ScopedConditional {
+            inner: Box::new(action::ActionsConversion::Branched {
+                condition: AbilityCondition::IsYourTurn,
+                then_effects: vec![Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }],
+                else_effects: vec![Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: GainLifePlayer::Controller,
+                }],
+            }),
+            player_scope: PlayerFilter::Opponent,
+            condition: AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Fixed { value: 0 },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        };
+
+        let err = build_ability_from_actions(AbilityKind::Spell, None, conv)
+            .expect_err("scoped IfElse must strict-fail");
+
+        assert!(
+            matches!(
+                err,
+                ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "AbilityDefinition::player_scope condition",
+                    ..
+                }
+            ),
+            "expected scoped condition gap, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn activate_only_if_their_turn_maps_to_timing_restriction() {
+        use crate::schema::types::{Condition, Player, Players};
+
+        let restrictions = convert_activate_only_if_condition(&Condition::PlayerPassesFilter(
+            Box::new(Player::You),
+            Box::new(Players::IsTheirTurn),
+        ))
+        .expect("convert turn timing activation condition");
+
+        assert_eq!(restrictions, vec![ActivationRestriction::DuringYourTurn]);
+    }
+
+    #[test]
+    fn activate_only_if_and_flattens_timing_restrictions() {
+        use crate::schema::types::{Condition, Player, Players};
+
+        let restrictions = convert_activate_only_if_condition(&Condition::And(vec![
+            Condition::PlayerPassesFilter(Box::new(Player::You), Box::new(Players::IsTheirTurn)),
+            Condition::IsBeforeAttackersDeclared,
+        ]))
+        .expect("convert compound timing activation condition");
+
+        assert_eq!(
+            restrictions,
+            vec![
+                ActivationRestriction::DuringYourTurn,
+                ActivationRestriction::BeforeAttackersDeclared
+            ]
+        );
+    }
 }

@@ -6,8 +6,8 @@
 //! per-variant mapping into engine `QuantityRef` and lands in later phases.
 
 use engine::types::ability::{
-    AggregateFunction, CountScope, FilterProp, ObjectProperty, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypedFilter, ZoneRef,
+    AggregateFunction, CountScope, DevotionColors, FilterProp, ObjectProperty, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypedFilter, ZoneRef,
 };
 use engine::types::player::PlayerCounterKind;
 use engine::types::zones::Zone;
@@ -379,7 +379,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         GameNumber::PlayerDevotionTo(player, color) => match (&**player, concrete_color(color)) {
             (Player::You, Some(mana_color)) => QuantityExpr::Ref {
                 qty: QuantityRef::Devotion {
-                    colors: vec![mana_color],
+                    colors: DevotionColors::Fixed(vec![mana_color]),
                 },
             },
             (Player::You, None) => {
@@ -777,6 +777,9 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                     },
                 }
             }
+            CardsInExile::TheExiledCards => QuantityExpr::Ref {
+                qty: QuantityRef::CardsExiledBySource,
+            },
             other => {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "QuantityRef",
@@ -1321,5 +1324,25 @@ fn unsupported(g: &GameNumber) -> ConversionGap {
         // tag itself. `MalformedIdiom[...]` sub-binning relies on this
         // convention.
         detail: format!("{tag}: unsupported variant"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn num_cards_in_exile_the_exiled_cards_lowers_to_source_links() {
+        let converted = convert(&GameNumber::NumCardsInExile(Box::new(
+            CardsInExile::TheExiledCards,
+        )))
+        .unwrap();
+
+        assert_eq!(
+            converted,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CardsExiledBySource,
+            }
+        );
     }
 }

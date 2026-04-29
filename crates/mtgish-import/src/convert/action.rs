@@ -8,7 +8,7 @@
 
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType,
-    ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
+    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
     GainLifePlayer, LibraryPosition, ManaSpendRestriction, ModalSelectionConstraint,
     MultiTargetSpec, PlayerFilter, PlayerScope, QuantityExpr, SearchSelectionConstraint,
     StaticDefinition, TargetFilter, TriggerDefinition, TypedFilter,
@@ -33,7 +33,7 @@ use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
     CreatureType, DamageRecipient, DistributedTarget, Distribution, FutureTrigger, GameNumber,
-    GroupFilter, ManaUseModifier, Player, Players, ReplacementActionWouldEnter,
+    GroupFilter, ManaUseModifier, Permanent, Player, Players, ReplacementActionWouldEnter,
     RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction, Spell, Spells, TokenFlag,
 };
 
@@ -193,6 +193,15 @@ pub enum ActionsConversion {
     Scoped {
         inner: Box<ActionsConversion>,
         player_scope: PlayerFilter,
+    },
+    /// CR 608.2c + CR 109.5: Player-scoped action with a per-player predicate
+    /// ("each opponent with no cards in hand ..."). `player_scope` chooses the
+    /// iteration set; `condition` is evaluated after scope rebinding, so
+    /// controller-relative refs describe the currently-iterated player.
+    ScopedConditional {
+        inner: Box<ActionsConversion>,
+        player_scope: PlayerFilter,
+        condition: AbilityCondition,
     },
 }
 
@@ -372,14 +381,15 @@ pub fn convert_actions(actions: &Actions) -> ConvResult<ActionsConversion> {
         }
         // CR 115.1 + CR 601.2c: `Targeted_DifferentTargets` is a single-body
         // targeting wrapper that constrains the chosen targets to be
-        // distinct. Inner-body targets resolve through the existing
-        // `Targeted` path; the distinctness constraint is a runtime
-        // targeting concern that the engine doesn't model on this slot
-        // today, so we recurse transparently. Conservative — preserves
-        // resolution semantics, drops only the distinctness gate (the
-        // native parser does the same).
-        Actions::Targeted_DifferentTargets(_targets, inner) => {
-            return convert_actions(inner);
+        // distinct. The engine currently models only the player-specific
+        // modal constraint (`DifferentTargetPlayers`), so importing this
+        // shape would drop a target legality gate. Strict-fail until the
+        // engine has a general object/player distinctness primitive.
+        Actions::Targeted_DifferentTargets(_targets, _inner) => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "TargetSelectionConstraint",
+                needed_variant: "DifferentTargets (object/player target slots)".into(),
+            });
         }
         // CR 700.4: `Modal_IfElse(cond, then_actions, else_actions)` is the
         // Actions-level branch — distinct from `Action::IfElse`, which lives
@@ -509,13 +519,10 @@ pub fn convert_actions(actions: &Actions) -> ConvResult<ActionsConversion> {
                     }
                 }
                 Action::EachPlayerAction(players, inner) => {
-                    if let Some(scope) = players_to_scope_opt(players)? {
+                    if let Some((scope, condition)) = players_to_scope_and_condition(players)? {
                         let inner_actions = Actions::ActionList(vec![(**inner).clone()]);
                         let inner_conv = convert_actions(&inner_actions)?;
-                        return Ok(ActionsConversion::Scoped {
-                            inner: Box::new(inner_conv),
-                            player_scope: scope,
-                        });
+                        return Ok(scoped_conversion(inner_conv, scope, condition));
                     }
                 }
                 // CR 119.1 + CR 119.3 + CR 608.2c: Plural body variant —
@@ -524,13 +531,10 @@ pub fn convert_actions(actions: &Actions) -> ConvResult<ActionsConversion> {
                 // as an ActionList so the inner shape detector still runs
                 // (modal/optional/conditional inner shapes survive scoping).
                 Action::EachPlayerActions(players, body) => {
-                    if let Some(scope) = players_to_scope_opt(players)? {
+                    if let Some((scope, condition)) = players_to_scope_and_condition(players)? {
                         let inner_actions = Actions::ActionList(body.clone());
                         let inner_conv = convert_actions(&inner_actions)?;
-                        return Ok(ActionsConversion::Scoped {
-                            inner: Box::new(inner_conv),
-                            player_scope: scope,
-                        });
+                        return Ok(scoped_conversion(inner_conv, scope, condition));
                     }
                 }
                 // CR 119.1 + CR 119.3: `Action::PlayerActions(player, Vec<Action>)`
@@ -581,33 +585,36 @@ pub fn convert_actions(actions: &Actions) -> ConvResult<ActionsConversion> {
                 // because the engine's player_scope iterates the optional
                 // ability over each matching player.
                 Action::EachPlayerMayAction(players, inner) => {
-                    if let Some(scope) = players_to_scope_opt(players)? {
+                    if let Some((scope, condition)) = players_to_scope_and_condition(players)? {
                         let effects = convert_action_vec(std::slice::from_ref(inner))?;
-                        return Ok(ActionsConversion::Scoped {
-                            inner: Box::new(ActionsConversion::Optional { effects }),
-                            player_scope: scope,
-                        });
+                        return Ok(scoped_conversion(
+                            ActionsConversion::Optional { effects },
+                            scope,
+                            condition,
+                        ));
                     }
                 }
                 Action::APlayerMayAction(players, inner) => {
-                    if let Some(scope) = players_to_scope_opt(players)? {
+                    if let Some((scope, condition)) = players_to_scope_and_condition(players)? {
                         let effects = convert_action_vec(std::slice::from_ref(inner))?;
-                        return Ok(ActionsConversion::Scoped {
-                            inner: Box::new(ActionsConversion::Optional { effects }),
-                            player_scope: scope,
-                        });
+                        return Ok(scoped_conversion(
+                            ActionsConversion::Optional { effects },
+                            scope,
+                            condition,
+                        ));
                     }
                 }
                 // CR 117.5 + CR 119.1 + CR 608.2c: Plural-body siblings —
                 // `EachPlayerMayActions(players, Vec<Action>)` mirrors
                 // `EachPlayerActions` but wraps the body in Optional first.
                 Action::EachPlayerMayActions(players, body) => {
-                    if let Some(scope) = players_to_scope_opt(players)? {
+                    if let Some((scope, condition)) = players_to_scope_and_condition(players)? {
                         let effects = convert_action_vec(body)?;
-                        return Ok(ActionsConversion::Scoped {
-                            inner: Box::new(ActionsConversion::Optional { effects }),
-                            player_scope: scope,
-                        });
+                        return Ok(scoped_conversion(
+                            ActionsConversion::Optional { effects },
+                            scope,
+                            condition,
+                        ));
                     }
                 }
                 _ => {}
@@ -766,8 +773,8 @@ pub fn convert_actions(actions: &Actions) -> ConvResult<ActionsConversion> {
 /// CR 601.2d: Lower an mtgish distributed-target wrapper into the engine's
 /// native `AbilityDefinition::{multi_target, distribute}` metadata plus the
 /// underlying damage effect. The wrapper is the single authority for the
-/// distribution amount and target arity, so the distributed leaf actions are
-/// only accepted in this context.
+/// distribution amount and target arity, so the `SpellDealsDistributedDamage`
+/// leaf is only accepted in this context.
 fn convert_targeted_distributed(
     targets: &[DistributedTarget],
     distribution: &Distribution,
@@ -848,7 +855,10 @@ fn distributed_target_to_target_filter(
         return Err(ConversionGap::MalformedIdiom {
             idiom: "Actions::TargetedDistributed/targets",
             path: String::new(),
-            detail: format!("expected one distributed target group, got {}", targets.len()),
+            detail: format!(
+                "expected one distributed target group, got {}",
+                targets.len()
+            ),
         });
     };
 
@@ -877,10 +887,9 @@ fn distributed_target_to_target_filter(
                 max: Some(fixed_max(n, "UptoNumberAnyTargets")?),
             },
         )),
-        DistributedTarget::AnyNumberOfAnyTargets => Ok((
-            TargetFilter::Any,
-            MultiTargetSpec { min: 1, max: None },
-        )),
+        DistributedTarget::AnyNumberOfAnyTargets => {
+            Ok((TargetFilter::Any, MultiTargetSpec { min: 1, max: None }))
+        }
         DistributedTarget::BetweenOneAndNumberTargetPermanents(n, permanents) => Ok((
             convert_permanents(permanents)?,
             MultiTargetSpec {
@@ -1223,17 +1232,18 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 }
             }
             Action::EachPlayerAction(players, inner) => {
-                let scope = players_to_scope_opt(players)?.ok_or_else(|| {
-                    ConversionGap::MalformedIdiom {
-                        idiom: "ChainSegment/EachPlayerAction",
-                        path: String::new(),
-                        detail: format!("non-scopable players: {players:?}"),
-                    }
-                })?;
+                let (scope, condition) =
+                    players_to_scope_and_condition(players)?.ok_or_else(|| {
+                        ConversionGap::MalformedIdiom {
+                            idiom: "ChainSegment/EachPlayerAction",
+                            path: String::new(),
+                            detail: format!("non-scopable players: {players:?}"),
+                        }
+                    })?;
                 let body_effects = convert_many(inner)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
-                    condition: None,
+                    condition,
                     effects: body_effects,
                     else_effects: None,
                     optional: SegmentOptional::Mandatory,
@@ -1241,17 +1251,18 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 });
             }
             Action::EachPlayerActions(players, body) => {
-                let scope = players_to_scope_opt(players)?.ok_or_else(|| {
-                    ConversionGap::MalformedIdiom {
-                        idiom: "ChainSegment/EachPlayerActions",
-                        path: String::new(),
-                        detail: format!("non-scopable players: {players:?}"),
-                    }
-                })?;
+                let (scope, condition) =
+                    players_to_scope_and_condition(players)?.ok_or_else(|| {
+                        ConversionGap::MalformedIdiom {
+                            idiom: "ChainSegment/EachPlayerActions",
+                            path: String::new(),
+                            detail: format!("non-scopable players: {players:?}"),
+                        }
+                    })?;
                 let body_effects = convert_action_vec(body)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
-                    condition: None,
+                    condition,
                     effects: body_effects,
                     else_effects: None,
                     optional: SegmentOptional::Mandatory,
@@ -1330,17 +1341,18 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // CR 117.5 + CR 119.1 + CR 608.2c: Mid-list filtered-set optional
             // wrappers. Same shape as the head-pattern arms but mid-list.
             Action::EachPlayerMayAction(players, inner) => {
-                let scope = players_to_scope_opt(players)?.ok_or_else(|| {
-                    ConversionGap::MalformedIdiom {
-                        idiom: "ChainSegment/EachPlayerMayAction",
-                        path: String::new(),
-                        detail: format!("non-scopable players: {players:?}"),
-                    }
-                })?;
+                let (scope, condition) =
+                    players_to_scope_and_condition(players)?.ok_or_else(|| {
+                        ConversionGap::MalformedIdiom {
+                            idiom: "ChainSegment/EachPlayerMayAction",
+                            path: String::new(),
+                            detail: format!("non-scopable players: {players:?}"),
+                        }
+                    })?;
                 let body_effects = convert_many(inner)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
-                    condition: None,
+                    condition,
                     effects: body_effects,
                     else_effects: None,
                     optional: SegmentOptional::Optional,
@@ -1348,17 +1360,18 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 });
             }
             Action::APlayerMayAction(players, inner) => {
-                let scope = players_to_scope_opt(players)?.ok_or_else(|| {
-                    ConversionGap::MalformedIdiom {
-                        idiom: "ChainSegment/APlayerMayAction",
-                        path: String::new(),
-                        detail: format!("non-scopable players: {players:?}"),
-                    }
-                })?;
+                let (scope, condition) =
+                    players_to_scope_and_condition(players)?.ok_or_else(|| {
+                        ConversionGap::MalformedIdiom {
+                            idiom: "ChainSegment/APlayerMayAction",
+                            path: String::new(),
+                            detail: format!("non-scopable players: {players:?}"),
+                        }
+                    })?;
                 let body_effects = convert_many(inner)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
-                    condition: None,
+                    condition,
                     effects: body_effects,
                     else_effects: None,
                     optional: SegmentOptional::Optional,
@@ -1366,17 +1379,18 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 });
             }
             Action::EachPlayerMayActions(players, body) => {
-                let scope = players_to_scope_opt(players)?.ok_or_else(|| {
-                    ConversionGap::MalformedIdiom {
-                        idiom: "ChainSegment/EachPlayerMayActions",
-                        path: String::new(),
-                        detail: format!("non-scopable players: {players:?}"),
-                    }
-                })?;
+                let (scope, condition) =
+                    players_to_scope_and_condition(players)?.ok_or_else(|| {
+                        ConversionGap::MalformedIdiom {
+                            idiom: "ChainSegment/EachPlayerMayActions",
+                            path: String::new(),
+                            detail: format!("non-scopable players: {players:?}"),
+                        }
+                    })?;
                 let body_effects = convert_action_vec(body)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
-                    condition: None,
+                    condition,
                     effects: body_effects,
                     else_effects: None,
                     optional: SegmentOptional::Optional,
@@ -1868,6 +1882,38 @@ fn convert_many(a: &Action) -> ConvResult<Vec<Effect>> {
     }
 }
 
+fn permanent_deals_damage_effect(
+    source: &Permanent,
+    amount: &GameNumber,
+    recipient: &DamageRecipient,
+) -> ConvResult<Effect> {
+    match source {
+        // CR 120.3: `Effect::DealDamage { damage_source: None }` uses the
+        // resolving ability's source object. Only lower source-self schema
+        // refs through this path; event-context refs like `Trigger_ThatPermanent`
+        // need an engine damage-source axis that can bind to the triggering
+        // object rather than the ability source.
+        Permanent::ThisPermanent
+        | Permanent::Self_It
+        | Permanent::ThisPermanentOrThisCommandCard => Ok(Effect::DealDamage {
+            amount: quantity::convert(amount)?,
+            target: damage_recipient_to_filter(recipient)?,
+            damage_source: None,
+        }),
+        Permanent::Ref_TargetPermanent
+        | Permanent::Ref_TargetPermanent1
+        | Permanent::Ref_TargetPermanents_0 => Ok(Effect::DealDamage {
+            amount: quantity::convert(amount)?,
+            target: damage_recipient_to_filter(recipient)?,
+            damage_source: Some(DamageSource::Target),
+        }),
+        other => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "Effect::DealDamage.damage_source",
+            needed_variant: format!("permanent source ref: {other:?}"),
+        }),
+    }
+}
+
 /// CR 603.7 + CR 603.7c: Map an mtgish `Expiration` to the engine's
 /// `DelayedTriggerCondition`. Most `ExilePermanentUntil` cards (the
 /// CR 117.6 + CR 700.4: Map an action-shaped `Cost` (mtgish encodes some
@@ -1976,11 +2022,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             subject: convert_permanent(subject)?,
             target: convert_permanent(target)?,
         },
-        Action::PermanentDealsDamage(_source, amount, recipient) => Effect::DealDamage {
-            amount: quantity::convert(amount)?,
-            target: damage_recipient_to_filter(recipient)?,
-            damage_source: None,
-        },
+        Action::PermanentDealsDamage(source, amount, recipient)
+        | Action::HavePermanentDealDamage(source, amount, recipient) => {
+            permanent_deals_damage_effect(source, amount, recipient)?
+        }
         // CR 119.3 + CR 115.1: "[This spell] deals N damage to <recipient>"
         // — the spell-source variant of PermanentDealsDamage. The source-
         // spell argument is dropped because Effect::DealDamage's resolver
@@ -2322,7 +2367,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
-                enter_with_counters: vec![],
+                enter_with_counters: r.enter_with_counters,
             }
         }
 
@@ -2346,7 +2391,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
-                enter_with_counters: vec![],
+                enter_with_counters: r.enter_with_counters,
             }
         }
 
@@ -2726,7 +2771,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
-                enter_with_counters: vec![],
+                enter_with_counters: r.enter_with_counters,
             }
         }
 
@@ -2890,7 +2935,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
-                enter_with_counters: vec![],
+                enter_with_counters: r.enter_with_counters,
             }
         }
 
@@ -4381,6 +4426,61 @@ fn player_to_scope_opt(player: &Player) -> ScopeOutcome {
     }
 }
 
+fn scoped_conversion(
+    inner: ActionsConversion,
+    player_scope: PlayerFilter,
+    condition: Option<AbilityCondition>,
+) -> ActionsConversion {
+    match condition {
+        Some(condition) => ActionsConversion::ScopedConditional {
+            inner: Box::new(inner),
+            player_scope,
+            condition,
+        },
+        None => ActionsConversion::Scoped {
+            inner: Box::new(inner),
+            player_scope,
+        },
+    }
+}
+
+fn combine_ability_conditions(mut conditions: Vec<AbilityCondition>) -> Option<AbilityCondition> {
+    match conditions.len() {
+        0 => None,
+        1 => conditions.pop(),
+        _ => Some(AbilityCondition::And { conditions }),
+    }
+}
+
+/// CR 109.5 + CR 608.2c: Split a filtered player set into the engine's two
+/// existing axes: `player_scope` for the candidate set, plus an
+/// `AbilityCondition` evaluated after player-scope rebinding for predicates
+/// like "with no cards in hand".
+fn players_to_scope_and_condition(
+    players: &Players,
+) -> ConvResult<Option<(PlayerFilter, Option<AbilityCondition>)>> {
+    if let Players::And(parts) = players {
+        let mut scope = None;
+        let mut conditions = Vec::new();
+        for part in parts {
+            if let Ok(Some(part_scope)) = players_to_scope_opt(part) {
+                if scope.replace(part_scope).is_some() {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "Players::And/scope",
+                        path: String::new(),
+                        detail: format!("multiple player-scope parts: {players:?}"),
+                    });
+                }
+            } else {
+                conditions.push(condition::convert_scoped_player_predicate_ability(part)?);
+            }
+        }
+        return Ok(scope.map(|scope| (scope, combine_ability_conditions(conditions))));
+    }
+
+    Ok(players_to_scope_opt(players)?.map(|scope| (scope, None)))
+}
+
 /// CR 119.1 + CR 119.3 + CR 101.4 (APNAP): Map an mtgish `Players` to a
 /// `PlayerFilter` for use as `AbilityDefinition::player_scope` on
 /// `EachPlayerAction` / `APlayerAction` shapes. See `player_to_scope_opt`
@@ -4873,6 +4973,47 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             no_repls,
             0,
         ),
+        // CR 701.23 + CR 701.20: Conflux / multi-filter tutor class —
+        // mtgish stores one search step with N independent filters. The
+        // engine-native shape is the same composition used by the native
+        // parser: one `SearchLibrary -> ChangeZone` pair per filter, followed
+        // by the ordinary trailing shuffle.
+        S::MayRevealMultipleCardsOfTypeAndPutIntoHand(cards) => {
+            return convert_multi_filter_search_library(
+                cards,
+                QuantityExpr::Fixed { value: 1 },
+                true,
+                true,
+                Zone::Hand,
+                no_repls,
+                rest,
+            );
+        }
+        S::FindCardsOfType(cards) => {
+            let (reveal, destination, consumed_extra_steps) = match rest {
+                [S::RevealFoundCards, S::PutFoundCardsIntoHand, ..] => (true, Zone::Hand, 2),
+                [S::PutFoundCardsIntoGraveyard, ..] => (false, Zone::Graveyard, 1),
+                _ => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "SearchLibrary/FindCardsOfType",
+                        path: String::new(),
+                        detail: format!(
+                            "FindCardsOfType not followed by recognized destination ({} steps)",
+                            rest.len()
+                        ),
+                    });
+                }
+            };
+            return convert_multi_filter_search_library(
+                cards,
+                QuantityExpr::Fixed { value: 1 },
+                false,
+                reveal,
+                destination,
+                no_repls,
+                &rest[consumed_extra_steps..],
+            );
+        }
         // CR 701.23 + CR 701.7 (Mill) / CR 701.13 (Exile).
         S::MayPutACardOfTypeIntoGraveyard(cards) => (
             filter_mod::cards_to_filter(cards)?,
@@ -4914,20 +5055,6 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             no_repls,
             0,
         ),
-        // CR 701.23 + CR 701.20: Mystical Tutor / Worldly Tutor / Boggart
-        // Harbinger class — search, reveal, put on top of library. The
-        // "set aside" step is a UX detail; the engine's
-        // `Effect::SearchLibrary { reveal: true } → ChangeZone(→ Library top)`
-        // expresses the rules-relevant outcome.
-        S::MaySetAsideAndRevealACardOfTypeToPutOnTopOfLibrary(cards) => (
-            filter_mod::cards_to_filter(cards)?,
-            QuantityExpr::Fixed { value: 1 },
-            true,
-            true,
-            Zone::Library,
-            no_repls,
-            0,
-        ),
         // CR 701.23 + CR 701.7 (Mill): Buried Alive class — bounded
         // up-to-N tutor that puts found cards into graveyard.
         S::MayPutUptoNumberOfCardsOfTypeIntoGraveyard(n, cards) => (
@@ -4940,25 +5067,22 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             0,
         ),
         // CR 701.23 + CR 701.20 + CR 701.24: Mystical Tutor / Liliana Vess
-        // class — "search your library for a card, reveal it, then shuffle
-        // and put that card on top of your library". The expected sibling
-        // sequence is `MayRevealACardOfType(cards)` followed by
-        // `ShuffleAndPutRevealedCardOnTop` (the shuffle + top-of-library
-        // single step). Engine encoding: `SearchLibrary { reveal: true } →
-        // ChangeZone(→ Library) → Shuffle`. We consume both steps here and
-        // emit the shuffle inline so the trailing tail is empty.
+        // class. Top-of-library placement needs an engine continuation that
+        // skips the positional put when the hidden-zone search finds no card.
+        // `Effect::PutAtLibraryPosition` errors with no target, so this stays
+        // strict-fail until that skip boundary exists.
         S::MayRevealACardOfType(cards) => {
             let f = filter_mod::cards_to_filter(cards)?;
             match rest.first() {
-                Some(S::ShuffleAndPutRevealedCardOnTop) => (
-                    f,
-                    QuantityExpr::Fixed { value: 1 },
-                    true,
-                    true,
-                    Zone::Library,
-                    no_repls,
-                    1,
-                ),
+                Some(S::ShuffleAndPutRevealedCardOnTop) => {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "SearchLibrary top-of-library continuation",
+                        needed_variant: format!(
+                            "skip PutAtLibraryPosition when no card found: {:?}",
+                            f
+                        ),
+                    })
+                }
                 _ => {
                     return Err(ConversionGap::MalformedIdiom {
                         idiom: "SearchLibrary/MayRevealACardOfType",
@@ -4972,25 +5096,14 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             }
         }
         // CR 701.23 + CR 701.24: "Search your library for a card, then
-        // shuffle and put that card on top" (Bringer of the Black Dawn /
-        // Liliana Vess -2 / Insatiable Avarice class). The set-aside step
-        // is procedural; the rules-relevant outcome is identical to the
-        // Mystical Tutor pattern except the card is not revealed. Expected
-        // sibling sequence: `SetAsideAGenericCard` followed by `Shuffle`
-        // and `PutOnTopOfLibrary` — both are consumed here.
+        // shuffle and put that card on top" needs the same no-card-found skip
+        // boundary as the revealed top-tutor form above.
         S::SetAsideAGenericCard => match rest {
             [S::Shuffle, S::PutOnTopOfLibrary, ..] => {
-                // Consume both extra steps; tail logic below will emit no
-                // additional shuffle (we emit our own inline).
-                (
-                    TargetFilter::Any,
-                    QuantityExpr::Fixed { value: 1 },
-                    false,
-                    false,
-                    Zone::Library,
-                    no_repls,
-                    2,
-                )
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "SearchLibrary top-of-library continuation",
+                    needed_variant: "skip PutAtLibraryPosition when no card found".into(),
+                })
             }
             _ => {
                 return Err(ConversionGap::MalformedIdiom {
@@ -5090,8 +5203,70 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         enter_tapped: enter_repls.enter_tapped,
         enters_attacking: enter_repls.enters_attacking,
         up_to: false,
-        enter_with_counters: vec![],
+        enter_with_counters: enter_repls.enter_with_counters,
     });
+    if shuffle {
+        out.push(Effect::Shuffle {
+            target: TargetFilter::Controller,
+        });
+    }
+    Ok(out)
+}
+
+fn convert_multi_filter_search_library(
+    cards: &[crate::schema::types::Cards],
+    count: QuantityExpr,
+    up_to: bool,
+    reveal: bool,
+    destination: Zone,
+    enter_repls: EnterReplacements,
+    tail: &[SearchLibraryAction],
+) -> ConvResult<Vec<Effect>> {
+    use SearchLibraryAction as S;
+
+    let shuffle = match tail {
+        [] => false,
+        [S::Shuffle] => true,
+        [S::DontShuffle] => false,
+        _ => {
+            return Err(ConversionGap::MalformedIdiom {
+                idiom: "SearchLibrary/tail",
+                path: String::new(),
+                detail: format!(
+                    "unsupported SearchLibrary tail length {} (expected [Shuffle] / [DontShuffle] / [])",
+                    tail.len()
+                ),
+            });
+        }
+    };
+
+    let search_count = if up_to {
+        QuantityExpr::up_to(count)
+    } else {
+        count
+    };
+    let mut out = Vec::with_capacity(cards.len() * 2 + usize::from(shuffle));
+    for card_filter in cards {
+        out.push(Effect::SearchLibrary {
+            filter: filter_mod::cards_to_filter(card_filter)?,
+            count: search_count.clone(),
+            reveal,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+        });
+        out.push(Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: enter_repls.enter_transformed,
+            under_your_control: enter_repls.under_your_control,
+            enter_tapped: enter_repls.enter_tapped,
+            enters_attacking: enter_repls.enters_attacking,
+            up_to: false,
+            enter_with_counters: enter_repls.enter_with_counters.clone(),
+        });
+    }
     if shuffle {
         out.push(Effect::Shuffle {
             target: TargetFilter::Controller,
@@ -5130,7 +5305,7 @@ fn group_filter_tag(group: &GroupFilter) -> String {
 /// struct is the single converter-side authority that maps the AST list to
 /// those flags so every "put onto battlefield" call site (SearchLibrary
 /// heads, reanimate, etc.) shares one extractor.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct EnterReplacements {
     /// CR 614.1: Object enters tapped.
     enter_tapped: bool,
@@ -5141,6 +5316,8 @@ struct EnterReplacements {
     enter_transformed: bool,
     /// CR 508.4: Object enters tapped and attacking.
     enters_attacking: bool,
+    /// CR 122.1 + CR 614.12: Counters placed as the object enters.
+    enter_with_counters: Vec<(String, QuantityExpr)>,
 }
 
 /// CR 614.12: Decode the `Vec<ReplacementActionWouldEnter>` accompanying a
@@ -5154,6 +5331,8 @@ struct EnterReplacements {
 /// | `EntersUnderOwnersControl`               | (no-op — engine default) |
 /// | `EntersTransformed`                      | `enter_transformed`   |
 /// | `EntersAttacking`                        | `enters_attacking`    |
+/// | `EntersWithACounter`                     | `enter_with_counters` |
+/// | `EntersWithNumberCounters`               | `enter_with_counters` |
 ///
 /// Unrecognized variants (counters, choices, layered effects, non-You
 /// player-control bindings, …) strict-fail so the gap surfaces in the
@@ -5169,6 +5348,14 @@ fn extract_enter_replacements(
             R::EntersTapped => out.enter_tapped = true,
             R::EntersTransformed => out.enter_transformed = true,
             R::EntersAttacking => out.enters_attacking = true,
+            R::EntersWithACounter(ct) => {
+                out.enter_with_counters
+                    .push((counter_type_name(ct), QuantityExpr::Fixed { value: 1 }));
+            }
+            R::EntersWithNumberCounters(n, ct) => {
+                out.enter_with_counters
+                    .push((counter_type_name(ct), quantity::convert(n)?));
+            }
             R::EntersUnderPlayersControl(player) => match &**player {
                 Player::You => out.under_your_control = true,
                 other => {
@@ -5286,57 +5473,74 @@ fn card_in_exile_to_filter(card: &CardInExile) -> ConvResult<TargetFilter> {
 /// `enter_with_counters`); unknown flags strict-fail with an explicit
 /// prerequisite so the report enumerates the remaining axes that need slots.
 fn apply_token_flags(mut effect: Effect, flags: &[TokenFlag]) -> ConvResult<Effect> {
-    let Effect::Token {
-        tapped,
-        enters_attacking,
-        attach_to,
-        enter_with_counters,
-        ..
-    } = &mut effect
-    else {
-        return Err(ConversionGap::MalformedIdiom {
-            idiom: "Action::CreateTokensWithFlags",
-            path: String::new(),
-            detail: "inner spec did not produce Effect::Token".into(),
-        });
-    };
-
     for flag in flags {
-        match flag {
-            // CR 614.12 + CR 614.1: token enters tapped.
-            TokenFlag::EntersTapped => *tapped = true,
-            // CR 508.4: token enters tapped and attacking.
-            TokenFlag::EntersAttacking => *enters_attacking = true,
-            // CR 303.7 + CR 701.4: "create a token attached to <permanent>".
-            // The single-permanent variant binds to the explicit target.
-            TokenFlag::EntersAttachedToPermanent(p) => {
-                *attach_to = Some(convert_permanent(p)?);
-            }
-            // CR 303.7 + CR 701.4: "create a token attached to a <filter>" —
-            // multi-match filter variant.
-            TokenFlag::EntersAttachedToAPermanent(filter) => {
-                *attach_to = Some(convert_permanents(filter)?);
-            }
-            // CR 122.1 + CR 614.12: "the token enters with a <counter> counter
-            // on it." Quantity defaults to 1 — the `EntersWithNumberCounters`
-            // variant carries an explicit count.
-            TokenFlag::EntersWithACounter(ct) => {
-                enter_with_counters.push((counter_type_name(ct), QuantityExpr::Fixed { value: 1 }));
-            }
-            // CR 122.1 + CR 614.12: "the token enters with N <counter>
-            // counters on it" — explicit count via `quantity::convert`.
-            TokenFlag::EntersWithNumberCounters(n, ct) => {
-                enter_with_counters.push((counter_type_name(ct), quantity::convert(n)?));
-            }
-            // Remaining flags need engine slots `Effect::Token` does not
-            // expose today (a `blocking_attacker` axis, an
-            // `attacking_player` redirect distinct from `enters_attacking`,
-            // a per-token `Vec<PermanentRule>` until-expiration). Surface as
-            // engine prerequisites so the work queue tracks them.
-            other => {
-                return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "Effect::Token",
-                    needed_variant: format!("token-flag-slot:{}", token_flag_tag(other)),
+        match &mut effect {
+            Effect::Token {
+                tapped,
+                enters_attacking,
+                attach_to,
+                enter_with_counters,
+                ..
+            } => match flag {
+                // CR 614.12 + CR 614.1: token enters tapped.
+                TokenFlag::EntersTapped => *tapped = true,
+                // CR 508.4: token enters tapped and attacking.
+                TokenFlag::EntersAttacking => *enters_attacking = true,
+                // CR 303.7 + CR 701.4: "create a token attached to <permanent>".
+                // The single-permanent variant binds to the explicit target.
+                TokenFlag::EntersAttachedToPermanent(p) => {
+                    *attach_to = Some(convert_permanent(p)?);
+                }
+                // CR 303.7 + CR 701.4: "create a token attached to a <filter>" —
+                // multi-match filter variant.
+                TokenFlag::EntersAttachedToAPermanent(filter) => {
+                    *attach_to = Some(convert_permanents(filter)?);
+                }
+                // CR 122.1 + CR 614.12: "the token enters with a <counter> counter
+                // on it." Quantity defaults to 1 — the `EntersWithNumberCounters`
+                // variant carries an explicit count.
+                TokenFlag::EntersWithACounter(ct) => {
+                    enter_with_counters
+                        .push((counter_type_name(ct), QuantityExpr::Fixed { value: 1 }));
+                }
+                // CR 122.1 + CR 614.12: "the token enters with N <counter>
+                // counters on it" — explicit count via `quantity::convert`.
+                TokenFlag::EntersWithNumberCounters(n, ct) => {
+                    enter_with_counters.push((counter_type_name(ct), quantity::convert(n)?));
+                }
+                // Remaining flags need engine slots `Effect::Token` does not
+                // expose today (a `blocking_attacker` axis, an
+                // `attacking_player` redirect distinct from `enters_attacking`,
+                // a per-token `Vec<PermanentRule>` until-expiration). Surface as
+                // engine prerequisites so the work queue tracks them.
+                other => {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "Effect::Token",
+                        needed_variant: format!("token-flag-slot:{}", token_flag_tag(other)),
+                    });
+                }
+            },
+            Effect::CopyTokenOf {
+                tapped,
+                enters_attacking,
+                ..
+            } => match flag {
+                // CR 614.12 + CR 707.2: copy-token enters tapped.
+                TokenFlag::EntersTapped => *tapped = true,
+                // CR 508.4 + CR 707.2: copy-token enters attacking.
+                TokenFlag::EntersAttacking => *enters_attacking = true,
+                other => {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "Effect::CopyTokenOf",
+                        needed_variant: format!("token-flag-slot:{}", token_flag_tag(other)),
+                    });
+                }
+            },
+            _ => {
+                return Err(ConversionGap::MalformedIdiom {
+                    idiom: "Action::CreateTokensWithFlags",
+                    path: String::new(),
+                    detail: "inner spec did not produce token creation effect".into(),
                 });
             }
         }
@@ -5511,8 +5715,12 @@ fn distributed_target_tag(t: &DistributedTarget) -> String {
 mod tests {
     use super::*;
     use crate::convert::build_ability_from_actions;
-    use crate::schema::types::{Condition, Cost, ManaSymbol, Permanent, Permanents};
-    use engine::types::ability::{AbilityKind, Effect, QuantityRef, TypeFilter};
+    use crate::schema::types::{
+        CardInGraveyard, Cards, Color, Comparison, Condition, Cost, CounterType, CreatableToken,
+        ManaSymbol, Permanent, Permanents, ReplacementActionWouldEnter, TokenCopyEffects,
+        TokenFlag,
+    };
+    use engine::types::ability::{AbilityKind, Comparator, Effect, QuantityRef, TypeFilter};
 
     #[test]
     fn player_may_cost_controller_of_target_spell_converts_to_dynamic_player_scope() {
@@ -5535,6 +5743,111 @@ mod tests {
         assert_eq!(*payer, TargetFilter::ParentTargetController);
         let sub = ability.sub_ability.as_ref().expect("expected paid body");
         assert!(matches!(sub.effect.as_ref(), Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn each_opponent_with_no_cards_in_hand_scopes_and_conditions() {
+        let actions = Actions::ActionList(vec![Action::EachPlayerAction(
+            Box::new(Players::And(vec![
+                Players::Opponent,
+                Players::NumCardsInHandIs(Box::new(Comparison::EqualTo(Box::new(
+                    GameNumber::Integer(0),
+                )))),
+            ])),
+            Box::new(Action::LoseLife(Box::new(GameNumber::Integer(10)))),
+        )]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert_eq!(ability.player_scope, Some(PlayerFilter::Opponent));
+        assert!(matches!(*ability.effect, Effect::LoseLife { .. }));
+        assert!(matches!(
+            ability.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller
+                    }
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
+        ));
+    }
+
+    #[test]
+    fn multi_filter_reveal_search_lowers_to_repeated_search_chain() {
+        let effects = convert_many(&Action::SearchLibrary(vec![
+            SearchLibraryAction::MayRevealMultipleCardsOfTypeAndPutIntoHand(vec![
+                Cards::IsColor(Color::White),
+                Cards::IsColor(Color::Blue),
+            ]),
+            SearchLibraryAction::Shuffle,
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 5);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary { reveal: true, .. }
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
+            Effect::SearchLibrary { reveal: true, .. }
+        ));
+        assert!(matches!(
+            &effects[3],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[4],
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn find_cards_of_type_to_hand_consumes_reveal_tail() {
+        let effects = convert_many(&Action::SearchLibrary(vec![
+            SearchLibraryAction::FindCardsOfType(vec![
+                Cards::IsCardtype(CardType::Creature),
+                Cards::IsCardtype(CardType::Land),
+            ]),
+            SearchLibraryAction::RevealFoundCards,
+            SearchLibraryAction::PutFoundCardsIntoHand,
+            SearchLibraryAction::Shuffle,
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 5);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary { reveal: true, .. }
+        ));
+        assert!(matches!(
+            &effects[2],
+            Effect::SearchLibrary { reveal: true, .. }
+        ));
+        assert!(matches!(
+            &effects[4],
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
     }
 
     #[test]
@@ -5602,6 +5915,112 @@ mod tests {
                 },
             },
         );
+    }
+
+    #[test]
+    fn etb_counter_replacements_flow_into_change_zone() {
+        let effect = convert(&Action::PutGraveyardCardOntoBattlefield(
+            CardInGraveyard::Ref_TargetGraveyardCard,
+            vec![ReplacementActionWouldEnter::EntersWithNumberCounters(
+                Box::new(GameNumber::Integer(2)),
+                CounterType::PTCounter(1, 1),
+            )],
+        ))
+        .unwrap();
+
+        let Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } = effect
+        else {
+            panic!("expected ChangeZone, got {effect:?}");
+        };
+        assert_eq!(
+            enter_with_counters,
+            vec![("+1/+1".to_string(), QuantityExpr::Fixed { value: 2 })]
+        );
+    }
+
+    #[test]
+    fn copy_token_flags_set_copy_token_axes() {
+        let effect = convert(&Action::CreateTokensWithFlags(
+            vec![CreatableToken::TokenCopyOfEachPermanent(
+                Box::new(Permanents::Ref_TargetPermanents),
+                TokenCopyEffects::NoTokenCopyEffects,
+            )],
+            vec![TokenFlag::EntersTapped, TokenFlag::EntersAttacking],
+        ))
+        .unwrap();
+
+        let Effect::CopyTokenOf {
+            tapped,
+            enters_attacking,
+            target,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(tapped);
+        assert!(enters_attacking);
+        assert_eq!(target, TargetFilter::Any);
+    }
+
+    #[test]
+    fn have_this_permanent_deal_damage_lowers_to_source_damage() {
+        let effect = convert(&Action::HavePermanentDealDamage(
+            Box::new(Permanent::ThisPermanent),
+            Box::new(GameNumber::Integer(3)),
+            Box::new(DamageRecipient::Ref_AnyTarget),
+        ))
+        .unwrap();
+
+        let Effect::DealDamage {
+            amount,
+            target,
+            damage_source,
+        } = effect
+        else {
+            panic!("expected DealDamage, got {effect:?}");
+        };
+        assert_eq!(amount, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(target, TargetFilter::Any);
+        assert_eq!(damage_source, None);
+    }
+
+    #[test]
+    fn non_source_damage_ref_remains_engine_prerequisite() {
+        let err = convert(&Action::PermanentDealsDamage(
+            Box::new(Permanent::Trigger_ThatPermanent),
+            Box::new(GameNumber::Integer(3)),
+            Box::new(DamageRecipient::Ref_AnyTarget),
+        ))
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "Effect::DealDamage.damage_source",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn target_source_damage_uses_first_object_target_as_source() {
+        let effect = convert(&Action::PermanentDealsDamage(
+            Box::new(Permanent::Ref_TargetPermanent1),
+            Box::new(GameNumber::Integer(2)),
+            Box::new(DamageRecipient::Permanent(Box::new(
+                Permanent::Ref_TargetPermanent2,
+            ))),
+        ))
+        .unwrap();
+
+        let Effect::DealDamage { damage_source, .. } = effect else {
+            panic!("expected DealDamage, got {effect:?}");
+        };
+        assert_eq!(damage_source, Some(DamageSource::Target));
     }
 
     #[test]
@@ -5706,5 +6125,4 @@ mod tests {
         assert_eq!(counter_type, "+1/+1");
         assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
     }
-
 }

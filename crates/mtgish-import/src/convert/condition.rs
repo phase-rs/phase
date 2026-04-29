@@ -1190,7 +1190,7 @@ fn bind_filter_controller_opponent(filter: TargetFilter) -> TargetFilter {
 /// with `QuantityComparison` / `QuantityCheck`. The `OneOf` / `AnyNumber` /
 /// chosen-quality / parity (`Even`/`Odd`/`Prime`) shapes have no engine
 /// comparator counterpart and strict-fail.
-fn comparison_to_pair(cmp: &Comparison) -> ConvResult<(Comparator, QuantityExpr)> {
+pub(crate) fn comparison_to_pair(cmp: &Comparison) -> ConvResult<(Comparator, QuantityExpr)> {
     let qty = |g: &GameNumber| crate::convert::quantity::convert(g);
     Ok(match cmp {
         Comparison::GreaterThanOrEqualTo(g) => (Comparator::GE, qty(g)?),
@@ -1204,6 +1204,59 @@ fn comparison_to_pair(cmp: &Comparison) -> ConvResult<(Comparator, QuantityExpr)
                 idiom: "Comparison/comparison_to_pair",
                 path: String::new(),
                 detail: format!("unsupported shape: {other:?}"),
+            });
+        }
+    })
+}
+
+/// CR 608.2c: Predicate evaluated inside an `AbilityDefinition::player_scope`
+/// iteration. The scoped player becomes the resolving ability controller, so
+/// controller-relative refs (`HandSize { Controller }`, life total controller,
+/// etc.) address the currently-iterated player rather than the source's owner.
+pub(crate) fn convert_scoped_player_predicate_ability(
+    predicate: &Players,
+) -> ConvResult<AbilityCondition> {
+    Ok(match predicate {
+        Players::And(parts) => AbilityCondition::And {
+            conditions: parts
+                .iter()
+                .map(convert_scoped_player_predicate_ability)
+                .collect::<ConvResult<_>>()?,
+        },
+        Players::Or(parts) => AbilityCondition::Or {
+            conditions: parts
+                .iter()
+                .map(convert_scoped_player_predicate_ability)
+                .collect::<ConvResult<_>>()?,
+        },
+        Players::LifeTotalIs(cmp) => {
+            let (comparator, rhs) = comparison_to_pair(cmp)?;
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator,
+                rhs,
+            }
+        }
+        Players::NumCardsInHandIs(cmp) => {
+            let (comparator, rhs) = comparison_to_pair(cmp)?;
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator,
+                rhs,
+            }
+        }
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "AbilityCondition",
+                needed_variant: format!("ScopedPlayerPredicate/{}", players_variant_tag(other)),
             });
         }
     })
@@ -2277,6 +2330,21 @@ fn opponent_predicate_trigger(predicate: &Players) -> ConvResult<TriggerConditio
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
         },
+        Players::LostLifeAmountThisTurn(cmp) => {
+            let (comparator, rhs) =
+                opponent_aggregate_max_pair(cmp, "Players::LostLifeAmountThisTurn (trigger/opp)")?;
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                },
+                comparator,
+                rhs,
+            }
+        }
         // CR 701.9: "if an opponent discarded a card this turn".
         Players::DiscardedACardThisTurn => TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
@@ -2375,6 +2443,21 @@ fn opponent_predicate_ability(predicate: &Players) -> ConvResult<AbilityConditio
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
         },
+        Players::LostLifeAmountThisTurn(cmp) => {
+            let (comparator, rhs) =
+                opponent_aggregate_max_pair(cmp, "Players::LostLifeAmountThisTurn (ability/opp)")?;
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                },
+                comparator,
+                rhs,
+            }
+        }
         Players::DiscardedACardThisTurn => AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::OpponentDiscardedCardThisTurn,
@@ -2470,6 +2553,21 @@ fn opponent_predicate_static(predicate: &Players) -> ConvResult<StaticCondition>
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
         },
+        Players::LostLifeAmountThisTurn(cmp) => {
+            let (comparator, rhs) =
+                opponent_aggregate_max_pair(cmp, "Players::LostLifeAmountThisTurn (static/opp)")?;
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                },
+                comparator,
+                rhs,
+            }
+        }
         Players::DiscardedACardThisTurn => StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::OpponentDiscardedCardThisTurn,
@@ -2799,5 +2897,32 @@ mod tests {
             }
             other => panic!("expected ZoneChangeObjectMatchesFilter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn opponent_lost_life_amount_lowers_to_max_life_lost_condition() {
+        let condition = Condition::APlayerPassesFilter(
+            Box::new(Players::Opponent),
+            Box::new(Players::LostLifeAmountThisTurn(Box::new(
+                Comparison::GreaterThanOrEqualTo(Box::new(GameNumber::Integer(2))),
+            ))),
+        );
+
+        let converted = convert_trigger(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            }
+        );
     }
 }
