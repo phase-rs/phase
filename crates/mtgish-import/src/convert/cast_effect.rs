@@ -34,6 +34,7 @@ use engine::types::{ManaCost, Zone};
 
 use crate::convert::condition as condition_conv;
 use crate::convert::cost as cost_conv;
+use crate::convert::filter as filter_conv;
 use crate::convert::mana as mana_conv;
 use crate::convert::quantity as quantity_conv;
 use crate::convert::result::{ConvResult, ConversionGap};
@@ -193,6 +194,25 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
             let static_cond = condition_conv::convert_static(condition)?;
             push_self_reduce_cost_static(stub, reduction, None, Some(static_cond))
         }
+        // CR 601.2f + CR 115.9b: Self-cost reduction gated by the spell's
+        // chosen targets ("costs {N} less if it targets a [permanent]").
+        // Runtime already performs the target-sensitive second pass after
+        // target selection for `FilterProp::Targets`.
+        E::ReduceCastingCostIfItTargetsAPermanent(reduction, permanents) => {
+            let target_filter = filter_conv::convert(permanents)?;
+            let spell_filter = engine::types::ability::TypedFilter::default().properties(vec![
+                engine::types::ability::FilterProp::Targets {
+                    filter: Box::new(target_filter),
+                },
+            ]);
+            push_self_reduce_cost_static_with_filter(
+                stub,
+                reduction,
+                Some(TargetFilter::Typed(spell_filter)),
+                None,
+                None,
+            )
+        }
         // CR 601.2c + CR 117.7: Bargain (MKM) is a built-in condition tied
         // to spell-cast metadata, not a generic StaticCondition. No engine
         // primitive expresses "this spell was bargained" as a self-cost
@@ -298,15 +318,48 @@ fn push_self_reduce_cost_static(
     push_self_reduce_cost_static_with_amount(stub, amount, dynamic_count, condition)
 }
 
+fn push_self_reduce_cost_static_with_filter(
+    stub: &mut EngineFaceStub,
+    reduction: &CostReduction,
+    spell_filter: Option<TargetFilter>,
+    dynamic_count: Option<QuantityRef>,
+    condition: Option<StaticCondition>,
+) -> ConvResult<()> {
+    let amount = mana_conv::convert_reduction(reduction)?;
+    push_self_reduce_cost_static_with_amount_and_filter(
+        stub,
+        amount,
+        spell_filter,
+        dynamic_count,
+        condition,
+    )
+}
+
 fn push_self_reduce_cost_static_with_amount(
     stub: &mut EngineFaceStub,
     amount: ManaCost,
     dynamic_count: Option<QuantityRef>,
     condition: Option<StaticCondition>,
 ) -> ConvResult<()> {
+    push_self_reduce_cost_static_with_amount_and_filter(
+        stub,
+        amount,
+        Some(TargetFilter::SelfRef),
+        dynamic_count,
+        condition,
+    )
+}
+
+fn push_self_reduce_cost_static_with_amount_and_filter(
+    stub: &mut EngineFaceStub,
+    amount: ManaCost,
+    spell_filter: Option<TargetFilter>,
+    dynamic_count: Option<QuantityRef>,
+    condition: Option<StaticCondition>,
+) -> ConvResult<()> {
     let mut def = StaticDefinition::new(StaticMode::ReduceCost {
         amount,
-        spell_filter: Some(TargetFilter::SelfRef),
+        spell_filter,
         dynamic_count,
     })
     .affected(TargetFilter::SelfRef);
@@ -349,3 +402,47 @@ fn variant_tag(eff: &CastEffect) -> String {
 // only referenced indirectly via the helper constructors above.
 #[allow(dead_code)]
 const _SCOK: Option<SpellCastingOptionKind> = None;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::types::{CardType, CostReductionSymbol, Permanents};
+    use engine::types::ability::{FilterProp, TypedFilter};
+
+    #[test]
+    fn reduce_cost_if_targets_permanent_lowers_to_target_sensitive_spell_filter() {
+        let mut stub = EngineFaceStub::default();
+
+        apply(
+            &CastEffect::ReduceCastingCostIfItTargetsAPermanent(
+                vec![CostReductionSymbol::CostReduceGeneric(2)],
+                Box::new(Permanents::IsCardtype(CardType::Creature)),
+            ),
+            &mut stub,
+        )
+        .unwrap();
+
+        assert_eq!(stub.statics.len(), 1);
+        let static_def = &stub.statics[0];
+        assert_eq!(static_def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(static_def.active_zones, vec![Zone::Hand, Zone::Stack]);
+
+        let StaticMode::ReduceCost {
+            amount,
+            spell_filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+            dynamic_count: None,
+        } = &static_def.mode
+        else {
+            panic!(
+                "expected target-sensitive ReduceCost, got {:?}",
+                static_def.mode
+            );
+        };
+        assert_eq!(*amount, ManaCost::generic(2));
+        assert!(matches!(
+            properties.as_slice(),
+            [FilterProp::Targets { filter }]
+                if matches!(filter.as_ref(), TargetFilter::Typed(_))
+        ));
+    }
+}
