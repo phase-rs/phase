@@ -5,7 +5,8 @@ use nom::Parser;
 use nom_language::error::VerboseError;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionConstraint,
+    AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionCondition,
+    ModalSelectionConstraint,
 };
 
 use super::oracle::find_activated_colon;
@@ -235,6 +236,14 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         constraints.push(ModalSelectionConstraint::NoRepeatThisGame);
     }
 
+    if parse_commander_conditional_choose_both(&text.to_lowercase()).is_ok() {
+        constraints.push(ModalSelectionConstraint::ConditionalMaxChoices {
+            condition: ModalSelectionCondition::ControlsCommander,
+            max_choices: 2,
+            otherwise_max_choices: 1,
+        });
+    }
+
     for sentence in sentences.iter().skip(1) {
         let lower = sentence.to_lowercase();
         if lower == "you may choose the same mode more than once" {
@@ -253,6 +262,18 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         allow_repeat_modes,
         constraints,
     })
+}
+
+fn parse_commander_conditional_choose_both(
+    input: &str,
+) -> nom::IResult<&str, (), VerboseError<&str>> {
+    let (rest, _) = tag("choose one.").parse(input.trim())?;
+    let (rest, _) = tag(" if ").parse(rest)?;
+    let (rest, _) = tag("you control a commander").parse(rest)?;
+    let (rest, _) = tag(" as you cast this spell,").parse(rest)?;
+    let (rest, _) = tag(" you may ").parse(rest)?;
+    let (rest, _) = tag("choose both instead").parse(rest)?;
+    Ok((rest, ()))
 }
 
 fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {

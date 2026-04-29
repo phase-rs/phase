@@ -2480,9 +2480,9 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AbilityCondition, Comparator, ContinuousModification, FilterProp, ManaSpendRestriction,
-        ModalSelectionConstraint, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
-        QuantityExpr, QuantityRef, ReplacementCondition, ShieldKind, StaticCondition, TargetFilter,
-        TypeFilter, TypedFilter,
+        ModalSelectionCondition, ModalSelectionConstraint, ObjectScope, ParsedCondition,
+        PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReplacementCondition, ShieldKind,
+        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind};
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -3823,6 +3823,15 @@ mod tests {
         assert_eq!(modal.min_choices, 1);
         assert_eq!(modal.max_choices, 2);
         assert_eq!(modal.mode_count, 2);
+        assert_eq!(
+            modal.constraints,
+            vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::ControlsCommander,
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }]
+        );
+        assert_eq!(r.parse_warnings, Vec::<String>::new());
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {

@@ -24,9 +24,9 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_warnings::push_warning;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, Effect, OpponentMayScope, PlayerFilter, QuantityExpr,
-    ReplacementDefinition, ReplacementMode, ShieldKind, StaticDefinition, TargetFilter,
-    TriggerDefinition,
+    AbilityCondition, AbilityDefinition, Effect, ModalSelectionConstraint, OpponentMayScope,
+    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, ShieldKind,
+    StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::statics::StaticMode;
 
@@ -113,6 +113,12 @@ fn detect_replacement_instead(cleaned: &str, original: &str, parsed: &ParsedAbil
         return;
     }
     if !parsed.replacements.is_empty() {
+        return;
+    }
+    // CR 700.2a / CR 601.2b: "choose both instead" modal overrides are
+    // represented as casting-time modal choice constraints, not replacement
+    // effects.
+    if parsed_has_conditional_modal_max(parsed) {
         return;
     }
     // CR 614.1a: AddTargetReplacement riders register a replacement at
@@ -213,6 +219,11 @@ fn detect_optional_you_may(cleaned: &str, original: &str, parsed: &ParsedAbiliti
         return;
     }
     if any_ability_is_optional(parsed) {
+        return;
+    }
+    // CR 700.2a / CR 601.2b: "you may choose both instead" grants a modal
+    // choice range, not an optional effect during resolution.
+    if parsed_has_conditional_modal_max(parsed) {
         return;
     }
     push_warning(format!(
@@ -633,6 +644,45 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
         // for the corresponding Oracle clause (Force of Will, Misdirection,
         // Borderpost cycle, Mastery cycle, Pact cycle, Expertise cycle, etc.)
         || !parsed.casting_options.is_empty()
+}
+
+fn parsed_has_conditional_modal_max(parsed: &ParsedAbilities) -> bool {
+    parsed.modal.as_ref().is_some_and(modal_has_conditional_max)
+        || parsed
+            .abilities
+            .iter()
+            .any(def_tree_has_conditional_modal_max)
+        || parsed.triggers.iter().any(|trigger| {
+            trigger
+                .execute
+                .as_ref()
+                .is_some_and(|execute| def_tree_has_conditional_modal_max(execute))
+        })
+}
+
+fn def_tree_has_conditional_modal_max(def: &AbilityDefinition) -> bool {
+    def.modal.as_ref().is_some_and(modal_has_conditional_max)
+        || def
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| def_tree_has_conditional_modal_max(sub))
+        || def
+            .else_ability
+            .as_ref()
+            .is_some_and(|else_ab| def_tree_has_conditional_modal_max(else_ab))
+        || def
+            .mode_abilities
+            .iter()
+            .any(def_tree_has_conditional_modal_max)
+}
+
+fn modal_has_conditional_max(modal: &crate::types::ability::ModalChoice) -> bool {
+    modal.constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            ModalSelectionConstraint::ConditionalMaxChoices { .. }
+        )
+    })
 }
 
 /// Recursive walk: does any def in the tree have a non-None duration?

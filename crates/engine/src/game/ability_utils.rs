@@ -126,10 +126,47 @@ pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelection
             ModalSelectionConstraint::DifferentTargetPlayers => {
                 Some(TargetSelectionConstraint::DifferentTargetPlayers)
             }
-            // NoRepeatThisTurn/NoRepeatThisGame are mode-selection constraints, not target constraints.
+            // ConditionalMaxChoices/NoRepeatThisTurn/NoRepeatThisGame are mode-selection
+            // constraints, not target constraints.
             _ => None,
         })
         .collect()
+}
+
+pub fn modal_choice_for_player(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    modal: &ModalChoice,
+) -> ModalChoice {
+    let mut effective = modal.clone();
+    for constraint in &modal.constraints {
+        if let ModalSelectionConstraint::ConditionalMaxChoices {
+            condition,
+            max_choices,
+            otherwise_max_choices,
+        } = constraint
+        {
+            let cap = if modal_selection_condition_matches(state, player, condition) {
+                *max_choices
+            } else {
+                *otherwise_max_choices
+            };
+            effective.max_choices = effective.max_choices.min(cap);
+        }
+    }
+    effective
+}
+
+fn modal_selection_condition_matches(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    condition: &crate::types::ability::ModalSelectionCondition,
+) -> bool {
+    match condition {
+        crate::types::ability::ModalSelectionCondition::ControlsCommander => {
+            super::commander::controls_commander(state, player)
+        }
+    }
 }
 
 /// Returns mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
@@ -162,6 +199,7 @@ pub fn compute_unavailable_modes(
                     }
                 }
             }
+            ModalSelectionConstraint::ConditionalMaxChoices { .. } => {}
             _ => {} // Other constraints (e.g. DifferentTargetPlayers) are handled elsewhere
         }
     }

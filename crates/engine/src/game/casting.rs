@@ -23,7 +23,7 @@ use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
     begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
     build_target_slots, compute_unavailable_modes, flatten_targets_in_chain,
-    target_constraints_from_modal,
+    modal_choice_for_player, target_constraints_from_modal,
 };
 use super::casting_costs::{
     self, auto_tap_mana_sources, check_additional_cost_or_pay, pay_and_push_adventure,
@@ -2511,7 +2511,7 @@ fn continue_with_prepared(
         // CR 601.2c: The player announcing a spell with modes chooses the mode(s).
         if let Some(ref modal_choice) = prepared.modal {
             // Cap max_choices to actual mode count
-            let mut capped = modal_choice.clone();
+            let mut capped = modal_choice_for_player(state, player, modal_choice);
             capped.max_choices = capped.max_choices.min(capped.mode_count);
             let target_constraints = target_constraints_from_modal(&capped);
 
@@ -4018,6 +4018,7 @@ pub fn handle_activate_ability(
     // CR 602.2b: Announce → choose modes → choose targets → pay costs.
     // Modal detection must happen BEFORE cost payment.
     if let Some(ref modal) = ability_def.modal {
+        let modal = modal_choice_for_player(state, player, modal);
         // Pre-validate tap cost for modals — fail fast before presenting the choice
         if ability_def.cost.as_ref().is_some_and(requires_untapped) {
             let obj = state.objects.get(&source_id).unwrap();
@@ -4027,10 +4028,10 @@ pub fn handle_activate_ability(
                 ));
             }
         }
-        let unavailable_modes = compute_unavailable_modes(state, source_id, modal);
+        let unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
         return Ok(WaitingFor::AbilityModeChoice {
             player,
-            modal: modal.clone(),
+            modal,
             source_id,
             mode_abilities: ability_def.mode_abilities.clone(),
             is_activated: true,
@@ -4689,8 +4690,9 @@ mod tests {
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, ChosenAttribute, ChosenSubtypeKind,
         ContinuousModification, ControllerRef, FilterProp, GameRestriction, ManaContribution,
-        ManaProduction, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition,
-        TargetFilter, TypeFilter, TypedFilter,
+        ManaProduction, ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr,
+        RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -7699,6 +7701,74 @@ mod tests {
                 assert_eq!(modal.mode_descriptions.len(), 3);
             }
             _ => panic!("expected ModeChoice"),
+        }
+    }
+
+    #[test]
+    fn conditional_commander_modal_caps_modes_without_commander() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_modal_charm(&mut state, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            let modal = obj.modal.as_mut().unwrap();
+            modal.max_choices = 2;
+            modal
+                .constraints
+                .push(ModalSelectionConstraint::ConditionalMaxChoices {
+                    condition: ModalSelectionCondition::ControlsCommander,
+                    max_choices: 2,
+                    otherwise_max_choices: 1,
+                });
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+
+        match result {
+            WaitingFor::ModeChoice { modal, .. } => {
+                assert_eq!(modal.max_choices, 1);
+            }
+            other => panic!("expected ModeChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditional_commander_modal_allows_extra_mode_with_commander() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_modal_charm(&mut state, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            let modal = obj.modal.as_mut().unwrap();
+            modal.max_choices = 2;
+            modal
+                .constraints
+                .push(ModalSelectionConstraint::ConditionalMaxChoices {
+                    condition: ModalSelectionCondition::ControlsCommander,
+                    max_choices: 2,
+                    otherwise_max_choices: 1,
+                });
+        }
+        let commander_id = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&commander_id).unwrap().is_commander = true;
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+
+        match result {
+            WaitingFor::ModeChoice { modal, .. } => {
+                assert_eq!(modal.max_choices, 2);
+            }
+            other => panic!("expected ModeChoice, got {other:?}"),
         }
     }
 

@@ -38,6 +38,17 @@ pub fn commander_casts_from_command_zone(state: &GameState, player: PlayerId) ->
         .sum()
 }
 
+/// CR 903.3d: If an effect refers to controlling a commander, it refers to a
+/// permanent on the battlefield that is a commander.
+pub fn controls_commander(state: &GameState, player: PlayerId) -> bool {
+    state.battlefield.iter().any(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| obj.controller == player && obj.is_commander)
+    })
+}
+
 /// CR 903.10a: A player who has been dealt 21 or more combat damage by the same commander
 /// over the course of the game loses the game.
 ///
