@@ -1422,6 +1422,11 @@ fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityE
             return Some(qty);
         }
     }
+    if let Ok((rest, qty)) = parse_for_each_mana_spent_clause(rest) {
+        if rest.trim().is_empty() {
+            return Some(qty);
+        }
+    }
     let clause = match nom_primitives::split_once_on(rest, ".") {
         Ok((_, (before_period, after_period))) if after_period.trim().is_empty() => {
             before_period.trim()
@@ -1452,6 +1457,48 @@ fn parse_for_each_convoked_creature_clause(
             qty: QuantityRef::ConvokedCreatureCount,
         },
     ))
+}
+
+fn parse_for_each_mana_spent_clause(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    if let Ok((rest, _)) =
+        pair(tag::<_, _, VerboseError<&str>>("color"), opt(tag("s"))).parse(input)
+    {
+        let (rest, _) = tag(" of mana spent to cast ").parse(rest)?;
+        let (rest, _) = parse_mana_spent_self_subject(rest)?;
+        let (rest, _) = opt(tag(".")).parse(rest)?;
+        return Ok((
+            rest,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ColorsSpentOnSelf,
+            },
+        ));
+    }
+
+    let (rest, _) = tag("mana spent to cast ").parse(input)?;
+    let (rest, _) = parse_mana_spent_self_subject(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((
+        rest,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentOnSelf,
+        },
+    ))
+}
+
+fn parse_mana_spent_self_subject(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("it"),
+            tag("this spell"),
+            tag("this creature"),
+            tag("this permanent"),
+            tag("~"),
+        )),
+    )
+    .parse(input)
 }
 
 fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, QuantityExpr)>> {
@@ -4578,6 +4625,50 @@ mod tests {
                 target: TargetFilter::SelfRef,
             } if counter_type == "P1P1"
                 && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ConvokedCreatureCount })
+        ));
+    }
+
+    #[test]
+    fn enters_with_counters_for_each_color_of_mana_spent_preserves_multiplier() {
+        let def = parse_replacement_line(
+            "Converge — This creature enters with two +1/+1 counters on it for each color of mana spent to cast it.",
+            "Glinting Creeper",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Multiply {
+                    factor: 2,
+                    ref inner,
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "P1P1"
+                && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ColorsSpentOnSelf })
+        ));
+    }
+
+    #[test]
+    fn enters_with_counters_for_each_mana_spent_uses_mana_spent_on_self() {
+        let def = parse_replacement_line(
+            "Verazol enters with a +1/+1 counter on it for each mana spent to cast it.",
+            "Verazol, the Split Current",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentOnSelf,
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "P1P1"
         ));
     }
 
