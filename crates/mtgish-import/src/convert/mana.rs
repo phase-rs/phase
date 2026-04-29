@@ -184,8 +184,9 @@ pub fn convert_produce(p: &ManaProduce) -> ConvResult<ManaProduction> {
         // `And` collapses to `Fixed` only when every leaf is a colored atom;
         // mixed colorless/colored sequences need `Mixed`.
         ManaProduce::And(parts) => fixed_or_mixed(parts)?,
-        // CR 605.3b: Choice over single colors → AnyOneColor with that set.
-        ManaProduce::Or(parts) => any_one_color_from_options(parts)?,
+        // CR 605.3b: Choice over single colors → AnyOneColor; choice over
+        // fixed colored sequences → ChoiceAmongCombinations.
+        ManaProduce::Or(parts) => choice_from_options(parts)?,
         // CR 106.7: "any color" is the WUBRG choice axis.
         ManaProduce::AnyManaColor => ManaProduction::AnyOneColor {
             count: QuantityExpr::Fixed { value: 1 },
@@ -291,6 +292,18 @@ pub fn convert_repeated_produce(
     })
 }
 
+fn choice_from_options(parts: &[ManaProduce]) -> ConvResult<ManaProduction> {
+    if parts.iter().all(|part| single_color(part).is_some()) {
+        return any_one_color_from_options(parts);
+    }
+
+    let mut options = Vec::with_capacity(parts.len());
+    for part in parts {
+        options.push(fixed_color_sequence(part)?);
+    }
+    Ok(ManaProduction::ChoiceAmongCombinations { options })
+}
+
 fn any_one_color_from_options(parts: &[ManaProduce]) -> ConvResult<ManaProduction> {
     let mut color_options = Vec::with_capacity(parts.len());
     for part in parts {
@@ -312,6 +325,36 @@ fn any_one_color_from_options(parts: &[ManaProduce]) -> ConvResult<ManaProductio
     })
 }
 
+fn fixed_color_sequence(produce: &ManaProduce) -> ConvResult<Vec<ManaColor>> {
+    if let Some(color) = single_color(produce) {
+        return Ok(vec![color]);
+    }
+
+    match produce {
+        ManaProduce::And(parts) => {
+            let mut colors = Vec::with_capacity(parts.len());
+            for part in parts {
+                match single_color(part) {
+                    Some(color) => colors.push(color),
+                    None => {
+                        return Err(ConversionGap::MalformedIdiom {
+                            idiom: "ManaProduce/Or",
+                            path: String::new(),
+                            detail: format!("non-colored combination leaf: {}", produce_tag(part)),
+                        });
+                    }
+                }
+            }
+            Ok(colors)
+        }
+        other => Err(ConversionGap::MalformedIdiom {
+            idiom: "ManaProduce/Or",
+            path: String::new(),
+            detail: format!("non-combination Or leaf: {}", produce_tag(other)),
+        }),
+    }
+}
+
 fn produce_tag(p: &ManaProduce) -> String {
     serde_json::to_value(p)
         .ok()
@@ -329,4 +372,48 @@ fn non_neg_generic(n: i32) -> ConvResult<u32> {
         path: String::new(),
         detail: format!("expected non-negative generic mana, got {n}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn or_of_single_colors_lowers_to_any_one_color() {
+        let produced = convert_produce(&ManaProduce::Or(vec![
+            ManaProduce::ManaProduceU,
+            ManaProduce::ManaProduceR,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            produced,
+            ManaProduction::AnyOneColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                color_options: vec![ManaColor::Blue, ManaColor::Red],
+                contribution: ManaContribution::Base,
+            }
+        );
+    }
+
+    #[test]
+    fn or_of_fixed_color_sequences_lowers_to_choice_among_combinations() {
+        let produced = convert_produce(&ManaProduce::Or(vec![
+            ManaProduce::And(vec![ManaProduce::ManaProduceU, ManaProduce::ManaProduceU]),
+            ManaProduce::And(vec![ManaProduce::ManaProduceU, ManaProduce::ManaProduceR]),
+            ManaProduce::And(vec![ManaProduce::ManaProduceR, ManaProduce::ManaProduceR]),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            produced,
+            ManaProduction::ChoiceAmongCombinations {
+                options: vec![
+                    vec![ManaColor::Blue, ManaColor::Blue],
+                    vec![ManaColor::Blue, ManaColor::Red],
+                    vec![ManaColor::Red, ManaColor::Red],
+                ],
+            }
+        );
+    }
 }
