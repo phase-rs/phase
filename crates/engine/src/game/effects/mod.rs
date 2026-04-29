@@ -8,7 +8,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef, UnlessCost,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
+use crate::types::game_state::{DayNight, GameState, PendingContinuation, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -2206,6 +2206,13 @@ fn evaluate_condition(
         AbilityCondition::Not { condition } => !evaluate_condition(condition, state, ability),
         // CR 730.2a: True when it's neither day nor night (no designation set yet).
         AbilityCondition::DayNightIsNeither => state.day_night.is_none(),
+        // CR 731.1: True when the game has the requested day/night designation.
+        AbilityCondition::DayNightIs {
+            state: DayNight::Day,
+        } => state.day_night == Some(DayNight::Day),
+        AbilityCondition::DayNightIs {
+            state: DayNight::Night,
+        } => state.day_night == Some(DayNight::Night),
         // CR 603.4: "if this is the [Nth] time this ability has resolved this turn".
         // The counter is bumped at the top of `resolve_ability_chain` (depth 0)
         // before this evaluator runs, so a freshly-incremented count of `n`

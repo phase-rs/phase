@@ -12,7 +12,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::game_state::GameState;
+use crate::types::game_state::{DayNight, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
@@ -268,6 +268,13 @@ pub(crate) fn evaluate_condition(
         StaticCondition::Not { condition } => {
             !evaluate_condition(state, condition, controller, source_id)
         }
+        // CR 731.1: True when the game has the requested day/night designation.
+        StaticCondition::DayNightIs {
+            state: DayNight::Day,
+        } => state.day_night == Some(DayNight::Day),
+        StaticCondition::DayNightIs {
+            state: DayNight::Night,
+        } => state.day_night == Some(DayNight::Night),
         // CR 122.1: Check counters on the source object, with optional maximum.
         // `CounterMatch::Any` sums across every counter type (for bare "a counter on
         // it" text); `CounterMatch::OfType(ct)` matches a specific counter type.

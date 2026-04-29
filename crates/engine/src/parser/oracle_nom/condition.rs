@@ -19,6 +19,7 @@ use crate::types::ability::{
     QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::game_state::DayNight;
 use crate::types::zones::Zone;
 
 /// Parse a condition phrase from Oracle text.
@@ -116,6 +117,7 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         map(tag("it's not your turn"), |_| StaticCondition::Not {
             condition: Box::new(StaticCondition::DuringYourTurn),
         }),
+        parse_day_night_condition,
     ))
     .parse(input)
 }
@@ -1013,6 +1015,16 @@ fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ),
     ))
     .parse(input)
+}
+
+fn parse_day_night_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("it's "), tag("it is "))).parse(input)?;
+    let (rest, state) = alt((
+        value(DayNight::Night, tag("night")),
+        value(DayNight::Day, tag("day")),
+    ))
+    .parse(rest)?;
+    Ok((rest, StaticCondition::DayNightIs { state }))
 }
 
 /// Parse "you've [done X] this turn" conditions.
@@ -3546,6 +3558,18 @@ mod tests {
             }
             other => panic!("expected controlled creature zone-change count, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn day_night_designation_condition_parses() {
+        let (rest, c) = parse_inner_condition("it's night").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::DayNightIs {
+                state: DayNight::Night
+            }
+        );
     }
 
     // -- "you control your commander" --

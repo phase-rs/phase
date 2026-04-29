@@ -1076,6 +1076,7 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
 fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<TriggerCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringYourTurn),
+        StaticCondition::DayNightIs { .. } => None,
 
         // CR 608.2c: Quantity comparisons map 1:1 (same fields). The only
         // asymmetry is the `Another` → `OtherThanTriggerObject` substitution

@@ -1497,6 +1497,9 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         StaticCondition::HasMaxSpeed => Some(AbilityCondition::HasMaxSpeed),
         StaticCondition::IsMonarch => Some(AbilityCondition::IsMonarch),
         StaticCondition::HasCityBlessing => Some(AbilityCondition::HasCityBlessing),
+        StaticCondition::DayNightIs { state } => {
+            Some(AbilityCondition::DayNightIs { state: *state })
+        }
         StaticCondition::SourceEnteredThisTurn => None,
         StaticCondition::IsPresent { filter } => {
             let filter = filter.clone().unwrap_or_else(|| {
@@ -1553,6 +1556,9 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                 condition: Box::new(AbilityCondition::SourceMatchesFilter {
                     filter: filter.clone(),
                 }),
+            }),
+            StaticCondition::DayNightIs { state } => Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::DayNightIs { state: *state }),
             }),
             _ => None,
         },
@@ -2384,6 +2390,23 @@ mod tests {
                 TargetFilter::Typed(TypedFilter { type_filters, .. })
                     if type_filters == &vec![TypeFilter::Sorcery]
             ))
+        );
+    }
+
+    #[test]
+    fn suffix_night_condition_uses_day_night_designation() {
+        let (condition, body) = strip_suffix_conditional(
+            "Target creature you control gets +2/+0 until end of turn if it's night.",
+        );
+        assert_eq!(
+            body,
+            "Target creature you control gets +2/+0 until end of turn"
+        );
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::DayNightIs {
+                state: crate::types::game_state::DayNight::Night
+            })
         );
     }
 

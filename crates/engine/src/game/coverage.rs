@@ -4245,6 +4245,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::Not { .. } => ("Not", Handled),
         // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
+        // CR 731.1: Day/night designation check — handled by evaluate_condition.
+        AbilityCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.
         AbilityCondition::NthResolutionThisTurn { .. } => ("NthResolutionThisTurn", Handled),
     }
@@ -4387,6 +4389,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
+        StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
         StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),

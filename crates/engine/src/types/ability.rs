@@ -2590,6 +2590,10 @@ pub enum StaticCondition {
     Not {
         condition: Box<StaticCondition>,
     },
+    /// CR 731.1: True when the game has the given day/night designation.
+    DayNightIs {
+        state: crate::types::game_state::DayNight,
+    },
     /// CR 122.1: True when the source object has at least `minimum` (and at most `maximum`,
     /// if specified) counters matching `counters`. `CounterMatch::Any` sums across every
     /// counter type on the object (for Oracle text that refers to "a counter on it" with
@@ -6139,6 +6143,10 @@ pub enum AbilityCondition {
     /// Used by Daybound/Nightbound ETB initialization: "If it's neither day nor night,
     /// it becomes day as this creature enters."
     DayNightIsNeither,
+    /// CR 731.1: True when the game has the given day/night designation.
+    DayNightIs {
+        state: crate::types::game_state::DayNight,
+    },
     /// CR 603.4: Intervening-if gate for "if this is the [Nth] time this ability has
     /// resolved this turn". Counter is keyed by `(source_id, ability_index)` and
     /// incremented at the top of `resolve_ability_chain` (depth 0). The condition is

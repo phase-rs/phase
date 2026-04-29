@@ -8102,6 +8102,27 @@ mod tests {
     }
 
     #[test]
+    fn self_cost_reduction_if_night_uses_day_night_condition() {
+        let def = parse_static_line("This spell costs {2} less to cast if it's night.").unwrap();
+
+        assert!(matches!(
+            def.mode,
+            StaticMode::ReduceCost {
+                amount: ManaCost::Cost { generic: 2, .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::DayNightIs {
+                state: crate::types::game_state::DayNight::Night
+            })
+        );
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+    }
+
+    #[test]
     fn static_this_spell_cost_less_if_it_targets_creature_filter() {
         let def =
             parse_static_line("This spell costs {2} less to cast if it targets a red creature.")
