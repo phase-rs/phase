@@ -14175,6 +14175,28 @@ mod tests {
     }
 
     #[test]
+    fn city_blessing_condition_instead_uses_condition_instead_wrapper() {
+        let ability = parse_effect_chain(
+            "Draw a card. If you have the city's blessing, draw three cards instead.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*ability.effect, Effect::Draw { .. }));
+        let sub = ability.sub_ability.as_ref().expect("expected instead sub");
+        assert!(matches!(
+            sub.condition,
+            Some(AbilityCondition::ConditionInstead { ref inner })
+                if matches!(inner.as_ref(), AbilityCondition::HasCityBlessing)
+        ));
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parse_damage_cant_be_prevented_this_turn() {
         let clause = parse_effect_clause(
             "Damage can't be prevented this turn",

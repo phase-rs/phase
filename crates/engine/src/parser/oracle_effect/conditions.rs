@@ -1362,6 +1362,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         }),
         StaticCondition::HasMaxSpeed => Some(AbilityCondition::HasMaxSpeed),
         StaticCondition::IsMonarch => Some(AbilityCondition::IsMonarch),
+        StaticCondition::HasCityBlessing => Some(AbilityCondition::HasCityBlessing),
         StaticCondition::SourceEnteredThisTurn => None,
         StaticCondition::IsPresent { filter } => {
             let filter = filter.clone().unwrap_or_else(|| {
@@ -1487,7 +1488,6 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceAttachedToCreature
-        | StaticCondition::HasCityBlessing
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }

@@ -5953,6 +5953,9 @@ pub enum AbilityCondition {
     HasMaxSpeed,
     /// CR 725.1: "if you're the monarch" is true when the ability controller has the monarch designation.
     IsMonarch,
+    /// CR 702.131c: "if you have the city's blessing" is true when the ability
+    /// controller has the city's blessing designation.
+    HasCityBlessing,
     /// CR 608.2e: "If [target] has [keyword], [override effect] instead"
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.

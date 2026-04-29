@@ -2046,6 +2046,9 @@ fn evaluate_condition(
             .is_some_and(|cast_phase| phases.contains(&cast_phase)),
         AbilityCondition::HasMaxSpeed => has_max_speed(state, ability.controller),
         AbilityCondition::IsMonarch => state.monarch == Some(ability.controller),
+        // CR 702.131c: The city's blessing is a player designation that effects
+        // can identify.
+        AbilityCondition::HasCityBlessing => state.city_blessing.contains(&ability.controller),
         // "Instead" override conditions — return pure boolean value.
         // Terminal control flow (early return from resolve_ability_chain) is the caller's
         // responsibility in the sub-ability context.
@@ -5099,6 +5102,42 @@ mod tests {
             &AbilityCondition::IsMonarch,
             &state,
             &opponent_ability
+        ));
+    }
+
+    #[test]
+    fn evaluate_condition_city_blessing_checks_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        state.city_blessing.insert(PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        assert!(evaluate_condition(
+            &AbilityCondition::HasCityBlessing,
+            &state,
+            &ability,
+        ));
+
+        let opponent_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(2),
+            PlayerId(1),
+        );
+        assert!(!evaluate_condition(
+            &AbilityCondition::HasCityBlessing,
+            &state,
+            &opponent_ability,
         ));
     }
 
