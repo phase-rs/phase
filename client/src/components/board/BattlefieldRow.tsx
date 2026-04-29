@@ -2,12 +2,21 @@ import { useRef, useState, useEffect } from "react";
 
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps";
+import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
+import {
+  GROUP_STAGGER_PX,
+  getCreatureGroupRenderMode,
+  type BattlefieldRowType,
+  visibleCardSlotCount,
+  visibleStaggerCount,
+} from "./groupRenderMode.ts";
 
 interface BattlefieldRowProps {
   groups: GroupedPermanent[];
-  rowType: "creatures" | "lands" | "support" | "other";
+  rowType: BattlefieldRowType;
   className?: string;
 }
 
@@ -49,8 +58,11 @@ function getCreatureScale(groupCount: number, display: "art_crop" | "full_card")
 export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowProps) {
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const isCompactHeight = useIsCompactHeight();
+  const combatMode = useUiStore((s) => s.combatMode);
+  const { committedAttackerIds } = useBoardInteractionState();
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null);
+  const [expandedGroupIds, setExpandedGroupIds] = useState<Set<number>>(() => new Set());
 
   // groups.length in deps ensures the observer is set up after the first
   // non-empty render (the early return below means the ref is null when empty).
@@ -69,6 +81,22 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
     return () => observer.disconnect();
   }, [rowType, hasGroups]);
 
+  useEffect(() => {
+    const currentGroupIds = new Set(groups.map((group) => group.ids[0]));
+    setExpandedGroupIds((previous) => {
+      let changed = false;
+      const next = new Set<number>();
+      for (const groupId of previous) {
+        if (currentGroupIds.has(groupId)) {
+          next.add(groupId);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [groups]);
+
   if (!hasGroups) return null;
 
   const isArtCrop = battlefieldCardDisplay === "art_crop";
@@ -86,25 +114,41 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
   /** Maximum creature card height — prevents oversized cards with few creatures */
   const MAX_CARD_H = 150;
   let creatureWrap = false;
+  const renderedGroups = groups.map((group) => {
+    const manualExpanded = expandedGroupIds.has(group.ids[0]);
+    const containsCommittedAttackerDuringBlockers =
+      rowType === "creatures"
+      && combatMode === "blockers"
+      && group.ids.some((id) => committedAttackerIds.has(id));
+    const renderMode = getCreatureGroupRenderMode(group, rowType, {
+      manualExpanded,
+      containsCommittedAttackerDuringBlockers,
+    });
+    return { group, manualExpanded, renderMode };
+  });
+  const totalVisibleCardSlots = renderedGroups.reduce(
+    (total, { group, renderMode }) => total + visibleCardSlotCount(renderMode, group),
+    0,
+  );
+  const totalVisibleStagger = renderedGroups.reduce(
+    (total, { group, renderMode }) => total + visibleStaggerCount(renderMode, group) * GROUP_STAGGER_PX,
+    0,
+  );
 
   if (rowType === "creatures") {
     if (containerSize && containerSize.height > 0) {
       // Measure-based sizing: fill available space
       const { width: cw, height: ch } = containerSize;
       const gap = 8; // gap-2
-      const n = groups.length;
+      const n = totalVisibleCardSlots;
       const activeAr = isArtCrop ? ART_CROP_AR : FULL_CARD_AR;
-
-      // Account for stagger width on stacked groups (each extra copy adds 20px)
-      const staggerPx = 20;
-      const totalStagger = groups.reduce((sum, g) => sum + Math.max(0, g.count - 1) * staggerPx, 0);
 
       // Try single-row first. Use the *natural* height (dictated by width
       // per group) as the wrap-or-not decision signal — if it's below
       // MIN_CARD_H, cards would shrink illegibly, so wrap to multi-row.
       // Only the rendered height is clamped up to MIN_CARD_H, keeping the
       // decision independent of the clamp.
-      const availableForCards = cw - (n - 1) * gap - totalStagger;
+      const availableForCards = cw - Math.max(0, n - 1) * gap - totalVisibleStagger;
       const widthPerGroup = n > 0 ? availableForCards / n : cw;
       const naturalCardH = Math.min(ch, widthPerGroup / activeAr, MAX_CARD_H);
       const singleRowCardH = Math.max(MIN_CARD_H, naturalCardH);
@@ -129,7 +173,7 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
         for (let rows = 2; rows <= 4; rows++) {
           const cardHFromHeight = (ch - (rows - 1) * rowGap) / rows;
           const groupsPerRow = Math.ceil(n / rows);
-          const staggerPerRow = totalStagger / rows; // approximate
+          const staggerPerRow = totalVisibleStagger / rows; // approximate
           const cardW = (cw - (groupsPerRow - 1) * gap - staggerPerRow) / groupsPerRow;
           const cardHFromWidth = cardW / activeAr;
           const cardH = Math.max(MIN_CARD_H, Math.min(cardHFromHeight, cardHFromWidth));
@@ -147,7 +191,7 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
       }
     } else {
       // Fallback before measurement
-      const creatureScale = getCreatureScale(groups.length, battlefieldCardDisplay);
+      const creatureScale = getCreatureScale(totalVisibleCardSlots, battlefieldCardDisplay);
       rowStyle = {
         "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale) * ${creatureScale})`,
         "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale) * ${creatureScale} * 0.75)`,
@@ -167,8 +211,27 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
       className={`flex ${minH} ${rowType === "creatures" ? `${creatureClass} ${creatureWrap ? "gap-x-2 gap-y-3" : "gap-2"}` : "flex-wrap items-center gap-2"} ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
       style={rowStyle}
     >
-      {groups.map((group) => (
-        <GroupedPermanentDisplay key={group.ids[0]} group={group} />
+      {renderedGroups.map(({ group, manualExpanded }) => (
+        <GroupedPermanentDisplay
+          key={group.ids[0]}
+          group={group}
+          rowType={rowType}
+          manualExpanded={manualExpanded}
+          onExpand={() => {
+            setExpandedGroupIds((previous) => {
+              const next = new Set(previous);
+              next.add(group.ids[0]);
+              return next;
+            });
+          }}
+          onCollapse={() => {
+            setExpandedGroupIds((previous) => {
+              const next = new Set(previous);
+              next.delete(group.ids[0]);
+              return next;
+            });
+          }}
+        />
       ))}
     </div>
   );

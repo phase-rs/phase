@@ -25,6 +25,7 @@ import { collectObjectActions, isManaObjectAction } from "../../viewmodel/cardAc
 interface PermanentCardProps {
   objectId: number;
   attachmentsLiftedByAncestor?: boolean;
+  onPrimaryClickOverride?: () => void;
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
@@ -92,7 +93,7 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
   return Number.isFinite(objectId) ? objectId : null;
 }
 
-export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false }: PermanentCardProps) {
+export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride }: PermanentCardProps) {
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -137,6 +138,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const isActivatable = hasActivatableAbility || canTapForMana;
   const tapCreatureCostChoice = useGameStore((s) =>
     (s.waitingFor?.type === "TapCreaturesForManaAbility" || s.waitingFor?.type === "TapCreaturesForSpellCost") && s.waitingFor.data.player === playerId
+      ? s.waitingFor.data
+      : null,
+  );
+  const equipTargetChoice = useGameStore((s) =>
+    s.waitingFor?.type === "EquipTarget" && s.waitingFor.data.player === playerId
       ? s.waitingFor.data
       : null,
   );
@@ -269,6 +275,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
   const handleClick = (e: React.MouseEvent) => {
     if (longPressFired.current) { longPressFired.current = false; return; }
+    if (onPrimaryClickOverride) {
+      e.stopPropagation();
+      onPrimaryClickOverride();
+      return;
+    }
     // Attached cards (Auras / Equipment / Fortifications) render as nested
     // <PermanentCard> inside their host's wrapper so they get full
     // click/hover/target handling for free. Without stopping propagation, a
@@ -290,6 +301,14 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       if (isValidAttacker) toggleAttacker(objectId);
     } else if (combatMode === "blockers" && combatClickHandler) {
       combatClickHandler(objectId);
+    } else if (equipTargetChoice?.valid_targets.includes(objectId)) {
+      dispatchAction({
+        type: "Equip",
+        data: {
+          equipment_id: equipTargetChoice.equipment_id,
+          target_id: objectId,
+        },
+      });
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
     } else if (isActivatable) {

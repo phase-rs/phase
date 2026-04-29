@@ -94,6 +94,12 @@ export function GameBoard() {
       validTargetObjectIds.add(objectId);
     }
 
+    if (waitingFor?.type === "EquipTarget") {
+      for (const objectId of waitingFor.data.valid_targets) {
+        validTargetObjectIds.add(objectId);
+      }
+    }
+
     if (waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost") {
       for (const objectId of waitingFor.data.creatures) {
         selectableManaCostCreatureIds.add(objectId);

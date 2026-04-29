@@ -4,6 +4,10 @@ import { isMultiplayerMode, useGameStore } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 import { dispatchAction } from "../game/dispatch";
 import { useAltToggle } from "./useAltToggle";
+import {
+  copyGameStateDebugSnapshot,
+  exportGameStateDebugZip,
+} from "../services/gameStateExport";
 
 /**
  * Registers global keyboard shortcuts for the game.
@@ -15,6 +19,7 @@ import { useAltToggle } from "./useAltToggle";
  * - T: Tap all untapped lands (when in ManaPayment)
  * - Escape: Cancel current action / cancel end-turn mode
  * - D: Copy game state JSON to clipboard (debug)
+ * - Ctrl+D: Export game state JSON as a compressed ZIP (debug)
  * - `: Toggle debug panel
  * - Triple-tap (touch): Toggle debug panel (iPad/mobile)
  */
@@ -147,16 +152,17 @@ export function useKeyboardShortcuts(): void {
 
         case "d":
         case "D":
-          if (!e.ctrlKey && !e.metaKey) {
+          if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
             e.preventDefault();
             if (gameState) {
-              const debug = {
-                gameState,
-                waitingFor,
-                legalActions: useGameStore.getState().legalActions,
-                turnCheckpoints: useGameStore.getState().turnCheckpoints,
-              };
-              navigator.clipboard.writeText(JSON.stringify(debug, null, 2))
+              exportGameStateDebugZip(gameState)
+                .then((filename) => console.log(`[Debug] Game state exported to ${filename}`))
+                .catch((err) => console.error("[Debug] Failed to export:", err));
+            }
+          } else if (!e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (gameState) {
+              copyGameStateDebugSnapshot(gameState)
                 .then(() => console.log("[Debug] Game state copied to clipboard"))
                 .catch((err) => console.error("[Debug] Failed to copy:", err));
             }

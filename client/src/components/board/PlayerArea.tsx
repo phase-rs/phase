@@ -4,7 +4,6 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
-import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
 import { CommanderDamage } from "./CommanderDamage.tsx";
 import { CommanderCardZone } from "../zone/CommanderCardZone.tsx";
@@ -112,9 +111,7 @@ export function PlayerArea({
   ) : null;
   const supportExtras = (
     <>
-      {partitioned?.planeswalkers.map((g) => (
-        <GroupedPermanentDisplay key={g.ids[0]} group={g} />
-      ))}
+      <BattlefieldRow groups={partitioned?.planeswalkers ?? []} rowType="support" />
       <CommandZone playerId={playerId} />
       {commanderSection}
     </>
@@ -147,9 +144,11 @@ export function PlayerArea({
         style={landStyle}
         data-debug-label="Lands"
       >
-        {partitioned?.lands.map((g) => (
-          <GroupedPermanentDisplay key={g.ids[0]} group={g} />
-        ))}
+        <BattlefieldRow
+          groups={partitioned?.lands ?? []}
+          rowType="lands"
+          className="justify-start px-0"
+        />
         {landColumnExtra}
       </div>
       <div

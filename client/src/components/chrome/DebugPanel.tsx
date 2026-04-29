@@ -4,6 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { GameState } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
+import {
+  copyGameStateDebugSnapshot,
+  exportGameStateDebugZip,
+} from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
 
@@ -114,15 +118,19 @@ export function DebugPanel() {
 
   const handleCopyState = useCallback(() => {
     if (!gameState) return;
-    const debug = {
-      gameState,
-      waitingFor: gameState.waiting_for,
-      legalActions: useGameStore.getState().legalActions,
-      turnCheckpoints: useGameStore.getState().turnCheckpoints,
-    };
-    navigator.clipboard.writeText(JSON.stringify(debug, null, 2))
+    copyGameStateDebugSnapshot(gameState)
       .then(() => setStatus({ type: "success", message: "Copied to clipboard" }))
       .catch(() => setStatus({ type: "error", message: "Failed to copy" }));
+  }, [gameState]);
+
+  const handleExportGameState = useCallback(() => {
+    if (!gameState) return;
+    exportGameStateDebugZip(gameState)
+      .then((filename) => setStatus({ type: "success", message: `Exported ${filename}` }))
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setStatus({ type: "error", message: "Failed to export game state" });
+      });
   }, [gameState]);
 
   const scrollToBottom = useCallback(() => {
@@ -301,6 +309,14 @@ export function DebugPanel() {
             className="w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Copy Current State to Clipboard
+          </button>
+          <button
+            onClick={handleExportGameState}
+            disabled={!gameState}
+            className="mt-1 w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
+            title="Download the current debug game state as minified JSON inside a compressed ZIP"
+          >
+            Export Game State
           </button>
         </section>
 

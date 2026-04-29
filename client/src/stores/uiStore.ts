@@ -49,11 +49,13 @@ interface UiStoreActions {
   setAltHeld: (held: boolean) => void;
   addSelectedCard: (cardId: ObjectId) => void;
   toggleSelectedCard: (cardId: ObjectId) => void;
+  setGroupSelectedCards: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
   clearSelectedCards: () => void;
   toggleFullControl: () => void;
   toggleAutoPass: () => void;
   setCombatMode: (mode: "attackers" | "blockers" | null) => void;
   toggleAttacker: (id: ObjectId) => void;
+  setGroupSelectedAttackers: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
   selectAllAttackers: (ids: ObjectId[]) => void;
   assignBlocker: (blockerId: ObjectId, attackerId: ObjectId) => void;
   removeBlockerAssignment: (blockerId: ObjectId) => void;
@@ -144,6 +146,17 @@ export const useUiStore = create<UiStore>()((set) => ({
         : [...state.selectedCardIds, cardId],
     })),
 
+  setGroupSelectedCards: (groupIds, selectedIds) =>
+    set((state) => {
+      const groupIdSet = new Set(groupIds);
+      return {
+        selectedCardIds: [
+          ...state.selectedCardIds.filter((id) => !groupIdSet.has(id)),
+          ...selectedIds,
+        ],
+      };
+    }),
+
   clearSelectedCards: () =>
     set({
       selectedCardIds: [],
@@ -163,6 +176,17 @@ export const useUiStore = create<UiStore>()((set) => ({
         ? state.selectedAttackers.filter((a) => a !== id)
         : [...state.selectedAttackers, id],
     })),
+
+  setGroupSelectedAttackers: (groupIds, selectedIds) =>
+    set((state) => {
+      const groupIdSet = new Set(groupIds);
+      return {
+        selectedAttackers: [
+          ...state.selectedAttackers.filter((id) => !groupIdSet.has(id)),
+          ...selectedIds,
+        ],
+      };
+    }),
 
   selectAllAttackers: (ids) => set({ selectedAttackers: ids }),
 
