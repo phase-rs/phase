@@ -1255,68 +1255,6 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
 /// supports non-battlefield grant statics like Lorehold's "Each instant and
 /// sorcery card in your hand has miracle {2}", whose filter carries
 /// `InZone { zone: Hand }`.
-/// CR 613.4c: True when the QuantityExpr's filter tree contains
-/// `FilterProp::AttachedToRecipient` — the per-recipient pronoun "it" referent
-/// in "for each X attached to it" clauses on Aura/Equipment statics. When
-/// true, dynamic P/T resolution must run inside the per-recipient loop so
-/// the count is computed against each affected creature, not against the
-/// static's source object.
-fn quantity_expr_uses_recipient(expr: &crate::types::ability::QuantityExpr) -> bool {
-    use crate::types::ability::{CardTypeSetSource, PlayerScope, QuantityExpr, QuantityRef};
-    match expr {
-        QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::HandSize {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeTotal {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeGainedThisTurn {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::PartySize {
-                player: PlayerScope::RecipientController,
-            } => true,
-            QuantityRef::ObjectCount { filter }
-            | QuantityRef::ObjectCountDistinctNames { filter }
-            | QuantityRef::DistinctCardTypes {
-                source: CardTypeSetSource::Objects { filter },
-            } => filter_uses_recipient(filter),
-            QuantityRef::ObjectColorCount {
-                scope: crate::types::ability::ObjectScope::Recipient,
-            } => true,
-            _ => false,
-        },
-        QuantityExpr::HalfRounded { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
-        QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
-    }
-}
-
-/// Recursively check whether a `TargetFilter` carries
-/// `FilterProp::AttachedToRecipient` anywhere in its property tree. Mirrors
-/// `filter_contains_other_than_trigger_object` in `quantity.rs`.
-fn filter_uses_recipient(filter: &crate::types::ability::TargetFilter) -> bool {
-    use crate::types::ability::{FilterProp, TargetFilter};
-    match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::AttachedToRecipient)),
-        TargetFilter::Not { filter: inner } => filter_uses_recipient(inner),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_uses_recipient)
-        }
-        _ => false,
-    }
-}
-
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
     let scan_zone = effect
         .affected_filter
@@ -1383,7 +1321,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         .get(&effect.source_id)
         .map(|o| o.controller)
         .unwrap_or(PlayerId(0));
-    let dynamic_uses_recipient = dynamic_pt_expr.is_some_and(quantity_expr_uses_recipient);
+    let dynamic_uses_recipient =
+        dynamic_pt_expr.is_some_and(crate::game::quantity::quantity_expr_uses_recipient);
     let dynamic_pt_shared = match (dynamic_pt_expr, dynamic_uses_recipient) {
         (Some(value), false) => Some(crate::game::quantity::resolve_quantity(
             state,

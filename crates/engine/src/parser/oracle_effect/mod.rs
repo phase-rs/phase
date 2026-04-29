@@ -11577,6 +11577,51 @@ mod tests {
     }
 
     #[test]
+    fn damage_all_for_each_aura_attached_to_that_creature() {
+        let e = parse_effect(
+            "Baki's Curse deals 2 damage to each creature for each Aura attached to that creature.",
+        );
+        match e {
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter,
+            } => {
+                assert!(player_filter.is_none());
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: None,
+                        properties,
+                    }) if type_filters == vec![TypeFilter::Creature] && properties.is_empty()
+                ));
+                match amount {
+                    QuantityExpr::Multiply { factor: 2, inner } => match *inner {
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        } => match filter {
+                            TargetFilter::Typed(TypedFilter {
+                                type_filters,
+                                controller,
+                                properties,
+                            }) => {
+                                assert_eq!(controller, None);
+                                assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
+                                assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
+                            }
+                            other => panic!("expected typed attachment filter, got {other:?}"),
+                        },
+                        other => panic!("expected ObjectCount inner quantity, got {other:?}"),
+                    },
+                    other => panic!("expected Multiply(2, ObjectCount), got {other:?}"),
+                }
+            }
+            other => panic!("expected DamageAll, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn for_each_token_count_replaced() {
         let e =
             parse_effect("create a 1/1 white Warrior creature token for each creature you control");

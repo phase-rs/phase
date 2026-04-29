@@ -1,9 +1,8 @@
 use crate::game::filter;
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
 use crate::types::ability::{
-    CardTypeSetSource, ContinuousModification, Duration, Effect, EffectError, EffectKind,
-    FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter,
-    TargetRef,
+    ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
+    StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -178,57 +177,6 @@ fn snapshot_transient_modifications(
             _ => modification.clone(),
         })
         .collect()
-}
-
-fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::HandSize {
-                player: crate::types::ability::PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeTotal {
-                player: crate::types::ability::PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeLostThisTurn {
-                player: crate::types::ability::PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeGainedThisTurn {
-                player: crate::types::ability::PlayerScope::RecipientController,
-            }
-            | QuantityRef::PartySize {
-                player: crate::types::ability::PlayerScope::RecipientController,
-            } => true,
-            QuantityRef::ObjectCount { filter }
-            | QuantityRef::ObjectCountDistinctNames { filter }
-            | QuantityRef::DistinctCardTypes {
-                source: CardTypeSetSource::Objects { filter },
-            } => filter_uses_recipient(filter),
-            QuantityRef::ObjectColorCount {
-                scope: crate::types::ability::ObjectScope::Recipient,
-            } => true,
-            _ => false,
-        },
-        QuantityExpr::HalfRounded { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
-        QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
-    }
-}
-
-fn filter_uses_recipient(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|property| matches!(property, FilterProp::AttachedToRecipient)),
-        TargetFilter::Not { filter } => filter_uses_recipient(filter),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_uses_recipient)
-        }
-        _ => false,
-    }
 }
 
 #[cfg(test)]

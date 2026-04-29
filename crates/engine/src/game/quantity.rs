@@ -12,9 +12,9 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef,
-    TypeFilter, ZoneRef,
+    AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, FilterProp, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+    RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -99,6 +99,59 @@ pub fn resolve_quantity_with_recipient(
             recipient: Some(recipient_id),
         },
     )
+}
+
+/// True when the QuantityExpr needs a per-object recipient binding to resolve
+/// an anaphoric quantity such as "for each Aura attached to it/that creature."
+pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::HandSize {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeTotal {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::PartySize {
+                player: PlayerScope::RecipientController,
+            } => true,
+            QuantityRef::ObjectCount { filter }
+            | QuantityRef::ObjectCountDistinctNames { filter }
+            | QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Objects { filter },
+            } => filter_uses_recipient(filter),
+            QuantityRef::ObjectColorCount {
+                scope: ObjectScope::Recipient,
+            } => true,
+            _ => false,
+        },
+        QuantityExpr::HalfRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
+        QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
+    }
+}
+
+fn filter_uses_recipient(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::AttachedToRecipient)),
+        TargetFilter::Not { filter: inner } => filter_uses_recipient(inner),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_uses_recipient)
+        }
+        _ => false,
+    }
 }
 
 /// Resolve a QuantityExpr with an explicit `QuantityContext` so variants like
@@ -276,6 +329,35 @@ pub fn resolve_quantity_with_targets(
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets(state, inner, ability)
+        }),
+    }
+}
+
+/// Resolve a QuantityExpr with ability targets/chosen-X plus a per-object
+/// recipient binding for `FilterProp::AttachedToRecipient`.
+pub(crate) fn resolve_quantity_with_targets_and_recipient(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+    recipient_id: ObjectId,
+) -> i32 {
+    match expr {
+        QuantityExpr::Fixed { value } => *value,
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            ability.controller,
+            QuantityContext {
+                entering: None,
+                source: ability.source_id,
+                recipient: Some(recipient_id),
+            },
+            &ability.targets,
+            ability.chosen_x,
+            Some(ability),
+        ),
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_targets_and_recipient(state, inner, ability, recipient_id)
         }),
     }
 }

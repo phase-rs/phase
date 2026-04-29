@@ -4,7 +4,10 @@ use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
 use crate::game::filter;
 use crate::game::keywords;
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::quantity::{
+    quantity_expr_uses_recipient, resolve_quantity_with_targets,
+    resolve_quantity_with_targets_and_recipient,
+};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     DamageSource, Effect, EffectError, EffectKind, PlayerFilter, QuantityExpr, ResolvedAbility,
@@ -579,20 +582,27 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_dmg, target_filter, player_filter): (u32, TargetFilter, Option<PlayerFilter>) =
-        match &ability.effect {
-            Effect::DamageAll {
-                amount,
-                target,
-                player_filter,
-            } => {
-                // CR 107.1b: Ability-context resolve so X-damage-to-all ("Deal X damage to each...")
-                // reads the caster-chosen X.
-                let dmg = resolve_quantity_with_targets(state, amount, ability).max(0) as u32;
-                (dmg, target.clone(), *player_filter)
-            }
-            _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
-        };
+    let (amount, target_filter, player_filter): (
+        &QuantityExpr,
+        TargetFilter,
+        Option<PlayerFilter>,
+    ) = match &ability.effect {
+        Effect::DamageAll {
+            amount,
+            target,
+            player_filter,
+        } => (amount, target.clone(), *player_filter),
+        _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
+    };
+    // CR 107.1b: Ability-context resolve so X-damage-to-all ("Deal X damage to each...")
+    // reads the caster-chosen X. Recipient-relative quantities defer resolution
+    // into the per-recipient loop below.
+    let amount_uses_recipient = quantity_expr_uses_recipient(amount);
+    let shared_num_dmg = if amount_uses_recipient {
+        None
+    } else {
+        Some(resolve_quantity_with_targets(state, amount, ability).max(0) as u32)
+    };
 
     let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
 
@@ -628,14 +638,31 @@ pub fn resolve_all(
     recipients.extend(matching_objects.iter().map(|&id| TargetRef::Object(id)));
     recipients.extend(matching_players.iter().map(|&pid| TargetRef::Player(pid)));
 
-    for (i, target) in recipients.iter().enumerate() {
-        match apply_damage_to_target(state, &ctx, target.clone(), num_dmg, false, events)? {
+    let recipient_amounts: Vec<(TargetRef, u32)> = recipients
+        .into_iter()
+        .map(|target| {
+            let dmg = match (shared_num_dmg, &target) {
+                (Some(dmg), _) => dmg,
+                (None, TargetRef::Object(id)) => {
+                    resolve_quantity_with_targets_and_recipient(state, amount, ability, *id).max(0)
+                        as u32
+                }
+                (None, TargetRef::Player(_)) => {
+                    resolve_quantity_with_targets(state, amount, ability).max(0) as u32
+                }
+            };
+            (target, dmg)
+        })
+        .collect();
+
+    for (i, (target, num_dmg)) in recipient_amounts.iter().enumerate() {
+        match apply_damage_to_target(state, &ctx, target.clone(), *num_dmg, false, events)? {
             DamageResult::Applied(_) => {}
             DamageResult::NeedsChoice => {
                 // CR 120.3 + CR 616.1e: Remaining batch recipients must resume after
                 // the replacement choice resolves — chain them as DealDamage
                 // continuations keyed to the same damage-source id.
-                let remaining = recipients[i + 1..].iter().map(|t| (t.clone(), num_dmg));
+                let remaining = recipient_amounts[i + 1..].iter().cloned();
                 stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
                 // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
                 // drain re-emits the parent event the non-pause tail fires.
@@ -857,7 +884,9 @@ pub fn resolve_each_player(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TargetFilter, TypedFilter};
+    use crate::types::ability::{
+        FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::game_state::{WaitingFor, ZoneChangeRecord};
@@ -1167,6 +1196,94 @@ mod tests {
 
         assert_eq!(state.objects[&bear1].damage_marked, 2);
         assert_eq!(state.objects[&bear2].damage_marked, 2);
+    }
+
+    #[test]
+    fn damage_all_resolves_recipient_relative_amount_per_creature() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Baki's Curse".to_string(),
+            Zone::Battlefield,
+        );
+        let bear1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear 1".to_string(),
+            Zone::Battlefield,
+        );
+        let bear2 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Bear 2".to_string(),
+            Zone::Battlefield,
+        );
+        let bear3 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Bear 3".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [bear1, bear2, bear3] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        for (card_id, host) in [(5, bear1), (6, bear1), (7, bear2)] {
+            let aura = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                format!("Aura {card_id}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(host.into());
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Subtype("Aura".to_string())],
+                                controller: None,
+                                properties: vec![FilterProp::AttachedToRecipient],
+                            }),
+                        },
+                    }),
+                },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                player_filter: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&bear1].damage_marked, 4);
+        assert_eq!(state.objects[&bear2].damage_marked, 2);
+        assert_eq!(state.objects[&bear3].damage_marked, 0);
     }
 
     #[test]
@@ -1968,6 +2085,108 @@ mod tests {
             );
             assert_eq!(*amount, 2, "continuation preserves amount");
         }
+    }
+
+    #[test]
+    fn damage_all_recipient_relative_amounts_preserved_in_replacement_continuation() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Baki's Curse".to_string(),
+            Zone::Battlefield,
+        );
+        let bear1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear1".to_string(),
+            Zone::Battlefield,
+        );
+        let bear2 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear2".to_string(),
+            Zone::Battlefield,
+        );
+        let bear3 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Bear3".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [bear1, bear2, bear3] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        for (card_id, host) in [(5, bear1), (6, bear2), (7, bear2), (8, bear3)] {
+            let aura = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                format!("Aura {card_id}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(host.into());
+        }
+        install_optional_damage_replacement(&mut state);
+
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Subtype("Aura".to_string())],
+                                controller: None,
+                                properties: vec![FilterProp::AttachedToRecipient],
+                            }),
+                        },
+                    }),
+                },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                player_filter: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let cont = state
+            .pending_continuation
+            .as_ref()
+            .expect("expected pending_continuation for remaining batch targets");
+        let summary = collect_chain_summary(&cont.chain);
+        assert_eq!(
+            summary,
+            vec![
+                (source_id, TargetRef::Object(bear2), 4),
+                (source_id, TargetRef::Object(bear3), 2),
+            ]
+        );
     }
 
     /// CR 120.3 + CR 616.1e: DamageEachPlayer must stash remaining players as
