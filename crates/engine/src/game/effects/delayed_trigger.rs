@@ -65,7 +65,9 @@ pub fn resolve(
     // time `last_created_token_ids` will have been overwritten by other
     // token-creating effects (CR 603.7c: a delayed trigger refers to a
     // particular object even if later events change it).
-    let snapshot_targets = if effect_references_last_created(&delayed_effect)
+    let snapshot_targets = if super::effect_refs_parent_target(&delayed_effect) {
+        ability.targets.clone()
+    } else if effect_references_last_created(&delayed_effect)
         && !state.last_created_token_ids.is_empty()
     {
         state
@@ -381,6 +383,41 @@ mod tests {
                 player: PlayerId(1),
             },
             "placeholder player must be rewritten to ability.controller"
+        );
+    }
+
+    #[test]
+    fn delayed_parent_target_snapshots_parent_targets() {
+        let mut state = GameState::new_two_player(42);
+        let vehicle_id = ObjectId(10);
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::ParentTarget,
+                destination: None,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(vehicle_id)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(vehicle_id)],
+            "delayed ParentTarget effects must remember the object from the parent resolution"
         );
     }
 }

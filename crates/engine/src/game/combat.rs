@@ -165,11 +165,6 @@ pub fn enter_attacking(
     source_id: ObjectId,
     controller: PlayerId,
 ) {
-    // CR 508.4: Attacking creatures enter tapped.
-    if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.tapped = true;
-    }
-
     // Determine defending player and attack target before mutable combat borrow.
     let (defending_player, attack_target) = state
         .combat

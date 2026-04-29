@@ -1628,11 +1628,13 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // Object should be on battlefield, tapped, and in combat
+        // Object should be on battlefield and in combat. Entering attacking
+        // does not itself tap the object; "tapped and attacking" effects set
+        // `enter_tapped` separately.
         assert!(state.battlefield.contains(&obj_id));
         assert!(
-            state.objects[&obj_id].tapped,
-            "CR 508.4: enters attacking should set tapped"
+            !state.objects[&obj_id].tapped,
+            "CR 508.4: enters attacking alone should not set tapped"
         );
         let combat = state.combat.as_ref().unwrap();
         assert!(

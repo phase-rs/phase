@@ -168,8 +168,9 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
 
     // CR 508.4 + CR 506.3a: Strip inline "that's tapped and attacking" /
     // "that is tapped and attacking" / "thats tapped and attacking" /
-    // "that are tapped and attacking" suffix (singular apostrophe variants
-    // Oracle normalizes to, plus the plural form for "create N tokens ...").
+    // "that are tapped and attacking" / "that are attacking" suffix (singular
+    // apostrophe variants Oracle normalizes to, plus the plural forms for
+    // "create N tokens ...").
     // This is the single-clause form; the trailing "It enters tapped and
     // attacking" sentence form is patched via
     // `ContinuationAst::EntersTappedAttacking`.
@@ -177,7 +178,7 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     // Single combinator for the whole clause: relative-pronoun variants
     // factored into one `alt`, shared tail appears once, `eof` anchors the
     // match at the string's end.
-    let tapped_attacking_clause = |i| -> OracleResult<'_, ()> {
+    let attacking_clause = |i| -> OracleResult<'_, bool> {
         let (i, _) = alt((
             tag(" that's"),
             tag(" that is"),
@@ -185,20 +186,29 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
             tag(" that are"),
         ))
         .parse(i)?;
-        let (i, _) = tag(" tapped and attacking").parse(i)?;
+        let (i, tapped) = alt((
+            value(true, tag(" tapped and attacking")),
+            value(false, tag(" attacking")),
+        ))
+        .parse(i)?;
         let (i, _) = nom::combinator::eof(i)?;
-        Ok((i, ()))
+        Ok((i, tapped))
     };
     // Nom parses forward; scan byte positions (only those starting with the
     // leading space the clause requires) for the first place where the clause
     // consumes the remainder to EOF. That byte offset is the body length.
-    let body_len = (0..lower_trimmed.len()).find(|&pos| {
-        lower_trimmed.as_bytes().get(pos) == Some(&b' ')
-            && tapped_attacking_clause(&lower_trimmed[pos..]).is_ok()
+    let entry_clause = (0..lower_trimmed.len()).find_map(|pos| {
+        (lower_trimmed.as_bytes().get(pos) == Some(&b' '))
+            .then(|| {
+                attacking_clause(&lower_trimmed[pos..])
+                    .ok()
+                    .map(|(_, tapped)| (pos, tapped))
+            })
+            .flatten()
     });
-    let (text, enters_attacking) = match body_len {
-        Some(len) => (&text[..len], true),
-        None => (text, false),
+    let (text, enters_attacking, enters_tapped_attacking) = match entry_clause {
+        Some((len, tapped)) => (&text[..len], true, tapped),
+        None => (text, false, false),
     };
     let (mut count, leading_name, mut rest) =
         if let Some((count, rest)) = parse_token_count_prefix(text) {
@@ -211,7 +221,7 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     // CR 508.4: Seed `tapped` from the inline "tapped and attacking" suffix
     // detected earlier so the "tapped " / "untapped " leading-word loop below
     // can still flip it if the token text also carries a leading "tapped".
-    let mut tapped = enters_attacking;
+    let mut tapped = enters_tapped_attacking;
 
     loop {
         let trimmed = rest.trim_start();
@@ -864,6 +874,35 @@ mod tests {
                     "plural 'that are' clause must set enters_attacking=true"
                 );
                 assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+            }
+            other => panic!("Expected Token effect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plural_that_are_attacking_suffix_strips_without_tapping() {
+        // CR 508.4: Parhelion II-style tokens enter attacking without being
+        // tapped unless the effect explicitly says tapped.
+        let effect = try_parse_token(
+            &"create two 4/4 white angel creature tokens with flying and vigilance that are attacking"
+                .to_lowercase(),
+            "create two 4/4 white Angel creature tokens with flying and vigilance that are attacking",
+        );
+        match effect {
+            Some(Effect::Token {
+                tapped,
+                enters_attacking,
+                count,
+                keywords,
+                ..
+            }) => {
+                assert!(!tapped, "attacking-only clause must not set tapped=true");
+                assert!(
+                    enters_attacking,
+                    "plural 'that are attacking' clause must set enters_attacking=true"
+                );
+                assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+                assert_eq!(keywords, vec![Keyword::Flying, Keyword::Vigilance]);
             }
             other => panic!("Expected Token effect, got {:?}", other),
         }
