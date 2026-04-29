@@ -17050,6 +17050,66 @@ mod tests {
     }
 
     #[test]
+    fn parse_controlled_parent_target_addendum_condition() {
+        let def = parse_effect_chain(
+            "Return target nonland permanent to its owner's hand. If you controlled that permanent, draw a card.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected controlled-parent-target addendum");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = &sub.condition else {
+            panic!(
+                "expected TargetMatchesFilter condition, got {:?}",
+                sub.condition
+            );
+        };
+        assert!(*use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|type_filter| *type_filter == TypeFilter::Permanent));
+            }
+            other => panic!("expected typed permanent filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_you_controlled_parent_target_condition_variants() {
+        let artifact = try_nom_condition_as_ability_condition("you controlled that artifact")
+            .expect("artifact condition should parse");
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = artifact else {
+            panic!("expected TargetMatchesFilter condition");
+        };
+        assert!(use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+            }
+            other => panic!("expected typed artifact filter, got {other:?}"),
+        }
+
+        let it = try_nom_condition_as_ability_condition("you controlled it")
+            .expect("it condition should parse");
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = it else {
+            panic!("expected TargetMatchesFilter condition");
+        };
+        assert!(use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_paid_x_threshold_sub_ability_condition() {
         let def = parse_effect_chain(
             "Create X tapped 2/1 white and black Inkling creature tokens with flying. If X is 6 or more, destroy all noncreature, nonland permanents.",

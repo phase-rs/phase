@@ -1666,7 +1666,10 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
 }
 
 fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCondition> {
-    let controller_only = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+    type E<'a> = VerboseError<&'a str>;
+
+    let controller_only =
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
     let permanent = TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You));
     let nonland_permanent = TargetFilter::Typed(
         TypedFilter::permanent()
@@ -1688,13 +1691,13 @@ fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCo
         TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle).controller(ControllerRef::You));
 
     let (_, filter) = all_consuming(preceded(
-        tag("you controlled "),
+        tag::<_, _, E>("you controlled "),
         alt((
-            value(controller_only, tag("it")),
+            value(controller_only, tag::<_, _, E>("it")),
             preceded(
-                tag("that "),
+                tag::<_, _, E>("that "),
                 alt((
-                    value(nonland_permanent, tag("nonland permanent")),
+                    value(nonland_permanent, tag::<_, _, E>("nonland permanent")),
                     value(permanent, tag("permanent")),
                     value(artifact, tag("artifact")),
                     value(creature, tag("creature")),

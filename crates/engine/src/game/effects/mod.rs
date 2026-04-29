@@ -2491,6 +2491,89 @@ mod tests {
         assert_eq!(state.players[0].hand.len(), 1);
     }
 
+    fn bounce_then_draw_if_controller_matched_lki(
+        permanent_controller: PlayerId,
+    ) -> (GameState, Vec<GameEvent>) {
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Library,
+        );
+        let permanent = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let permanent_obj = state.objects.get_mut(&permanent).unwrap();
+        permanent_obj.controller = permanent_controller;
+        permanent_obj.card_types.core_types.push(CoreType::Artifact);
+
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+            use_lki: true,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+            },
+            vec![TargetRef::Object(permanent)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(draw);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        (state, events)
+    }
+
+    #[test]
+    fn bounce_followup_draws_when_caster_controlled_parent_target() {
+        let (state, events) = bounce_then_draw_if_controller_matched_lki(PlayerId(0));
+
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[1].hand.len(), 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Battlefield),
+                to: Zone::Hand,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn bounce_followup_skips_draw_when_opponent_controlled_parent_target() {
+        let (state, events) = bounce_then_draw_if_controller_matched_lki(PlayerId(1));
+
+        assert_eq!(state.players[0].hand.len(), 0);
+        assert_eq!(state.players[1].hand.len(), 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Battlefield),
+                to: Zone::Hand,
+                ..
+            }
+        )));
+    }
+
     #[test]
     fn previous_effect_amount_for_damage_ignores_counter_side_effects() {
         let mut state = GameState::new_two_player(42);
