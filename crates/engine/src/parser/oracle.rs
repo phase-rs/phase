@@ -1300,6 +1300,28 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        // Instant/sorcery prevention text creates a resolving spell effect,
+        // not a standing replacement definition. Let the effect-chain parser
+        // preserve any preceding clauses ("You gain 1 life for each ...")
+        // before the replacement classifier sees the prevention marker.
+        if is_spell && scan_contains(&lower, "prevent") && scan_contains(&lower, "damage") {
+            let def = parse_effect_chain_with_context(
+                &line,
+                AbilityKind::Spell,
+                &ParseContext {
+                    subject: None,
+                    card_name: Some(card_name.to_string()),
+                    actor: None,
+                    ..Default::default()
+                },
+            );
+            if !has_unimplemented(&def) {
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 8: Replacement patterns
         if is_replacement_pattern(&lower) {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
@@ -4732,6 +4754,56 @@ mod tests {
                 effect
             ),
         }
+    }
+
+    #[test]
+    fn spell_prevention_keeps_preceding_dynamic_gain_life() {
+        use crate::types::ability::{PreventionAmount, QuantityExpr, QuantityRef};
+
+        let parsed = parse(
+            "You gain 1 life for each creature on the battlefield. Prevent all combat damage that would be dealt this turn.",
+            "Blunt the Assault",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert!(
+            parsed.replacements.is_empty(),
+            "spell prevention should parse as resolving effect, got {:?}",
+            parsed.replacements
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        let ability = &parsed.abilities[0];
+        match &*ability.effect {
+            Effect::GainLife {
+                amount:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                ..
+            } => {}
+            other => panic!("expected dynamic GainLife, got {other:?}"),
+        }
+        let prevention = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected prevention follow-up");
+        assert!(matches!(
+            &*prevention.effect,
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                ..
+            }
+        ));
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            "unexpected dynamic quantity warning: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     // ── Coverage batch: play from exile ────────────────────────────────
