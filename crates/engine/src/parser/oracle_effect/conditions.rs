@@ -527,6 +527,41 @@ fn parse_its_a_type_condition(condition_text: &str) -> Option<AbilityCondition> 
     ))
 }
 
+fn parse_target_color_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    let (rest, negated) = alt((
+        value(false, alt((tag("it's "), tag("it is ")))),
+        value(
+            true,
+            alt((tag("it isn't "), tag("it's not "), tag("it is not "))),
+        ),
+    ))
+    .parse(input)?;
+    let (rest, color) = nom_primitives::parse_color(rest)?;
+    Ok((
+        rest,
+        maybe_negate(
+            AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+                ),
+                use_lki: false,
+            },
+            negated,
+        ),
+    ))
+}
+
+fn parse_target_color_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let parsed = all_consuming(parse_target_color_condition)
+        .parse(lower.as_str())
+        .ok()
+        .map(|(_, condition)| condition);
+    parsed
+}
+
 pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
     let lower = text.to_lowercase();
     let lower = lower.trim_end_matches('.');
@@ -1068,6 +1103,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     }
 
     if let Some(condition) = parse_paid_x_condition_text(text) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_target_color_condition_text(text) {
         return Some(condition);
     }
 
@@ -2165,6 +2204,47 @@ mod tests {
                 }
             )),
             "expected Legendary supertype filter, got {:?}",
+            filter.properties
+        );
+    }
+
+    #[test]
+    fn leading_its_color_checks_parent_target_color() {
+        let (condition, body) =
+            strip_leading_general_conditional("If it's red, you may cast it this turn.");
+        assert_eq!(body, "you may cast it this turn.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
+            panic!("expected TargetMatchesFilter, got {condition:?}");
+        };
+        assert!(!use_lki);
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed color filter");
+        };
+        assert!(
+            filter.properties.contains(&FilterProp::HasColor {
+                color: ManaColor::Red
+            }),
+            "expected Red color filter, got {:?}",
+            filter.properties
+        );
+    }
+
+    #[test]
+    fn suffix_its_color_checks_parent_target_color() {
+        let (condition, body) = strip_suffix_conditional("Counter target spell if it's blue.");
+        assert_eq!(body, "Counter target spell");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
+            panic!("expected TargetMatchesFilter, got {condition:?}");
+        };
+        assert!(!use_lki);
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed color filter");
+        };
+        assert!(
+            filter.properties.contains(&FilterProp::HasColor {
+                color: ManaColor::Blue
+            }),
+            "expected Blue color filter, got {:?}",
             filter.properties
         );
     }
