@@ -669,6 +669,14 @@ fn permanents_you_controlled_left_battlefield_this_turn_ref() -> QuantityRef {
     }
 }
 
+fn creatures_you_controlled_left_battlefield_this_turn_ref() -> QuantityRef {
+    QuantityRef::ZoneChangeCountThisTurn {
+        from: Some(Zone::Battlefield),
+        to: None,
+        filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+    }
+}
+
 /// Parse "you control" condition patterns.
 fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
@@ -1092,6 +1100,14 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
             alt((
                 tag("a permanent you controlled left the battlefield this turn"),
                 tag("a permanent left the battlefield under your control this turn"),
+            )),
+        ),
+        // "a creature left the battlefield under your control this turn"
+        value(
+            make_quantity_ge(creatures_you_controlled_left_battlefield_this_turn_ref(), 1),
+            alt((
+                tag("a creature you controlled left the battlefield this turn"),
+                tag("a creature left the battlefield under your control this turn"),
             )),
         ),
         // "an opponent lost life this turn"
@@ -3499,6 +3515,36 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    #[test]
+    fn test_creature_left_battlefield_under_your_control() {
+        let (rest, c) =
+            parse_inner_condition("a creature left the battlefield under your control this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: None,
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert!(filter
+                    .type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Creature)));
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected controlled creature zone-change count, got {other:?}"),
         }
     }
 
