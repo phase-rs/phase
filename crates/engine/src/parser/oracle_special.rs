@@ -1,5 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
+use nom::combinator::opt;
 use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -15,6 +16,8 @@ use crate::types::statics::StaticMode;
 use super::oracle_effect::imperative::try_parse_die_result_line;
 use super::oracle_effect::{capitalize, parse_effect_chain};
 use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::error::OracleResult;
+use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_subtype, strip_reminder_text,
 };
@@ -68,53 +71,37 @@ pub(super) fn parse_defiler_cost_reduction(
     lower: &str,
     has_next_line: bool,
     next_line_lower: impl FnOnce() -> Option<String>,
-) -> Option<StaticDefinition> {
-    let ((), after_cast) = nom_on_lower(lower, lower, |i| {
-        value((), tag("as an additional cost to cast ")).parse(i)
-    })?;
-    let perm_pos = after_cast.find(" permanent spell")?;
-    let color_word = after_cast[..perm_pos].trim();
-    let color = match color_word {
-        "white" => ManaColor::White,
-        "blue" => ManaColor::Blue,
-        "black" => ManaColor::Black,
-        "red" => ManaColor::Red,
-        "green" => ManaColor::Green,
-        _ => return None,
+) -> Option<(StaticDefinition, bool)> {
+    let (rest, (color, life_cost)) = parse_defiler_life_payment_sentence(lower.trim()).ok()?;
+    let consumes_next_line = rest.is_empty();
+    let reduction_text = if consumes_next_line {
+        if !has_next_line {
+            return None;
+        }
+        next_line_lower()?
+    } else {
+        rest.to_string()
     };
-
-    let pay_pos = lower.find("you may pay ")?;
-    let after_pay = &lower[pay_pos + "you may pay ".len()..];
-    let (life_cost, _) = super::oracle_util::parse_number(after_pay)?;
-
-    if !has_next_line {
-        return None;
+    let (rest, mana_reduction) =
+        parse_defiler_reduction_sentence(reduction_text.trim(), color).ok()?;
+    let (rest, mana_limit) = opt((
+        tag::<_, _, VerboseError<&str>>(". this effect reduces only the amount of "),
+        parse_defiler_color,
+        tag(" mana you pay"),
+    ))
+    .parse(rest)
+    .ok()?;
+    if let Some((_, limit_color, _)) = mana_limit {
+        if limit_color != color {
+            return None;
+        }
     }
-    let next_lower = next_line_lower()?;
-    let next_trimmed = next_lower.trim().trim_end_matches('.');
-
-    let ((), cost_rest) = nom_on_lower(next_trimmed, next_trimmed, |i| {
-        value((), tag("those spells cost ")).parse(i)
-    })?;
-    let less_pos = cost_rest.find(" less to cast")?;
-    let mana_text = cost_rest[..less_pos].trim();
-    if !mana_text.starts_with('{') {
+    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(".")).parse(rest).ok()?;
+    if !rest.is_empty() {
         return None;
     }
 
-    let shard = match color {
-        ManaColor::White => ManaCostShard::White,
-        ManaColor::Blue => ManaCostShard::Blue,
-        ManaColor::Black => ManaCostShard::Black,
-        ManaColor::Red => ManaCostShard::Red,
-        ManaColor::Green => ManaCostShard::Green,
-    };
-    let mana_reduction = ManaCost::Cost {
-        shards: vec![shard],
-        generic: 0,
-    };
-
-    Some(
+    Some((
         StaticDefinition::new(StaticMode::DefilerCostReduction {
             color,
             life_cost,
@@ -123,9 +110,76 @@ pub(super) fn parse_defiler_cost_reduction(
         .affected(TargetFilter::SelfRef)
         .description(format!(
             "As an additional cost to cast {} permanent spells, you may pay {} life. Those spells cost less to cast.",
-            color_word, life_cost
+            defiler_color_word(color), life_cost
         )),
-    )
+        consumes_next_line,
+    ))
+}
+
+fn parse_defiler_life_payment_sentence(input: &str) -> OracleResult<'_, (ManaColor, u32)> {
+    let (rest, _) = tag("as an additional cost to cast ").parse(input)?;
+    let (rest, color) = parse_defiler_color(rest)?;
+    let (rest, _) = tag(" permanent spell").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(", you may pay ").parse(rest)?;
+    let (rest, life_cost) = nom_primitives::parse_number(rest)?;
+    let (rest, _) = tag(" life.").parse(rest)?;
+    let (rest, _) = opt(tag(" ")).parse(rest)?;
+    Ok((rest, (color, life_cost)))
+}
+
+fn parse_defiler_reduction_sentence(input: &str, color: ManaColor) -> OracleResult<'_, ManaCost> {
+    let (rest, _) = tag("those spells cost ").parse(input)?;
+    let (rest, mana_reduction) = parse_defiler_mana_reduction(rest, color)?;
+    let (rest, _) = tag(" less to cast").parse(rest)?;
+    let (rest, _) = opt(tag(" if you paid life this way")).parse(rest)?;
+    Ok((rest, mana_reduction))
+}
+
+fn parse_defiler_color(input: &str) -> OracleResult<'_, ManaColor> {
+    alt((
+        value(ManaColor::White, tag("white")),
+        value(ManaColor::Blue, tag("blue")),
+        value(ManaColor::Black, tag("black")),
+        value(ManaColor::Red, tag("red")),
+        value(ManaColor::Green, tag("green")),
+    ))
+    .parse(input)
+}
+
+fn parse_defiler_mana_reduction(input: &str, color: ManaColor) -> OracleResult<'_, ManaCost> {
+    let shard = defiler_mana_shard(color);
+    let cost = ManaCost::Cost {
+        shards: vec![shard],
+        generic: 0,
+    };
+    match color {
+        ManaColor::White => value(cost, tag("{w}")).parse(input),
+        ManaColor::Blue => value(cost, tag("{u}")).parse(input),
+        ManaColor::Black => value(cost, tag("{b}")).parse(input),
+        ManaColor::Red => value(cost, tag("{r}")).parse(input),
+        ManaColor::Green => value(cost, tag("{g}")).parse(input),
+    }
+}
+
+fn defiler_mana_shard(color: ManaColor) -> ManaCostShard {
+    match color {
+        ManaColor::White => ManaCostShard::White,
+        ManaColor::Blue => ManaCostShard::Blue,
+        ManaColor::Black => ManaCostShard::Black,
+        ManaColor::Red => ManaCostShard::Red,
+        ManaColor::Green => ManaCostShard::Green,
+    }
+}
+
+fn defiler_color_word(color: ManaColor) -> &'static str {
+    match color {
+        ManaColor::White => "white",
+        ManaColor::Blue => "blue",
+        ManaColor::Black => "black",
+        ManaColor::Red => "red",
+        ManaColor::Green => "green",
+    }
 }
 
 /// Normalize self-references in a line for static ability parsing.

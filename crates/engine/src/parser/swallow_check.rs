@@ -374,6 +374,9 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
             // cast permission, structurally opt-in.
             | StaticMode::GraveyardCastPermission { .. }
+            // CR 601.2f: Defiler-style cost reductions encode the optional
+            // life payment inside the static cost-modification primitive.
+            | StaticMode::DefilerCostReduction { .. }
     )
 }
 
@@ -1065,6 +1068,7 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
         "\"type\":\"FlipCoin\"",
         "\"type\":\"FlipCoins\"",
         "\"type\":\"RollDie\"",
+        "DefilerCostReduction",
     ];
     if json_has_any(ast_json, cond_markers) {
         return;

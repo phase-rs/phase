@@ -1177,6 +1177,21 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        // Priority 6c-defiler: "As an additional cost to cast [color] permanent spells,
+        // you may pay N life. Those spells cost {C} less to cast if you paid life this way."
+        // This is a static ability on the permanent, not a self-cost for this spell.
+        if is_defiler_cost_pattern(&lower) {
+            if let Some((static_def, consumes_next_line)) =
+                parse_defiler_cost_reduction(&lower, i + 1 < lines.len(), || {
+                    lines.get(i + 1).map(|l| l.to_lowercase())
+                })
+            {
+                result.statics.push(static_def);
+                i += if consumes_next_line { 2 } else { 1 };
+                continue;
+            }
+        }
+
         // Priority 7: Static/continuous patterns
         // CR 611.2a + CR 611.3a: On permanents, "creatures you control get +1/+1"
         // is a static ability (CR 611.3a). On instants/sorceries, lines with an
@@ -1363,22 +1378,6 @@ pub fn parse_oracle_text(
             result.abilities.push(def);
             i += 1;
             continue;
-        }
-
-        // Priority 8b-defiler: "As an additional cost to cast [color] permanent spells,
-        // you may pay N life." + next line "Those spells cost {C} less to cast."
-        // This is a static ability on the permanent, not a self-cost for this spell.
-        if is_defiler_cost_pattern(&lower) {
-            if let Some(static_def) =
-                parse_defiler_cost_reduction(&lower, i + 1 < lines.len(), || {
-                    lines.get(i + 1).map(|l| l.to_lowercase())
-                })
-            {
-                result.statics.push(static_def);
-                // Consume both lines (cost line + reduction line)
-                i += 2;
-                continue;
-            }
         }
 
         // Priority 8b: "As an additional cost to cast this spell"
@@ -2554,7 +2553,7 @@ mod tests {
         ReplacementCondition, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
-    use crate::types::mana::{ManaCost, ManaCostShard};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
@@ -8615,6 +8614,45 @@ mod tests {
             1,
             "Syr Gwyn: expected one static (equip Knight grant); got {}",
             r.statics.len()
+        );
+    }
+
+    #[test]
+    fn defiler_single_line_cost_reduction_parses_as_dedicated_static() {
+        let r = parse(
+            "Flying\nAs an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.\nWhenever you cast a blue permanent spell, draw a card.",
+            "Defiler of Dreams",
+            &[Keyword::Flying],
+            &["Creature"],
+            &["Phyrexian", "Sphinx"],
+        );
+
+        assert_eq!(r.statics.len(), 1, "expected Defiler static: {r:#?}");
+        match &r.statics[0].mode {
+            StaticMode::DefilerCostReduction {
+                color,
+                life_cost,
+                mana_reduction,
+            } => {
+                assert_eq!(*color, ManaColor::Blue);
+                assert_eq!(*life_cost, 2);
+                assert_eq!(
+                    mana_reduction,
+                    &ManaCost::Cost {
+                        shards: vec![ManaCostShard::Blue],
+                        generic: 0,
+                    }
+                );
+            }
+            other => panic!("expected DefilerCostReduction, got {other:?}"),
+        }
+        assert!(
+            r.parse_warnings.iter().all(|warning| {
+                let tag = warning.split_whitespace().next();
+                tag != Some("Swallow:Optional_YouMay") && tag != Some("Swallow:Condition_If")
+            }),
+            "unexpected Defiler warnings: {:?}",
+            r.parse_warnings
         );
     }
 }
