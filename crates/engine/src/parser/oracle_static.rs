@@ -6213,6 +6213,10 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
                             super::oracle_keyword::parse_keyword_from_oracle(&lower)
                         {
                             modifications.push(ContinuousModification::AddKeyword { keyword });
+                        } else if let Some(static_modifications) =
+                            parse_quoted_rule_static_modifications(ability_text)
+                        {
+                            modifications.extend(static_modifications);
                         } else {
                             modifications.push(ContinuousModification::GrantAbility {
                                 definition: Box::new(parse_quoted_ability(ability_text)),
@@ -6227,6 +6231,28 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
     }
 
     modifications
+}
+
+fn parse_quoted_rule_static_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+    let modifications: Vec<_> = parse_static_line_multi(text)
+        .into_iter()
+        .map(|definition| {
+            if definition.affected != Some(TargetFilter::SelfRef)
+                || definition.condition.is_some()
+                || !definition.modifications.is_empty()
+            {
+                return None;
+            }
+            Some(ContinuousModification::AddStaticMode {
+                mode: definition.mode,
+            })
+        })
+        .collect::<Option<_>>()?;
+    if modifications.is_empty() {
+        None
+    } else {
+        Some(modifications)
+    }
 }
 
 /// Parse a single quoted ability string into a typed AbilityDefinition.
@@ -9414,6 +9440,19 @@ mod tests {
             ),
             "effect should not be Unimplemented, got {:?}",
             def.effect
+        );
+    }
+
+    #[test]
+    fn quoted_self_rule_static_grants_static_mode() {
+        let modifications = parse_quoted_ability_modifications(
+            "It gains \"This creature attacks each combat if able.\"",
+        );
+        assert_eq!(
+            modifications,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustAttack,
+            }]
         );
     }
 

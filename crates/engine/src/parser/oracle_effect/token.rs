@@ -8,14 +8,18 @@ use nom_language::error::VerboseError;
 
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
-    ContinuousModification, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef, TargetFilter,
+    ContinuousModification, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_nom::primitives as nom_primitives;
+use super::super::oracle_static::parse_static_line_multi;
 use super::super::oracle_target::parse_target;
-use super::super::oracle_util::{parse_number, strip_reminder_text, TextPair};
+use super::super::oracle_util::{
+    normalize_card_name_refs, parse_number, strip_reminder_text, TextPair,
+};
 use super::types::*;
 
 /// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
@@ -334,7 +338,7 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     }
 
     // Extract quoted static abilities: `and "This token can't block."` / `"~ can't block."`
-    let static_abilities = extract_token_static_abilities(suffix);
+    let static_abilities = extract_token_static_abilities(suffix, &name);
 
     Some(TokenDescription {
         name,
@@ -556,31 +560,28 @@ fn parse_token_name_clause(text: &str) -> (Option<String>, &str) {
 /// - `and "This token can't block."` → `[StaticDefinition::new(StaticMode::CantBlock)]`
 /// - `and "This creature can't block."` → same
 /// - `and '~ can't block.'` → same
-fn extract_token_static_abilities(text: &str) -> Vec<crate::types::ability::StaticDefinition> {
-    use crate::types::ability::StaticDefinition;
-    use crate::types::statics::StaticMode;
-
+fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDefinition> {
     let mut statics = Vec::new();
-    let lower = text.to_lowercase();
 
     // Look for quoted ability text between double quotes.
     // Single quotes are unreliable because "can't" contains an apostrophe.
     for (open, close) in [('"', '"')] {
-        let search = &lower;
+        let search = text;
         let mut pos = 0;
         while pos < search.len() {
             if let Some(start) = search[pos..].find(open) {
                 let abs_start = pos + start + open.len_utf8();
                 if let Some(end) = search[abs_start..].find(close) {
                     let quoted = &search[abs_start..abs_start + end];
-                    let quoted_clean = quoted.trim().trim_end_matches('.');
-
-                    // CR 509.1b: "can't block" static restriction
-                    if quoted_clean.ends_with("can't block")
-                        || quoted_clean.ends_with("cannot block")
-                    {
-                        statics.push(StaticDefinition::new(StaticMode::CantBlock));
-                    }
+                    let ability_text = quoted.trim();
+                    let normalized;
+                    let static_text = if token_name.is_empty() {
+                        ability_text
+                    } else {
+                        normalized = normalize_card_name_refs(ability_text, token_name);
+                        &normalized
+                    };
+                    statics.extend(parse_static_line_multi(static_text));
 
                     pos = abs_start + end + close.len_utf8();
                 } else {
@@ -829,25 +830,54 @@ mod tests {
 
     #[test]
     fn extract_static_cant_block_from_quoted_ability() {
-        use crate::types::ability::StaticDefinition;
+        use crate::types::ability::TargetFilter;
         use crate::types::statics::StaticMode;
 
         let statics =
-            extract_token_static_abilities(r#"with toxic 1 and "This token can't block.""#);
-        assert_eq!(statics, vec![StaticDefinition::new(StaticMode::CantBlock)]);
+            extract_token_static_abilities(r#"with toxic 1 and "This token can't block.""#, "");
+        assert_eq!(statics.len(), 1);
+        assert_eq!(statics[0].mode, StaticMode::CantBlock);
+        assert_eq!(statics[0].affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn extract_static_must_attack_from_named_token_quoted_ability() {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let statics = extract_token_static_abilities(
+            r#"with flying, indestructible, and "The Void attacks each combat if able.""#,
+            "The Void",
+        );
+        assert_eq!(statics.len(), 1);
+        assert_eq!(statics[0].mode, StaticMode::MustAttack);
+        assert_eq!(statics[0].affected, Some(TargetFilter::SelfRef));
+
+        let statics = extract_token_static_abilities(
+            r#"with "Creatures you control attack each combat if able.""#,
+            "Pirate",
+        );
+        assert_eq!(statics.len(), 1);
+        assert_eq!(statics[0].mode, StaticMode::MustAttack);
+        assert_eq!(
+            statics[0].affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
+            ))
+        );
     }
 
     #[test]
     fn extract_static_no_false_positive_on_single_quotes() {
         // Single quotes around "can't" are ambiguous (apostrophe = close quote).
         // Only double quotes reliably delimit abilities in Oracle text.
-        let statics = extract_token_static_abilities("and '~ can't block.'");
+        let statics = extract_token_static_abilities("and '~ can't block.'", "");
         assert!(statics.is_empty());
     }
 
     #[test]
     fn extract_static_empty_when_no_quoted_ability() {
-        let statics = extract_token_static_abilities("with flying and haste");
+        let statics = extract_token_static_abilities("with flying and haste", "");
         assert!(statics.is_empty());
     }
 
