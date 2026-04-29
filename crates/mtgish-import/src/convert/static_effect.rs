@@ -296,6 +296,15 @@ pub fn convert_permanent_rule(
         P::MustAttack => StaticMode::MustAttack,
         P::MustBlock => StaticMode::MustBlock,
         P::MustBeBlocked => StaticMode::MustBeBlocked,
+        P::CanBlockOnly(filter) if is_creature_with_flying_filter(filter) => {
+            StaticMode::BlockRestriction
+        }
+        P::CanBlockOnly(filter) => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "StaticMode::BlockRestriction",
+                needed_variant: format!("parameterized block-only filter: {filter:?}"),
+            });
+        }
         P::CantAttackIfDefendingPlayer(condition) => {
             return Ok(StaticDefinition::new(StaticMode::CantAttack)
                 .affected(affected)
@@ -360,6 +369,26 @@ pub fn convert_permanent_rule(
         }
     };
     Ok(StaticDefinition::new(mode).affected(affected))
+}
+
+fn is_creature_with_flying_filter(filter: &crate::schema::types::Permanents) -> bool {
+    use crate::schema::types::Permanents as P;
+
+    match filter {
+        P::And(parts) if parts.len() == 2 => {
+            let has_creature = parts.iter().any(|part| {
+                matches!(
+                    part,
+                    P::IsCardtype(crate::schema::types::CardType::Creature)
+                )
+            });
+            let has_flying = parts
+                .iter()
+                .any(|part| matches!(part, P::HasAbility(CheckHasable::Flying)));
+            has_creature && has_flying
+        }
+        _ => false,
+    }
 }
 
 fn defending_player_static_condition(condition: &Condition) -> ConvResult<StaticCondition> {
@@ -903,8 +932,23 @@ fn check_hasable_to_remove_keyword(c: &CheckHasable) -> ConvResult<Vec<Continuou
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::types::{PermanentRule, Player};
+    use crate::schema::types::{PermanentRule, Permanents, Player};
     use engine::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+
+    #[test]
+    fn can_block_only_creatures_with_flying_lowers_to_block_restriction() {
+        let converted = convert_permanent_rule(
+            &PermanentRule::CanBlockOnly(Box::new(Permanents::And(vec![
+                Permanents::IsCardtype(CardType::Creature),
+                Permanents::HasAbility(CheckHasable::Flying),
+            ]))),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert_eq!(converted.mode, StaticMode::BlockRestriction);
+        assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+    }
 
     #[test]
     fn cant_attack_unless_defending_player_controls_lowers_to_negated_condition() {
