@@ -1931,6 +1931,14 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 508.1d / CR 509.1c: Cross-mode conjunctions of the form
+    // "<predicate_1> and attack/block each combat if able" combine a
+    // continuous static (usually a keyword grant) with a combat requirement.
+    // A single `StaticDefinition` cannot carry both modes, so decompose them.
+    if let Some(defs) = try_split_and_must_attack_block(&stripped) {
+        return defs;
+    }
+
     // Fall back to the single-return parser.
     parse_static_line(text).into_iter().collect()
 }
@@ -2015,6 +2023,76 @@ fn try_split_and_can_attack_despite_defender(text: &str) -> Option<Vec<StaticDef
         companion = companion.condition(cond);
     }
     defs.push(companion);
+    Some(defs)
+}
+
+fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    let lower = text.to_lowercase();
+
+    let (before, modes, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        preceded(
+            tag::<_, _, VE>("and "),
+            alt((
+                value(
+                    vec![StaticMode::MustAttack, StaticMode::MustBlock],
+                    alt((
+                        tag::<_, _, VE>("attacks or blocks each combat if able"),
+                        tag("attack or block each combat if able"),
+                    )),
+                ),
+                value(
+                    vec![StaticMode::MustAttack],
+                    alt((
+                        tag::<_, _, VE>("attacks each combat if able"),
+                        tag("attack each combat if able"),
+                        tag("attacks each turn if able"),
+                        tag("attack each turn if able"),
+                        tag("must attack each combat if able"),
+                        tag("must attack if able"),
+                    )),
+                ),
+                value(
+                    vec![StaticMode::MustBlock],
+                    alt((
+                        tag::<_, _, VE>("blocks each combat if able"),
+                        tag("block each combat if able"),
+                        tag("blocks each turn if able"),
+                        tag("block each turn if able"),
+                        tag("must block each combat if able"),
+                        tag("must block if able"),
+                    )),
+                ),
+            )),
+        )
+        .parse(i)
+    })?;
+    if !rest.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    let cut_end = before.trim_end().len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let template = &defs[0];
+    let affected = template.affected.clone()?;
+    let condition = template.condition.clone();
+    for mode in modes {
+        let mut companion = StaticDefinition::new(mode)
+            .affected(affected.clone())
+            .description(text.to_string());
+        if let Some(condition) = condition.clone() {
+            companion = companion.condition(condition);
+        }
+        defs.push(companion);
+    }
     Some(defs)
 }
 
@@ -8896,6 +8974,40 @@ mod tests {
                 TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
             ))
         );
+    }
+
+    #[test]
+    fn static_keyword_grant_and_attack_if_able_emits_both_defs() {
+        let defs = parse_static_line_multi(
+            "All creatures have double strike and attack each combat if able.",
+        );
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::DoubleStrike,
+            }));
+        assert_eq!(defs[1].mode, StaticMode::MustAttack);
+        assert_eq!(defs[1].affected, defs[0].affected);
+    }
+
+    #[test]
+    fn static_keyword_grant_and_attack_or_block_if_able_emits_three_defs() {
+        let defs = parse_static_line_multi(
+            "All creatures have vigilance and attack or block each combat if able.",
+        );
+        assert_eq!(defs.len(), 3);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Vigilance,
+            }));
+        assert_eq!(defs[1].mode, StaticMode::MustAttack);
+        assert_eq!(defs[2].mode, StaticMode::MustBlock);
+        assert_eq!(defs[1].affected, defs[0].affected);
+        assert_eq!(defs[2].affected, defs[0].affected);
     }
 
     #[test]
