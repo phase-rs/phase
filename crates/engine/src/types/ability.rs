@@ -2210,6 +2210,9 @@ pub enum QuantityRef {
     /// the actual paid amount. Distinct from `Variable { name: "X" }` which
     /// only resolves while the ability is on the stack with `chosen_x` set.
     CostXPaid,
+    /// CR 702.33b + CR 702.33c: Number of kicker costs paid for the source
+    /// spell. For multikicker, each repeated payment contributes one entry.
+    KickerCount,
     /// CR 601.2h + CR 603.4: Total amount of mana actually spent to cast the
     /// spell that caused the current trigger event. Resolves against the
     /// spell object referenced by `trigger_event` (e.g., `SpellCast`), reading

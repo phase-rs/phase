@@ -1291,7 +1291,7 @@ fn parse_enters_with_counters(
     let counter_type =
         crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
     if let Some(for_each_count) = parse_enters_counter_for_each_suffix(after_counter) {
-        count_expr = for_each_count;
+        count_expr = multiply_counter_count_by_for_each(count_expr, for_each_count);
     }
     // CR 122.6: For "a number of counters equal to [quantity]", parse the dynamic expression
     if dynamic_remainder.is_some() {
@@ -1386,6 +1386,20 @@ fn parse_enters_with_counters(
     }
 
     Some(def)
+}
+
+fn multiply_counter_count_by_for_each(
+    count_expr: QuantityExpr,
+    for_each_count: QuantityExpr,
+) -> QuantityExpr {
+    match count_expr {
+        QuantityExpr::Fixed { value: 1 } => for_each_count,
+        QuantityExpr::Fixed { value } => QuantityExpr::Multiply {
+            factor: value,
+            inner: Box::new(for_each_count),
+        },
+        _ => for_each_count,
+    }
 }
 
 fn extract_enters_with_only_if_suffix(text: &str) -> Option<ReplacementCondition> {
@@ -4849,6 +4863,45 @@ mod tests {
                 "Expected CastViaKicker {{ variant: None, kicker_cost: Some(_) }}, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn enters_with_counter_for_each_time_kicked_uses_kicker_count() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it for each time it was kicked.",
+            "Apex Hawks",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::KickerCount
+                },
+                ..
+            } if counter_type == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn enters_with_two_counters_for_each_time_kicked_preserves_multiplier() {
+        let def = parse_replacement_line(
+            "This creature enters with two +1/+1 counters on it for each time it was kicked.",
+            "Synthetic Multikicker",
+        )
+        .unwrap();
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                count: QuantityExpr::Multiply {
+                    factor: 2,
+                    ref inner,
+                },
+                ..
+            } if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::KickerCount })
+        ));
     }
 
     // ── External replacement effects ──

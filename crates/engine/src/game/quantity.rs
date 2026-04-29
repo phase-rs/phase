@@ -1288,6 +1288,11 @@ fn resolve_ref(
             .map(u32_to_i32_saturating)
             .or_else(|| chosen_x.map(u32_to_i32_saturating))
             .unwrap_or(0),
+        QuantityRef::KickerCount => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| usize_to_i32_saturating(obj.kickers_paid.len()))
+            .unwrap_or(0),
         // CR 603.10a + CR 603.6e: Count attachments present on the leaving object
         // at zone-change time (look-back). Reads the `attachments` snapshot on
         // the `ZoneChanged` event in `current_trigger_event`, filtered by kind
@@ -1856,7 +1861,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AggregateFunction, ChoiceValue, ControllerRef, DevotionColors, Effect, FilterProp,
-        ObjectProperty, TargetFilter, TypeFilter, TypedFilter,
+        KickerVariant, ObjectProperty, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
@@ -2352,6 +2357,28 @@ mod tests {
         // X=5 → half rounded up = 3.
         state.objects.get_mut(&obj_id).unwrap().cost_x_paid = Some(5);
         assert_eq!(resolve_quantity(&state, &half_up, PlayerId(0), obj_id), 3);
+    }
+
+    #[test]
+    fn resolve_quantity_kicker_count_reads_source_object_payments() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Multikicked".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&obj_id).unwrap().kickers_paid = vec![
+            KickerVariant::First,
+            KickerVariant::First,
+            KickerVariant::First,
+        ];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::KickerCount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), obj_id), 3);
     }
 
     // CR 603.10a + CR 603.6e: Hateful Eidolon's "for each Aura you controlled that

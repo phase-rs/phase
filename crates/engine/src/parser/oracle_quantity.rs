@@ -712,6 +712,10 @@ fn parse_opponent_searched_library_this_way(
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
 
+    if let Some(qty) = parse_for_each_kicker_count(clause) {
+        return Some(qty);
+    }
+
     if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref.parse(clause) {
         if rest.is_empty() {
             return Some(qty);
@@ -949,6 +953,19 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     None
 }
 
+fn parse_for_each_kicker_count(clause: &str) -> Option<QuantityRef> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("time ")
+        .parse(clause)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("it was kicked"),
+        tag("this spell was kicked"),
+    ))
+    .parse(rest)
+    .ok()?;
+    rest.is_empty().then_some(QuantityRef::KickerCount)
+}
+
 fn parse_for_each_target_controlled_type(clause: &str) -> Option<QuantityRef> {
     let (rest, type_text) = alt((
         terminated(
@@ -1016,6 +1033,18 @@ mod tests {
         assert!(
             matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(ref counter_type) } if counter_type == "blight"),
             "singular counter form should produce CountersOnSelf"
+        );
+    }
+
+    #[test]
+    fn for_each_time_it_was_kicked_maps_to_kicker_count() {
+        assert_eq!(
+            parse_for_each_clause("time it was kicked"),
+            Some(QuantityRef::KickerCount)
+        );
+        assert_eq!(
+            parse_for_each_clause("time this spell was kicked"),
+            Some(QuantityRef::KickerCount)
         );
     }
 
