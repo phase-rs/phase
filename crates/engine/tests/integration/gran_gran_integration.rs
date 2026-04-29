@@ -20,14 +20,19 @@
 
 use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::apply_as_current;
+use engine::game::stack;
+use engine::game::triggers::process_triggers;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCondition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility,
+    TargetFilter, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 fn gran_gran_chain(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
@@ -151,6 +156,95 @@ fn gran_gran_empty_hand_still_draws() {
     }
     assert!(state.players[0].graveyard.contains(&library_card));
     assert_eq!(state.players[0].hand.len(), 0);
+}
+
+#[test]
+fn gran_gran_taps_trigger_draws_before_discard_choice() {
+    let mut state = GameState::new_two_player(42);
+    let controller = PlayerId(0);
+
+    let gran_gran = create_object(
+        &mut state,
+        CardId(100),
+        controller,
+        "Gran-Gran".into(),
+        Zone::Battlefield,
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::Taps)
+        .execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                    random: false,
+                    unless_filter: None,
+                    filter: None,
+                },
+            )),
+        )
+        .valid_card(TargetFilter::SelfRef)
+        .trigger_zones(vec![Zone::Battlefield]);
+    state
+        .objects
+        .get_mut(&gran_gran)
+        .unwrap()
+        .trigger_definitions
+        .push(trigger);
+
+    let old_hand_card = create_object(&mut state, CardId(1), controller, "A".into(), Zone::Hand);
+    let _other_hand_card = create_object(&mut state, CardId(2), controller, "B".into(), Zone::Hand);
+    let drawn_card = create_object(
+        &mut state,
+        CardId(3),
+        controller,
+        "Top".into(),
+        Zone::Library,
+    );
+    let lib_size_before = state.players[0].library.len();
+    let hand_size_before = state.players[0].hand.len();
+
+    process_triggers(
+        &mut state,
+        &[GameEvent::PermanentTapped {
+            object_id: gran_gran,
+            caused_by: None,
+        }],
+    );
+    assert_eq!(state.stack.len(), 1);
+
+    let mut events = Vec::new();
+    stack::resolve_top(&mut state, &mut events);
+
+    assert_eq!(state.players[0].library.len(), lib_size_before - 1);
+    assert_eq!(state.players[0].hand.len(), hand_size_before + 1);
+    assert!(state.players[0].hand.contains(&drawn_card));
+    match &state.waiting_for {
+        WaitingFor::DiscardChoice { player, count, .. } => {
+            assert_eq!(*player, controller);
+            assert_eq!(*count, 1);
+        }
+        other => panic!("expected DiscardChoice, got {:?}", other),
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: vec![old_hand_card],
+        },
+    )
+    .unwrap();
+
+    assert!(state.players[0].graveyard.contains(&old_hand_card));
+    assert!(state.players[0].hand.contains(&drawn_card));
+    assert_eq!(state.players[0].hand.len(), hand_size_before);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
