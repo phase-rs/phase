@@ -595,7 +595,7 @@ fn convert_rule(
         }
         // CR 613: Continuous static effects on a single permanent (usually self).
         Rule::PermanentLayerEffect(target, effects) => {
-            let affected = filter::convert_permanent(target)?;
+            let affected = filter::convert_permanent_for_static_affected(target)?;
             let s = static_effect::build_static(affected, effects)?;
             stub.statics.push(s);
             return Ok(());
@@ -611,7 +611,7 @@ fn convert_rule(
         // CR 113.6: Rules-modifying continuous effects on a single permanent
         // ("This creature can't attack").
         Rule::PermanentRuleEffect(target, rules) => {
-            let affected = filter::convert_permanent(target)?;
+            let affected = filter::convert_permanent_for_static_affected(target)?;
             for r in rules {
                 stub.statics
                     .push(static_effect::convert_permanent_rule(r, affected.clone())?);
@@ -2828,9 +2828,12 @@ fn creature_type_name(ct: &crate::schema::types::CreatureType) -> String {
 mod tests {
     use super::*;
     use engine::types::ability::{
-        AbilityCondition, Comparator, GainLifePlayer, PlayerFilter, QuantityExpr,
+        AbilityCondition, Comparator, ContinuousModification, GainLifePlayer, PlayerFilter,
+        QuantityExpr, StaticCondition,
     };
     use engine::types::triggers::TriggerMode;
+
+    use crate::schema::types::{Condition, Permanent, StaticLayerEffect};
 
     fn draw_ability(kind: AbilityKind) -> AbilityDefinition {
         AbilityDefinition::new(
@@ -2840,6 +2843,41 @@ mod tests {
                 target: TargetFilter::Controller,
             },
         )
+    }
+
+    #[test]
+    fn host_conditioned_static_uses_attached_host_for_condition_and_affected() {
+        let rule = Rule::If(
+            Condition::PermanentPassesFilter(
+                Box::new(Permanent::HostPermanent),
+                Box::new(Permanents::IsCardtype(CardType::Creature)),
+            ),
+            vec![Rule::PermanentLayerEffect(
+                Box::new(Permanent::HostPermanent),
+                vec![StaticLayerEffect::AdjustPT(2, 1)],
+            )],
+        );
+        let mut report = crate::report::ImportReport::default();
+        let mut ctx = Ctx::new("host fixture".to_string(), &mut report);
+
+        let converted = recurse_rules(&[rule], "main", 0, &mut ctx).unwrap();
+
+        assert_eq!(converted.statics.len(), 1);
+        let static_def = &converted.statics[0];
+        assert_eq!(static_def.affected, Some(TargetFilter::AttachedTo));
+        assert_eq!(
+            static_def.modifications,
+            vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 1 }
+            ]
+        );
+        assert!(matches!(
+            &static_def.condition,
+            Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::And { filters })
+            }) if filters.first() == Some(&TargetFilter::AttachedTo)
+        ));
     }
 
     #[test]

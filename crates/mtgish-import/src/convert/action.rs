@@ -3575,7 +3575,7 @@ fn convert_emblem_body(rules: &[Rule]) -> ConvResult<Effect> {
             }
             // CR 613 + CR 114.4: Continuous static on a single permanent.
             Rule::PermanentLayerEffect(target, effects) => {
-                let affected = filter_mod::convert_permanent(target)?;
+                let affected = filter_mod::convert_permanent_for_static_affected(target)?;
                 let s = static_effect::build_static(affected, effects)?;
                 statics.push(s);
             }

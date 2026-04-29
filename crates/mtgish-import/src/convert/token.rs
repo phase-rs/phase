@@ -518,7 +518,7 @@ fn absorb_token_rules(rules: &[Rule]) -> ConvResult<(Vec<Keyword>, Vec<StaticDef
         // Other rule shapes (triggers, activated, replacements, "whenever"
         // clauses) require slots `Effect::Token` does not yet expose.
         if let Rule::PermanentLayerEffect(target, effects) = rule {
-            let affected = filter::convert_permanent(target)?;
+            let affected = filter::convert_permanent_for_static_affected(target)?;
             let s = crate::convert::static_effect::build_static(affected, effects)?;
             statics.push(s);
             continue;

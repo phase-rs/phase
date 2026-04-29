@@ -18,7 +18,7 @@
       {
         "mode": "Continuous",
         "affected": {
-          "type": "SelfRef"
+          "type": "AttachedTo"
         },
         "modifications": [
           {

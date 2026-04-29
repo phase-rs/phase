@@ -682,6 +682,21 @@ pub fn convert_permanent(p: &Permanent) -> ConvResult<TargetFilter> {
     })
 }
 
+/// Singular `Permanent` reference used as a static's affected object.
+///
+/// In ordinary source-bound contexts, `HostPermanent` is still routed through
+/// `convert_permanent` for baseline compatibility. Static effects from an
+/// Aura/Equipment need the host object instead, so only this static-affected
+/// helper maps `HostPermanent` to `AttachedTo`.
+pub(crate) fn convert_permanent_for_static_affected(p: &Permanent) -> ConvResult<TargetFilter> {
+    Ok(match p {
+        // CR 301.5a/f + CR 303.4b/m: "equipped/enchanted [object]" is the
+        // object the source is attached to.
+        Permanent::HostPermanent => TargetFilter::AttachedTo,
+        _ => convert_permanent(p)?,
+    })
+}
+
 fn permanent_tag(p: &Permanent) -> String {
     serde_json::to_value(p)
         .ok()
@@ -1814,5 +1829,20 @@ mod tests {
             )))
             .expect("convert owner-scoped card filter"),
         );
+    }
+
+    #[test]
+    fn host_permanent_preserves_baseline_source_axis() {
+        let converted = convert_permanent(&Permanent::HostPermanent).expect("convert host");
+
+        assert_eq!(converted, TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn host_permanent_static_affected_uses_attached_to_axis() {
+        let converted = convert_permanent_for_static_affected(&Permanent::HostPermanent)
+            .expect("convert static host");
+
+        assert_eq!(converted, TargetFilter::AttachedTo);
     }
 }

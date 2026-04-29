@@ -302,15 +302,10 @@ pub fn convert_static(c: &Condition) -> ConvResult<StaticCondition> {
                 .map(convert_static)
                 .collect::<ConvResult<_>>()?,
         },
-        // CR 611.2b + CR 613: "as long as [permanent] is X" — when the
-        // permanent axis aliases the source object, `permanent_filter_to_static`
-        // produces a source-bound StaticCondition. Non-source axes
-        // (host/attached/target) strict-fail because StaticCondition only has
-        // `SourceMatchesFilter`, not `TargetMatchesFilter`.
-        Condition::PermanentPassesFilter(perm, pred) => {
-            require_source_axis(perm, "Condition::PermanentPassesFilter (static)")?;
-            permanent_filter_to_static(pred)?
-        }
+        // CR 611.2b + CR 613: "as long as [permanent] is X". Source-axis
+        // predicates use source-bound StaticCondition variants; HostPermanent
+        // predicates use the existing attached-host filter axis.
+        Condition::PermanentPassesFilter(perm, pred) => permanent_filter_to_static(perm, pred)?,
         // CR 500: "during your turn" / "during an opponent's turn" gates a
         // static effect on whose turn is currently active.
         Condition::IsPlayersTurn(p) => match &**p {
@@ -1002,9 +997,20 @@ pub fn merge_valid_card(existing: Option<TargetFilter>, extra: TargetFilter) -> 
     }
 }
 
+/// Map `PermanentPassesFilter(perm, pred)` to a `StaticCondition`.
+fn permanent_filter_to_static(perm: &Permanent, pred: &Permanents) -> ConvResult<StaticCondition> {
+    match perm {
+        Permanent::HostPermanent => host_permanent_filter_to_static(pred),
+        _ => {
+            require_source_axis(perm, "Condition::PermanentPassesFilter (static)")?;
+            source_permanent_filter_to_static(pred)
+        }
+    }
+}
+
 /// Map a `Permanents` predicate (the second arg of `PermanentPassesFilter`)
 /// to a `StaticCondition` evaluated against the source object.
-fn permanent_filter_to_static(p: &Permanents) -> ConvResult<StaticCondition> {
+fn source_permanent_filter_to_static(p: &Permanents) -> ConvResult<StaticCondition> {
     use engine::types::counter::CounterMatch;
     Ok(match p {
         // CR 611.2b: "is tapped" / "is untapped".
@@ -1045,6 +1051,19 @@ fn permanent_filter_to_static(p: &Permanents) -> ConvResult<StaticCondition> {
                 repr: permanents_variant_tag(p),
             });
         }
+    })
+}
+
+/// Map a HostPermanent predicate to a static condition that checks the object
+/// attached to the Aura/Equipment source. This deliberately uses
+/// `TargetFilter::AttachedTo` rather than `EnchantedBy`/`EquippedBy`; those
+/// properties have non-source fallback behavior when the source is unattached.
+fn host_permanent_filter_to_static(p: &Permanents) -> ConvResult<StaticCondition> {
+    let filter = crate::convert::filter::convert(p)?;
+    Ok(StaticCondition::IsPresent {
+        filter: Some(TargetFilter::And {
+            filters: vec![TargetFilter::AttachedTo, filter],
+        }),
     })
 }
 
@@ -2914,6 +2933,30 @@ mod tests {
             }
             other => panic!("expected SourceMatchesFilter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn host_permanent_static_condition_lowers_to_attached_to_presence_filter() {
+        let condition = Condition::PermanentPassesFilter(
+            Box::new(Permanent::HostPermanent),
+            Box::new(Permanents::IsCardtype(CardType::Creature)),
+        );
+
+        let converted = convert_static(&condition).unwrap();
+
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::And { filters }),
+        } = converted
+        else {
+            panic!("expected IsPresent attached-host filter, got {converted:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0], TargetFilter::AttachedTo);
+        assert!(matches!(
+            &filters[1],
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&engine::types::ability::TypeFilter::Creature)
+        ));
     }
 
     #[test]
