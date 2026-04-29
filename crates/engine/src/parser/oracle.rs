@@ -1415,12 +1415,10 @@ pub fn parse_oracle_text(
             continue;
         }
 
-        if is_spell {
-            if let Some(option) = parse_spell_casting_option_line(&line, card_name) {
-                result.casting_options.push(option);
-                i += 1;
-                continue;
-            }
+        if let Some(option) = parse_spell_casting_option_line(&line, card_name) {
+            result.casting_options.push(option);
+            i += 1;
+            continue;
         }
 
         // CR 706: Die roll table — "Roll a dN" followed by "min—max | effect" lines.
@@ -3532,6 +3530,28 @@ mod tests {
             })
         );
         assert_eq!(r.abilities.len(), 1);
+    }
+
+    #[test]
+    fn permanent_casting_option_parses_flash_permission_with_extra_cost() {
+        let r = parse(
+            "You may cast this spell as though it had flash if you pay {2} more to cast it.\nWhen this creature enters, draw a card.",
+            "Example Ambusher",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(r.casting_options.len(), 1);
+        assert_eq!(
+            r.casting_options[0],
+            SpellCastingOption::as_though_had_flash().cost(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                },
+            })
+        );
+        assert_eq!(r.triggers.len(), 1);
     }
 
     #[test]
