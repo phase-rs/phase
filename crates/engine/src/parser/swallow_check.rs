@@ -813,6 +813,11 @@ fn detect_dynamic_qty(cleaned: &str, original: &str, ast_json: &str) {
         // continuous-modification variant, not a quantity expression.
         "AssignDamageFromToughness",
         "AssignDamageAsThoughUnblocked",
+        // CR 508.1h + CR 509.1d: Ghostly Prison / Propaganda combat-tax
+        // phrasing uses "for each creature" but is encoded as a typed
+        // scaling mode on `StaticCondition::UnlessPay`, not as a
+        // `QuantityExpr` carrier.
+        "PerAffectedCreature",
         // CR 614.1d: "twice that many" / "thrice that many" replacement
         // multipliers (Doubling Season, Parallel Lives, Anointed
         // Procession, Branching Evolution, Hardened Scales class) are
