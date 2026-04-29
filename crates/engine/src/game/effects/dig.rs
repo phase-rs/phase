@@ -410,6 +410,53 @@ mod tests {
     }
 
     #[test]
+    fn dig_choice_rejects_duplicate_selected_cards() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        let original_library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        let cards_on_top = original_library.clone();
+
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            selectable_cards: cards_on_top.clone(),
+            cards: cards_on_top.clone(),
+            keep_count: 3,
+            up_to: false,
+            kept_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Library),
+            source_id: Some(ObjectId(100)),
+        };
+
+        let mut events = Vec::new();
+        let result = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![cards_on_top[0], cards_on_top[0], cards_on_top[1]],
+            },
+            &mut events,
+        );
+
+        assert!(result.is_err(), "duplicate selections must be rejected");
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            original_library,
+            "invalid duplicate selection must not mutate library order"
+        );
+    }
+
+    #[test]
     fn dig_choice_forwards_kept_cards_to_conditional_continuation() {
         use crate::game::engine_resolution_choices::{
             handle_resolution_choice, ResolutionChoiceOutcome,

@@ -459,6 +459,16 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
+            if kept
+                .iter()
+                .enumerate()
+                .any(|(index, card_id)| kept[index + 1..].contains(card_id))
+            {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be unique".to_string(),
+                ));
+            }
+
             if !selectable_cards.is_empty() {
                 for card_id in &kept {
                     if !selectable_cards.contains(card_id) {
