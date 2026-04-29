@@ -16937,6 +16937,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_condition_text_paid_x_threshold() {
+        let cond = parse_condition_text("X is 5 or more").expect("should parse");
+        assert_eq!(
+            cond,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_paid_x_threshold_sub_ability_condition() {
+        let def = parse_effect_chain(
+            "Create X tapped 2/1 white and black Inkling creature tokens with flying. If X is 6 or more, destroy all noncreature, nonland permanents.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.expect("expected conditional continuation");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 6 },
+            })
+        );
+    }
+
+    #[test]
     fn parse_condition_text_non_comparison_returns_none() {
         assert!(parse_condition_text("the creature that is exiled").is_none());
     }

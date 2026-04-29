@@ -1043,6 +1043,10 @@ pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, Quant
 }
 
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
+    if let Some(condition) = parse_paid_x_condition_text(text) {
+        return Some(condition);
+    }
+
     let text = text.trim().trim_end_matches('.');
     let (lhs_text, comparator_rhs) = text.split_once(" is ")?;
     let lhs = parse_cda_quantity(lhs_text)?;
@@ -1051,6 +1055,37 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         lhs,
         comparator,
         rhs,
+    })
+}
+
+fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
+    let ((comparator, amount), _) = nom_on_lower(trimmed, &lower, |input| {
+        all_consuming(|input| {
+            let (rest, _) = tag::<_, _, VerboseError<&str>>("x is ").parse(input)?;
+            let (rest, amount) = nom_primitives::parse_number(rest)?;
+            let (rest, comparator) = alt((
+                value(Comparator::GE, tag::<_, _, VerboseError<&str>>(" or more")),
+                value(Comparator::LE, tag(" or less")),
+                value(Comparator::GE, tag(" or greater")),
+                value(Comparator::LE, tag(" or fewer")),
+            ))
+            .parse(rest)?;
+            let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(".")).parse(rest)?;
+            Ok((rest, (comparator, amount)))
+        })
+        .parse(input)
+    })?;
+
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        },
+        comparator,
+        rhs: QuantityExpr::Fixed {
+            value: amount as i32,
+        },
     })
 }
 
