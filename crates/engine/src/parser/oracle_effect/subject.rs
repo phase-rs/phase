@@ -1690,6 +1690,14 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
                 scope: crate::types::ability::ObjectScope::Target,
             },
         }
+    } else if nom_primitives::scan_contains(&lower, "equal to its toughness")
+        || nom_primitives::scan_contains(&lower, "its toughness")
+    {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
+        }
     } else {
         // Try to parse a fixed amount: "its controller gains 3 life"
         let after = &lower["its controller ".len()..];
@@ -2077,6 +2085,40 @@ mod tests {
             app.is_optional,
             "'may' modal must mark the subject as optional"
         );
+    }
+
+    #[test]
+    fn targeted_controller_gains_life_equal_to_target_toughness() {
+        let clause = try_parse_targeted_controller_gain_life(
+            "Its controller gains life equal to its toughness.",
+        )
+        .expect("targeted controller gain life clause");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
+                player: GainLifePlayer::TargetedController
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_controller_gains_fixed_life_still_parses() {
+        let clause = try_parse_targeted_controller_gain_life("Its controller gains 3 life.")
+            .expect("targeted controller fixed gain life clause");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: GainLifePlayer::TargetedController
+            }
+        ));
     }
 
     #[test]
