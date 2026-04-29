@@ -523,6 +523,13 @@ fn absorb_token_rules(rules: &[Rule]) -> ConvResult<(Vec<Keyword>, Vec<StaticDef
             statics.push(s);
             continue;
         }
+        if let Rule::PermanentRuleEffect(target, rules) = rule {
+            let affected = filter::convert_permanent_for_static_affected(target)?;
+            statics.extend(crate::convert::static_effect::build_rule_effect_statics(
+                affected, rules,
+            )?);
+            continue;
+        }
         return Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "TokenSpec",
             needed_variant: format!(
@@ -843,6 +850,9 @@ fn token_tag(t: &CreatableToken) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::types::{Permanent, PermanentRule};
+    use engine::types::ability::TargetFilter;
+    use engine::types::statics::StaticMode;
 
     #[test]
     fn artifact_token_with_no_rules_preserves_type_line() {
@@ -936,5 +946,34 @@ mod tests {
             ))
         );
         assert_eq!(keywords[1], Keyword::TotemArmor);
+    }
+
+    #[test]
+    fn creature_token_absorbs_permanent_rule_effects() {
+        let effect = convert(&CreatableToken::CreatureTokenWithAbilities(
+            PT::PT(1, 1),
+            CreatureTokenType::ArtifactCreatureToken,
+            ColorList::Colorless,
+            CreatureTokenSubtypes::CreatureTokenSubtypesList(vec![
+                SubType::Phyrexian,
+                SubType::Mite,
+            ]),
+            vec![Rule::PermanentRuleEffect(
+                Box::new(Permanent::ThisPermanent),
+                vec![PermanentRule::CantBlock],
+            )],
+        ))
+        .expect("convert token with permanent rule");
+
+        let Effect::Token {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected token effect, got {effect:?}");
+        };
+
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].mode, StaticMode::CantBlock);
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
     }
 }
