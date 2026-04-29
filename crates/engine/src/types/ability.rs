@@ -2753,6 +2753,8 @@ pub enum ParsedCondition {
         filter: PlayerFilter,
         minimum: usize,
     },
+    /// CR 702.131a: True when the activating player has the city's blessing.
+    HasCityBlessing,
     // -- Combinators --
     /// CR 601.3 / CR 602.5: All inner conditions must be true. Used for compound
     /// casting/activation restrictions like "Cast this spell only if you control a

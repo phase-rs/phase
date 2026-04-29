@@ -787,6 +787,9 @@ fn evaluate_condition(
             crate::game::quantity::resolve_player_count(state, filter, player, source_id) as usize
                 >= *minimum
         }
+        // CR 702.131c: The city's blessing is a player designation that effects
+        // and restrictions may identify.
+        ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
         // CR 601.3 / CR 602.5: Compound restriction — all inner conditions must be true.
         ParsedCondition::And { conditions } => conditions
             .iter()
@@ -1039,7 +1042,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::parser::oracle_condition::parse_restriction_condition;
-    use crate::types::ability::{AbilityKind, Effect, QuantityExpr};
+    use crate::types::ability::{AbilityKind, Effect, ParsedCondition, QuantityExpr};
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::WaitingFor;
@@ -1074,6 +1077,18 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn city_blessing_restriction_checks_player_designation() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = ObjectId(10);
+        let condition = ParsedCondition::HasCityBlessing;
+
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+        state.city_blessing.insert(player);
+        assert!(evaluate_condition(&state, player, source_id, &condition));
     }
 
     #[test]

@@ -2458,9 +2458,9 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AbilityCondition, Comparator, ContinuousModification, FilterProp, ManaSpendRestriction,
-        ModalSelectionConstraint, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
-        QuantityRef, ReplacementCondition, ShieldKind, StaticCondition, TargetFilter, TypeFilter,
-        TypedFilter,
+        ModalSelectionConstraint, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
+        QuantityExpr, QuantityRef, ReplacementCondition, ShieldKind, StaticCondition, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind};
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -7548,6 +7548,35 @@ mod tests {
             parsed.parse_warnings
         );
         assert_eq!(parsed.replacements.len(), 1);
+    }
+
+    #[test]
+    fn city_blessing_activation_restriction_does_not_emit_condition_warning() {
+        let oracle = "Ascend (If you control ten or more permanents, you get the city's blessing for the rest of the game.)\n{T}: Add {C}.\n{5}, {T}: Draw a card. Activate only if you have the city's blessing.";
+        let parsed = parse(oracle, "Arch of Orazca", &[], &["Land"], &[]);
+
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            "unexpected condition warning: {:?}",
+            parsed.parse_warnings
+        );
+        let draw_ability = parsed
+            .abilities
+            .iter()
+            .find(|ability| matches!(*ability.effect, Effect::Draw { .. }))
+            .expect("expected draw ability");
+        assert!(draw_ability
+            .activation_restrictions
+            .iter()
+            .any(|restriction| matches!(
+                restriction,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::HasCityBlessing)
+                }
+            )));
     }
 
     #[test]

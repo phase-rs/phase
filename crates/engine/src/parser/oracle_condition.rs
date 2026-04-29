@@ -104,6 +104,16 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
         return Some(condition);
     }
 
+    if value(
+        (),
+        tag::<_, _, VerboseError<&str>>("you have the city's blessing"),
+    )
+    .parse(text)
+    .is_ok()
+    {
+        return Some(ParsedCondition::HasCityBlessing);
+    }
+
     if let Some(count) = parse_numeric_threshold(text, "you attacked with ", " creatures this turn")
     {
         return Some(ParsedCondition::YouAttackedWithAtLeast {
@@ -1017,6 +1027,14 @@ mod tests {
                 filter: PlayerFilter::OpponentGainedLife,
                 minimum: 1,
             }),
+        );
+    }
+
+    #[test]
+    fn parses_city_blessing_restriction() {
+        assert_eq!(
+            parse_restriction_condition("you have the city's blessing"),
+            Some(ParsedCondition::HasCityBlessing),
         );
     }
 
