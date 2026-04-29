@@ -839,6 +839,9 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             || tag::<_, _, VerboseError<&str>>("put ")
                 .parse(remaining)
                 .is_ok()
+            || tag::<_, _, VerboseError<&str>>("instead")
+                .parse(remaining)
+                .is_ok()
         {
             break;
         }
@@ -1095,6 +1098,7 @@ mod tests {
             "land card, reveal it, put it into your hand, then shuffle",
             "card, put it onto the battlefield tapped",
             "creature card. exile it",
+            "Vampire cards instead",
         ] {
             clear_warnings();
             let _ = parse_search_filter(text);
