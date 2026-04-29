@@ -32,9 +32,10 @@ use crate::convert::token;
 use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
-    CreatureType, DamageRecipient, DistributedTarget, Distribution, FutureTrigger, GameNumber,
-    GroupFilter, ManaUseModifier, Permanent, Player, Players, ReplacementActionWouldEnter,
-    RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction, Spell, Spells, TokenFlag,
+    CreatureType, DamageRecipient, DamageToRecipients, DistributedTarget, Distribution,
+    FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent, Player, Players,
+    ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction,
+    Spell, Spells, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -1751,6 +1752,19 @@ fn require_clash_opponent_axis(players: &Players) -> ConvResult<()> {
 fn convert_many(a: &Action) -> ConvResult<Vec<Effect>> {
     match a {
         Action::SearchLibrary(actions) => convert_search_library(actions),
+        // CR 120.1 + CR 608.2c: mtgish packs "deal A damage to X and B
+        // damage to Y" into one action. The engine represents that as an
+        // ordinary effect chain: each DealDamage node consumes the next target
+        // slot.
+        Action::SpellDealsMultipleDamage(source, recipients) => {
+            spell_deals_multiple_damage_effects(source, recipients)
+        }
+        Action::PermanentDealsMultipleDamage(source, recipients) => {
+            permanent_deals_multiple_damage_effects(source, recipients)
+        }
+        Action::GraveyardCardDealsMultipleDamage(source, recipients) => {
+            graveyard_card_deals_multiple_damage_effects(source, recipients)
+        }
         // CR 701.20a + CR 701.9a: "Target player reveals their hand. You choose
         // a [filter] card from it. That player discards that card." The engine's
         // `RevealHand` resolver records the chosen card as a continuation
@@ -1880,6 +1894,78 @@ fn convert_many(a: &Action) -> ConvResult<Vec<Effect>> {
         }
         _ => Ok(vec![convert(a)?]),
     }
+}
+
+fn spell_deals_multiple_damage_effects(
+    source: &Spell,
+    recipients: &[DamageToRecipients],
+) -> ConvResult<Vec<Effect>> {
+    if !matches!(source, Spell::ThisSpell) {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "Effect::DealDamage.damage_source",
+            needed_variant: format!("multiple spell damage source: {}", spell_tag(source)),
+        });
+    }
+
+    damage_to_recipients_effects(recipients, |amount, recipient| {
+        Ok(Effect::DealDamage {
+            amount: quantity::convert(amount)?,
+            target: damage_recipient_to_filter(recipient)?,
+            damage_source: None,
+        })
+    })
+}
+
+fn permanent_deals_multiple_damage_effects(
+    source: &Permanent,
+    recipients: &[DamageToRecipients],
+) -> ConvResult<Vec<Effect>> {
+    damage_to_recipients_effects(recipients, |amount, recipient| {
+        permanent_deals_damage_effect(source, amount, recipient)
+    })
+}
+
+fn graveyard_card_deals_multiple_damage_effects(
+    source: &CardInGraveyard,
+    recipients: &[DamageToRecipients],
+) -> ConvResult<Vec<Effect>> {
+    if !matches!(source, CardInGraveyard::ThisGraveyardCard) {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "Effect::DealDamage.damage_source",
+            needed_variant: format!("graveyard-card source ref: {source:?}"),
+        });
+    }
+
+    damage_to_recipients_effects(recipients, |amount, recipient| {
+        Ok(Effect::DealDamage {
+            amount: quantity::convert(amount)?,
+            target: damage_recipient_to_filter(recipient)?,
+            damage_source: None,
+        })
+    })
+}
+
+fn damage_to_recipients_effects<F>(
+    recipients: &[DamageToRecipients],
+    mut build: F,
+) -> ConvResult<Vec<Effect>>
+where
+    F: FnMut(&GameNumber, &DamageRecipient) -> ConvResult<Effect>,
+{
+    if recipients.is_empty() {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "DamageToRecipients",
+            path: String::new(),
+            detail: "empty recipient list".into(),
+        });
+    }
+
+    let mut effects = Vec::with_capacity(recipients.len());
+    for recipient in recipients {
+        let DamageToRecipients::DamageToRecipients(amount, damage_recipient) = recipient;
+        effects.push(build(amount, damage_recipient)?);
+    }
+    Ok(effects)
 }
 
 fn permanent_deals_damage_effect(
@@ -6021,6 +6107,77 @@ mod tests {
             panic!("expected DealDamage, got {effect:?}");
         };
         assert_eq!(damage_source, Some(DamageSource::Target));
+    }
+
+    #[test]
+    fn spell_deals_multiple_damage_lowers_to_damage_chain() {
+        let actions = Actions::ActionList(vec![Action::SpellDealsMultipleDamage(
+            Box::new(Spell::ThisSpell),
+            vec![
+                DamageToRecipients::DamageToRecipients(
+                    Box::new(GameNumber::Integer(2)),
+                    Box::new(DamageRecipient::Ref_AnyTarget1),
+                ),
+                DamageToRecipients::DamageToRecipients(
+                    Box::new(GameNumber::Integer(1)),
+                    Box::new(DamageRecipient::Ref_AnyTarget2),
+                ),
+            ],
+        )]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        let Effect::DealDamage { amount, target, .. } = ability.effect.as_ref() else {
+            panic!("expected DealDamage head, got {:?}", ability.effect);
+        };
+        assert_eq!(*amount, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(*target, TargetFilter::Any);
+
+        let sub = ability.sub_ability.as_ref().expect("expected damage tail");
+        let Effect::DealDamage { amount, target, .. } = sub.effect.as_ref() else {
+            panic!("expected DealDamage tail, got {:?}", sub.effect);
+        };
+        assert_eq!(*amount, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(*target, TargetFilter::Any);
+    }
+
+    #[test]
+    fn permanent_deals_multiple_damage_reuses_permanent_source_lowering() {
+        let effects = convert_many(&Action::PermanentDealsMultipleDamage(
+            Box::new(Permanent::ThisPermanent),
+            vec![
+                DamageToRecipients::DamageToRecipients(
+                    Box::new(GameNumber::Integer(1)),
+                    Box::new(DamageRecipient::Player(Box::new(Player::You))),
+                ),
+                DamageToRecipients::DamageToRecipients(
+                    Box::new(GameNumber::Integer(2)),
+                    Box::new(DamageRecipient::Ref_AnyTarget),
+                ),
+            ],
+        ))
+        .unwrap();
+
+        let [first, second] = effects.as_slice() else {
+            panic!("expected two effects, got {effects:?}");
+        };
+        assert!(matches!(
+            first,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+            }
+        ));
+        assert!(matches!(
+            second,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            }
+        ));
     }
 
     #[test]
