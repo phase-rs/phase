@@ -5086,6 +5086,15 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             no_repls,
             0,
         ),
+        S::RevealAGenericCardAndPutItIntoHand => (
+            TargetFilter::Any,
+            QuantityExpr::Fixed { value: 1 },
+            true,
+            true,
+            Zone::Hand,
+            no_repls,
+            0,
+        ),
         // CR 701.23 + CR 701.20: Conflux / multi-filter tutor class —
         // mtgish stores one search step with N independent filters. The
         // engine-native shape is the same composition used by the native
@@ -5105,6 +5114,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         S::FindCardsOfType(cards) => {
             let (reveal, destination, consumed_extra_steps) = match rest {
                 [S::RevealFoundCards, S::PutFoundCardsIntoHand, ..] => (true, Zone::Hand, 2),
+                [S::PutTheCardsFoundThisWayIntoHand, ..] => (false, Zone::Hand, 1),
                 [S::PutFoundCardsIntoGraveyard, ..] => (false, Zone::Graveyard, 1),
                 _ => {
                     return Err(ConversionGap::MalformedIdiom {
@@ -5126,6 +5136,31 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
                 no_repls,
                 &rest[consumed_extra_steps..],
             );
+        }
+        S::FindAGenericCard => {
+            let (reveal, consumed_extra_steps) = match rest {
+                [S::RevealFoundCard, S::PutFoundCardIntoHand, ..] => (true, 2),
+                [S::PutFoundCardIntoHand, ..] | [S::PutFoundCardsIntoHand, ..] => (false, 1),
+                _ => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "SearchLibrary/FindAGenericCard",
+                        path: String::new(),
+                        detail: format!(
+                            "FindAGenericCard not followed by recognized hand destination ({} steps)",
+                            rest.len()
+                        ),
+                    });
+                }
+            };
+            (
+                TargetFilter::Any,
+                QuantityExpr::Fixed { value: 1 },
+                true,
+                reveal,
+                Zone::Hand,
+                no_repls,
+                consumed_extra_steps,
+            )
         }
         S::MayPutUptoNumberGenericCardsIntoHand(n) => (
             TargetFilter::Any,
@@ -5243,8 +5278,26 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         S::FindACardOfType(cards) => {
             let f = filter_mod::cards_to_filter(cards)?;
             // Inspect the second step.
-            match rest.first() {
-                Some(S::PutFoundCardOntoBattlefield(repls)) => (
+            match rest {
+                [S::RevealFoundCard, S::PutFoundCardIntoHand, ..] => (
+                    f,
+                    QuantityExpr::Fixed { value: 1 },
+                    true,
+                    true,
+                    Zone::Hand,
+                    no_repls,
+                    2,
+                ),
+                [S::PutFoundCardIntoHand, ..] | [S::PutFoundCardsIntoHand, ..] => (
+                    f,
+                    QuantityExpr::Fixed { value: 1 },
+                    true,
+                    false,
+                    Zone::Hand,
+                    no_repls,
+                    1,
+                ),
+                [S::PutFoundCardOntoBattlefield(repls), ..] => (
                     f,
                     QuantityExpr::Fixed { value: 1 },
                     true,
@@ -5990,6 +6043,75 @@ mod tests {
         ));
         assert!(matches!(
             &effects[4],
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn find_generic_card_to_hand_lowers_search_chain() {
+        let effects = convert_many(&Action::SearchLibrary(vec![
+            SearchLibraryAction::FindAGenericCard,
+            SearchLibraryAction::PutFoundCardIntoHand,
+            SearchLibraryAction::Shuffle,
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                reveal: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn find_card_of_type_reveal_to_hand_lowers_search_chain() {
+        let effects = convert_many(&Action::SearchLibrary(vec![
+            SearchLibraryAction::FindACardOfType(Box::new(Cards::IsCardtype(CardType::Creature))),
+            SearchLibraryAction::RevealFoundCard,
+            SearchLibraryAction::PutFoundCardIntoHand,
+            SearchLibraryAction::Shuffle,
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary {
+                reveal: true,
+                filter: TargetFilter::Typed(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
             Effect::Shuffle {
                 target: TargetFilter::Controller
             }
