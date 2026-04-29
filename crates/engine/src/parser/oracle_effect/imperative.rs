@@ -2547,47 +2547,48 @@ fn parse_possessive_determiner(input: &str) -> nom::IResult<&str, (), VerboseErr
     .parse(input)
 }
 
-/// Parse "shuffle the cards {from|in} {possessive} {zone} into {possessive} library"
-/// and return the origin zone.
+fn parse_shuffle_origin_zones(input: &str) -> nom::IResult<&str, Vec<Zone>, VerboseError<&str>> {
+    alt((
+        value(vec![Zone::Hand, Zone::Graveyard], tag("hand and graveyard")),
+        value(vec![Zone::Graveyard, Zone::Hand], tag("graveyard and hand")),
+        value(vec![Zone::Hand], tag("hand")),
+        value(vec![Zone::Graveyard], tag("graveyard")),
+        value(vec![Zone::Exile], tag("exile")),
+    ))
+    .parse(input)
+}
+
+/// Parse "shuffle [the cards {from|in}] {possessive} {zone-list} into
+/// {possessive} library" and return the origin zones.
 ///
 /// CR 400.6 + CR 701.24a: Recognizes whole-zone bulk moves like Whirlpool Drake's
-/// "shuffle the cards from your hand into your library". The `the cards` phrase
-/// names every card in the origin zone — no targeting or filtering — so the
+/// "shuffle the cards from your hand into your library" and Midnight Clock's
+/// "shuffle your hand and graveyard into your library". The origin-zone phrase
+/// names every card in each listed zone — no targeting or filtering — so the
 /// resulting AST lowers to `ChangeZoneAll` (not `ChangeZone`).
 ///
 /// Supports zones: hand, graveyard, exile. Returns None for any other structure.
-fn parse_mass_zone_to_library(lower: &str) -> Option<Zone> {
-    // "shuffle the cards {from|in} "
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("shuffle the cards ")
+fn parse_mass_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("shuffle ")
         .parse(lower)
         .ok()?;
-    let (rest, _) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("from ")),
-        value((), tag::<_, _, VerboseError<&str>>("in ")),
+    let (rest, _) = opt(preceded(
+        tag::<_, _, VerboseError<&str>>("the cards "),
+        alt((tag("from "), tag("in "))),
     ))
     .parse(rest)
     .ok()?;
     // "{possessive} "
     let (rest, _) = parse_possessive_determiner(rest).ok()?;
     let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
-    // zone word
-    let (rest, origin) = alt((
-        value(Zone::Hand, tag::<_, _, VerboseError<&str>>("hand")),
-        value(
-            Zone::Graveyard,
-            tag::<_, _, VerboseError<&str>>("graveyard"),
-        ),
-        value(Zone::Exile, tag::<_, _, VerboseError<&str>>("exile")),
-    ))
-    .parse(rest)
-    .ok()?;
+    let (rest, origins) = parse_shuffle_origin_zones(rest).ok()?;
     // " into {possessive} library"
     let (rest, _) = tag::<_, _, VerboseError<&str>>(" into ").parse(rest).ok()?;
     let (rest, _) = parse_possessive_determiner(rest).ok()?;
     let (_rest, _) = tag::<_, _, VerboseError<&str>>(" library")
         .parse(rest)
         .ok()?;
-    Some(origin)
+    Some(origins)
 }
 
 pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
@@ -2700,22 +2701,23 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             owner_library,
         });
     }
+    // CR 701.24a + CR 400.6: "shuffle the cards from {possessive} {zone} into
+    // {possessive} library" and "shuffle {possessive} hand and graveyard into
+    // {possessive} library" — whole-zone mass move(s) + implicit shuffle.
+    // Must run before the generic targeted-shuffle path below, which would otherwise
+    // consume "the cards" as a `ParentTarget` pronoun.
+    if let Some(origins) = parse_mass_zones_to_library(lower) {
+        return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins });
+    }
     if contains_possessive(lower, "shuffle", "graveyard") {
         return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary {
-            origin: Zone::Graveyard,
+            origins: vec![Zone::Graveyard],
         });
     }
     if contains_possessive(lower, "shuffle", "hand") {
-        return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin: Zone::Hand });
-    }
-    // CR 701.24a + CR 400.6: "shuffle the cards from {possessive} {zone} into
-    // {possessive} library" — whole-zone mass move + implicit shuffle (Whirlpool
-    // Drake / Warrior / Rider). The phrase "the cards from your hand" names every
-    // card in the zone, so this lowers to ChangeZoneAll (no targeting, no filter).
-    // Must run before the generic targeted-shuffle path below, which would otherwise
-    // consume "the cards" as a `ParentTarget` pronoun.
-    if let Some(origin) = parse_mass_zone_to_library(lower) {
-        return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin });
+        return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary {
+            origins: vec![Zone::Hand],
+        });
     }
     // CR 701.24a: "shuffle target card from your graveyard into your library" —
     // targeted zone change (origin → library) + implicit shuffle.
@@ -2776,20 +2778,15 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             };
             with_shuffle_sub_ability(effect)
         }
-        ShuffleImperativeAst::ChangeZoneAllToLibrary { origin } => {
+        ShuffleImperativeAst::ChangeZoneAllToLibrary { origins } => {
             // CR 400.6 + CR 400.3: "shuffle {possessive} {zone} into {possessive}
-            // library" moves every card in the origin zone owned by the
+            // library" moves every card in the origin zone(s) owned by the
             // identified player. The sentinel `TargetFilter::Controller` is
             // later remapped to a concrete player by `inject_subject_target`
             // when a subject like "that player" precedes the shuffle phrase
             // (Jace's ultimate) — otherwise the resolver treats it as "the
             // ability controller's cards".
-            let effect = Effect::ChangeZoneAll {
-                origin: Some(origin),
-                destination: Zone::Library,
-                target: TargetFilter::Controller,
-            };
-            with_shuffle_sub_ability(effect)
+            lower_change_zone_all_to_library(origins)
         }
         // CR 701.24a: Targeted zone change to library with implicit shuffle sub_ability.
         ShuffleImperativeAst::TargetedChangeZoneToLibrary { target, origin } => {
@@ -3007,6 +3004,40 @@ pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
         condition: None,
         optional: false,
     }
+}
+
+fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
+    Effect::ChangeZoneAll {
+        origin: Some(origin),
+        destination: Zone::Library,
+        target: TargetFilter::Controller,
+    }
+}
+
+fn lower_change_zone_all_to_library(origins: Vec<Zone>) -> ParsedEffectClause {
+    let (first, rest) = origins
+        .split_first()
+        .expect("ChangeZoneAllToLibrary must have at least one origin");
+    let first = *first;
+
+    let mut tail: Option<Box<AbilityDefinition>> = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Shuffle {
+            target: TargetFilter::Controller,
+        },
+    )));
+    for origin in rest.iter().rev().copied() {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            change_zone_all_to_library_effect(origin),
+        );
+        def.sub_ability = tail;
+        tail = Some(Box::new(def));
+    }
+
+    let mut clause = parsed_clause(change_zone_all_to_library_effect(first));
+    clause.sub_ability = tail;
+    clause
 }
 
 pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
@@ -6432,8 +6463,8 @@ mod tests {
         let text = "shuffle the cards from your hand into your library";
         let result = parse_shuffle_ast(text, text);
         match result {
-            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin }) => {
-                assert_eq!(origin, Zone::Hand);
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
+                assert_eq!(origins, vec![Zone::Hand]);
             }
             other => panic!("Expected ChangeZoneAllToLibrary Hand, got {other:?}"),
         }
@@ -6447,8 +6478,8 @@ mod tests {
         let text = "shuffle the cards from your graveyard into your library";
         let result = parse_shuffle_ast(text, text);
         match result {
-            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin }) => {
-                assert_eq!(origin, Zone::Graveyard);
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
+                assert_eq!(origins, vec![Zone::Graveyard]);
             }
             other => panic!("Expected ChangeZoneAllToLibrary Graveyard, got {other:?}"),
         }
@@ -6462,11 +6493,63 @@ mod tests {
         let text = "shuffle the cards from their hand into their library";
         let result = parse_shuffle_ast(text, text);
         match result {
-            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin }) => {
-                assert_eq!(origin, Zone::Hand);
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
+                assert_eq!(origins, vec![Zone::Hand]);
             }
             other => panic!("Expected ChangeZoneAllToLibrary Hand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_shuffle_hand_and_graveyard_into_your_library() {
+        let text = "shuffle your hand and graveyard into your library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
+                assert_eq!(origins, vec![Zone::Hand, Zone::Graveyard]);
+            }
+            other => panic!("Expected ChangeZoneAllToLibrary Hand+Graveyard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_shuffle_hand_and_graveyard_into_change_zone_all_chain() {
+        let clause = lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneAllToLibrary {
+            origins: vec![Zone::Hand, Zone::Graveyard],
+        });
+        assert!(matches!(
+            &clause.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+            }
+        ));
+
+        let graveyard = clause
+            .sub_ability
+            .as_deref()
+            .expect("hand move should chain graveyard move");
+        assert!(matches!(
+            &*graveyard.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+            }
+        ));
+
+        let shuffle = graveyard
+            .sub_ability
+            .as_deref()
+            .expect("graveyard move should chain shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            }
+        ));
+        assert!(shuffle.sub_ability.is_none());
     }
 
     /// CR 400.7 + CR 701.23: Multi-zone same-name exile combinator covers

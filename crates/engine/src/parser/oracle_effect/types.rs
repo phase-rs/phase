@@ -782,7 +782,7 @@ pub(super) enum ShuffleImperativeAst {
         owner_library: bool,
     },
     ChangeZoneAllToLibrary {
-        origin: Zone,
+        origins: Vec<Zone>,
     },
     /// "shuffle target card from {origin} into {owner}'s library" —
     /// targeted zone change + shuffle composition.

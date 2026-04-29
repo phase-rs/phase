@@ -58,8 +58,8 @@ use crate::types::zones::Zone;
 pub(crate) use self::conditions::split_leading_conditional;
 use self::conditions::*;
 use self::imperative::{
-    lower_imperative_family_ast, lower_targeted_action_ast, lower_zone_counter_ast,
-    parse_imperative_family_ast,
+    lower_imperative_family_ast, lower_shuffle_ast, lower_targeted_action_ast,
+    lower_zone_counter_ast, parse_imperative_family_ast, parse_shuffle_ast,
 };
 #[cfg(test)]
 use self::search::parse_search_filter;
@@ -4708,6 +4708,14 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
     tag::<_, _, VerboseError<&str>>("shuffle ")
         .parse(lower.as_str())
         .ok()?;
+
+    if let Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) =
+        parse_shuffle_ast(text, &lower)
+    {
+        return Some(lower_shuffle_ast(
+            ShuffleImperativeAst::ChangeZoneAllToLibrary { origins },
+        ));
+    }
 
     // Try to split compound subject from the text after "shuffle "
     let text_after = &text["shuffle ".len()..];
@@ -12485,6 +12493,46 @@ mod tests {
             .as_ref()
             .expect("should have Shuffle sub_ability");
         assert!(matches!(&*sub.effect, Effect::Shuffle { .. }));
+    }
+
+    #[test]
+    fn compound_shuffle_hand_and_graveyard_into_library() {
+        let def = parse_effect_chain(
+            "Shuffle your hand and graveyard into your library",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+            }
+        ));
+
+        let graveyard = def
+            .sub_ability
+            .as_deref()
+            .expect("hand move should chain graveyard move");
+        assert!(matches!(
+            &*graveyard.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+            }
+        ));
+
+        let shuffle = graveyard
+            .sub_ability
+            .as_deref()
+            .expect("graveyard move should chain Shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
     }
 
     // Remaining tests truncated for space — they are identical to the original file.
