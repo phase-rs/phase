@@ -77,11 +77,28 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return false;
     }
 
+    if is_spell_resolution_cast_from_hand_free(lower) {
+        return true;
+    }
+
     ((scan_contains(lower, "deals ") || scan_contains(lower, "deal "))
         && scan_contains(lower, "damage"))
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
         || scan_contains(lower, "this turn")
+}
+
+fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {
+    alt((
+        tag::<_, _, VerboseError<&str>>("you may cast "),
+        tag("you may play "),
+    ))
+    .parse(lower)
+    .is_ok()
+        && scan_contains(lower, "from your hand")
+        && (scan_contains(lower, "without paying its mana cost")
+            || scan_contains(lower, "without paying their mana cost")
+            || scan_contains(lower, "without paying their mana costs"))
 }
 
 fn is_self_spell_cost_modification(lower: &str) -> bool {

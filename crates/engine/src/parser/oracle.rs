@@ -3516,6 +3516,66 @@ mod tests {
     }
 
     #[test]
+    fn spell_resolution_free_cast_from_hand_is_effect_not_static() {
+        let r = parse(
+            "Return up to three target artifacts and/or creatures to their owners' hands.\nYou may cast a spell with mana value 4 or less from your hand without paying its mana cost.",
+            "Baral's Expertise",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+
+        assert_eq!(r.statics.len(), 0);
+        assert_eq!(r.abilities.len(), 2);
+        assert!(r.abilities[1].optional);
+        match &*r.abilities[1].effect {
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(filter),
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                ..
+            } => {
+                assert_eq!(filter.type_filters, vec![TypeFilter::Card]);
+                assert_eq!(
+                    filter.controller,
+                    Some(crate::types::ability::ControllerRef::You)
+                );
+                assert!(filter
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })));
+                assert!(filter.properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }
+                )));
+            }
+            effect => panic!("expected optional CastFromZone, got {effect:?}"),
+        }
+        assert_eq!(r.parse_warnings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn permanent_free_cast_from_hand_remains_static_permission() {
+        let r = parse(
+            "You may cast spells from your hand without paying their mana costs.",
+            "Omniscience",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 0);
+        assert_eq!(r.statics.len(), 1);
+        assert!(matches!(
+            r.statics[0].mode,
+            StaticMode::CastFromHandFree { .. }
+        ));
+    }
+
+    #[test]
     fn spell_casting_option_ignores_followup_if_you_do_sentence() {
         let r = parse(
             "Return up to two target creature cards from your graveyard to your hand.\nYou may cast this spell for {2}{B/G}{B/G}. If you do, ignore the bracketed text.",
