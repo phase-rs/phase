@@ -1123,32 +1123,61 @@ fn parse_mana_color_spent_condition_text(text: &str) -> Option<AbilityCondition>
 fn parse_mana_color_spent_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
-    all_consuming(|input| {
-        let (mut rest, first_color) = parse_basic_colored_mana_symbol(input)?;
-        let mut counts = vec![(first_color, 1_u32)];
-        while let Ok((after_symbol, color)) = parse_basic_colored_mana_symbol(rest) {
-            if let Some((_, count)) = counts.iter_mut().find(|(seen, _)| *seen == color) {
-                *count += 1;
-            } else {
-                counts.push((color, 1));
-            }
-            rest = after_symbol;
-        }
-        let (rest, _) = tag(" was spent to cast ").parse(rest)?;
-        let (rest, _) = alt((tag("this spell"), tag("it"), tag("~"))).parse(rest)?;
-        let condition = if counts.len() == 1 {
-            let (color, minimum) = counts[0];
-            AbilityCondition::ManaColorSpent { color, minimum }
+    all_consuming(alt((
+        parse_symbolic_mana_color_spent_condition,
+        parse_word_mana_color_spent_condition,
+    )))
+    .parse(input)
+}
+
+fn parse_symbolic_mana_color_spent_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    let (mut rest, first_color) = parse_basic_colored_mana_symbol(input)?;
+    let mut counts = vec![(first_color, 1_u32)];
+    while let Ok((after_symbol, color)) = parse_basic_colored_mana_symbol(rest) {
+        if let Some((_, count)) = counts.iter_mut().find(|(seen, _)| *seen == color) {
+            *count += 1;
         } else {
-            AbilityCondition::And {
-                conditions: counts
-                    .into_iter()
-                    .map(|(color, minimum)| AbilityCondition::ManaColorSpent { color, minimum })
-                    .collect(),
-            }
-        };
-        Ok((rest, condition))
-    })
+            counts.push((color, 1));
+        }
+        rest = after_symbol;
+    }
+    let (rest, _) = parse_spent_to_cast_tail(rest)?;
+    let condition = if counts.len() == 1 {
+        let (color, minimum) = counts[0];
+        AbilityCondition::ManaColorSpent { color, minimum }
+    } else {
+        AbilityCondition::And {
+            conditions: counts
+                .into_iter()
+                .map(|(color, minimum)| AbilityCondition::ManaColorSpent { color, minimum })
+                .collect(),
+        }
+    };
+    Ok((rest, condition))
+}
+
+fn parse_word_mana_color_spent_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("at least ").parse(input)?;
+    let (rest, minimum) = nom_primitives::parse_number(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, color) = nom_primitives::parse_color(rest)?;
+    let (rest, _) = tag(" mana").parse(rest)?;
+    let (rest, _) = parse_spent_to_cast_tail(rest)?;
+    Ok((rest, AbilityCondition::ManaColorSpent { color, minimum }))
+}
+
+fn parse_spent_to_cast_tail(input: &str) -> super::super::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(
+            tag(" was spent to cast "),
+            alt((tag("this spell"), tag("it"), tag("them"), tag("~"))),
+        ),
+    )
     .parse(input)
 }
 
@@ -2240,6 +2269,21 @@ mod tests {
             color: ManaColor::Black,
             minimum: 1,
         }));
+    }
+
+    #[test]
+    fn leading_word_mana_spent_condition_parses_adamant() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If at least three red mana was spent to cast this spell, it deals 4 damage instead.",
+        );
+        assert_eq!(body, "it deals 4 damage instead.");
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::ManaColorSpent {
+                color: ManaColor::Red,
+                minimum: 3,
+            })
+        );
     }
 
     /// CR 122.1 + CR 608.2c: "there are no counters on ~" round-trips through
