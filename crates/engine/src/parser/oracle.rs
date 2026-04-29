@@ -7661,6 +7661,34 @@ mod tests {
     }
 
     #[test]
+    fn normalized_source_power_activation_restriction_does_not_emit_condition_warning() {
+        let oracle = "{T}: This creature deals 4 damage to target creature. Activate only if this creature's power is 4 or greater.";
+        let parsed = parse(
+            oracle,
+            "Bloodshot Trainee",
+            &[],
+            &["Creature"],
+            &["Goblin", "Warrior"],
+        );
+
+        assert_eq!(parsed.parse_warnings, Vec::<String>::new());
+        let damage_ability = parsed
+            .abilities
+            .iter()
+            .find(|ability| matches!(*ability.effect, Effect::DealDamage { .. }))
+            .expect("expected damage ability");
+        assert!(damage_ability
+            .activation_restrictions
+            .iter()
+            .any(|restriction| matches!(
+                restriction,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::SourcePowerAtLeast { minimum: 4 })
+                }
+            )));
+    }
+
+    #[test]
     fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
         let oracle =
             "Vivid — {T}: For each color among permanents you control, add one mana of that color.";

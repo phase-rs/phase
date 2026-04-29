@@ -153,6 +153,7 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
         tag::<_, _, VerboseError<&str>>("this "),
         tag("enchanted "),
         tag("from your "),
+        tag("~'s "),
         tag("~ "),
     ))
     .parse(text)
@@ -206,11 +207,9 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
             return Some(ParsedCondition::SourceIsColor { color });
         }
     }
-    // Power threshold: "this creature's power is N or greater"
-    if let Some(power) = parse_numeric_threshold(text, "this creature's power is ", " or greater") {
-        return Some(ParsedCondition::SourcePowerAtLeast {
-            minimum: power as i32,
-        });
+    // Power threshold: "this creature's power is N or greater" / "~'s power is N or greater"
+    if let Some(power) = parse_source_power_threshold(text) {
+        return Some(ParsedCondition::SourcePowerAtLeast { minimum: power });
     }
     if let Some((counter_type, count)) = parse_counter_requirement(text) {
         return Some(ParsedCondition::SourceHasCounterAtLeast {
@@ -222,6 +221,20 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
         return Some(ParsedCondition::SourceHasNoCounter { counter_type });
     }
     None
+}
+
+fn parse_source_power_threshold(text: &str) -> Option<i32> {
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("this creature's power is "),
+        tag("~'s power is "),
+    ))
+    .parse(text)
+    .ok()?;
+    let (rest, power) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" or greater")
+        .parse(rest)
+        .ok()?;
+    rest.trim().is_empty().then_some(power as i32)
 }
 
 fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
@@ -895,6 +908,10 @@ mod tests {
         assert_eq!(
             parse_restriction_condition("this creature is attacking"),
             Some(ParsedCondition::SourceIsAttacking),
+        );
+        assert_eq!(
+            parse_restriction_condition("~'s power is 4 or greater"),
+            Some(ParsedCondition::SourcePowerAtLeast { minimum: 4 }),
         );
         assert_eq!(
             parse_restriction_condition("this card is in your graveyard"),
