@@ -1267,13 +1267,29 @@ pub enum AttachmentKind {
     Equipment,
 }
 
-/// CR 700.5: Qualities that can be shared across multi-target selections.
+/// Qualities that can be shared across multi-target selections.
 /// Used by `FilterProp::SharesQuality` for group constraint validation at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SharedQuality {
+    /// CR 201.2: object names compared by shared name.
+    Name,
     CreatureType,
     Color,
     CardType,
+    /// CR 205.3i + CR 305.6: land subtypes, including the five basic land types.
+    LandType,
+}
+
+/// Relationship required by `FilterProp::SharesQuality`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SharedQualityRelation {
+    #[default]
+    Shares,
+    DoesNotShare,
+}
+
+fn is_default_shared_quality_relation(value: &SharedQualityRelation) -> bool {
+    matches!(value, SharedQualityRelation::Shares)
 }
 
 /// Individual filter properties that can be combined in a Typed filter.
@@ -1425,6 +1441,11 @@ pub enum FilterProp {
     /// Used for "spells of the chosen type" patterns (Archon of Valor's Reach).
     /// Reads `ChosenAttribute::CardType` from the source permanent.
     IsChosenCardType,
+    /// CR 205.2 + CR 608.2c: Matches objects by the transient "land or nonland"
+    /// choice made earlier in the same resolving instruction sequence. Used by
+    /// "of the chosen kind" library filters, where "Land" means cards with the
+    /// land card type and "Nonland" means cards without it.
+    IsChosenLandOrNonlandKind,
     /// CR 115.7: Matches stack entries that have exactly one target.
     /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
@@ -1492,11 +1513,15 @@ pub enum FilterProp {
     InAnyZone {
         zones: Vec<Zone>,
     },
-    /// CR 700.5: Multi-target group constraint — all selected targets must share at least
+    /// Multi-target group constraint — all selected targets must share at least
     /// one value of the named quality. Validated at resolution time, not per-object.
     /// Examples: "that share a creature type", "that share a color", "that share a card type".
     SharesQuality {
         quality: SharedQuality,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<Box<TargetFilter>>,
+        #[serde(default, skip_serializing_if = "is_default_shared_quality_relation")]
+        relation: SharedQualityRelation,
     },
     /// CR 510.1: Object was dealt damage during this turn.
     /// Checks `damage_marked > 0` (damage persists until cleanup step).
@@ -1934,6 +1959,11 @@ pub enum QuantityRef {
     /// ObjectScope (Round Π-6). Mirrors `Power`. Replaces the `SelfToughness`
     /// variant.
     Toughness { scope: ObjectScope },
+    /// CR 202.3: Mana value of an object, scoped via ObjectScope.
+    /// `Source` is the resolving ability's source; `Target` is the first object
+    /// target. Used by source/target-relative mana-value filters such as
+    /// "with the same mana value as that spell".
+    ObjectManaValue { scope: ObjectScope },
     /// CR 202.3: The mana value of the source object — i.e. the object passed
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
     /// is the spell-being-cast, so "pay life equal to its mana value" reads
@@ -5882,6 +5912,10 @@ pub enum AbilityCondition {
     /// CR 603.4: "If you cast it from [zone]" — sub_ability executes only if the spell
     /// was cast from the specified zone. Evaluated against SpellContext.cast_from_zone.
     CastFromZone { zone: Zone },
+    /// CR 207.2c + CR 601.2: "if you cast this spell during your [phase/step]".
+    /// `phases` is parameterized so grouped phrases like "main phase" can map to
+    /// both concrete main phases without proliferating condition variants.
+    CastDuringPhase { phases: Vec<Phase> },
     /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last revealed card's type.
     /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`.
     /// `additional_filter` holds optional extra filter properties (e.g., `IsChosenCreatureType`
@@ -6119,6 +6153,10 @@ pub struct SpellContext {
     /// to ETB triggers so conditions like "if you cast it from your hand" can evaluate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
+    /// CR 601.2: Phase at the time the spell was cast. Used by addendum-style
+    /// conditions such as "if you cast this spell during your main phase".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_phase: Option<Phase>,
 }
 
 /// Intervening-if condition for triggered abilities.
@@ -6278,8 +6316,10 @@ pub enum TriggerCondition {
 
     /// CR 702.104a: "if tribute wasn't paid" — Tribute mechanic intervening-if.
     TributeNotPaid,
-    /// CR 207.2c: "if you cast this spell during your main phase" — Addendum ability word.
-    CastDuringMainPhase,
+    /// CR 207.2c + CR 601.2: "if you cast this spell during your [phase/step]".
+    /// `phases` is parameterized so grouped phrases like "main phase" can map to
+    /// both concrete main phases without proliferating condition variants.
+    CastDuringPhase { phases: Vec<Phase> },
     /// CR 207.2c: "if at least N mana of [color] was spent to cast this spell" — Adamant.
     ManaColorSpent { color: ManaColor, minimum: u32 },
     /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"

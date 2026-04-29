@@ -9,8 +9,8 @@ use crate::game::combat;
 use crate::game::game_object::GameObject;
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::types::ability::{
-    ChosenAttribute, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, SharedQuality,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ChoiceValue, ChosenAttribute, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord};
@@ -1190,6 +1190,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
+        | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
         // CR 700.9: Modified requires on-battlefield attachments/counters,
@@ -1283,6 +1284,18 @@ fn resolve_filter_threshold(
             source.controller.unwrap_or(PlayerId(0)),
             source.id,
         ),
+    }
+}
+
+fn matches_last_chosen_land_or_nonland_kind(
+    choice: &Option<ChoiceValue>,
+    core_types: &[CoreType],
+) -> bool {
+    let is_land = core_types.contains(&CoreType::Land);
+    match choice {
+        Some(ChoiceValue::Label(label)) if label.eq_ignore_ascii_case("Land") => is_land,
+        Some(ChoiceValue::Label(label)) if label.eq_ignore_ascii_case("Nonland") => !is_land,
+        _ => false,
     }
 }
 
@@ -1666,6 +1679,10 @@ fn matches_filter_prop(
                 _ => None,
             })
             .is_some_and(|chosen| obj.card_types.core_types.contains(chosen)),
+        FilterProp::IsChosenLandOrNonlandKind => matches_last_chosen_land_or_nonland_kind(
+            &state.last_named_choice,
+            &obj.card_types.core_types,
+        ),
         // CR 701.60b: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
         // CR 700.9: A permanent is modified if it has one or more counters on
@@ -1720,8 +1737,34 @@ fn matches_filter_prop(
         }
         // CR 604.3: Match objects in any of the listed zones (OR semantics).
         FilterProp::InAnyZone { zones } => zones.contains(&obj.zone),
-        // CR 601.2c: Group constraint — not evaluable per-object, validated at resolution time.
-        FilterProp::SharesQuality { .. } => true,
+        FilterProp::SharesQuality {
+            quality,
+            reference,
+            relation,
+        } => {
+            let shares = reference.as_ref().is_none_or(|reference_filter| {
+                object_shares_quality_with_reference_filter(
+                    state,
+                    obj,
+                    quality,
+                    reference_filter,
+                    source,
+                )
+            });
+            match relation {
+                SharedQualityRelation::Shares => shares,
+                SharedQualityRelation::DoesNotShare => {
+                    !shares
+                        && (!matches!(quality, SharedQuality::Name)
+                            || !object_shared_quality_values(
+                                obj,
+                                quality,
+                                &state.all_creature_types,
+                            )
+                            .is_empty())
+                }
+            }
+        }
         // CR 510.1: Object was dealt damage this turn (damage_marked persists until cleanup).
         FilterProp::WasDealtDamageThisTurn => obj.damage_marked > 0,
         // CR 400.7: Object entered the battlefield this turn.
@@ -1950,6 +1993,7 @@ fn zone_change_record_matches_property(
         // trigger-filter coverage grows.
         FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
+        | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
         // CR 700.9: Modified is a live-battlefield predicate (counters +
@@ -1973,6 +2017,195 @@ fn zone_change_record_matches_property(
         | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
     }
+}
+
+const LAND_TYPES: &[&str] = &[
+    "Cave",
+    "Desert",
+    "Forest",
+    "Gate",
+    "Island",
+    "Lair",
+    "Locus",
+    "Mine",
+    "Mountain",
+    "Plains",
+    "Planet",
+    "Power-Plant",
+    "Sphere",
+    "Swamp",
+    "Tower",
+    "Town",
+    "Urza's",
+];
+
+fn is_land_type(subtype: &str) -> bool {
+    LAND_TYPES
+        .iter()
+        .any(|land_type| subtype.eq_ignore_ascii_case(land_type))
+}
+
+fn shared_quality_values(
+    name: &str,
+    core_types: &[CoreType],
+    subtypes: &[String],
+    colors: &[ManaColor],
+    keywords: &[Keyword],
+    quality: &SharedQuality,
+    all_creature_types: &[String],
+) -> HashSet<String> {
+    match quality {
+        SharedQuality::Name => {
+            if name.is_empty() {
+                HashSet::new()
+            } else {
+                HashSet::from([name.to_ascii_lowercase()])
+            }
+        }
+        SharedQuality::CreatureType => {
+            if keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Changeling))
+            {
+                return all_creature_types
+                    .iter()
+                    .map(|creature_type| creature_type.to_ascii_lowercase())
+                    .collect();
+            }
+
+            subtypes
+                .iter()
+                .filter(|subtype| {
+                    all_creature_types
+                        .iter()
+                        .any(|creature_type| subtype.eq_ignore_ascii_case(creature_type))
+                })
+                .map(|subtype| subtype.to_ascii_lowercase())
+                .collect()
+        }
+        SharedQuality::Color => colors
+            .iter()
+            .map(|color| format!("{color:?}").to_ascii_lowercase())
+            .collect(),
+        SharedQuality::CardType => core_types
+            .iter()
+            .map(|card_type| format!("{card_type:?}").to_ascii_lowercase())
+            .collect(),
+        SharedQuality::LandType => subtypes
+            .iter()
+            .filter(|subtype| is_land_type(subtype))
+            .map(|subtype| subtype.to_ascii_lowercase())
+            .collect(),
+    }
+}
+
+fn object_shared_quality_values(
+    obj: &GameObject,
+    quality: &SharedQuality,
+    all_creature_types: &[String],
+) -> HashSet<String> {
+    shared_quality_values(
+        &obj.name,
+        &obj.card_types.core_types,
+        &obj.card_types.subtypes,
+        &obj.color,
+        &obj.keywords,
+        quality,
+        all_creature_types,
+    )
+}
+
+fn lki_shared_quality_values(
+    lki: &LKISnapshot,
+    quality: &SharedQuality,
+    all_creature_types: &[String],
+) -> HashSet<String> {
+    shared_quality_values(
+        &lki.name,
+        &lki.card_types,
+        &lki.subtypes,
+        &lki.colors,
+        &lki.keywords,
+        quality,
+        all_creature_types,
+    )
+}
+
+fn quality_sets_overlap(left: &HashSet<String>, right: &HashSet<String>) -> bool {
+    !left.is_empty() && !right.is_empty() && !left.is_disjoint(right)
+}
+
+fn object_shares_quality_values(
+    obj: &GameObject,
+    quality: &SharedQuality,
+    values: &HashSet<String>,
+    all_creature_types: &[String],
+) -> bool {
+    quality_sets_overlap(
+        &object_shared_quality_values(obj, quality, all_creature_types),
+        values,
+    )
+}
+
+fn parent_target_shared_quality_values(
+    state: &GameState,
+    source: &SourceContext<'_>,
+    quality: &SharedQuality,
+) -> Option<HashSet<String>> {
+    let target_id = source
+        .ability?
+        .targets
+        .iter()
+        .find_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })?;
+
+    if let Some(obj) = state.objects.get(&target_id) {
+        return Some(object_shared_quality_values(
+            obj,
+            quality,
+            &state.all_creature_types,
+        ));
+    }
+
+    state
+        .lki_cache
+        .get(&target_id)
+        .map(|lki| lki_shared_quality_values(lki, quality, &state.all_creature_types))
+}
+
+fn object_shares_quality_with_reference_filter(
+    state: &GameState,
+    obj: &GameObject,
+    quality: &SharedQuality,
+    reference_filter: &TargetFilter,
+    source: &SourceContext<'_>,
+) -> bool {
+    if matches!(reference_filter, TargetFilter::ParentTarget) {
+        return parent_target_shared_quality_values(state, source, quality).is_some_and(|values| {
+            object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
+        });
+    }
+
+    state.objects.keys().copied().any(|reference_id| {
+        filter_inner(
+            state,
+            reference_id,
+            reference_filter,
+            source.id,
+            source.controller,
+            source.ability,
+            source.recipient_id,
+        ) && state
+            .objects
+            .get(&reference_id)
+            .is_some_and(|reference_obj| {
+                let values =
+                    object_shared_quality_values(reference_obj, quality, &state.all_creature_types);
+                object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
+            })
+    })
 }
 
 /// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
@@ -2001,61 +2234,23 @@ pub fn validate_shares_quality(
         return true;
     }
 
-    match quality {
-        SharedQuality::CreatureType => {
-            // Collect subtypes for each object, then intersect.
-            let mut subtype_sets: Vec<HashSet<&str>> = Vec::new();
-            for &id in &obj_ids {
-                if let Some(obj) = state.objects.get(&id) {
-                    let set: HashSet<&str> =
-                        obj.card_types.subtypes.iter().map(|s| s.as_str()).collect();
-                    subtype_sets.push(set);
-                } else {
-                    return false;
-                }
-            }
-            // Intersect all sets — at least one common subtype must exist.
-            let mut shared = subtype_sets[0].clone();
-            for set in &subtype_sets[1..] {
-                shared = shared.intersection(set).copied().collect();
-            }
-            !shared.is_empty()
-        }
-        SharedQuality::Color => {
-            // All objects must share at least one color.
-            let mut color_sets: Vec<HashSet<&ManaColor>> = Vec::new();
-            for &id in &obj_ids {
-                if let Some(obj) = state.objects.get(&id) {
-                    let set: HashSet<&ManaColor> = obj.color.iter().collect();
-                    color_sets.push(set);
-                } else {
-                    return false;
-                }
-            }
-            let mut shared = color_sets[0].clone();
-            for set in &color_sets[1..] {
-                shared = shared.intersection(set).copied().collect();
-            }
-            !shared.is_empty()
-        }
-        SharedQuality::CardType => {
-            // All objects must share at least one core card type.
-            let mut type_sets: Vec<HashSet<&CoreType>> = Vec::new();
-            for &id in &obj_ids {
-                if let Some(obj) = state.objects.get(&id) {
-                    let set: HashSet<&CoreType> = obj.card_types.core_types.iter().collect();
-                    type_sets.push(set);
-                } else {
-                    return false;
-                }
-            }
-            let mut shared = type_sets[0].clone();
-            for set in &type_sets[1..] {
-                shared = shared.intersection(set).copied().collect();
-            }
-            !shared.is_empty()
-        }
+    let mut sets = Vec::new();
+    for id in obj_ids {
+        let Some(obj) = state.objects.get(&id) else {
+            return false;
+        };
+        sets.push(object_shared_quality_values(
+            obj,
+            quality,
+            &state.all_creature_types,
+        ));
     }
+
+    let mut shared = sets[0].clone();
+    for set in &sets[1..] {
+        shared = shared.intersection(set).cloned().collect();
+    }
+    !shared.is_empty()
 }
 
 /// Check if a player matches a typed player filter.
@@ -2924,6 +3119,7 @@ mod tests {
     #[test]
     fn shares_quality_creature_type_passes_with_shared_subtype() {
         let mut state = setup();
+        state.all_creature_types = vec!["Elf".to_string()];
         let a = add_creature(&mut state, PlayerId(0), "Elf Warrior");
         state
             .objects
@@ -2952,6 +3148,7 @@ mod tests {
     #[test]
     fn shares_quality_creature_type_fails_with_no_shared_subtype() {
         let mut state = setup();
+        state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
         let a = add_creature(&mut state, PlayerId(0), "Elf");
         state
             .objects
@@ -3007,6 +3204,205 @@ mod tests {
             !validate_shares_quality(&state, &targets, &SharedQuality::Color),
             "Red and Blue share no colors"
         );
+    }
+
+    #[test]
+    fn shares_quality_with_source_color_matches_per_object() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Blue Source");
+        state.objects.get_mut(&source).unwrap().color = vec![ManaColor::Blue];
+        let blue = add_creature(&mut state, PlayerId(0), "Blue Candidate");
+        state.objects.get_mut(&blue).unwrap().color = vec![ManaColor::Blue];
+        let red = add_creature(&mut state, PlayerId(0), "Red Candidate");
+        state.objects.get_mut(&red).unwrap().color = vec![ManaColor::Red];
+
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(Box::new(TargetFilter::SelfRef)),
+                relation: SharedQualityRelation::Shares,
+            },
+        ]));
+
+        assert!(matches_target_filter(&state, blue, &filter, source));
+        assert!(!matches_target_filter(&state, red, &filter, source));
+    }
+
+    #[test]
+    fn shares_quality_negated_land_type_reference_matches_per_object() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let plains = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&plains).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Plains".to_string());
+        }
+        let island = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&island).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Island".to_string());
+        }
+        let mountain = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(1),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mountain).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Mountain".to_string());
+        }
+
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::LandType,
+                    reference: Some(Box::new(TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::You),
+                    ))),
+                    relation: SharedQualityRelation::DoesNotShare,
+                }]),
+            );
+
+        assert!(!matches_target_filter(&state, plains, &filter, source));
+        assert!(!matches_target_filter(&state, island, &filter, source));
+        assert!(matches_target_filter(&state, mountain, &filter, source));
+    }
+
+    #[test]
+    fn shares_quality_name_reference_matches_graveyard_card() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let reference = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Frost Bolt".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&reference)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let matching = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Frost Bolt".to_string(),
+            Zone::Library,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Fire Bolt".to_string(),
+            Zone::Library,
+        );
+
+        let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(Box::new(TargetFilter::Typed(
+                    TypedFilter::default()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ))),
+                relation: SharedQualityRelation::Shares,
+            },
+        ]));
+
+        assert!(matches_target_filter(&state, matching, &filter, source));
+        assert!(!matches_target_filter(&state, other, &filter, source));
+    }
+
+    #[test]
+    fn shares_quality_name_negated_reference_uses_explicit_battlefield_zone() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let battlefield_room = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Central Elevator".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battlefield_room)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Room".to_string());
+        let library_room_same_name = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Hidden Elevator".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&library_room_same_name)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Room".to_string());
+
+        let matching = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Central Elevator".to_string(),
+            Zone::Library,
+        );
+        let different = create_object(
+            &mut state,
+            CardId(103),
+            PlayerId(0),
+            "Promising Stairs".to_string(),
+            Zone::Library,
+        );
+
+        let room_reference = TargetFilter::Typed(
+            TypedFilter::default()
+                .controller(ControllerRef::You)
+                .subtype("Room".to_string())
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+        );
+        let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(Box::new(room_reference)),
+                relation: SharedQualityRelation::DoesNotShare,
+            },
+        ]));
+
+        assert!(!matches_target_filter(&state, matching, &filter, source));
+        assert!(matches_target_filter(&state, different, &filter, source));
     }
 
     #[test]

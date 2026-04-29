@@ -7,7 +7,9 @@ use nom_language::error::VerboseError;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_target::{parse_mana_value_suffix, parse_target, parse_type_phrase};
+use super::super::oracle_target::{
+    parse_mana_value_suffix, parse_shared_quality_clause, parse_target, parse_type_phrase,
+};
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
 };
@@ -15,8 +17,8 @@ use super::types::{SearchLibraryDetails, SeekDetails};
 use super::{capitalize, scan_contains_phrase};
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, TargetFilter, TypeFilter,
-    TypedFilter,
+    ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,
+    SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::zones::Zone;
@@ -875,6 +877,148 @@ fn parse_search_suffix_subtype_redeclaration(text: &str) -> Option<(&str, Vec<Ty
     Some((rest, filters))
 }
 
+fn parse_search_name_reference_suffix(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<VerboseError<&str>>> {
+    let (rest, relation) = alt((
+        value(
+            SharedQualityRelation::DoesNotShare,
+            tag("that doesn't have the same name as "),
+        ),
+        value(
+            SharedQualityRelation::DoesNotShare,
+            tag("that does not have the same name as "),
+        ),
+        value(
+            SharedQualityRelation::DoesNotShare,
+            tag("that doesn't share a name with "),
+        ),
+        value(
+            SharedQualityRelation::DoesNotShare,
+            tag("that does not share a name with "),
+        ),
+        value(
+            SharedQualityRelation::Shares,
+            tag("that has the same name as "),
+        ),
+        value(
+            SharedQualityRelation::Shares,
+            tag("that have the same name as "),
+        ),
+        value(SharedQualityRelation::Shares, tag("with the same name as ")),
+    ))
+    .parse(input)?;
+
+    if tag::<_, _, VerboseError<&str>>("target ")
+        .parse(rest)
+        .is_ok()
+    {
+        return Err(nom::Err::Error(VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("target name reference"),
+            )],
+        }));
+    }
+
+    let (reference, rest) = parse_type_phrase(rest);
+    if !search_filter_has_meaningful_content(&reference) {
+        return Err(nom::Err::Error(VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("name reference"),
+            )],
+        }));
+    }
+
+    Ok((
+        rest,
+        FilterProp::SharesQuality {
+            quality: SharedQuality::Name,
+            reference: Some(Box::new(name_reference_filter(reference))),
+            relation,
+        },
+    ))
+}
+
+fn name_reference_filter(filter: TargetFilter) -> TargetFilter {
+    owner_scope_non_battlefield_zones(add_default_battlefield_zone(filter))
+}
+
+fn filter_prop_is_zone(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::InZone { .. } | FilterProp::InAnyZone { .. } => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_is_zone),
+        _ => false,
+    }
+}
+
+fn zone_for_scope(props: &[FilterProp]) -> Option<Zone> {
+    props.iter().find_map(|prop| match prop {
+        FilterProp::InZone { zone } => Some(*zone),
+        FilterProp::InAnyZone { zones } if zones.len() == 1 => zones.first().copied(),
+        _ => None,
+    })
+}
+
+fn owner_scope_non_battlefield_zones(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if let Some(controller) = typed.controller.clone() {
+                if zone_for_scope(&typed.properties).is_some_and(|zone| zone != Zone::Battlefield)
+                    && !typed
+                        .properties
+                        .iter()
+                        .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+                {
+                    typed.controller = None;
+                    typed.properties.push(FilterProp::Owned { controller });
+                }
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(owner_scope_non_battlefield_zones)
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(owner_scope_non_battlefield_zones)
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+fn add_default_battlefield_zone(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed.properties.iter().any(filter_prop_is_zone) {
+                typed.properties.push(FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                });
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(add_default_battlefield_zone)
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(add_default_battlefield_zone)
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 /// Parse property suffixes from search filter text ("with mana value ...", "with a different name ...").
 /// Reuses the existing suffix parsers from oracle_target.
 fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints) {
@@ -982,10 +1126,32 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             }
         }
 
+        if let Ok((rest, prop)) = parse_search_name_reference_suffix(remaining) {
+            suffix.properties.push(prop);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Ok((rest, _)) =
             tag::<_, _, VerboseError<&str>>("with the same name").parse(remaining)
         {
             suffix.properties.push(FilterProp::SameNameAsParentTarget);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, _)) =
+            tag::<_, _, VerboseError<&str>>("of the chosen kind").parse(remaining)
+        {
+            suffix
+                .properties
+                .push(FilterProp::IsChosenLandOrNonlandKind);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, prop)) = parse_shared_quality_clause(remaining) {
+            suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
         }
@@ -1103,7 +1269,7 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Comparator, QuantityRef};
+    use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
     use crate::types::keywords::Keyword;
 
     #[test]
@@ -1303,6 +1469,28 @@ mod tests {
             "expected basic-land subtype disjunction, got {:?}",
             typed.type_filters
         );
+    }
+
+    #[test]
+    fn parse_search_filter_handles_shared_color_with_source() {
+        let filter = parse_search_filter("instant or sorcery card that shares a color with ~");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for branch in filters {
+            let TargetFilter::Typed(typed) = branch else {
+                panic!("expected Typed branch, got {branch:?}");
+            };
+            assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Color,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::Shares,
+                } if matches!(reference.as_ref(), TargetFilter::SelfRef)
+            )));
+        }
     }
 
     #[test]
@@ -1667,6 +1855,88 @@ mod tests {
             );
         };
         assert!(target.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    #[test]
+    fn parse_search_filter_same_name_as_another_creature_you_control() {
+        let filter = parse_search_filter("card with the same name as another creature you control");
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(
+                reference.as_ref(),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    properties,
+                }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Creature))
+                    && properties.iter().any(|property| matches!(property, FilterProp::Another))
+                    && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Battlefield))
+            )
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_same_name_as_card_in_your_graveyard() {
+        let filter = parse_search_filter(
+            "instant or sorcery card with the same name as a card in your graveyard",
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for branch in filters {
+            let TargetFilter::Typed(filter) = branch else {
+                panic!("expected Typed branch, got {branch:?}");
+            };
+            assert!(filter.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::Shares,
+                } if matches!(
+                    reference.as_ref(),
+                    TargetFilter::Typed(TypedFilter {
+                        controller: None,
+                        properties,
+                        ..
+                    }) if properties.iter().any(|property| matches!(property, FilterProp::Owned { controller: ControllerRef::You }))
+                        && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Graveyard))
+                )
+            )));
+        }
+    }
+
+    #[test]
+    fn parse_search_filter_different_name_from_room_you_control() {
+        let filter =
+            parse_search_filter("room card that doesn't have the same name as a room you control");
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(reference),
+                relation: SharedQualityRelation::DoesNotShare,
+            } if matches!(
+                reference.as_ref(),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    properties,
+                }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Room"))
+                    && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Battlefield))
+            )
+        )));
     }
 
     #[test]

@@ -7,8 +7,8 @@ use nom::multi::many0;
 use nom::Parser;
 
 use crate::types::ability::{
-    AttachmentKind, Comparator, ControllerRef, FilterProp, QuantityExpr, QuantityRef,
-    SharedQuality, TargetFilter, TypeFilter, TypedFilter,
+    AttachmentKind, Comparator, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+    SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::identifiers::TrackedSetId;
@@ -1260,7 +1260,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         pos += consumed;
     }
 
-    // CR 700.5: "that share(s) a creature type" / "that has/have [keyword]" relative clause.
+    // "that share(s) a creature type" / "that has/have [keyword]" relative clause.
     if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..]) {
         properties.extend(that_props);
         pos += consumed;
@@ -2108,6 +2108,10 @@ fn parse_pt_quantity_comparison_tail(input: &str) -> Option<(Comparator, Quantit
 /// Returns (FilterProp, bytes consumed from the original text).
 pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
+    if let Some((prop, after)) = parse_relative_mana_value_suffix(trimmed) {
+        return Some((prop, text.len() - after.len()));
+    }
+
     let (rest, _) = alt((
         tag::<_, _, nom_language::error::VerboseError<&str>>("with mana value "),
         tag::<_, _, nom_language::error::VerboseError<&str>>("that have mana value "),
@@ -2216,7 +2220,11 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
             .parse(after_equal_to)
             .ok()?;
         let phrase = phrase.trim();
-        if let Some(value) = crate::parser::oracle_quantity::parse_cda_quantity(phrase) {
+        let value = crate::parser::oracle_quantity::parse_cda_quantity(phrase).or_else(|| {
+            parse_mana_value_reference_expr(phrase)
+                .and_then(|(value, after)| after.trim().is_empty().then_some(value))
+        });
+        if let Some(value) = value {
             return Some((
                 FilterProp::Cmc {
                     comparator: Comparator::EQ,
@@ -2265,6 +2273,117 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
         )
     };
     Some((prop, text.len() - after.len()))
+}
+
+fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
+    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    let (rest, comparator) = nom::sequence::preceded(
+        tag::<_, _, Vbe>("with "),
+        alt((
+            value(Comparator::LT, tag::<_, _, Vbe>("lesser mana value")),
+            value(Comparator::GT, tag("greater mana value")),
+            value(Comparator::LE, tag("equal or lesser mana value")),
+            value(Comparator::EQ, tag("the same mana value")),
+            value(Comparator::EQ, tag("same mana value")),
+        )),
+    )
+    .parse(text)
+    .ok()?;
+
+    let rest = rest.trim_start();
+    let (value, after) = if matches!(comparator, Comparator::EQ) {
+        let (after_as, _) = tag::<_, _, Vbe>("as ").parse(rest).ok()?;
+        parse_mana_value_reference_expr(after_as)?
+    } else if let Ok((after_than, _)) = tag::<_, _, Vbe>("than ").parse(rest) {
+        parse_mana_value_reference_expr(after_than)?
+    } else {
+        (
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceManaValue,
+            },
+            rest,
+        )
+    };
+
+    Some((FilterProp::Cmc { comparator, value }, after))
+}
+
+fn parse_mana_value_reference_expr(text: &str) -> Option<(QuantityExpr, &str)> {
+    parse_mana_value_reference_qty(text)
+        .map(|(after, qty)| (QuantityExpr::Ref { qty }, after))
+        .ok()
+}
+
+fn parse_mana_value_reference_qty(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
+    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    alt((
+        value(
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Target,
+            },
+            alt((
+                tag::<_, _, Vbe>("that spell's mana value"),
+                tag("that card's mana value"),
+                tag("that permanent's mana value"),
+                tag("that creature's mana value"),
+                tag("that spell"),
+                tag("that card"),
+                tag("that permanent"),
+                tag("that creature"),
+            )),
+        ),
+        value(
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Source,
+            },
+            alt((
+                tag::<_, _, Vbe>("this spell's mana value"),
+                tag("this card's mana value"),
+                tag("this creature's mana value"),
+                tag("this spell"),
+                tag("this card"),
+                tag("this creature"),
+                tag("~"),
+            )),
+        ),
+        value(
+            QuantityRef::EventContextSourceManaValue,
+            alt((
+                tag::<_, _, Vbe>("that spell's mana value"),
+                tag("the creature that died"),
+                tag("the permanent that died"),
+                tag("the creature that entered"),
+                tag("the permanent that entered"),
+            )),
+        ),
+        value(
+            crate::parser::oracle_quantity::parse_quantity_ref("the mana value of the exiled card")
+                .expect("linked exiled-card mana-value quantity must parse"),
+            tag::<_, _, Vbe>("the exiled card"),
+        ),
+        parse_cost_paid_mana_value_reference,
+    ))
+    .parse(input)
+}
+
+fn parse_cost_paid_mana_value_reference(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = alt((tag("discarded "), tag("sacrificed "))).parse(rest)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::CostPaidObjectManaValue))
 }
 
 /// Parse "with [count] [counter] counter(s) on it/them" using pure nom combinators.
@@ -2569,10 +2688,98 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
     Some(KeywordMatch::Concrete(keyword))
 }
 
+fn parse_shared_quality(
+    input: &str,
+) -> nom::IResult<&str, SharedQuality, nom_language::error::VerboseError<&str>> {
+    alt((
+        value(SharedQuality::Name, tag("names")),
+        value(SharedQuality::Name, tag("name")),
+        value(SharedQuality::CreatureType, tag("creature types")),
+        value(SharedQuality::CreatureType, tag("creature type")),
+        value(SharedQuality::CardType, tag("card types")),
+        value(SharedQuality::CardType, tag("card type")),
+        value(SharedQuality::LandType, tag("land types")),
+        value(SharedQuality::LandType, tag("land type")),
+        value(SharedQuality::Color, tag("colors")),
+        value(SharedQuality::Color, tag("color")),
+    ))
+    .parse(input)
+}
+
+fn parse_shared_quality_reference(
+    input: &str,
+) -> nom::IResult<&str, TargetFilter, nom_language::error::VerboseError<&str>> {
+    if let Ok((rest, filter)) = value(
+        TargetFilter::ParentTarget,
+        tag::<_, _, nom_language::error::VerboseError<&str>>("the discarded card"),
+    )
+    .parse(input)
+    {
+        return Ok((rest, filter));
+    }
+
+    let (filter, rest) = parse_target(input);
+    if matches!(filter, TargetFilter::Any) {
+        Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("shared quality reference"),
+            )],
+        }))
+    } else {
+        Ok((rest, filter))
+    }
+}
+
+pub(crate) fn parse_shared_quality_clause(
+    input: &str,
+) -> nom::IResult<&str, FilterProp, nom_language::error::VerboseError<&str>> {
+    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    let (rest, _) = tag::<_, _, Vbe>("that ").parse(input)?;
+    let (rest, relation) = alt((
+        value(
+            SharedQualityRelation::DoesNotShare,
+            alt((
+                tag::<_, _, Vbe>("don't share "),
+                tag("doesn't share "),
+                tag("do not share "),
+                tag("does not share "),
+            )),
+        ),
+        |i| {
+            let (rest, _) = alt((tag::<_, _, Vbe>("share "), tag("shares "))).parse(i)?;
+            let (rest, no_marker) = opt(tag::<_, _, Vbe>("no ")).parse(rest)?;
+            let relation = if no_marker.is_some() {
+                SharedQualityRelation::DoesNotShare
+            } else {
+                SharedQualityRelation::Shares
+            };
+            Ok((rest, relation))
+        },
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag::<_, _, Vbe>("a ")).parse(rest)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let (rest, reference) = opt(nom::sequence::preceded(
+        tag::<_, _, Vbe>(" with "),
+        parse_shared_quality_reference,
+    ))
+    .parse(rest)?;
+
+    Ok((
+        rest,
+        FilterProp::SharesQuality {
+            quality,
+            reference: reference.map(Box::new),
+            relation,
+        },
+    ))
+}
+
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
 ///
 /// Handles multiple pattern classes:
-/// - CR 700.5: "that share(s) [a] [quality]" → `SharesQuality`
+/// - "that share(s) [a] [quality]" → `SharesQuality`
 /// - CR 510.1: "that was dealt damage this turn" → `WasDealtDamageThisTurn`
 /// - CR 400.7: "that entered (the battlefield) this turn" → `EnteredThisTurn`
 /// - CR 508.1a: "that attacked this turn" → `AttackedThisTurn`
@@ -2642,52 +2849,15 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
         }
     }
 
+    if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed) {
+        let consumed = trimmed.len() - rest.len();
+        return Some((vec![prop], leading_ws + consumed));
+    }
+
     let (after_that, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ")
         .parse(trimmed)
         .ok()?;
     let that_len = leading_ws + "that ".len();
-
-    // --- "that share(s) [no] [a] [quality]" ---
-    let share_result = nom::branch::alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("share "),
-        tag("shares "),
-    ))
-    .parse(after_that);
-    if let Ok((rest, matched_verb)) = share_result {
-        let share_verb_len = matched_verb.len();
-
-        // Optional negation: "that share no creature types"
-        let (rest, _negated, neg_len) = if let Ok((r, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("no ").parse(rest)
-        {
-            (r, true, "no ".len())
-        } else {
-            (rest, false, 0)
-        };
-
-        // Optional article: "a creature type" vs "creature types"
-        let (rest, a_len) = if let Ok((r, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("a ").parse(rest)
-        {
-            (r, "a ".len())
-        } else {
-            (rest, 0)
-        };
-
-        // CR 700.5: Map quality phrase to typed SharedQuality enum.
-        let quality_end = rest.find([',', '.']).unwrap_or(rest.len());
-        let quality_str = rest[..quality_end].trim();
-        let shared_quality = match quality_str {
-            "creature type" | "creature types" => Some(SharedQuality::CreatureType),
-            "color" | "colors" => Some(SharedQuality::Color),
-            "card type" | "card types" => Some(SharedQuality::CardType),
-            _ => None,
-        };
-        if let Some(quality) = shared_quality {
-            let total = that_len + share_verb_len + neg_len + a_len + quality_end;
-            return Some((vec![FilterProp::SharesQuality { quality }], total));
-        }
-    }
 
     // --- CR 115.9c: "that targets only [filter]" ---
     if let Ok((rest, _)) =
@@ -3244,7 +3414,7 @@ enum ZonePrep {
 /// The `Bare` variant is a zero-width match, so `parse_zone_qual` always succeeds.
 #[derive(Copy, Clone, PartialEq)]
 enum ZoneQual {
-    /// "an opponent's ", "each opponent's " — produces `Owned{Opponent}` per CR 404.2.
+    /// "an opponent's ", "each opponent's " — produces `Owned{Opponent}`.
     Opponent,
     /// "your " — sets `ControllerRef::You` on the parent filter.
     You,
@@ -3295,7 +3465,7 @@ pub(crate) fn scan_zone_phrase(
 ///
 /// Each axis is a single `alt()` — variants are never expanded combinatorially.
 ///
-/// Handles (CR 404.2 for opponent/owner semantics):
+/// Handles owner semantics for player-specific non-battlefield zones:
 /// - Opponent possessive: "from an opponent's graveyard", "from each opponent's graveyard"
 ///   → `[Owned{Opponent}, InZone]` so stolen creatures that died are still matched by owner.
 /// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
@@ -3994,6 +4164,70 @@ mod tests {
                     },
                 }
             ]))
+        );
+    }
+
+    #[test]
+    fn card_with_lesser_mana_value_uses_event_source() {
+        let (f, rest) = parse_type_phrase("creature card with lesser mana value, reveal it");
+        assert_eq!(rest, ", reveal it");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LT,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourceManaValue,
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_greater_mana_value_than_discarded_card() {
+        let (f, rest) = parse_type_phrase("card with greater mana value than the discarded card");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GT,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CostPaidObjectManaValue,
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_same_mana_value_as_that_spell_uses_parent_target() {
+        let (f, rest) = parse_type_phrase("card with the same mana value as that spell");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    },
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_equal_to_that_cards_mana_value() {
+        let (f, rest) = parse_type_phrase("card with mana value equal to that card's mana value");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    },
+                },
+            }]))
         );
     }
 
@@ -5733,13 +5967,16 @@ mod tests {
 
     #[test]
     fn that_share_creature_type_consumed() {
-        // CR 700.5: "that share a creature type" is consumed into SharesQuality.
+        // "that share a creature type" is consumed into SharesQuality.
         let (filter, rest) = parse_type_phrase("creatures you control that share a creature type");
         if let TargetFilter::Typed(ref tf) = filter {
-            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|type_filter| matches!(type_filter, TypeFilter::Creature)));
             assert_eq!(tf.controller, Some(ControllerRef::You));
             assert!(tf.properties.iter().any(
-                |p| matches!(p, FilterProp::SharesQuality { quality } if *quality == SharedQuality::CreatureType)
+                |p| matches!(p, FilterProp::SharesQuality { quality, .. } if *quality == SharedQuality::CreatureType)
             ));
         } else {
             panic!("expected Typed filter, got {filter:?}");
@@ -5754,10 +5991,14 @@ mod tests {
     fn that_share_no_creature_types_consumed() {
         let (filter, rest) = parse_type_phrase("creatures that share no creature types");
         if let TargetFilter::Typed(ref tf) = filter {
-            assert!(tf
-                .properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::SharesQuality { quality } if *quality == SharedQuality::CreatureType)));
+            assert!(tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: None,
+                    relation: SharedQualityRelation::DoesNotShare,
+                }
+            )));
         } else {
             panic!("expected Typed filter, got {filter:?}");
         }
@@ -5765,6 +6006,75 @@ mod tests {
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"
         );
+    }
+
+    #[test]
+    fn that_shares_card_type_with_exiled_card_consumed() {
+        let (filter, rest) =
+            parse_type_phrase("permanent that shares a card type with the exiled card");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Permanent)));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CardType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::TrackedSet { id } if *id == TrackedSetId(0))
+        )));
+        assert!(rest.trim().is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn that_dont_share_card_type_with_discarded_card_consumed() {
+        let (filter, rest) =
+            parse_type_phrase("cards that don't share a card type with the discarded card");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CardType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::DoesNotShare,
+            } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
+        )));
+        assert!(rest.trim().is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn that_doesnt_share_land_type_with_land_you_control_consumed() {
+        let (filter, rest) =
+            parse_type_phrase("land that doesn't share a land type with a land you control");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Land)));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::LandType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::DoesNotShare,
+            } if matches!(
+                reference.as_ref(),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    ..
+                }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Land))
+            )
+        )));
+        assert!(rest.trim().is_empty(), "remainder: {rest:?}");
     }
 
     #[test]

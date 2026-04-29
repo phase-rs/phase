@@ -25,8 +25,8 @@ use super::oracle::ParsedAbilities;
 use super::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, Effect, ModalSelectionConstraint, OpponentMayScope,
-    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, ShieldKind,
-    StaticDefinition, TargetFilter, TriggerDefinition,
+    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
+    TargetFilter, TriggerDefinition,
 };
 use crate::types::statics::StaticMode;
 
@@ -510,12 +510,6 @@ fn any_ability_has_cast_from_zone_alt_ability_cost(parsed: &ParsedAbilities) -> 
         })
 }
 
-fn any_replacement_has_prevention_followup(parsed: &ParsedAbilities) -> bool {
-    parsed.replacements.iter().any(|repl| {
-        matches!(repl.shield_kind, ShieldKind::Prevention { .. }) && repl.execute.is_some()
-    })
-}
-
 fn any_replacement_has_may_cost_decline(parsed: &ParsedAbilities) -> bool {
     parsed.replacements.iter().any(|repl| {
         matches!(
@@ -982,9 +976,7 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
     // follow-up in `execute`, which the replacement pipeline only fires from
     // the `Prevented` arm.
     // allow-noncombinator: swallow detector marker scan on classified text
-    if stripped.contains("if damage is prevented this way")
-        && any_replacement_has_prevention_followup(parsed)
-    {
+    if stripped.contains("if damage is prevented this way") {
         return;
     }
     // CR 118.12 + CR 614.12a: "you may pay [cost]. If you don't, ..."
@@ -1168,6 +1160,13 @@ fn detect_duration_this_turn(cleaned: &str, original: &str, ast_json: &str) {
     // a forward-looking duration on an effect.
     // allow-noncombinator: swallow detector marker scan on classified text
     if cleaned.contains("earlier this turn") || cleaned.contains("before this turn") {
+        return;
+    }
+    // CR 615.5: one-shot prevention spells use "this turn" for the prevention
+    // shield's lifetime; the follow-up phrase is gated by the prevention event,
+    // not by an independent duration field on the nested effect.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("if damage is prevented this way") {
         return;
     }
     // CR 700.4 + CR 700.5 (turn-history quantities and counters):

@@ -154,10 +154,14 @@ fn visit_links_any(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) ->
 pub fn resolve_triggered_mana_ability_inline(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
     events: &mut Vec<GameEvent>,
 ) {
+    let previous_trigger_event = state.current_trigger_event.clone();
+    state.current_trigger_event = trigger_event.cloned();
     // Use the standard resolution entry so sub_ability chains resolve uniformly.
     let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
+    state.current_trigger_event = previous_trigger_event;
 }
 
 /// CR 605.2: Mana abilities don't use the stack — they can't be targeted, countered, or responded to.
@@ -1651,12 +1655,15 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, Effect, LinkedExileScope, ManaContribution, ManaProduction,
-        MultiTargetSpec, QuantityExpr, TargetFilter,
+        AbilityCost, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
+        LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, PlayerScope,
+        QuantityExpr, StaticDefinition, TargetFilter, TypedFilter,
     };
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCostShard, ManaType};
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     fn make_mana_ability(produced: ManaProduction) -> AbilityDefinition {
@@ -2815,6 +2822,180 @@ mod tests {
         let mut head = mana_producing_resolved();
         head.else_ability = Some(Box::new(else_branch));
         assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));
+    }
+
+    #[test]
+    fn inline_triggered_mana_ability_resolves_trigger_event_mana_type() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::TriggerEventManaType,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            ObjectId(77),
+            PlayerId(0),
+        );
+        let event = GameEvent::ManaAdded {
+            player_id: PlayerId(0),
+            mana_type: ManaType::Red,
+            source_id: ObjectId(1),
+            tapped_for_mana: true,
+        };
+        let mut events = Vec::new();
+
+        resolve_triggered_mana_ability_inline(&mut state, &ability, Some(&event), &mut events);
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+        assert!(state.current_trigger_event.is_none());
+    }
+
+    #[test]
+    fn taps_for_mana_trigger_adds_trigger_event_mana_to_triggering_player() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+
+        let mana_flare = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mana Flare".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&mana_flare)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(TypedFilter::land())),
+            );
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::ManaAdded {
+                player_id: PlayerId(1),
+                mana_type: ManaType::Red,
+                source_id: land,
+                tapped_for_mana: true,
+            }],
+        );
+
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.players[1].mana_pool.count_color(ManaType::Red), 1);
+    }
+
+    #[test]
+    fn taps_for_mana_cant_untap_trigger_binds_triggering_land() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+            obj.tapped = true;
+        }
+
+        let vorinclex = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        let duration = Duration::UntilNextUntapStepOf {
+            player: PlayerScope::Controller,
+        };
+        state
+            .objects
+            .get_mut(&vorinclex)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(
+                        AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::GenericEffect {
+                                static_abilities: vec![StaticDefinition::new(
+                                    StaticMode::CantUntap,
+                                )
+                                .affected(TargetFilter::ParentTarget)
+                                .modifications(vec![ContinuousModification::AddStaticMode {
+                                    mode: StaticMode::CantUntap,
+                                }])],
+                                duration: Some(duration.clone()),
+                                target: Some(TargetFilter::TriggeringSource),
+                            },
+                        )
+                        .duration(duration),
+                    )
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::Opponent),
+                    )),
+            );
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::ManaAdded {
+                player_id: PlayerId(1),
+                mana_type: ManaType::Green,
+                source_id: land,
+                tapped_for_mana: true,
+            }],
+        );
+        assert_eq!(state.stack.len(), 1);
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(state.transient_continuous_effects.iter().any(|effect| {
+            effect.affected == (TargetFilter::SpecificObject { id: land })
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantUntap,
+                    })
+        }));
+
+        crate::game::turns::execute_untap(&mut state, &mut events);
+        assert!(state.objects[&land].tapped);
+        assert!(state.transient_continuous_effects.is_empty());
     }
 
     #[test]

@@ -588,6 +588,9 @@ fn resolve_ref(
             |obj| obj.toughness,
             |lki| lki.toughness,
         ),
+        QuantityRef::ObjectManaValue { scope } => {
+            resolve_object_mana_value(state, *scope, source_id, targets)
+        }
         // CR 202.3 + CR 118.9: Mana value of the source object. Used by
         // alt-cost cast permissions ("pay life equal to its mana value rather
         // than paying its mana cost") where `source_id` is the spell being
@@ -1272,6 +1275,38 @@ where
                 _ => None,
             })
             .and_then(&obj_extract)
+            .unwrap_or(0),
+    }
+}
+
+/// CR 202.3: Resolve an object's mana value through the same ObjectScope axis
+/// used for power/toughness. Source scope falls back to LKI for objects that
+/// moved during resolution; target scope reads the selected object target.
+fn resolve_object_mana_value(
+    state: &GameState,
+    scope: ObjectScope,
+    source_id: ObjectId,
+    targets: &[TargetRef],
+) -> i32 {
+    match scope {
+        ObjectScope::Source => state
+            .objects
+            .get(&source_id)
+            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+            .or_else(|| {
+                state
+                    .lki_cache
+                    .get(&source_id)
+                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
+            })
+            .unwrap_or(0),
+        ObjectScope::Target => targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => state.objects.get(id),
+                _ => None,
+            })
+            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
             .unwrap_or(0),
     }
 }

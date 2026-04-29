@@ -4,8 +4,8 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityKind, ControllerRef, Effect, EffectError, EffectKind, FilterProp,
-    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, TargetFilter,
-    TargetRef, UnlessCost,
+    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation,
+    TargetFilter, TargetRef, UnlessCost,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
@@ -418,13 +418,19 @@ fn split_player_scope_chain(
 
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
 /// Returns the typed qualities that require group validation.
-fn extract_shares_quality_props(filter: &TargetFilter) -> Vec<&SharedQuality> {
+fn extract_shares_quality_props(
+    filter: &TargetFilter,
+) -> Vec<(&SharedQuality, SharedQualityRelation)> {
     match filter {
         TargetFilter::Typed(typed) => typed
             .properties
             .iter()
             .filter_map(|p| match p {
-                FilterProp::SharesQuality { quality } => Some(quality),
+                FilterProp::SharesQuality {
+                    quality,
+                    reference: None,
+                    relation,
+                } => Some((quality, *relation)),
                 _ => None,
             })
             .collect(),
@@ -1418,9 +1424,14 @@ pub fn resolve_ability_chain(
         // If targets don't share the required quality, skip the effect.
         let shares_quality_failed = if effective.targets.len() >= 2 {
             if let Some(target_filter) = effect_target_filter(&effective.effect) {
-                let qualities = extract_shares_quality_props(target_filter);
-                qualities.iter().any(|quality| {
-                    !filter::validate_shares_quality(state, &effective.targets, quality)
+                let constraints = extract_shares_quality_props(target_filter);
+                constraints.iter().any(|(quality, relation)| {
+                    let shares =
+                        filter::validate_shares_quality(state, &effective.targets, quality);
+                    match relation {
+                        SharedQualityRelation::Shares => !shares,
+                        SharedQualityRelation::DoesNotShare => shares,
+                    }
                 })
             } else {
                 false
@@ -2027,6 +2038,10 @@ fn evaluate_condition(
             );
             comparator.evaluate(l, r)
         }
+        AbilityCondition::CastDuringPhase { phases } => ability
+            .context
+            .cast_phase
+            .is_some_and(|cast_phase| phases.contains(&cast_phase)),
         AbilityCondition::HasMaxSpeed => has_max_speed(state, ability.controller),
         AbilityCondition::IsMonarch => state.monarch == Some(ability.controller),
         // "Instead" override conditions — return pure boolean value.
@@ -4961,6 +4976,50 @@ mod tests {
             &AbilityCondition::IsMonarch,
             &state,
             &opponent_ability
+        ));
+    }
+
+    #[test]
+    fn evaluate_cast_during_main_phase_checks_cast_phase_context() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.phase = Phase::BeginCombat;
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.context.cast_phase = Some(Phase::PreCombatMain);
+
+        assert!(evaluate_condition(
+            &AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            },
+            &state,
+            &ability
+        ));
+
+        ability.context.cast_phase = Some(Phase::BeginCombat);
+        assert!(!evaluate_condition(
+            &AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            },
+            &state,
+            &ability
+        ));
+
+        ability.context.cast_phase = Some(Phase::PostCombatMain);
+        state.active_player = PlayerId(1);
+        assert!(evaluate_condition(
+            &AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            },
+            &state,
+            &ability
         ));
     }
 

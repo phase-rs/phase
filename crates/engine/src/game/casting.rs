@@ -3,6 +3,7 @@ use crate::types::ability::{
     ContinuousModification, Duration, Effect, GameRestriction, QuantityExpr, ResolvedAbility,
     RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
+use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, ConvokeMode, GameState, PendingCast, SneakPlacement, SpellCastRecord,
@@ -25,9 +26,7 @@ use super::ability_utils::{
     build_target_slots, compute_unavailable_modes, flatten_targets_in_chain,
     modal_choice_for_player, target_constraints_from_modal,
 };
-use super::casting_costs::{
-    self, auto_tap_mana_sources, check_additional_cost_or_pay, pay_and_push_adventure,
-};
+use super::casting_costs::{self, auto_tap_mana_sources, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
 use super::mana_payment;
@@ -1771,37 +1770,83 @@ pub(super) fn consume_pending_spell_cost_reduction(state: &mut GameState, caster
     }
 }
 
-/// CR 715.3a: Swap object characteristics to the Adventure face for casting.
-/// Saves the creature face in `back_face` for later restoration.
-fn swap_to_adventure_face(obj: &mut crate::game::game_object::GameObject) {
-    let adventure = match obj.back_face.take() {
+/// CR 715.3a / CR 720.3a: Swap object characteristics to the alternative
+/// spell face for casting. Saves the normal face in `back_face` for later
+/// restoration.
+fn swap_to_alternative_spell_face(obj: &mut crate::game::game_object::GameObject) {
+    let alternative = match obj.back_face.take() {
         Some(b) => b,
         None => return,
     };
-    // Snapshot current (creature) face into back_face
-    let creature_snapshot = super::printed_cards::snapshot_object_face(obj);
-    super::printed_cards::apply_back_face_to_object(obj, adventure);
-    obj.back_face = Some(creature_snapshot);
+    let normal_snapshot = super::printed_cards::snapshot_object_face(obj);
+    super::printed_cards::apply_back_face_to_object(obj, alternative);
+    obj.back_face = Some(normal_snapshot);
 }
 
-/// CR 715: Returns true if this object is an Adventure card (creature front + instant/sorcery back).
-fn is_adventure_card(obj: &crate::game::game_object::GameObject) -> bool {
+/// CR 715 / CR 720: Returns the Adventure-family spell layout if this object
+/// has normal creature characteristics plus an inset instant/sorcery spell
+/// face that may be chosen while casting from hand.
+fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Option<LayoutKind> {
     let Some(ref back) = obj.back_face else {
-        return false;
+        return None;
     };
     use crate::types::card_type::CoreType;
-    back.card_types
+    let back_is_spell = back
+        .card_types
         .core_types
         .iter()
-        .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery))
-        && obj
-            .card_types
-            .core_types
-            .iter()
-            .any(|ct| matches!(ct, CoreType::Creature))
+        .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery));
+    let front_is_creature = obj
+        .card_types
+        .core_types
+        .iter()
+        .any(|ct| matches!(ct, CoreType::Creature));
+    if !back_is_spell || !front_is_creature {
+        return None;
+    }
+
+    if back
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype.eq_ignore_ascii_case("Omen"))
+    {
+        return Some(LayoutKind::Omen);
+    }
+    if back
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype.eq_ignore_ascii_case("Adventure"))
+    {
+        return Some(LayoutKind::Adventure);
+    }
+
+    match back.layout_kind {
+        Some(LayoutKind::Omen) => Some(LayoutKind::Omen),
+        Some(LayoutKind::Adventure) => Some(LayoutKind::Adventure),
+        Some(_) => None,
+        None => Some(LayoutKind::Adventure),
+    }
 }
 
-/// CR 715.3a: Handle Adventure face choice and proceed with casting.
+fn casting_variant_for_alternative_spell(layout: LayoutKind) -> CastingVariant {
+    match layout {
+        LayoutKind::Adventure => CastingVariant::Adventure,
+        LayoutKind::Omen => CastingVariant::Omen,
+        LayoutKind::Single
+        | LayoutKind::Split
+        | LayoutKind::Flip
+        | LayoutKind::Transform
+        | LayoutKind::Meld
+        | LayoutKind::Modal
+        | LayoutKind::Prepare => {
+            unreachable!("alternative_spell_layout only returns Adventure or Omen")
+        }
+    }
+}
+
+/// CR 715.3a / CR 720.3: Handle alternative spell-face choice and proceed with casting.
 pub fn handle_adventure_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -1818,100 +1863,23 @@ pub fn handle_adventure_choice(
         return continue_cast_from_prepared(state, player, object_id, events);
     }
 
-    // CR 715.3a: Swap to Adventure face characteristics
+    let layout = state
+        .objects
+        .get(&object_id)
+        .and_then(alternative_spell_layout)
+        .ok_or_else(|| {
+            EngineError::InvalidAction("Object has no castable alternative spell face".to_string())
+        })?;
+    let casting_variant = casting_variant_for_alternative_spell(layout);
+
+    // CR 715.3a / CR 720.3a: Swap to alternative spell face characteristics.
     if let Some(obj) = state.objects.get_mut(&object_id) {
-        swap_to_adventure_face(obj);
+        swap_to_alternative_spell_face(obj);
     }
 
-    let prepared = prepare_spell_cast(state, player, object_id)?;
-
-    // CR 601.2a + CR 715.3a: Announce the Adventure spell onto the stack before
-    // mode/target/cost processing. The Adventure path bypasses
-    // continue_with_prepared so it must announce explicitly.
-    announce_spell_on_stack(state, player, &prepared, events);
-
-    // The Adventure face is always an instant or sorcery, so it always has a
-    // spell ability_def (synthesized from its Oracle text).
-    let ability_def = prepared
-        .ability_def
-        .as_ref()
-        .expect("adventure spell face must have ability_def");
-
-    let resolved = {
-        let mut r = ResolvedAbility::new(
-            *ability_def.effect.clone(),
-            Vec::new(),
-            prepared.object_id,
-            player,
-        );
-        if let Some(sub) = &ability_def.sub_ability {
-            r = r.sub_ability(build_resolved_from_def(sub, prepared.object_id, player));
-        }
-        if let Some(c) = ability_def.condition.clone() {
-            r = r.condition(c);
-        }
-        r
-    };
-
-    // Evaluate layers before targeting
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
-
-    let target_slots = build_target_slots(state, &resolved)?;
-    if !target_slots.is_empty() {
-        if let Some(targets) =
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
-        {
-            let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
-            return pay_and_push_adventure(
-                state,
-                player,
-                prepared.object_id,
-                prepared.card_id,
-                resolved,
-                &prepared.mana_cost,
-                CastingVariant::Adventure,
-                None,
-                prepared.origin_zone,
-                events,
-            );
-        }
-
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
-        let mut pending_adv = PendingCast::new(
-            prepared.object_id,
-            prepared.card_id,
-            resolved,
-            prepared.mana_cost.clone(),
-        );
-        // CR 715.3a: Preserve Adventure casting variant so the spell resolves to exile.
-        // prepare_spell_cast always returns CastingVariant::Normal — override here.
-        pending_adv.casting_variant = CastingVariant::Adventure;
-        pending_adv.distribute = ability_def.distribute.clone();
-        pending_adv.origin_zone = prepared.origin_zone;
-        return Ok(WaitingFor::TargetSelection {
-            player,
-            pending_cast: Box::new(pending_adv),
-            target_slots,
-            selection,
-        });
-    }
-
-    // No targets -- proceed to payment.
-    pay_and_push_adventure(
-        state,
-        player,
-        prepared.object_id,
-        prepared.card_id,
-        resolved,
-        &prepared.mana_cost,
-        CastingVariant::Adventure,
-        None,
-        prepared.origin_zone,
-        events,
-    )
+    let mut prepared = prepare_spell_cast(state, player, object_id)?;
+    prepared.casting_variant = casting_variant;
+    continue_with_prepared(state, player, prepared, events)
 }
 
 /// Handle Warp cost choice and proceed with casting.
@@ -2316,9 +2284,10 @@ pub fn handle_cast_spell(
         )));
     }
 
-    // CR 715.3a: Adventure cards from hand require choosing creature or Adventure face.
+    // CR 715.3 / CR 720.3: Adventure-family cards from hand require choosing
+    // the normal creature face or alternative spell face.
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand && is_adventure_card(obj) {
+        if obj.zone == Zone::Hand && alternative_spell_layout(obj).is_some() {
             return Ok(WaitingFor::AdventureCastChoice {
                 player,
                 object_id,
@@ -2937,13 +2906,14 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
         return true;
     }
 
-    // CR 715.3a: For adventure cards, also evaluate the adventure face (instant/sorcery).
-    // The creature face may be unaffordable while the adventure face is castable — in that
-    // case the card is still legally castable and will prompt AdventureCastChoice.
-    if is_adventure_card(obj) {
+    // CR 715.3a / CR 720.3a: For Adventure-family cards, also evaluate the
+    // alternative spell face. The creature face may be unaffordable while the
+    // spell face is castable; in that case the card is still legally castable
+    // and will prompt AdventureCastChoice.
+    if alternative_spell_layout(obj).is_some() {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&object_id) {
-            swap_to_adventure_face(sim_obj);
+            swap_to_alternative_spell_face(sim_obj);
         }
         return can_cast_object_now(&sim, player, object_id);
     }
@@ -8010,6 +7980,62 @@ mod tests {
         obj_id
     }
 
+    /// Create an Omen card in hand: creature normal face / sorcery Omen face.
+    fn create_omen_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(71),
+            player,
+            "Omen Beast".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Beast".to_string());
+        obj.power = Some(4);
+        obj.toughness = Some(4);
+        obj.mana_cost = ManaCost::generic(5);
+
+        obj.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Good Omen".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types: {
+                let mut ct = crate::types::card_type::CardType::default();
+                ct.core_types.push(CoreType::Sorcery);
+                ct.subtypes.push("Omen".to_string());
+                ct
+            },
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            },
+            keywords: Vec::new(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: crate::types::ability::GainLifePlayer::Controller,
+                },
+            )],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![ManaColor::Green],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Omen),
+        });
+
+        obj_id
+    }
+
     /// Regression: adventure card is castable (via adventure face) even when the
     /// creature face cost is unaffordable. Previously can_cast_object_now gated on
     /// the creature face cost and would return false, suppressing AdventureCastChoice.
@@ -8058,6 +8084,100 @@ mod tests {
     }
 
     #[test]
+    fn omen_cast_choice_when_only_omen_face_affordable() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_omen_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Omen card should be castable when only the Omen face is affordable"
+        );
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(71), &mut events).unwrap();
+
+        assert!(
+            matches!(result, WaitingFor::AdventureCastChoice { player, .. }
+                if player == PlayerId(0)),
+            "Expected AdventureCastChoice for Omen card, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn omen_face_cast_uses_omen_variant_and_resolves_to_owner_library() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_omen_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(71), &mut events).unwrap();
+        assert!(
+            matches!(result, WaitingFor::AdventureCastChoice { .. }),
+            "Expected AdventureCastChoice for Omen card, got {:?}",
+            result
+        );
+
+        let result = handle_adventure_choice(
+            &mut state,
+            PlayerId(0),
+            obj_id,
+            CardId(71),
+            false,
+            &mut events,
+        )
+        .expect("Omen face cast should succeed without panic");
+        assert!(
+            matches!(result, WaitingFor::Priority { .. }),
+            "Expected Priority after Omen face cast, got {:?}",
+            result
+        );
+
+        let entry = state
+            .stack
+            .iter()
+            .find(|entry| entry.id == obj_id)
+            .expect("Omen spell should be on the stack");
+        match &entry.kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                casting_variant,
+                ..
+            } => {
+                assert_eq!(*casting_variant, CastingVariant::Omen);
+                assert!(matches!(ability.effect, Effect::GainLife { .. }));
+            }
+            other => panic!("expected Omen Spell entry, got {other:?}"),
+        }
+
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert!(
+            state.players[0].library.contains(&obj_id),
+            "Omen spell should resolve into owner's library"
+        );
+        assert!(
+            !state.exile.contains(&obj_id),
+            "Omen spell should not exile"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&obj_id),
+            "Omen spell should not go to graveyard on resolution"
+        );
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(obj.name, "Omen Beast");
+        assert_eq!(obj.zone, Zone::Library);
+        assert_eq!(
+            obj.back_face.as_ref().map(|face| face.name.as_str()),
+            Some("Good Omen")
+        );
+        assert_eq!(state.players[0].life, 23);
+    }
+
+    #[test]
     fn adventure_exile_on_resolve() {
         let mut state = setup_game_at_main_phase();
         let obj_id = create_adventure_in_hand(&mut state, PlayerId(0));
@@ -8067,7 +8187,7 @@ mod tests {
 
         // Swap to Adventure face (simulating what handle_adventure_choice does)
         if let Some(obj) = state.objects.get_mut(&obj_id) {
-            swap_to_adventure_face(obj);
+            swap_to_alternative_spell_face(obj);
         }
 
         state.stack.push_back(StackEntry {

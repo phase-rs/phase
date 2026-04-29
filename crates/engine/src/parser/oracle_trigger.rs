@@ -23,8 +23,9 @@ use super::oracle_util::{
 use crate::parser::oracle_warnings::{push_warning, take_warnings};
 use crate::types::ability::{
     AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef, DamageKindFilter,
-    FilterProp, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
+    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
+    UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::PlayerActionKind;
@@ -68,6 +69,21 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
                     .and_then(self_recursion_trigger_zone)
             }),
     }
+}
+
+fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
+    value(
+        (),
+        pair(
+            alt((
+                tag::<_, _, VerboseError<&str>>("that player "),
+                tag("that opponent "),
+            )),
+            alt((tag("adds "), tag("add "))),
+        ),
+    )
+    .parse(effect_lower.trim_start())
+    .is_ok()
 }
 
 fn trigger_condition_source_zone(condition: &TriggerCondition) -> Option<Zone> {
@@ -534,6 +550,14 @@ pub(crate) fn parse_trigger_line_with_index(
         };
         if has_up_to {
             ability.optional_targeting = true;
+        }
+        if effect_adds_mana_to_triggering_player(&effect_lower)
+            && matches!(
+                ability.effect.as_ref(),
+                crate::types::ability::Effect::Mana { .. }
+            )
+        {
+            ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
         }
         // CR 609.3: "You may" applies to the effect during resolution, not to whether
         // the trigger fires. Propagate to the execute ability so the resolver prompts
@@ -1326,7 +1350,9 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             // CR 207.2c: Addendum — "if you cast this spell during your main phase"
             (
                 "if you cast this spell during your main phase",
-                TriggerCondition::CastDuringMainPhase,
+                TriggerCondition::CastDuringPhase {
+                    phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+                },
             ),
             // CR 400.7: "if it had counters on it" — past-state counter check
             (
@@ -7922,6 +7948,28 @@ mod tests {
     }
 
     #[test]
+    fn trigger_player_taps_land_for_mana_adds_to_that_player() {
+        let def = parse_trigger_line(
+            "Whenever a player taps a land for mana, that player adds one mana of any type that land produced.",
+            "Mana Flare",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)))
+        );
+        let execute = def.execute.as_deref().unwrap();
+        assert_eq!(execute.player_scope, Some(PlayerFilter::TriggeringPlayer));
+        assert!(matches!(
+            execute.effect.as_ref(),
+            crate::types::ability::Effect::Mana {
+                produced: crate::types::ability::ManaProduction::TriggerEventManaType,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn trigger_enchanted_land_is_tapped_for_mana() {
         let def = parse_trigger_line(
             "Whenever enchanted land is tapped for mana, its controller adds an additional {G}.",
@@ -10831,7 +10879,12 @@ mod tests {
         let (cleaned, cond) =
             extract_if_condition("draw a card if you cast this spell during your main phase");
         assert_eq!(cleaned, "draw a card");
-        assert_eq!(cond.unwrap(), TriggerCondition::CastDuringMainPhase);
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            }
+        );
     }
 
     #[test]

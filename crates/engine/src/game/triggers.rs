@@ -1019,6 +1019,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 super::mana_abilities::resolve_triggered_mana_ability_inline(
                     state,
                     &trigger.ability,
+                    trigger.trigger_event.as_ref(),
                     &mut events_out,
                 );
                 continue;
@@ -1972,10 +1973,8 @@ pub(crate) fn check_trigger_condition(
                     .iter()
                     .any(|a| matches!(a, ChosenAttribute::TributeOutcome(TributeOutcome::Paid)))
             }),
-        // CR 207.2c: Addendum — cast during main phase.
-        TriggerCondition::CastDuringMainPhase => {
-            matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-        }
+        // CR 207.2c + CR 601.2: cast during the configured phase set.
+        TriggerCondition::CastDuringPhase { phases } => phases.contains(&state.phase),
         // CR 207.2c: Adamant — at least N mana of a specific color was spent to cast.
         // Reads the per-color tally recorded in casting::pay_mana_cost.
         TriggerCondition::ManaColorSpent { color, minimum } => source_id
@@ -6349,6 +6348,103 @@ pub mod tests {
         assert!(
             !check_trigger_constraint(&state, &trig_def, source, 0, PlayerId(0), &spell_event),
             "intervening non-X spell must not reset qualifying count"
+        );
+    }
+
+    #[test]
+    fn nth_spell_you_trigger_matches_source_controller_spell_only() {
+        fn spell_record() -> SpellCastRecord {
+            SpellCastRecord {
+                core_types: vec![CoreType::Instant],
+                supertypes: vec![],
+                subtypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                mana_value: 1,
+                has_x_in_cost: false,
+            }
+        }
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Cosmogrand Zenith".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::SpellCast)
+                    .valid_target(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ))
+                    .constraint(TriggerConstraint::NthSpellThisTurn { n: 2, filter: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+            );
+        }
+
+        let opponent_spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Opponent Spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .spells_cast_this_turn_by_player
+            .insert(PlayerId(0), vec![spell_record(), spell_record()]);
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                card_id: CardId(1),
+                controller: PlayerId(0),
+                object_id: opponent_spell,
+            }],
+        );
+        assert!(
+            state.stack.is_empty(),
+            "source controller's 'you cast your second spell' trigger must not fire for an opponent's second spell"
+        );
+
+        let controller_spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Controller Spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .spells_cast_this_turn_by_player
+            .insert(PlayerId(1), vec![spell_record(), spell_record()]);
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                card_id: CardId(2),
+                controller: PlayerId(1),
+                object_id: controller_spell,
+            }],
+        );
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "source controller's second spell should fire the trigger"
+        );
+        assert!(matches!(
+            state.stack.back().map(|entry| &entry.kind),
+            Some(StackEntryKind::TriggeredAbility { .. })
+        ));
+        assert_eq!(
+            state.stack.back().map(|entry| entry.source_id),
+            Some(source)
         );
     }
 

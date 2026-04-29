@@ -3,10 +3,11 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, opt, value};
+use nom::sequence::preceded;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
-use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
@@ -23,6 +24,7 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::mana::ManaCost;
+use crate::types::phase::Phase;
 use crate::types::zones::Zone;
 
 /// Wrap `cond` in `AbilityCondition::Not` when `negated` is true; otherwise
@@ -1043,11 +1045,16 @@ pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, Quant
 }
 
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
+    let text = text.trim().trim_end_matches('.');
+
+    if let Some(condition) = parse_cast_during_phase_condition_text(text) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_paid_x_condition_text(text) {
         return Some(condition);
     }
 
-    let text = text.trim().trim_end_matches('.');
     let (lhs_text, comparator_rhs) = text.split_once(" is ")?;
     let lhs = parse_cda_quantity(lhs_text)?;
     let (comparator, rhs) = parse_quantity_comparison(comparator_rhs)?;
@@ -1058,10 +1065,43 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     })
 }
 
+fn parse_cast_during_phase_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, parse_cast_during_phase_condition)
+        .map(|phases| AbilityCondition::CastDuringPhase { phases })
+}
+
+fn parse_cast_during_phase_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, Vec<Phase>> {
+    all_consuming(|input| {
+        let (rest, _) =
+            tag::<_, _, VerboseError<&str>>("you cast this spell during your ").parse(input)?;
+        alt((
+            value(
+                vec![Phase::PreCombatMain, Phase::PostCombatMain],
+                tag::<_, _, VerboseError<&str>>("main phase"),
+            ),
+            value(vec![Phase::PreCombatMain], tag("precombat main phase")),
+            value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
+            value(vec![Phase::Upkeep], tag("upkeep")),
+            value(vec![Phase::Draw], tag("draw step")),
+            value(vec![Phase::BeginCombat], tag("beginning of combat step")),
+            value(vec![Phase::DeclareAttackers], tag("declare attackers step")),
+            value(vec![Phase::DeclareBlockers], tag("declare blockers step")),
+            value(vec![Phase::CombatDamage], tag("combat damage step")),
+            value(vec![Phase::EndCombat], tag("end of combat step")),
+            value(vec![Phase::End], tag("end step")),
+            value(vec![Phase::Cleanup], tag("cleanup step")),
+        ))
+        .parse(rest)
+    })
+    .parse(input)
+}
+
 fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
-    let trimmed = text.trim();
-    let lower = trimmed.to_lowercase();
-    let ((comparator, amount), _) = nom_on_lower(trimmed, &lower, |input| {
+    let lower = text.to_ascii_lowercase();
+    let (comparator, amount) = nom_parse_lower(&lower, |input| {
         all_consuming(|input| {
             let (rest, _) = tag::<_, _, VerboseError<&str>>("x is ").parse(input)?;
             let (rest, amount) = nom_primitives::parse_number(rest)?;
@@ -1446,6 +1486,10 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
 
     let lower = text.to_lowercase();
 
+    if let Some(condition) = parse_you_controlled_parent_target_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_zone_change_object_matches_filter_condition(lower.as_str()) {
         return Some(condition);
     }
@@ -1619,6 +1663,57 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         return None;
     }
     static_condition_to_ability_condition(&condition)
+}
+
+fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCondition> {
+    let controller_only = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+    let permanent = TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You));
+    let nonland_permanent = TargetFilter::Typed(
+        TypedFilter::permanent()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+            .controller(ControllerRef::You),
+    );
+    let card = TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You));
+    let artifact =
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
+    let creature = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+    let enchantment = TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Enchantment).controller(ControllerRef::You),
+    );
+    let land = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
+    let planeswalker = TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+    );
+    let battle =
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle).controller(ControllerRef::You));
+
+    let (_, filter) = all_consuming(preceded(
+        tag("you controlled "),
+        alt((
+            value(controller_only, tag("it")),
+            preceded(
+                tag("that "),
+                alt((
+                    value(nonland_permanent, tag("nonland permanent")),
+                    value(permanent, tag("permanent")),
+                    value(artifact, tag("artifact")),
+                    value(creature, tag("creature")),
+                    value(enchantment, tag("enchantment")),
+                    value(land, tag("land")),
+                    value(planeswalker, tag("planeswalker")),
+                    value(battle, tag("battle")),
+                    value(card, tag("card")),
+                )),
+            ),
+        )),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    Some(AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki: true,
+    })
 }
 
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {

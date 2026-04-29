@@ -5826,9 +5826,12 @@ fn is_choose_as_targeting(rest: &str) -> bool {
 /// Match "choose a creature type", "choose a color", "choose odd or even",
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
 pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("choose ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("choose "),
+        nom::sequence::preceded(tag("secretly "), tag("choose ")),
+    ))
+    .parse(lower)
+    .ok()?;
     type E<'a> = VerboseError<&'a str>;
     if tag::<_, _, E>("a creature type").parse(rest).is_ok() {
         Some(ChoiceType::CreatureType)
@@ -8989,7 +8992,7 @@ fn try_parse_damage(lower: &str, text: &str) -> Option<Effect> {
 /// Safety: `pos` is computed from `lower.find(...)` and used to slice both `text`
 /// and `lower` at the same byte offset. This is sound because Oracle text is ASCII
 /// and `to_lowercase()` preserves byte length for ASCII characters.
-fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Effect, &'a str)> {
+fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<(Effect, &'a str)> {
     // Match: "~ deals N damage to {target}" / "deal N damage to {target}"
     // and variable forms like "deal that much damage" or
     // "deal damage equal to its power".
@@ -10140,7 +10143,7 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CastVariantPaid, Comparator, ContinuousModification, ControllerRef, CountScope,
+        CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef, CountScope,
         DoublePTMode, Duration, FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution,
         ManaProduction, PaymentCost, TypeFilter, ZoneRef,
     };
@@ -15819,6 +15822,34 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn search_filter_card_of_chosen_kind() {
+        let filter = parse_search_filter("card of the chosen kind");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(tf
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::IsChosenLandOrNonlandKind)));
+    }
+
+    #[test]
+    fn search_filter_permanent_card_of_chosen_kind() {
+        let filter = parse_search_filter("permanent card of the chosen kind");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Permanent)));
+        assert!(tf
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::IsChosenLandOrNonlandKind)));
+    }
+
     // --- Seek parser tests ---
 
     #[test]
@@ -15848,6 +15879,48 @@ mod tests {
             t,
             TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Land)
         )));
+    }
+
+    #[test]
+    fn seek_cards_of_chosen_kind() {
+        let details = parse_seek_details("seek two cards of the chosen kind");
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+        let TargetFilter::Typed(tf) = &details.filter else {
+            panic!("Expected Typed filter, got {:?}", details.filter);
+        };
+        assert!(tf
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::IsChosenLandOrNonlandKind)));
+    }
+
+    #[test]
+    fn choose_land_or_nonland_then_seek_chosen_kind_chain() {
+        let def = parse_effect_chain(
+            "Secretly choose land or nonland. Seek a card of the chosen kind.",
+            AbilityKind::Spell,
+        );
+        let Effect::Choose {
+            choice_type: ChoiceType::Labeled { options },
+            persist: false,
+        } = *def.effect
+        else {
+            panic!("Expected Choose land/nonland, got {:?}", def.effect);
+        };
+        assert_eq!(options, vec!["Land".to_string(), "Nonland".to_string()]);
+
+        let seek = def.sub_ability.expect("expected seek continuation");
+        let Effect::Seek { filter, count, .. } = *seek.effect else {
+            panic!("Expected Seek continuation, got {:?}", seek.effect);
+        };
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(tf
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::IsChosenLandOrNonlandKind)));
     }
 
     #[test]
@@ -16948,6 +17021,31 @@ mod tests {
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },
             }
+        );
+    }
+
+    #[test]
+    fn parse_condition_text_cast_during_main_phase() {
+        assert_eq!(
+            parse_condition_text("you cast this spell during your main phase"),
+            Some(AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_addendum_condition_on_followup_clause() {
+        let def = parse_effect_chain(
+            "Return target creature to its owner's hand. If you cast this spell during your main phase, draw a card.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.expect("expected conditional addendum");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            })
         );
     }
 
@@ -19377,6 +19475,16 @@ mod tests {
         assert_eq!(
             super::try_parse_named_choice("choose a creature card name"),
             Some(ChoiceType::CardName)
+        );
+    }
+
+    #[test]
+    fn named_choice_accepts_secretly_choose_land_or_nonland() {
+        assert_eq!(
+            super::try_parse_named_choice("secretly choose land or nonland"),
+            Some(ChoiceType::Labeled {
+                options: vec!["Land".to_string(), "Nonland".to_string()]
+            })
         );
     }
 

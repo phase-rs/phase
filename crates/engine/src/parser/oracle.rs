@@ -2517,7 +2517,7 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, Comparator, ContinuousModification, FilterProp, ManaSpendRestriction,
         ModalSelectionCondition, ModalSelectionConstraint, ObjectScope, ParsedCondition,
-        PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReplacementCondition, ShieldKind,
+        PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReplacementCondition,
         StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind};
@@ -7653,17 +7653,14 @@ mod tests {
             parsed.parse_warnings
         );
 
-        let replacement = parsed
-            .replacements
+        let ability = parsed
+            .abilities
             .first()
-            .expect("expected prevention replacement");
-        assert!(matches!(
-            replacement.shield_kind,
-            ShieldKind::Prevention { .. }
-        ));
+            .expect("expected prevention spell ability");
+        assert!(matches!(*ability.effect, Effect::PreventDamage { .. }));
         assert!(
-            replacement.execute.is_some(),
-            "expected prevented-this-way follow-up execute"
+            ability.sub_ability.is_some(),
+            "expected prevented-this-way follow-up sub-ability"
         );
     }
 

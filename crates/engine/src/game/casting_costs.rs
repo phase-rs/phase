@@ -1563,6 +1563,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // evaluate conditions like "if you cast it from your hand".
     let mut ability = ability;
     ability.context.cast_from_zone = Some(source_zone);
+    ability.context.cast_phase = Some(state.phase);
 
     // Emit targeting events now that the cast is committed.
     emit_targeting_events(

@@ -43,10 +43,22 @@ pub fn resolve(
     // Resolve restriction templates into concrete restrictions
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
 
+    let recipient = match produced {
+        ManaProduction::TriggerEventManaType => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(|event| match event {
+                GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
+                _ => None,
+            })
+            .unwrap_or(ability.controller),
+        _ => ability.controller,
+    };
+
     let player = state
         .players
         .iter_mut()
-        .find(|p| p.id == ability.controller)
+        .find(|p| p.id == recipient)
         .ok_or(EffectError::PlayerNotFound)?;
 
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
@@ -63,7 +75,7 @@ pub fn resolve(
         player.mana_pool.add(unit);
 
         events.push(GameEvent::ManaAdded {
-            player_id: ability.controller,
+            player_id: recipient,
             mana_type,
             source_id: ability.source_id,
             tapped_for_mana: false,

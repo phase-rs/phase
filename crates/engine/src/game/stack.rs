@@ -22,6 +22,16 @@ pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<
     state.stack.push_back(entry);
 }
 
+fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        if let Some(normal_face) = obj.back_face.take() {
+            let alternative_snapshot = super::printed_cards::snapshot_object_face(obj);
+            super::printed_cards::apply_back_face_to_object(obj, normal_face);
+            obj.back_face = Some(alternative_snapshot);
+        }
+    }
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
@@ -128,6 +138,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         Zone::Graveyard
                     };
                     zones::move_to_zone(state, entry.id, dest, events);
+                    if matches!(
+                        casting_variant,
+                        CastingVariant::Adventure | CastingVariant::Omen
+                    ) {
+                        restore_alternative_spell_normal_face(state, entry.id);
+                    }
                 }
                 events.push(GameEvent::StackResolved {
                     object_id: entry.id,
@@ -174,6 +190,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         } else if casting_variant == CastingVariant::Adventure {
             // CR 715.3d: Adventure spell resolves → exile with casting permission.
             Zone::Exile
+        } else if casting_variant == CastingVariant::Omen {
+            // CR 720.3d: Omen spell resolves → shuffle into owner's library.
+            Zone::Library
         } else if casting_variant == CastingVariant::Harmonize {
             // CR 702.180a: If the harmonize cost was paid, exile this card instead of putting it anywhere else.
             if is_permanent_type(state, entry.id) {
@@ -412,18 +431,31 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             zones::move_to_zone(state, entry.id, dest, events);
         }
 
-        // CR 715.3d: When an Adventure spell resolves to exile, restore the creature face
-        // and grant AdventureCreature permission so it can be cast from exile.
+        // CR 715.4 / CR 720.4: Outside the stack, Adventure-family cards have
+        // their normal characteristics.
+        if matches!(
+            casting_variant,
+            CastingVariant::Adventure | CastingVariant::Omen
+        ) {
+            restore_alternative_spell_normal_face(state, entry.id);
+        }
+
+        // CR 715.3d: When an Adventure spell resolves to exile, grant
+        // AdventureCreature permission so it can be cast from exile.
         if casting_variant == CastingVariant::Adventure {
             if let Some(obj) = state.objects.get_mut(&entry.id) {
-                // Restore creature face characteristics (swap back from Adventure face)
-                if let Some(creature_face) = obj.back_face.take() {
-                    let adventure_snapshot = super::printed_cards::snapshot_object_face(obj);
-                    super::printed_cards::apply_back_face_to_object(obj, creature_face);
-                    obj.back_face = Some(adventure_snapshot);
-                }
                 obj.casting_permissions
                     .push(crate::types::ability::CastingPermission::AdventureCreature);
+            }
+        }
+        if casting_variant == CastingVariant::Omen {
+            if let Some(owner) = state
+                .objects
+                .get(&entry.id)
+                .filter(|obj| obj.zone == Zone::Library)
+                .map(|obj| obj.owner)
+            {
+                effects::change_zone::shuffle_library(state, owner);
             }
         }
 

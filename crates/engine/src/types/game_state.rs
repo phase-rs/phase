@@ -2040,6 +2040,9 @@ pub enum CastingVariant {
     /// CR 715.4: Cast as the Adventure half. On resolution, exiled with
     /// AdventureCreature permission and creature face restored.
     Adventure,
+    /// CR 720.3d / CR 720.4: Cast as the Omen half. On resolution, shuffled
+    /// into its owner's library with normal characteristics restored.
+    Omen,
     /// CR 702.185a: Cast via Warp alternative cost from hand. On resolution,
     /// creates a delayed trigger to exile at end step with WarpExile permission.
     Warp,

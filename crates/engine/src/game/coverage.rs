@@ -10,8 +10,9 @@ use crate::types::ability::{
     ControllerRef, CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SharedQuality, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ReplacementMode, SharedQuality, SharedQualityRelation, SpellCastingOption,
+    SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -347,6 +348,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::IsChosenCreatureType => parts.push("chosen creature type".into()),
             FilterProp::IsChosenCardType => parts.push("chosen card type".into()),
+            FilterProp::IsChosenLandOrNonlandKind => parts.push("chosen land/nonland kind".into()),
             FilterProp::NotColor { color } => {
                 parts.push(format!("non-{}", format!("{color:?}").to_lowercase()));
             }
@@ -367,13 +369,28 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let zone_strs: Vec<_> = zones.iter().map(fmt_zone).collect();
                 parts.push(format!("in {}", zone_strs.join("/")));
             }
-            FilterProp::SharesQuality { quality } => {
+            FilterProp::SharesQuality {
+                quality,
+                reference,
+                relation,
+            } => {
                 let name = match quality {
+                    SharedQuality::Name => "name",
                     SharedQuality::CreatureType => "creature type",
                     SharedQuality::Color => "color",
                     SharedQuality::CardType => "card type",
+                    SharedQuality::LandType => "land type",
                 };
-                parts.push(format!("shares {name}"));
+                let prefix = match relation {
+                    SharedQualityRelation::Shares => "shares",
+                    SharedQualityRelation::DoesNotShare => "doesn't share",
+                };
+                let suffix = if reference.is_some() {
+                    " with reference"
+                } else {
+                    ""
+                };
+                parts.push(format!("{prefix} {name}{suffix}"));
             }
             FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
@@ -628,6 +645,10 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source => "self toughness".into(),
             ObjectScope::Target => "target's toughness".into(),
+        },
+        QuantityRef::ObjectManaValue { scope } => match scope {
+            ObjectScope::Source => "self mana value".into(),
+            ObjectScope::Target => "target's mana value".into(),
         },
         QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
@@ -4138,6 +4159,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
         AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
         AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
+        AbilityCondition::CastDuringPhase { .. } => ("CastDuringPhase", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
@@ -4198,6 +4220,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source => ("SelfToughness", Handled),
             ObjectScope::Target => ("TargetToughness", Handled),
+        },
+        QuantityRef::ObjectManaValue { scope } => match scope {
+            ObjectScope::Source => ("SelfManaValue", Handled),
+            ObjectScope::Target => ("TargetManaValue", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),

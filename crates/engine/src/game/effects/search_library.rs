@@ -331,6 +331,24 @@ mod tests {
         id
     }
 
+    fn add_library_land_with_subtype(
+        state: &mut GameState,
+        card_id: u64,
+        owner: PlayerId,
+        name: &str,
+        subtype: &str,
+    ) -> ObjectId {
+        let id = add_library_land(state, card_id, owner, name, false);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push(subtype.to_string());
+        id
+    }
+
     #[test]
     fn search_finds_matching_cards_sets_search_choice() {
         let mut state = GameState::new_two_player(42);
@@ -640,6 +658,150 @@ mod tests {
 
         assert_eq!(state.objects[&land].zone, Zone::Hand);
         assert!(state.players[0].hand.contains(&land));
+    }
+
+    #[test]
+    fn sequential_searches_forward_each_selection_and_run_shuffle_tail() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::types::ability::{Effect, TypeFilter};
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let forest = add_library_land_with_subtype(&mut state, 1, PlayerId(0), "Forest", "Forest");
+        let plains = add_library_land_with_subtype(&mut state, 2, PlayerId(0), "Plains", "Plains");
+
+        let shuffle_step = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let put_plains_step = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle_step);
+        let search_plains_step = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(
+                    TypedFilter::land().with_type(TypeFilter::Subtype("Plains".to_string())),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(put_plains_step);
+        let put_forest_step = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(search_plains_step);
+        let search_forest_step = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(
+                    TypedFilter::land().with_type(TypeFilter::Subtype("Forest".to_string())),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(put_forest_step);
+
+        let mut all_events = Vec::new();
+        resolve_ability_chain(&mut state, &search_forest_step, &mut all_events, 0).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert_eq!(cards, &vec![forest], "first search should offer Forest");
+            }
+            other => panic!("expected first SearchChoice, got {:?}", other),
+        }
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![forest],
+            },
+        )
+        .unwrap();
+        all_events.extend(result.events);
+
+        assert_eq!(state.objects[&forest].zone, Zone::Battlefield);
+        assert!(state.objects[&forest].tapped);
+        assert_eq!(
+            state.objects[&plains].zone,
+            Zone::Library,
+            "Plains should wait for the second search selection"
+        );
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert_eq!(cards, &vec![plains], "second search should offer Plains");
+            }
+            other => panic!("expected second SearchChoice, got {:?}", other),
+        }
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![plains],
+            },
+        )
+        .unwrap();
+        all_events.extend(result.events);
+
+        assert_eq!(state.objects[&plains].zone, Zone::Battlefield);
+        assert!(state.objects[&plains].tapped);
+        assert!(state.pending_continuation.is_none());
+        assert!(state.pending_repeat_iteration.is_none());
+        assert!(all_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Shuffle,
+                ..
+            }
+        )));
     }
 
     #[test]

@@ -3546,7 +3546,7 @@ pub(super) fn parse_imperative_family_ast(
             }),
 
         // Choose (CR 700.2)
-        "choose" => parse_choose_ast(text, lower)
+        "choose" | "secretly" => parse_choose_ast(text, lower)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast))),
 
         // ── Exact-match keyword actions ──
