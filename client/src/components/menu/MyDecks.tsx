@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
 import { ACTIVE_DECK_KEY, listSavedDeckNames, getDeckMeta, deleteDeck } from "../../constants/storage";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import {
   getDeckFeedOrigin,
   listSubscriptions,
@@ -39,28 +40,33 @@ const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"])
 const PRECON_PREFIX = "[Pre-built] ";
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
-const FORMAT_TAGS = new Set(["standard", "modern", "pioneer", "commander", "legacy", "vintage", "pauper", "historic", "brawl", "metagame"]);
+const FORMAT_TAGS = new Set([
+  ...FORMAT_REGISTRY.flatMap((m) => [
+    m.format.toLowerCase(),
+    m.label.toLowerCase(),
+    m.short_label.toLowerCase(),
+  ]),
+  "metagame",
+]);
+const DECK_FORMATS = FORMAT_REGISTRY.filter((m) => m.group !== "Multiplayer");
 
-type DeckFilter = "all" | "standard" | "pioneer" | "modern" | "legacy" | "vintage" | "pauper" | "commander" | "historic" | "brawl" | "bo3";
+type DeckFilter = "all" | GameFormat;
 type DeckSort = "alpha" | "recent" | "format";
 
 /** Ordered list of format filters shown in the filter bar. */
 const FORMAT_FILTERS: Array<{ key: DeckFilter; label: string; aetherhubUrl?: string }> = [
   { key: "all", label: "All" },
-  { key: "standard", label: "Standard" },
-  { key: "pioneer", label: "Pioneer" },
-  { key: "modern", label: "Modern" },
-  { key: "legacy", label: "Legacy" },
-  { key: "vintage", label: "Vintage" },
-  { key: "pauper", label: "Pauper" },
-  { key: "commander", label: "Commander" },
-  { key: "historic", label: "Historic", aetherhubUrl: "https://aetherhub.com/Metagame/Historic" },
-  { key: "brawl", label: "Brawl", aetherhubUrl: "https://aetherhub.com/Metagame/Brawl" },
-  { key: "bo3", label: "BO3" },
+  ...DECK_FORMATS.map((m) => ({
+    key: m.format,
+    label: m.label,
+    aetherhubUrl:
+      m.format === "Historic"
+        ? "https://aetherhub.com/Metagame/Historic"
+        : m.format === "Brawl"
+          ? "https://aetherhub.com/Metagame/Brawl"
+          : undefined,
+  })),
 ];
-
-/** Formats that use `format_legality` for filtering (all except standard/commander/bo3 which have dedicated checks). */
-const LEGALITY_BASED_FORMATS = new Set<DeckFilter>(["pioneer", "modern", "legacy", "vintage", "pauper", "historic", "brawl"]);
 
 function DeckArtTile({ cardName }: { cardName: string | null }) {
   const { src, isLoading } = useCardImage(cardName ?? "", { size: "art_crop" });
@@ -310,19 +316,13 @@ export function MyDecks({
   const feedCache = useFeedCacheSnapshot();
 
   const contextualFilter = useMemo<DeckFilter | null>(() => {
-    if (!selectedFormat) return null;
-    const map: Partial<Record<GameFormat, DeckFilter>> = {
-      Standard: "standard",
-      Commander: "commander",
-      Pioneer: "pioneer",
-      Historic: "historic",
-      Pauper: "pauper",
-      Brawl: "brawl",
-      HistoricBrawl: "brawl",
-    };
-    return map[selectedFormat] ?? null;
+    return selectedFormat && DECK_FORMATS.some((m) => m.format === selectedFormat)
+      ? selectedFormat
+      : null;
   }, [selectedFormat]);
   const [activeFilter, setActiveFilter] = useState<DeckFilter>(contextualFilter ?? "all");
+  const selectedFormatForCompatibility = selectedFormat ?? (activeFilter === "all" ? null : activeFilter);
+  const activeFilterOption = FORMAT_FILTERS.find((option) => option.key === activeFilter);
   const [activeSort, setActiveSort] = useState<DeckSort>(
     mode === "select" ? (selectedFormat ? "format" : "recent") : "alpha",
   );
@@ -383,8 +383,9 @@ export function MyDecks({
 
       try {
         setIsEvaluating(true);
+        setCompatibilities({});
         const results = await evaluateDeckCompatibilityBatch(loadedDecks, {
-          selectedFormat,
+          selectedFormat: selectedFormatForCompatibility,
           selectedMatchType,
         });
         if (!cancelled) {
@@ -408,7 +409,7 @@ export function MyDecks({
     return () => {
       cancelled = true;
     };
-  }, [deckNames, selectedFormat, selectedMatchType, onCompatibilityUpdate, feedCache]);
+  }, [deckNames, selectedFormatForCompatibility, selectedMatchType, onCompatibilityUpdate, feedCache]);
 
   const filteredDeckNames = useMemo(() => {
     return deckNames.filter((deckName) => {
@@ -426,11 +427,8 @@ export function MyDecks({
         return selectedFormatCompatible;
       }
 
-      if (activeFilter === "standard") return compatibility.standard.compatible;
-      if (activeFilter === "commander") return compatibility.commander.compatible;
-      if (activeFilter === "bo3") return compatibility.bo3_ready;
-      if (LEGALITY_BASED_FORMATS.has(activeFilter)) {
-        return compatibility.format_legality?.[activeFilter] === "legal";
+      if (activeFilter !== "all" && selectedFormatCompatible != null) {
+        return selectedFormatCompatible;
       }
       return true;
     });
@@ -528,14 +526,14 @@ export function MyDecks({
 
   const Wrapper = bare ? "div" : MenuPanel;
   const wrapperClass = bare
-    ? "flex w-full flex-col items-center gap-4"
-    : "flex w-full max-w-5xl flex-col items-center gap-6 px-4 py-5";
+    ? "flex w-full min-w-0 flex-col items-center gap-4"
+    : "flex w-full min-w-0 max-w-5xl flex-col items-center gap-6 px-4 py-5";
 
   return (
     <Wrapper className={wrapperClass}>
       {!bare && (
-      <div className="flex w-full items-center justify-between gap-3">
-        <div className="flex items-center gap-4">
+      <div className="flex w-full flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
           <h2 className="menu-display text-[1.9rem] leading-tight text-white">
             {mode === "manage" ? "My Decks" : "Select Deck"}
           </h2>
@@ -567,7 +565,7 @@ export function MyDecks({
         {mode === "manage" && activeTab === "decks" && (
           <button
             onClick={onCreateDeck}
-            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+            className={`${menuButtonClass({ tone: "neutral", size: "sm" })} self-start sm:self-auto`}
           >
             Create New
           </button>
@@ -594,8 +592,8 @@ export function MyDecks({
 
       {(activeTab === "decks" || mode === "select") && (<>
       {/* Search + filter/sort controls */}
-      <div className="flex w-full flex-wrap items-center gap-2">
-        <div className="relative">
+      <div className="flex w-full min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="relative min-w-0 sm:w-[182px]">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500">
             <path fillRule="evenodd" d="M9.965 11.026a5 5 0 1 1 1.06-1.06l2.755 2.754a.75.75 0 1 1-1.06 1.06l-2.755-2.754ZM10.5 7a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0Z" clipRule="evenodd" />
           </svg>
@@ -604,38 +602,41 @@ export function MyDecks({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search decks…"
-            className="rounded-lg bg-black/30 py-1.5 pl-8 pr-3 text-xs text-slate-200 outline-none ring-1 ring-white/10 transition-colors placeholder:text-slate-500 focus:ring-white/20"
+            className="w-full rounded-lg bg-black/30 py-1.5 pl-8 pr-3 text-xs text-slate-200 outline-none ring-1 ring-white/10 transition-colors placeholder:text-slate-500 focus:ring-white/20"
           />
         </div>
 
         {mode === "manage" && (<>
-        {FORMAT_FILTERS.map(({ key, label, aetherhubUrl }) => (
-          <span key={key} className="inline-flex items-center gap-0.5">
-            <button
-              onClick={() => setActiveFilter(key)}
-              className={`rounded px-2 py-1 text-xs font-medium ${
-                activeFilter === key
-                  ? "bg-white/10 text-white"
-                  : "bg-black/18 text-slate-400 hover:bg-white/8 hover:text-white"
-              }`}
+        <div className="flex min-w-0 items-center gap-1 sm:w-[228px]">
+          <label htmlFor="my-decks-format-filter" className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Format
+          </label>
+          <select
+            id="my-decks-format-filter"
+            value={activeFilter}
+            onChange={(e) => setActiveFilter(e.target.value as DeckFilter)}
+            className="min-h-[30px] min-w-0 flex-1 rounded bg-black/30 px-2 py-1 text-xs text-slate-300 outline-none ring-1 ring-white/10 focus:ring-white/20 sm:w-44"
+          >
+            {FORMAT_FILTERS.map(({ key, label }) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+          {activeFilterOption?.aetherhubUrl && (
+            <a
+              href={activeFilterOption.aetherhubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded p-1 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-300"
+              title={`Browse ${activeFilterOption.label} decks on Aetherhub`}
             >
-              {label}
-            </button>
-            {aetherhubUrl && (
-              <a
-                href={aetherhubUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="rounded p-0.5 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-300"
-                title={`Browse ${label} decks on Aetherhub`}
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
-                  <path fillRule="evenodd" d="M4.5 2A2.5 2.5 0 0 0 2 4.5v7A2.5 2.5 0 0 0 4.5 14h7a2.5 2.5 0 0 0 2.5-2.5V9a.75.75 0 0 0-1.5 0v2.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1H7a.75.75 0 0 0 0-1.5H4.5ZM9 2a.75.75 0 0 0 0 1.5h2.69L8.22 7.03a.75.75 0 1 0 1.06 1.06l3.47-3.47V7a.75.75 0 0 0 1.5 0V2H9Z" clipRule="evenodd" />
-                </svg>
-              </a>
-            )}
-          </span>
-        ))}
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+                <path fillRule="evenodd" d="M4.5 2A2.5 2.5 0 0 0 2 4.5v7A2.5 2.5 0 0 0 4.5 14h7a2.5 2.5 0 0 0 2.5-2.5V9a.75.75 0 0 0-1.5 0v2.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1H7a.75.75 0 0 0 0-1.5H4.5ZM9 2a.75.75 0 0 0 0 1.5h2.69L8.22 7.03a.75.75 0 1 0 1.06 1.06l3.47-3.47V7a.75.75 0 0 0 1.5 0V2H9Z" clipRule="evenodd" />
+              </svg>
+            </a>
+          )}
+        </div>
         {contextualFilter && activeFilter === contextualFilter && (
           <button
             onClick={() => setActiveFilter("all")}
@@ -644,7 +645,7 @@ export function MyDecks({
             Show all decks
           </button>
         )}
-        <div className="ml-auto flex items-center gap-1">
+        <div className="flex items-center justify-end gap-1 sm:ml-auto">
           <select
             value={activeSort}
             onChange={(e) => {

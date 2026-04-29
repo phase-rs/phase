@@ -153,6 +153,65 @@ describe("MyDecks", () => {
     expect(screen.getByText("Unknown 1")).toBeInTheDocument();
   });
 
+  it("uses supported game formats as deck filters without offering BO3 as a format", async () => {
+    saveDeck("PDH Ready", {
+      main: [{ name: "Island", count: 99 }],
+      sideboard: [],
+      commander: ["Tatyova, Benthic Druid"],
+    });
+    saveDeck("Not PDH", {
+      main: [{ name: "Lightning Bolt", count: 60 }],
+      sideboard: [],
+      commander: [],
+    });
+
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (_decks, options) => ({
+      "PDH Ready": {
+        standard: { compatible: false, reasons: [] },
+        commander: { compatible: true, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: options?.selectedFormat === "PauperCommander" ? true : null,
+        selected_format_reasons: [],
+        color_identity: ["U", "G"],
+      },
+      "Not PDH": {
+        standard: { compatible: true, reasons: [] },
+        commander: { compatible: false, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: options?.selectedFormat === "PauperCommander" ? false : null,
+        selected_format_reasons: [],
+        color_identity: ["R"],
+      },
+    }));
+
+    render(
+      <MyDecks
+        mode="manage"
+        activeDeckName={null}
+        onCreateDeck={vi.fn()}
+        onEditDeck={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("PDH Ready")).toBeInTheDocument();
+    expect(screen.getByText("Not PDH")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Pauper Commander" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "BO3" })).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(screen.getByLabelText("Format"), "PauperCommander");
+
+    await waitFor(() => {
+      expect(screen.queryByText("Not PDH")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("PDH Ready")).toBeInTheDocument();
+    expect(evaluateDeckCompatibilityBatch).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      { selectedFormat: "PauperCommander", selectedMatchType: undefined },
+    );
+  });
+
   it("offers an edit action in selection mode without selecting the deck", async () => {
     saveDeck("Selectable Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
     vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({
