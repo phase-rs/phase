@@ -7926,6 +7926,73 @@ mod tests {
     }
 
     #[test]
+    fn granted_trigger_you_may_draw_does_not_emit_optional_warning() {
+        let oracle = "Enchant creature\nEnchanted creature gets +1/+1 and has \"Whenever this creature deals combat damage to a player, you may draw a card.\"";
+        let parsed = parse(
+            oracle,
+            "Curious Obsession",
+            &[],
+            &["Enchantment"],
+            &["Aura"],
+        );
+
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Optional_YouMay")),
+            "unexpected optional warning: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed.statics.iter().any(|static_def| {
+                static_def.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::GrantTrigger { trigger }
+                            if trigger.optional
+                    )
+                })
+            }),
+            "expected optional granted trigger, got statics={:?}",
+            parsed.statics
+        );
+    }
+
+    #[test]
+    fn emblem_trigger_you_may_draw_does_not_emit_optional_warning() {
+        let oracle =
+            "[-6]: You get an emblem with \"Whenever a land you control enters, you may draw a card.\"";
+        let parsed = parse(
+            oracle,
+            "Nissa, Vital Force",
+            &[],
+            &["Planeswalker"],
+            &["Nissa"],
+        );
+
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Optional_YouMay")),
+            "unexpected optional warning: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed.abilities.iter().any(|ability| {
+                matches!(
+                    &*ability.effect,
+                    Effect::CreateEmblem { triggers, .. }
+                        if triggers.iter().any(|trigger| trigger.optional)
+                )
+            }),
+            "expected emblem with optional trigger, got abilities={:?}",
+            parsed.abilities
+        );
+    }
+
+    #[test]
     fn city_blessing_activation_restriction_does_not_emit_condition_warning() {
         let oracle = "Ascend (If you control ten or more permanents, you get the city's blessing for the rest of the game.)\n{T}: Add {C}.\n{5}, {T}: Draw a card. Activate only if you have the city's blessing.";
         let parsed = parse(oracle, "Arch of Orazca", &[], &["Land"], &[]);

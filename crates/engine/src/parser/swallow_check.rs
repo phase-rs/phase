@@ -24,11 +24,12 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_warnings::push_warning;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, Effect, ModalSelectionConstraint, OpponentMayScope,
-    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TargetFilter, TriggerDefinition,
+    AbilityCondition, AbilityDefinition, ContinuousModification, Effect, ModalSelectionConstraint,
+    OpponentMayScope, PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode,
+    StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::statics::StaticMode;
+use crate::types::triggers::TriggerMode;
 
 /// Strip parenthesized reminder text. Reminder text is the parser's
 /// responsibility to ignore at the keyword level — keywords themselves are
@@ -258,6 +259,15 @@ fn def_tree_has_optional(def: &AbilityDefinition) -> bool {
     def.mode_abilities.iter().any(def_tree_has_optional)
 }
 
+fn trigger_tree_has_optional(trigger: &TriggerDefinition) -> bool {
+    trigger.optional
+        || matches!(trigger.mode, TriggerMode::Exerted)
+        || trigger
+            .execute
+            .as_deref()
+            .is_some_and(def_tree_has_optional)
+}
+
 /// Detects "you may" optionality encoded inside the effect itself rather
 /// than via `def.optional`. Some effects model the choice at the runtime
 /// resolution layer (e.g., `Dig` with `up_to: true` lets the player keep
@@ -283,21 +293,25 @@ fn def_tree_has_optional(def: &AbilityDefinition) -> bool {
 /// player's reveal choice IS the "may" decision, with the decline branch
 /// handling the "if you don't" alternative.
 fn effect_has_internal_optionality(effect: &Effect) -> bool {
-    matches!(
-        effect,
+    match effect {
         Effect::Dig { up_to: true, .. }
-            | Effect::GrantCastingPermission { .. }
-            | Effect::CastFromZone { .. }
-            | Effect::PayCost { .. }
-            | Effect::RevealHand {
-                choice_optional: true,
-                ..
-            }
-            | Effect::RevealFromHand {
-                on_decline: Some(_),
-                ..
-            }
-    )
+        | Effect::GrantCastingPermission { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::PayCost { .. }
+        | Effect::RevealHand {
+            choice_optional: true,
+            ..
+        }
+        | Effect::RevealFromHand {
+            on_decline: Some(_),
+            ..
+        } => true,
+        Effect::CreateEmblem { statics, triggers } => {
+            statics.iter().any(static_definition_has_optional)
+                || triggers.iter().any(trigger_tree_has_optional)
+        }
+        _ => false,
+    }
 }
 
 /// Recursive walk: does any def in the tree carry an `AddTargetReplacement`
@@ -334,10 +348,37 @@ fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
 ///   - `AssignDamageFromToughness` is mandatory (Brontodon class), so
 ///     it is NOT included here.
 fn static_carries_optional_modification(s: &StaticDefinition) -> bool {
-    use crate::types::ability::ContinuousModification;
-    s.modifications
-        .iter()
-        .any(|m| matches!(m, ContinuousModification::AssignDamageAsThoughUnblocked))
+    s.modifications.iter().any(|m| match m {
+        ContinuousModification::AssignDamageAsThoughUnblocked => true,
+        ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_optional(trigger),
+        ContinuousModification::GrantAbility { definition } => def_tree_has_optional(definition),
+        _ => false,
+    })
+}
+
+fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayChooseNotToUntap
+            | StaticMode::MayPlayAdditionalLand
+            | StaticMode::TopOfLibraryCastPermission { .. }
+            // CR 702.8: "You may cast this spell as though it had flash" —
+            // opt-in cast-timing permission.
+            | StaticMode::CastWithFlash
+            // CR 702.51a: "Creature spells you cast have convoke",
+            // "you may cast X as though it had flash if you pay Y" —
+            // generalized cast-timing/keyword permission, always opt-in.
+            | StaticMode::CastWithKeyword { .. }
+            // CR 117.3a: "You may play lands from your graveyard"
+            // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
+            // cast permission, structurally opt-in.
+            | StaticMode::GraveyardCastPermission { .. }
+    )
+}
+
+fn static_definition_has_optional(s: &StaticDefinition) -> bool {
+    static_carries_optional_modification(s) || static_mode_is_optional_permission(&s.mode)
 }
 
 /// Recursive walk: does any def in the tree carry an `Effect::Unimplemented`?
@@ -565,21 +606,13 @@ fn any_static_has_target_gated_cost_modification(parsed: &ParsedAbilities) -> bo
 }
 
 fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
-    use crate::types::triggers::TriggerMode;
     parsed.abilities.iter().any(def_tree_has_optional)
-        || parsed.triggers.iter().any(|t| {
-            // CR 603.3: Triggers carry their own optional flag for the
-            // outer "you may" prompt; the inner execute may carry a
-            // nested optional too.
-            // CR 702.139a: `Exerted` triggers fire only when the controller
-            // chose to exert the creature — exert itself is the "you may"
-            // gate, so the trigger doesn't need an `optional` flag.
-            t.optional
-                || matches!(t.mode, TriggerMode::Exerted)
-                || t.execute
-                    .as_deref()
-                    .is_some_and(def_tree_has_optional)
-        })
+        // CR 603.3: Triggers carry their own optional flag for the outer
+        // "you may" prompt; the inner execute may carry a nested optional too.
+        // CR 702.139a: `Exerted` triggers fire only when the controller chose
+        // to exert the creature — exert itself is the "you may" gate, so the
+        // trigger doesn't need an `optional` flag.
+        || parsed.triggers.iter().any(trigger_tree_has_optional)
         // CR 614.1a: Replacement effects with `mode = Optional` (e.g., "you
         // may have this creature enter as a copy of...") encode the choice
         // at the replacement layer, not via `def.optional`. Mandatory
@@ -597,27 +630,7 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
         //   CR 701.43:  MayLookAtTopOfLibrary ("you may look at...any time")
         //   CR 117.3a:  MayChooseNotToUntap   ("you may choose not to untap")
         //   CR 117.3a:  TopOfLibraryCastPermission (Bolas's Citadel-style)
-        || parsed.statics.iter().any(static_carries_optional_modification)
-        || parsed.statics.iter().any(|s| {
-            matches!(
-                s.mode,
-                StaticMode::MayLookAtTopOfLibrary
-                    | StaticMode::MayChooseNotToUntap
-                    | StaticMode::MayPlayAdditionalLand
-                    | StaticMode::TopOfLibraryCastPermission { .. }
-                    // CR 702.8: "You may cast this spell as though it had
-                    // flash" — opt-in cast-timing permission.
-                    | StaticMode::CastWithFlash
-                    // CR 702.51a: "Creature spells you cast have convoke",
-                    // "you may cast X as though it had flash if you pay Y" —
-                    // generalized cast-timing/keyword permission, always opt-in.
-                    | StaticMode::CastWithKeyword { .. }
-                    // CR 117.3a: "You may play lands from your graveyard"
-                    // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
-                    // cast permission, structurally opt-in.
-                    | StaticMode::GraveyardCastPermission { .. }
-            )
-        })
+        || parsed.statics.iter().any(static_definition_has_optional)
         // CR 700.2c: "you may choose the same mode more than once" is
         // encoded as `modal.allow_repeat_modes = true`, not as a def-level
         // optional flag.
