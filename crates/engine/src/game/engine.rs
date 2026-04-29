@@ -288,10 +288,92 @@ fn phase_stop_hit(state: &GameState, player: PlayerId) -> bool {
         .is_some_and(|stops| stops.contains(&state.phase))
 }
 
+fn pass_priority_once_with_pipeline(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    state.cancelled_casts.clear();
+    // CR 117.4 + 608.1: When all players pass in succession the stack begins
+    // resolving; at that moment the AI guard against re-activating pending
+    // abilities is no longer needed.
+    state.pending_activations.clear();
+
+    let stack_was_empty = state.stack.is_empty();
+    let wf = priority::handle_priority_pass(state, events);
+    sync_waiting_for(state, &wf);
+    let skip_triggers =
+        stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
+
+    let wf = engine_priority::run_post_action_pipeline(state, events, &wf, skip_triggers)?;
+    sync_waiting_for(state, &wf);
+    Ok(wf)
+}
+
+fn active_until_stack_empty_requester(state: &GameState) -> Option<PlayerId> {
+    state.auto_pass.iter().find_map(|(player, mode)| {
+        matches!(mode, AutoPassMode::UntilStackEmpty { .. }).then_some(*player)
+    })
+}
+
+fn priority_player_has_meaningful_action(state: &GameState) -> bool {
+    let mut probe = state.clone();
+    probe.auto_pass.clear();
+    let actions = crate::ai_support::legal_actions(&probe);
+    crate::ai_support::has_meaningful_priority_action(&probe, &actions)
+}
+
+fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameState) -> bool {
+    let finished: Vec<PlayerId> = state
+        .auto_pass
+        .iter()
+        .filter_map(|(player, mode)| match mode {
+            AutoPassMode::UntilStackEmpty { initial_stack_len }
+                if state.stack.is_empty() || state.stack.len() > *initial_stack_len =>
+            {
+                Some(*player)
+            }
+            _ => None,
+        })
+        .collect();
+
+    for player in &finished {
+        state.auto_pass.remove(player);
+    }
+
+    !finished.is_empty()
+}
+
+fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
+    let living_players = state
+        .players
+        .iter()
+        .filter(|player| !player.is_eliminated)
+        .count()
+        .max(1);
+    state
+        .stack
+        .len()
+        .saturating_mul(living_players)
+        .saturating_mul(2)
+        .saturating_add(16)
+        .clamp(500, 10_000)
+}
+
 #[cfg(test)]
 mod auto_pass_decision_tests {
     use super::*;
-    use crate::types::identifiers::ObjectId;
+    use std::sync::Arc;
+
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::CastingVariant;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::zones::Zone;
 
     fn stack_entry(controller: PlayerId) -> StackEntry {
         StackEntry {
@@ -313,6 +395,85 @@ mod auto_pass_decision_tests {
 
     fn is_finish(d: &AutoPassDecision) -> bool {
         matches!(d, AutoPassDecision::Finish)
+    }
+
+    fn priority_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 1;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.clear();
+        state.priority_pass_count = 0;
+        state
+    }
+
+    fn push_simple_stack_entry(state: &mut GameState, id: u64, controller: PlayerId) {
+        state.stack.push_back(StackEntry {
+            id: ObjectId(id),
+            source_id: ObjectId(id),
+            controller,
+            kind: StackEntryKind::KeywordAction {
+                action: KeywordAction::Crew {
+                    vehicle_id: ObjectId(id),
+                    paid_creature_ids: Vec::new(),
+                },
+            },
+        });
+    }
+
+    fn draw_ability(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source_id,
+            controller,
+        )
+    }
+
+    fn add_non_mana_activated_artifact(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(900),
+            controller,
+            "Priority Action".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        object_id
+    }
+
+    fn push_spell(
+        state: &mut GameState,
+        id: ObjectId,
+        controller: PlayerId,
+        ability: ResolvedAbility,
+    ) {
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(id.0),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
     }
 
     #[test]
@@ -419,20 +580,237 @@ mod auto_pass_decision_tests {
         assert!(phase_stop_hit(&state, PlayerId(0)));
         assert!(!end_of_turn_active(&state, PlayerId(0)));
     }
+
+    #[test]
+    fn until_stack_empty_resolves_large_stack_in_one_apply() {
+        let mut state = priority_state();
+        for idx in 0..264 {
+            push_simple_stack_entry(&mut state, 10_000 + idx, PlayerId(0));
+        }
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilStackEmpty,
+            },
+        )
+        .unwrap();
+
+        assert!(state.stack.is_empty());
+        assert!(state.auto_pass.get(&PlayerId(0)).is_none());
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                .count(),
+            264
+        );
+    }
+
+    #[test]
+    fn until_stack_empty_stops_on_non_requester_meaningful_action() {
+        let mut state = priority_state();
+        push_simple_stack_entry(&mut state, 20_000, PlayerId(1));
+        add_non_mana_activated_artifact(&mut state, PlayerId(1));
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilStackEmpty,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "requester's session stays active while waiting on opponent action"
+        );
+    }
+
+    #[test]
+    fn until_stack_empty_non_requester_own_stack_shortcut_does_not_hide_action() {
+        let mut state = priority_state();
+        push_simple_stack_entry(&mut state, 21_000, PlayerId(1));
+        add_non_mana_activated_artifact(&mut state, PlayerId(1));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.priority_player = PlayerId(1);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 1,
+            },
+        );
+
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: Vec::new(),
+        };
+        run_auto_pass_loop(&mut state, &mut result);
+
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+    }
+
+    #[test]
+    fn until_stack_empty_stops_on_interactive_waiting_for() {
+        let mut state = priority_state();
+        let spell_id = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Scry Spell".to_string(),
+            Zone::Stack,
+        );
+        create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            spell_id,
+            PlayerId(0),
+        );
+        push_spell(&mut state, spell_id, PlayerId(0), ability);
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilStackEmpty,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ScryChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn until_stack_empty_stops_on_stack_growth() {
+        let mut state = priority_state();
+        let copied_id = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Copied Spell".to_string(),
+            Zone::Stack,
+        );
+        push_spell(
+            &mut state,
+            copied_id,
+            PlayerId(0),
+            draw_ability(copied_id, PlayerId(0)),
+        );
+        let copy_id = create_object(
+            &mut state,
+            CardId(904),
+            PlayerId(0),
+            "Copy Spell".to_string(),
+            Zone::Stack,
+        );
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            copy_id,
+            PlayerId(0),
+        );
+        push_spell(&mut state, copy_id, PlayerId(0), copy_ability);
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilStackEmpty,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.stack.len(), 2);
+        assert!(state.auto_pass.get(&PlayerId(0)).is_none());
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn until_stack_empty_does_not_advance_phase_after_stack_empties() {
+        let mut state = priority_state();
+        push_simple_stack_entry(&mut state, 30_000, PlayerId(0));
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilStackEmpty,
+            },
+        )
+        .unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+    }
 }
 
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
-    const MAX_ITERATIONS: usize = 500;
-
-    for _ in 0..MAX_ITERATIONS {
+    for _ in 0..auto_pass_loop_max_iterations(state) {
         match &result.waiting_for {
             WaitingFor::Priority { player } => {
                 let player = *player;
                 let decision = priority_auto_pass_decision(state, player);
                 match decision {
-                    AutoPassDecision::Exit => break,
+                    AutoPassDecision::Exit => {
+                        let Some(requester) = active_until_stack_empty_requester(state) else {
+                            break;
+                        };
+                        if requester == player {
+                            break;
+                        }
+                        if finish_completed_or_interrupted_until_stack_empty_sessions(state) {
+                            break;
+                        }
+                        if priority_player_has_meaningful_action(state) {
+                            break;
+                        }
+                    }
                     AutoPassDecision::Finish => {
                         state.auto_pass.remove(&player);
                         break;
@@ -440,36 +818,16 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                     AutoPassDecision::Pass => {}
                 }
 
-                // Pass priority internally
                 let mut events = Vec::new();
-                let stack_was_empty = state.stack.is_empty();
-                let wf = priority::handle_priority_pass(state, &mut events);
-                sync_waiting_for(state, &wf);
-                let skip_triggers = stack_was_empty
-                    && !state.stack.is_empty()
-                    && state.phase == Phase::CombatDamage;
-
-                // Run post-action pipeline (SBAs, triggers, layers)
-                match engine_priority::run_post_action_pipeline(
-                    state,
-                    &mut events,
-                    &wf,
-                    skip_triggers,
-                ) {
+                match pass_priority_once_with_pipeline(state, &mut events) {
                     Ok(wf) => {
-                        sync_waiting_for(state, &wf);
-
-                        // Check for stack growth after pipeline (triggers may have fired)
-                        if let Some(AutoPassMode::UntilStackEmpty { initial_stack_len }) =
-                            state.auto_pass.get(&player)
-                        {
-                            if state.stack.len() > *initial_stack_len {
-                                state.auto_pass.remove(&player);
-                            }
-                        }
-
+                        let stack_empty_or_grew =
+                            finish_completed_or_interrupted_until_stack_empty_sessions(state);
                         result.events.extend(events);
                         result.waiting_for = wf;
+                        if stack_empty_or_grew {
+                            break;
+                        }
                     }
                     Err(_) => break,
                 }
@@ -631,23 +989,12 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            // Track stack growth during combat damage: process_combat_damage_triggers
-            // processes non-phase events (LifeChanged, DamageDealt) for triggers inline.
-            // Other phase triggers (Upkeep, End, etc.) only process PhaseChanged events
-            // which the pipeline already filters, so they don't need this guard.
-            state.cancelled_casts.clear();
-            // CR 117.4 + 608.1: When all players pass in succession the stack
-            // begins resolving; at that moment the AI-guard against re-activating
-            // still-pending abilities is no longer needed. Cleared unconditionally
-            // on PassPriority (not on PlayLand — playing a land doesn't resolve
-            // the stack, so prior activations are still pending).
-            state.pending_activations.clear();
-            let stack_was_empty = state.stack.is_empty();
-            let wf = priority::handle_priority_pass(state, &mut events);
-            if stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage {
-                triggers_processed_inline = true;
-            }
-            wf
+            let wf = pass_priority_once_with_pipeline(state, &mut events)?;
+            return Ok(ActionResult {
+                events,
+                waiting_for: wf,
+                log_entries: vec![],
+            });
         }
         (WaitingFor::Priority { player }, GameAction::PlayLand { object_id, card_id }) => {
             if state.priority_player
@@ -2269,8 +2616,12 @@ fn apply_action(
                 AutoPassRequest::UntilEndOfTurn => AutoPassMode::UntilEndOfTurn,
             };
             state.auto_pass.insert(*player, stored_mode);
-            // Immediately pass priority — the auto-pass loop in apply() continues from here
-            priority::handle_priority_pass(state, &mut events)
+            let wf = pass_priority_once_with_pipeline(state, &mut events)?;
+            return Ok(ActionResult {
+                events,
+                waiting_for: wf,
+                log_entries: vec![],
+            });
         }
         // CR 701.34a: Proliferate — player selected targets to proliferate.
         (

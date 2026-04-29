@@ -422,13 +422,23 @@ fn matches_waiting_target_choice(
     }
 }
 
-/// Returns the legal actions for the current game state.
-///
-/// Mana actions are omitted from the flat list returned by [`legal_actions`].
-/// They are still exposed through `legal_actions_by_object` by
-/// [`legal_actions_full`] so the frontend can render and dispatch
-/// engine-authoritative mana affordances without treating them as meaningful
-/// priority decisions.
+/// True when `actions` contains a priority action that materially changes the
+/// game beyond passing or producing standalone mana.
+pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction]) -> bool {
+    actions.iter().any(|action| match action {
+        GameAction::PassPriority => false,
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => state.objects.get(source_id).is_some_and(|obj| {
+            obj.abilities
+                .get(*ability_index)
+                .is_some_and(|ability| !mana_abilities::is_mana_ability(ability))
+        }),
+        _ => true,
+    })
+}
+
 /// Determines whether the frontend should auto-pass the current priority window.
 ///
 /// Returns `true` when auto-passing is recommended:
@@ -444,32 +454,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         _ => return false,
     };
 
-    // Meaningful = any action that directly affects the game beyond passing.
-    // Land mana abilities (ActivateAbility on a Land) are NOT meaningful on their
-    // own — they only matter if the mana enables casting a spell, in which case
-    // CastSpell will also be present in `actions` (the engine's can_pay_cost_after_auto_tap
-    // already simulates tapping those lands when checking spell castability).
-    let has_meaningful = actions.iter().any(|a| {
-        match a {
-            GameAction::PassPriority => false,
-            GameAction::ActivateAbility {
-                source_id,
-                ability_index,
-            } => {
-                // Non-mana activated abilities are always meaningful.
-                // Mana abilities on lands are NOT meaningful on their own — they only
-                // matter if the mana enables casting a spell, in which case CastSpell
-                // will also be present in `actions`.
-                state.objects.get(source_id).is_some_and(|obj| {
-                    obj.abilities
-                        .get(*ability_index)
-                        .is_some_and(|ability| !mana_abilities::is_mana_ability(ability))
-                })
-            }
-            _ => true,
-        }
-    });
-    if !has_meaningful {
+    if !has_meaningful_priority_action(state, actions) {
         return true;
     }
 
@@ -485,6 +470,13 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     false
 }
 
+/// Returns the legal actions for the current game state.
+///
+/// Mana actions are omitted from the flat list returned by [`legal_actions`].
+/// They are still exposed through `legal_actions_by_object` by
+/// [`legal_actions_full`] so the frontend can render and dispatch
+/// engine-authoritative mana affordances without treating them as meaningful
+/// priority decisions.
 pub fn legal_actions(state: &GameState) -> Vec<GameAction> {
     legal_actions_with_costs(state).0
 }
@@ -1172,6 +1164,10 @@ mod tests {
             !super::auto_pass_recommended(&state, &actions),
             "Auto-pass must not fire when a non-mana land ability is available"
         );
+        assert!(
+            super::has_meaningful_priority_action(&state, &actions),
+            "Extracted helper must classify non-mana abilities as meaningful"
+        );
 
         // But if only the mana ability is available, auto-pass should fire
         let mana_only = vec![
@@ -1184,6 +1180,31 @@ mod tests {
         assert!(
             super::auto_pass_recommended(&state, &mana_only),
             "Auto-pass should fire when only mana abilities are available"
+        );
+        assert!(
+            !super::has_meaningful_priority_action(&state, &mana_only),
+            "Extracted helper must ignore standalone mana abilities"
+        );
+
+        use crate::types::ability::KeywordAction;
+        state.stack.push_back(StackEntry {
+            id: ObjectId(100),
+            source_id: land,
+            controller: PlayerId(0),
+            kind: StackEntryKind::KeywordAction {
+                action: KeywordAction::Crew {
+                    vehicle_id: land,
+                    paid_creature_ids: Vec::new(),
+                },
+            },
+        });
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "Existing frontend recommendation keeps the own-stack shortcut"
+        );
+        assert!(
+            super::has_meaningful_priority_action(&state, &actions),
+            "The reusable helper must not apply the own-stack shortcut"
         );
     }
 }
