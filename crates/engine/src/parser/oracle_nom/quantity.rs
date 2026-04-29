@@ -1265,6 +1265,7 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_creature_died_this_turn,
         parse_for_each_attacking_controller_type,
+        parse_for_each_blocking_source_type,
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_for_each_controlled_type,
@@ -1370,6 +1371,26 @@ fn parse_for_each_attacking_controller_type(input: &str) -> OracleResult<'_, Qua
                 type_filters: vec![tf],
                 controller: None,
                 properties: vec![FilterProp::AttackingController],
+            }),
+        },
+    ))
+}
+
+fn parse_for_each_blocking_source_type(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, tf) = parse_type_filter_word(input)?;
+    let (rest, _) = alt((
+        tag(" blocking it"),
+        tag(" blocking ~"),
+        tag(" blocking this creature"),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: None,
+                properties: vec![FilterProp::BlockingSource],
             }),
         },
     ))
@@ -2043,6 +2064,35 @@ mod tests {
             _ => panic!("expected ObjectCount"),
         }
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_for_each_creature_blocking_it() {
+        let (rest, q) = parse_for_each("for each creature blocking it").unwrap();
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                    assert_eq!(tf.controller, None);
+                    assert_eq!(tf.properties, vec![FilterProp::BlockingSource]);
+                }
+                _ => panic!("expected Typed filter"),
+            },
+            _ => panic!("expected ObjectCount"),
+        }
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_for_each("for each creature blocking ~").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    properties,
+                    ..
+                })
+            } if properties == vec![FilterProp::BlockingSource]
+        ));
     }
 
     #[test]

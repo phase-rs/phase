@@ -1123,6 +1123,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Attacking
         | FilterProp::AttackingController
         | FilterProp::Blocking
+        | FilterProp::BlockingSource
         | FilterProp::Unblocked
         | FilterProp::Tapped
         | FilterProp::Untapped
@@ -1275,6 +1276,15 @@ fn matches_filter_prop(
             .combat
             .as_ref()
             .is_some_and(|combat| combat.blocker_to_attacker.contains_key(&object_id)),
+        // CR 509.1g: A blocking creature is blocking the attacking creature it
+        // was assigned to block. ExtraBlockers can allow one blocker to block
+        // multiple attackers, so read the reverse map's full assignment list.
+        FilterProp::BlockingSource => state.combat.as_ref().is_some_and(|combat| {
+            combat
+                .blocker_to_attacker
+                .get(&object_id)
+                .is_some_and(|attackers| attackers.contains(&source.id))
+        }),
         // CR 509.1h: Unblocked = attacking creature that was never assigned blockers.
         // unblocked_attackers checks the permanent `blocked` flag, not the current blocker list.
         FilterProp::Unblocked => combat::unblocked_attackers(state).contains(&object_id),
@@ -1829,6 +1839,9 @@ fn zone_change_record_matches_property(
                 && source.controller == record.combat_status.defending_player
         }
         FilterProp::Blocking => record.combat_status.blocking,
+        // `ZoneChangeCombatStatus` snapshots role, not the blocker-to-attacker
+        // relation. Source-relative blocker checks require live combat state.
+        FilterProp::BlockingSource => false,
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
@@ -2758,6 +2771,46 @@ mod tests {
 
         assert!(matches_target_filter(&state, attacker, &filter, attacker));
         assert!(!matches_target_filter(&state, bystander, &filter, attacker));
+    }
+
+    #[test]
+    fn blocking_source_property_matches_only_source_blockers() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker");
+        let other_attacker = add_creature(&mut state, PlayerId(0), "Other Attacker");
+        let blocker = add_creature(&mut state, PlayerId(1), "Blocker");
+        let other_blocker = add_creature(&mut state, PlayerId(1), "Other Blocker");
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(attacker, PlayerId(1)),
+                AttackerInfo::attacking_player(other_attacker, PlayerId(1)),
+            ],
+            blocker_assignments: [
+                (attacker, vec![blocker]),
+                (other_attacker, vec![other_blocker]),
+            ]
+            .into(),
+            blocker_to_attacker: [
+                (blocker, vec![attacker]),
+                (other_blocker, vec![other_attacker]),
+            ]
+            .into(),
+            ..CombatState::default()
+        });
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::BlockingSource]),
+        );
+
+        assert!(matches_target_filter(&state, blocker, &filter, attacker));
+        assert!(!matches_target_filter(
+            &state,
+            other_blocker,
+            &filter,
+            attacker,
+        ));
     }
 
     #[test]

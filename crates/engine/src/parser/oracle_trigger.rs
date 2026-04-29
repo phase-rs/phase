@@ -5821,7 +5821,7 @@ mod tests {
     use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
     use crate::types::ability::{
         Comparator, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PlayerScope,
-        PtValue, QuantityExpr, QuantityRef, TypedFilter, UnlessCost,
+        PtValue, QuantityExpr, QuantityRef, TypeFilter, TypedFilter, UnlessCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
 
@@ -7108,6 +7108,49 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::BecomesBlocked);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_becomes_blocked_pump_scales_with_creatures_blocking_it() {
+        let def = parse_trigger_line(
+            "Whenever this creature becomes blocked, it gets +2/+2 until end of turn for each creature blocking it.",
+            "Gang of Elk",
+        );
+
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+        match execute.effect.as_ref() {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(target, &TargetFilter::SelfRef);
+                for value in [power, toughness] {
+                    match value {
+                        PtValue::Quantity(QuantityExpr::Multiply { factor, inner }) => {
+                            assert_eq!(*factor, 2);
+                            match inner.as_ref() {
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::ObjectCount { filter },
+                                } => match filter {
+                                    TargetFilter::Typed(tf) => {
+                                        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                                        assert_eq!(tf.properties, vec![FilterProp::BlockingSource]);
+                                    }
+                                    other => panic!("expected Typed filter, got {other:?}"),
+                                },
+                                other => panic!("expected ObjectCount ref, got {other:?}"),
+                            }
+                        }
+                        other => panic!("expected scaled dynamic P/T value, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected Pump, got {other:?}"),
+        }
     }
 
     #[test]

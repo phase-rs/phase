@@ -1236,6 +1236,9 @@ pub enum FilterProp {
     Attacking,
     /// CR 509.1a: Matches creatures that are blocking.
     Blocking,
+    /// CR 509.1g: Matches creatures currently blocking the filter source.
+    /// Used for "creature(s) blocking it" source-relative quantities and filters.
+    BlockingSource,
     /// CR 509.1h: Matches attacking creatures with no blockers assigned.
     Unblocked,
     Tapped,
@@ -8104,6 +8107,8 @@ mod tests {
             FilterProp::Token,
             FilterProp::Attacking,
             FilterProp::AttackingController,
+            FilterProp::Blocking,
+            FilterProp::BlockingSource,
             FilterProp::Unblocked,
             FilterProp::Tapped,
             FilterProp::Untapped,

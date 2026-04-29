@@ -1972,6 +1972,88 @@ mod tests {
     }
 
     #[test]
+    fn resolve_quantity_object_count_creatures_blocking_source() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let other_attacker = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Other Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other_attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let blockers: Vec<_> = (0..3)
+            .map(|i| {
+                let id = create_object(
+                    &mut state,
+                    CardId(30 + i),
+                    PlayerId(1),
+                    format!("Blocker {i}"),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                id
+            })
+            .collect();
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(source, PlayerId(1)),
+                AttackerInfo::attacking_player(other_attacker, PlayerId(1)),
+            ],
+            blocker_assignments: [
+                (source, vec![blockers[0], blockers[1]]),
+                (other_attacker, vec![blockers[2]]),
+            ]
+            .into(),
+            blocker_to_attacker: [
+                (blockers[0], vec![source]),
+                (blockers[1], vec![source]),
+                (blockers[2], vec![other_attacker]),
+            ]
+            .into(),
+            ..CombatState::default()
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::BlockingSource]),
+                ),
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
+    }
+
+    #[test]
     fn object_count_with_in_zone_graveyard() {
         // Eddymurk Crab pattern: count instants and sorceries in your graveyard.
         use crate::types::ability::FilterProp;
