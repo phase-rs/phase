@@ -1715,6 +1715,31 @@ pub(crate) fn check_trigger_condition(
                 .and_then(|id| state.objects.get(&id))
                 .is_some_and(|obj| obj.cast_from_zone.is_some())
         }
+        // CR 603.4 + CR 702.33d-f: "if it was kicked" intervening-if.
+        // ETB/LTB trigger conditions refer to the triggering zone-change
+        // object; self-referential triggers fall back to the trigger source.
+        TriggerCondition::AdditionalCostPaid {
+            variant,
+            kicker_cost,
+            min_count,
+        } => {
+            if kicker_cost.is_some() && variant.is_none() {
+                false
+            } else {
+                let checked_id = trigger_event
+                    .and_then(|event| match event {
+                        GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                        _ => None,
+                    })
+                    .or(source_id);
+                checked_id
+                    .and_then(|id| state.objects.get(&id))
+                    .is_some_and(|obj| match variant {
+                        Some(kicker) => obj.kickers_paid.contains(kicker),
+                        None => obj.kickers_paid.len() >= *min_count as usize,
+                    })
+            }
+        }
         // CR 508.1: "if it's attacking" — true when the trigger source is in combat.attackers.
         TriggerCondition::SourceIsAttacking => {
             let sid = source_id.unwrap_or(ObjectId(0));
@@ -2243,8 +2268,8 @@ pub mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        GainLifePlayer, MultiTargetSpec, QuantityExpr, QuantityRef, TargetFilter, TriggerCondition,
-        TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        GainLifePlayer, KickerVariant, MultiTargetSpec, QuantityExpr, QuantityRef, TargetFilter,
+        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -6889,6 +6914,81 @@ pub mod tests {
             &TriggerCondition::WasCast,
             PlayerId(0),
             Some(cast_spell),
+            None,
+        ));
+    }
+
+    #[test]
+    fn additional_cost_paid_uses_entering_object_kicker_facts() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kicker Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Kicked Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .kickers_paid
+            .push(KickerVariant::First);
+
+        let event = zone_changed_event(
+            entering,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec![],
+        );
+
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::AdditionalCostPaid {
+                variant: None,
+                kicker_cost: None,
+                min_count: 1,
+            },
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+    }
+
+    #[test]
+    fn additional_cost_paid_min_count_checks_multikicker_count() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kicked Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .kickers_paid
+            .extend([KickerVariant::First, KickerVariant::First]);
+
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::AdditionalCostPaid {
+                variant: None,
+                kicker_cost: None,
+                min_count: 2,
+            },
+            PlayerId(0),
+            Some(source),
             None,
         ));
     }

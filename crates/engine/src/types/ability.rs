@@ -6169,6 +6169,21 @@ pub enum TriggerCondition {
     /// CR 701.57a: Used by Discover ETB triggers.
     /// Negation ("if it wasn't cast") is expressed via `Not { Box::new(WasCast) }`.
     WasCast,
+    /// CR 603.4 + CR 702.33d-f: Intervening-if for "if it was kicked" /
+    /// "if it was kicked with its [A] kicker" / "if it was kicked twice".
+    /// Evaluates the triggering zone-change object when present, otherwise the
+    /// trigger source, using `GameObject::kickers_paid` recorded at cast time.
+    AdditionalCostPaid {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<KickerVariant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kicker_cost: Option<ManaCost>,
+        #[serde(
+            default = "AbilityCondition::default_min_count",
+            skip_serializing_if = "AbilityCondition::is_default_min_count"
+        )]
+        min_count: u32,
+    },
 
     /// "if it's attacking" — true when the trigger source object is currently an attacker.
     /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).

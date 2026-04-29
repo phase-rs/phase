@@ -525,6 +525,14 @@ fn zone_change_object_filter_to_trigger(
     destination: Zone,
     idiom: &'static str,
 ) -> ConvResult<TriggerCondition> {
+    match pred {
+        Permanents::WasKicked | Permanents::WasKickedWithKicker(_) | Permanents::WasKickedTwice
+            if destination == Zone::Battlefield =>
+        {
+            return entering_permanent_filter_to_trigger(pred);
+        }
+        _ => {}
+    }
     Ok(TriggerCondition::ZoneChangeObjectMatchesFilter {
         origin,
         destination,
@@ -644,6 +652,22 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         // entered via the stack rather than a non-cast zone change. Engine's
         // `WasCast` predicate is zoneless (mirrors Discover ETB usage).
         Permanents::WasCast | Permanents::ItWasCast => TriggerCondition::WasCast,
+        // CR 702.33d-f + CR 603.4: ETB intervening-if "if it was kicked".
+        Permanents::WasKicked => TriggerCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        },
+        Permanents::WasKickedWithKicker(cost) => TriggerCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: Some(mana::convert(cost)?),
+            min_count: 1,
+        },
+        Permanents::WasKickedTwice => TriggerCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count: 2,
+        },
         // CR 702.112a: "if ~ is renowned" — source-bound renowned check.
         Permanents::IsRenowned => TriggerCondition::SourceIsRenowned,
         // CR 208.3 + CR 603.4: "if its mana value is X" — comparison against the
@@ -2890,6 +2914,22 @@ mod tests {
             }
             other => panic!("expected SourceMatchesFilter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn entering_was_kicked_lowers_to_trigger_additional_cost_paid() {
+        let condition = Condition::EnteringPermanentPassesFilter(Box::new(Permanents::WasKicked));
+
+        let converted = convert_trigger(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            TriggerCondition::AdditionalCostPaid {
+                variant: None,
+                kicker_cost: None,
+                min_count: 1,
+            }
+        );
     }
 
     #[test]
