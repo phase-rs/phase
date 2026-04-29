@@ -3058,6 +3058,8 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     let (for_each_no_duration, for_each_duration) = strip_trailing_duration(for_each_clause);
     let qty = parse_for_each_clause(for_each_no_duration.trim_end_matches('.'))?;
     let quantity = QuantityExpr::Ref { qty };
+    let reference_target =
+        for_each_clause_target_controller_filter(for_each_no_duration.trim_end_matches('.'));
 
     // Strip trailing duration from the base text (e.g., "gets +2/+0 until end of turn"
     // → "gets +2/+0" with duration=UntilEndOfTurn). Duration often appears between
@@ -3086,15 +3088,11 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     {
         let effect = imperative::lower_numeric_imperative_ast(ast.with_for_each_quantity(quantity));
         let effect = thread_for_each_subject(effect, base_no_duration);
-        return Some(ParsedEffectClause {
+        return Some(parsed_for_each_quantity_effect(
             effect,
             duration,
-            sub_ability: None,
-            distribute: None,
-            multi_target: None,
-            condition: None,
-            optional: false,
-        });
+            reference_target,
+        ));
     }
 
     let targeted_base_storage = subject::strip_subject_clause(base_no_duration);
@@ -3251,6 +3249,57 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     }
 
     None
+}
+
+fn for_each_clause_target_controller_filter(for_each_clause: &str) -> Option<TargetFilter> {
+    nom_primitives::scan_at_word_boundaries(for_each_clause, |input| {
+        alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("target opponent controls"),
+            ),
+            value(TargetFilter::Player, tag("target player controls")),
+        ))
+        .parse(input)
+    })
+}
+
+fn parsed_for_each_quantity_effect(
+    effect: Effect,
+    duration: Option<Duration>,
+    reference_target: Option<TargetFilter>,
+) -> ParsedEffectClause {
+    if let Some(target) = reference_target {
+        if matches!(
+            effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ) {
+            let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, effect);
+            sub_ability.duration = duration;
+            return ParsedEffectClause {
+                effect: Effect::TargetOnly { target },
+                duration: None,
+                sub_ability: Some(Box::new(sub_ability)),
+                distribute: None,
+                multi_target: None,
+                condition: None,
+                optional: false,
+            };
+        }
+    }
+
+    ParsedEffectClause {
+        effect,
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+    }
 }
 
 fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
@@ -4771,10 +4820,10 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
-        | Effect::ForceBlock { target } => {
-            if !matches!(target, TargetFilter::ParentTargetController) {
-                *target = TargetFilter::ParentTarget;
-            }
+        | Effect::ForceBlock { target }
+            if !matches!(target, TargetFilter::ParentTargetController) =>
+        {
+            *target = TargetFilter::ParentTarget;
         }
         Effect::Attach { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
             *target = TargetFilter::ParentTarget;
@@ -17094,7 +17143,7 @@ mod tests {
                 assert!(tf
                     .type_filters
                     .iter()
-                    .any(|type_filter| *type_filter == TypeFilter::Permanent));
+                    .any(|type_filter| matches!(type_filter, TypeFilter::Permanent)));
             }
             other => panic!("expected typed permanent filter, got {other:?}"),
         }
@@ -18373,6 +18422,58 @@ mod tests {
                 target: TargetFilter::Player,
             },
         );
+    }
+
+    #[test]
+    fn effect_draw_for_each_tapped_creature_target_opponent_controls() {
+        let def = parse_effect_chain(
+            "Draw a card for each tapped creature target opponent controls.",
+            AbilityKind::Spell,
+        );
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(target),
+        } = &*def.effect
+        else {
+            panic!(
+                "Expected TargetOnly target opponent wrapper, got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(target.controller, Some(ControllerRef::Opponent));
+        assert!(target.type_filters.is_empty());
+
+        let draw = def.sub_ability.as_ref().expect("expected draw sub ability");
+        let Effect::Draw { count, target } = &*draw.effect else {
+            panic!("Expected Draw sub ability, got {:?}", draw.effect);
+        };
+        assert_eq!(*target, TargetFilter::Controller);
+        match count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(typed),
+                    },
+            } => {
+                assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+                assert!(
+                    typed
+                        .type_filters
+                        .iter()
+                        .any(|type_filter| matches!(type_filter, TypeFilter::Creature)),
+                    "expected Creature type filter, got {:?}",
+                    typed.type_filters
+                );
+                assert!(
+                    typed
+                        .properties
+                        .iter()
+                        .any(|property| matches!(property, FilterProp::Tapped)),
+                    "expected Tapped property, got {:?}",
+                    typed.properties
+                );
+            }
+            other => panic!("Expected ObjectCount draw quantity, got {other:?}"),
+        }
     }
 
     #[test]

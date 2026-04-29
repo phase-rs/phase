@@ -11,6 +11,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
+use nom::sequence::terminated;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -19,8 +20,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, CountScope, DevotionColors, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, DevotionColors, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
 };
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
@@ -877,6 +878,10 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         }
     }
 
+    if let Some(qty) = parse_for_each_target_controlled_type(clause) {
+        return Some(qty);
+    }
+
     // "creature you control", "artifact you control", etc.
     // Use parse_type_phrase (not parse_target) to avoid generating spurious
     // target-fallback warnings for quantity text that isn't a target clause.
@@ -886,6 +891,46 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     }
 
     None
+}
+
+fn parse_for_each_target_controlled_type(clause: &str) -> Option<QuantityRef> {
+    let (rest, type_text) = alt((
+        terminated(
+            take_until::<_, _, VerboseError<&str>>(" target opponent controls"),
+            tag(" target opponent controls"),
+        ),
+        terminated(
+            take_until::<_, _, VerboseError<&str>>(" target player controls"),
+            tag(" target player controls"),
+        ),
+    ))
+    .parse(clause)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if remainder.trim().is_empty() {
+        with_target_player_controller(filter).map(|filter| QuantityRef::ObjectCount { filter })
+    } else {
+        None
+    }
+}
+
+fn with_target_player_controller(filter: TargetFilter) -> Option<TargetFilter> {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed.controller = Some(ControllerRef::TargetPlayer);
+            Some(TargetFilter::Typed(typed))
+        }
+        TargetFilter::Or { filters } => filters
+            .into_iter()
+            .map(with_target_player_controller)
+            .collect::<Option<Vec<_>>>()
+            .map(|filters| TargetFilter::Or { filters }),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1481,6 +1526,35 @@ mod tests {
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
         );
+    }
+
+    #[test]
+    fn for_each_tapped_creature_target_opponent_controls() {
+        let qty = parse_for_each_clause("tapped creature target opponent controls").unwrap();
+        match qty {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(typed),
+            } => {
+                assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+                assert!(
+                    typed
+                        .type_filters
+                        .iter()
+                        .any(|type_filter| matches!(type_filter, TypeFilter::Creature)),
+                    "expected Creature type filter, got {:?}",
+                    typed.type_filters
+                );
+                assert!(
+                    typed
+                        .properties
+                        .iter()
+                        .any(|property| matches!(property, FilterProp::Tapped)),
+                    "expected Tapped property, got {:?}",
+                    typed.properties
+                );
+            }
+            other => panic!("Expected ObjectCount over Typed filter, got {other:?}"),
+        }
     }
 
     /// CR 608.2c + CR 109.5: Tempt with Discovery's
