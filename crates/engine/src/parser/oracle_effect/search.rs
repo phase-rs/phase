@@ -151,22 +151,24 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
     }
 }
 
-/// CR 608.2c + CR 701.23: Detect the "with different names" printed-text
-/// restriction at any word boundary in the clause. Composable nom scan that
-/// matches both the canonical phrasing and the trivial pluralization variants
-/// without committing to a fixed prefix.
-fn scan_distinct_names_clause(lower: &str) -> bool {
-    use nom::branch::alt;
-    use nom::combinator::value;
+fn parse_distinct_names_marker(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+    value(
+        (),
+        nom::sequence::pair(
+            tag::<_, _, VerboseError<&str>>("different name"),
+            nom::combinator::opt(tag::<_, _, VerboseError<&str>>("s")),
+        ),
+    )
+    .parse(input)
+}
 
-    scan_preceded(lower, "with ", |i| {
-        alt((
-            value((), tag::<_, _, VerboseError<&str>>("different names")),
-            value((), tag::<_, _, VerboseError<&str>>("different name")),
-        ))
-        .parse(i)
-    })
-    .is_some()
+/// CR 608.2c + CR 701.23: Detect the distinct-names printed-text restriction
+/// at any word boundary in the clause. Composable nom scan that matches both
+/// canonical search phrasings ("with different names", "that have different
+/// names") without committing to a fixed count/filter prefix.
+fn scan_distinct_names_clause(lower: &str) -> bool {
+    scan_preceded(lower, "with ", parse_distinct_names_marker).is_some()
+        || scan_preceded(lower, "that have ", parse_distinct_names_marker).is_some()
 }
 
 /// CR 701.23a + CR 107.1: Split a search filter tail on conjunction boundaries
@@ -985,15 +987,19 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             continue;
         }
 
-        // CR 608.2c: "with different names" / "with different name" — distinct-names
-        // constraint is already encoded on the search details upstream via
-        // `scan_distinct_names_clause`. The chomping arm here exists solely to
-        // consume the marker text so the dispatch loop does not emit a spurious
-        // "search-filter-suffix unmatched" warning. No FilterProp emitted.
-        if let Ok((rest, _)) = nom::sequence::pair(
-            tag::<_, _, VerboseError<&str>>("with different name"),
-            nom::combinator::opt(tag::<_, _, VerboseError<&str>>("s")),
-        )
+        // CR 608.2c: distinct-names suffixes constrain the chosen set, not
+        // individual cards. The constraint is already encoded upstream via
+        // `scan_distinct_names_clause`; this arm only consumes the marker.
+        if let Ok((rest, _)) = alt((
+            nom::sequence::preceded(
+                tag::<_, _, VerboseError<&str>>("with "),
+                parse_distinct_names_marker,
+            ),
+            nom::sequence::preceded(
+                tag::<_, _, VerboseError<&str>>("that have "),
+                parse_distinct_names_marker,
+            ),
+        ))
         .parse(remaining)
         {
             remaining = rest.trim_start();
@@ -1771,6 +1777,19 @@ mod tests {
         );
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 4 });
+    }
+
+    #[test]
+    fn search_that_have_different_names_emits_distinct_names_constraint() {
+        let details = parse_search_library_details(
+            "search your library for up to five land cards that have different names, exile them, then shuffle",
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::DistinctNames
+        );
+        assert!(details.up_to);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
     }
 
     /// Regression: searches without the "different names" clause stay on the
