@@ -3,7 +3,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::ObjectId;
-use super::keywords::KeywordKind;
+use super::keywords::{Keyword, KeywordKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaColor {
@@ -228,10 +228,17 @@ impl ManaRestriction {
 
 /// CR 106.6: Additional effect that the mana confers upon the spell it is spent on.
 /// E.g., "that spell can't be countered" (Cavern of Souls, Delighted Halfling).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaSpellGrant {
     /// The spell cast with this mana can't be countered.
     CantBeCountered,
+    /// CR 106.6 + CR 702: If the spell this mana is spent on satisfies
+    /// `restriction`, grant it `keyword` until end of turn.
+    AddKeywordUntilEndOfTurn {
+        keyword: Keyword,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restriction: Option<ManaRestriction>,
+    },
 }
 
 /// When mana expires — controls lifecycle beyond the normal CR 500.4 phase drain.

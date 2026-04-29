@@ -421,6 +421,44 @@ fn any_ability_has_exile_parent_rider(parsed: &ParsedAbilities) -> bool {
         })
 }
 
+fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
+    if let Effect::Mana { grants, .. } = &*def.effect {
+        if grants.iter().any(|grant| {
+            matches!(
+                grant,
+                crate::types::mana::ManaSpellGrant::AddKeywordUntilEndOfTurn { .. }
+            )
+        }) {
+            return true;
+        }
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_conditional_mana_spell_grant(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_conditional_mana_spell_grant(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_conditional_mana_spell_grant)
+}
+
+fn any_ability_has_conditional_mana_spell_grant(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_conditional_mana_spell_grant)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_conditional_mana_spell_grant)
+        })
+}
+
 fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
@@ -550,6 +588,7 @@ fn any_ability_has_duration(parsed: &ParsedAbilities) -> bool {
                 )
         })
         || parsed.statics.iter().any(static_has_duration)
+        || any_ability_has_conditional_mana_spell_grant(parsed)
 }
 
 fn static_has_duration(s: &StaticDefinition) -> bool {
@@ -766,6 +805,9 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
     // your graveyard") implicit in the sub_ability's relationship to the
     // parent effect.
     if any_ability_has_exile_parent_rider(parsed) {
+        return;
+    }
+    if any_ability_has_conditional_mana_spell_grant(parsed) {
         return;
     }
     // Strip CR-implicit "if" phrases that aren't real conditional gates

@@ -1,7 +1,7 @@
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
-use nom::combinator::value;
+use nom::combinator::{opt, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -14,8 +14,9 @@ use crate::types::ability::{
     QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
-use crate::types::mana::{ManaColor, ManaSpellGrant};
+use crate::types::mana::{ManaColor, ManaRestriction, ManaSpellGrant};
 
+use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_quantity::{parse_cda_quantity, parse_event_context_quantity};
 use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
@@ -990,6 +991,9 @@ pub(crate) fn parse_mana_spend_restriction(
 /// producing a standalone clause like "that spell can't be countered".
 pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>> {
     let trimmed = lower.trim().trim_end_matches('.');
+    if let Some(grant) = parse_conditional_keyword_grant(trimmed) {
+        return Some(vec![grant]);
+    }
     // Use nom tag for matching
     if value::<_, _, nom_language::error::VerboseError<&str>, _>(
         (),
@@ -1001,6 +1005,39 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
         return Some(vec![ManaSpellGrant::CantBeCountered]);
     }
     None
+}
+
+/// CR 106.6 + CR 702: Parse mana-rider keyword grants:
+/// "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
+fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("if that mana is spent on ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = opt(alt((tag::<_, _, VerboseError<&str>>("a "), tag("an "))))
+        .parse(rest)
+        .ok()?;
+    let (rest, subtype) = terminated(
+        take_until::<_, _, VerboseError<&str>>(" creature spell, it gains "),
+        tag(" creature spell, it gains "),
+    )
+    .parse(rest)
+    .ok()?;
+    let (rest, keyword_text) = terminated(
+        take_until::<_, _, VerboseError<&str>>(" until end of turn"),
+        tag(" until end of turn"),
+    )
+    .parse(rest)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let keyword = parse_keyword_from_oracle(keyword_text.trim())?;
+    Some(ManaSpellGrant::AddKeywordUntilEndOfTurn {
+        keyword,
+        restriction: Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
+            subtype.trim(),
+        ))),
+    })
 }
 
 /// CR 106.6: Extract trailing spell grants from a mana restriction clause.
@@ -1553,6 +1590,21 @@ mod tests {
         assert_eq!(
             typed,
             TypedFilter::default().controller(ControllerRef::Opponent)
+        );
+    }
+
+    #[test]
+    fn parses_conditional_mana_keyword_grant() {
+        let grants = parse_mana_spell_grant(
+            "if that mana is spent on a dragon creature spell, it gains haste until end of turn.",
+        )
+        .expect("conditional mana keyword grant must parse");
+        assert_eq!(
+            grants,
+            vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: crate::types::keywords::Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+            }]
         );
     }
 }

@@ -1,7 +1,7 @@
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode, ChoiceType, Effect,
-    GameRestriction, QuantityExpr, ResolvedAbility, RestrictionPlayerScope, StaticDefinition,
-    TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode, ChoiceType,
+    ContinuousModification, Duration, Effect, GameRestriction, QuantityExpr, ResolvedAbility,
+    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -3087,6 +3087,42 @@ fn apply_mana_spell_grants(
             }
         }
     }
+
+    let Some(caster) = state.objects.get(&spell_id).map(|obj| obj.controller) else {
+        return;
+    };
+    let spell_meta = build_spell_meta(state, caster, spell_id);
+    let mut keyword_grants = Vec::new();
+    for grant in spent_units.iter().flat_map(|unit| unit.grants.iter()) {
+        let ManaSpellGrant::AddKeywordUntilEndOfTurn {
+            keyword,
+            restriction,
+        } = grant
+        else {
+            continue;
+        };
+        if restriction.as_ref().is_some_and(|restriction| {
+            !spell_meta
+                .as_ref()
+                .is_some_and(|meta| restriction.allows_spell(meta))
+        }) {
+            continue;
+        }
+        if !keyword_grants.contains(keyword) {
+            keyword_grants.push(keyword.clone());
+        }
+    }
+
+    for keyword in keyword_grants {
+        state.add_transient_continuous_effect(
+            spell_id,
+            caster,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: spell_id },
+            vec![ContinuousModification::AddKeyword { keyword }],
+            None,
+        );
+    }
 }
 
 /// Pay an activated ability's cost. Handles `Tap`, `Mana`, `Composite` (recursive),
@@ -4499,7 +4535,9 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
-    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::mana::{
+        ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSpellGrant, ManaType, ManaUnit,
+    };
     use crate::types::phase::Phase;
     use std::sync::Arc;
 
@@ -4527,6 +4565,60 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    #[test]
+    fn conditional_mana_keyword_grant_applies_to_matching_spell() {
+        let mut state = setup_game_at_main_phase();
+        let dragon_id = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Dragon Whelp".to_string(),
+            Zone::Stack,
+        );
+        let dragon = state.objects.get_mut(&dragon_id).unwrap();
+        dragon.card_types.core_types.push(CoreType::Creature);
+        dragon.card_types.subtypes.push("Dragon".to_string());
+
+        let goblin_id = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Stack,
+        );
+        let goblin = state.objects.get_mut(&goblin_id).unwrap();
+        goblin.card_types.core_types.push(CoreType::Creature);
+        goblin.card_types.subtypes.push("Goblin".to_string());
+
+        let unit = ManaUnit {
+            color: ManaType::Red,
+            source_id: ObjectId(1),
+            snow: false,
+            restrictions: vec![],
+            grants: vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+            }],
+            expiry: None,
+        };
+
+        apply_mana_spell_grants(&mut state, dragon_id, std::slice::from_ref(&unit));
+        apply_mana_spell_grants(&mut state, goblin_id, &[unit]);
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        let effect = &state.transient_continuous_effects[0];
+        assert_eq!(
+            effect.affected,
+            TargetFilter::SpecificObject { id: dragon_id }
+        );
+        assert_eq!(
+            effect.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }]
+        );
     }
 
     fn add_basic_land(
