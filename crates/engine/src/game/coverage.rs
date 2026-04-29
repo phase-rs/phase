@@ -4199,6 +4199,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
         AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
         AbilityCondition::CastDuringPhase { .. } => ("CastDuringPhase", Handled),
+        AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),

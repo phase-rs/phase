@@ -2048,6 +2048,13 @@ fn evaluate_condition(
             .context
             .cast_phase
             .is_some_and(|cast_phase| phases.contains(&cast_phase)),
+        // CR 601.2h + CR 608.2c: Spend-color riders read the resolving spell
+        // object's recorded mana payment. Spell copies with no mana paid
+        // naturally fail because their tally is empty.
+        AbilityCondition::ManaColorSpent { color, minimum } => state
+            .objects
+            .get(&ability.source_id)
+            .is_some_and(|obj| obj.colors_spent_to_cast.get(*color) >= *minimum),
         AbilityCondition::HasMaxSpeed => has_max_speed(state, ability.controller),
         AbilityCondition::IsMonarch => state.monarch == Some(ability.controller),
         // CR 702.131c: The city's blessing is a player designation that effects
@@ -2365,9 +2372,9 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CastingPermission, ControllerRef, DelayedTriggerCondition,
-        Duration, FilterProp, GainLifePlayer, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, SpellContext, TargetFilter, TargetRef, TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ControllerRef,
+        DelayedTriggerCondition, Duration, FilterProp, GainLifePlayer, PlayerFilter, PlayerScope,
+        PtValue, QuantityExpr, QuantityRef, SpellContext, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -4348,6 +4355,59 @@ mod tests {
 
         assert_eq!(state.players[0].hand.len(), 0);
         assert_eq!(state.players[1].hand.len(), 1);
+    }
+
+    #[test]
+    fn resolve_ability_chain_gates_on_source_mana_color_spent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Spend Check".to_string(),
+            Zone::Stack,
+        );
+        create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Card B".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::ManaColorSpent {
+            color: ManaColor::Black,
+            minimum: 1,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.players[0].hand.len(), 0);
+
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .colors_spent_to_cast
+            .add(ManaColor::Black, 1);
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.players[0].hand.len(), 1);
     }
 
     #[test]

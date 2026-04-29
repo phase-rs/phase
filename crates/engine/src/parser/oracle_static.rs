@@ -1588,28 +1588,35 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 
     // --- "{Ability} abilities you activate cost {N} less to activate" ---
     // CR 601.2f: Ability-type-specific cost reduction (e.g., Silver-Fur Master, Fluctuator).
-    if nom_primitives::scan_contains(tp.lower, "abilities you activate cost")
+    if nom_primitives::scan_contains(tp.lower, "abilities you activate")
         && nom_primitives::scan_contains(tp.lower, "less to activate")
     {
         // Extract keyword name and amount via nom combinators
         if let Some(((keyword, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
             let (i, kw) = terminated(
-                nom::bytes::complete::take_until(" abilities you activate cost "),
-                tag(" abilities you activate cost "),
+                nom::bytes::complete::take_until(" abilities you activate"),
+                tag(" abilities you activate"),
             )
             .parse(i)?;
+            let (i, _) = take_until(" cost ").parse(i)?;
+            let (i, _) = tag(" cost ").parse(i)?;
             let (i, amt) =
                 nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
                     .parse(i)?;
             let (i, _) = tag(" less to activate").parse(i)?;
             Ok((i, (kw.to_string(), amt)))
-        }) {
+        })
+        .filter(|((keyword, _), _)| !keyword.trim().is_empty())
+        {
             return Some(
-                StaticDefinition::new(StaticMode::ReduceAbilityCost { keyword, amount })
-                    .affected(TargetFilter::Typed(
-                        TypedFilter::card().controller(ControllerRef::You),
-                    ))
-                    .description(text.to_string()),
+                StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    keyword: keyword.trim().to_string(),
+                    amount,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::card().controller(ControllerRef::You),
+                ))
+                .description(text.to_string()),
             );
         }
     }
@@ -10447,6 +10454,21 @@ mod tests {
             ),
             "Expected ReduceAbilityCost {{ keyword: ninjutsu, amount: 1 }}, got {:?}",
             def.mode
+        );
+    }
+
+    #[test]
+    fn static_reduce_equip_abilities_with_object_qualifier() {
+        let def = parse_static_line(
+            "Equip abilities you activate of other Equipment cost {1} less to activate.",
+        )
+        .expect("should parse ReduceAbilityCost");
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "equip".to_string(),
+                amount: 1,
+            }
         );
     }
 

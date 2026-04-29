@@ -65,7 +65,9 @@ pub(crate) fn is_opening_hand_begin_game(lower: &str) -> bool {
 }
 
 pub(crate) fn is_ability_activate_cost_static(lower: &str) -> bool {
-    scan_contains(lower, "abilities you activate cost") && scan_contains(lower, "less")
+    scan_contains(lower, "abilities you activate")
+        && scan_contains(lower, "cost")
+        && scan_contains(lower, "less to activate")
 }
 
 pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {

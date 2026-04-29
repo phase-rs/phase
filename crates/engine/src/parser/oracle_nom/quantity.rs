@@ -1362,6 +1362,7 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // `parse_for_each_controlled_type` since the leading "creature" token
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_creature_died_this_turn,
+        parse_for_each_combat_creature_controlled,
         parse_for_each_combat_creature_other_than_source,
         parse_for_each_attacking_controller_type,
         parse_for_each_blocking_source_type,
@@ -1426,6 +1427,29 @@ fn parse_number_of_object_colors_tail(input: &str) -> OracleResult<'_, QuantityR
     let (rest, _) = tag("colors of ").parse(input)?;
     let (rest, scope) = parse_object_color_of_scope(rest)?;
     Ok((rest, QuantityRef::ObjectColorCount { scope }))
+}
+
+/// Parse controller-scoped combat-class counts:
+/// "for each attacking/blocking creature they control".
+fn parse_for_each_combat_creature_controlled(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, combat_property) = alt((
+        value(FilterProp::Attacking, tag("attacking ")),
+        value(FilterProp::Blocking, tag("blocking ")),
+    ))
+    .parse(input)?;
+    let (rest, tf) = parse_type_filter_word(rest)?;
+    let (rest, _) = alt((tag(" they control"), tag(" you control"))).parse(rest)?;
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: Some(ControllerRef::You),
+                properties: vec![combat_property],
+            }),
+        },
+    ))
 }
 
 /// Parse source-excluding combat-class counts:
@@ -2694,6 +2718,24 @@ mod tests {
                 })
             } if type_filters == vec![TypeFilter::Creature]
                 && properties == vec![FilterProp::Attacking, FilterProp::Another]
+        ));
+    }
+
+    #[test]
+    fn test_parse_for_each_attacking_creature_they_control() {
+        let (rest, q) = parse_for_each("for each attacking creature they control").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    properties,
+                    ..
+                })
+            } if type_filters == vec![TypeFilter::Creature]
+                && properties == vec![FilterProp::Attacking]
         ));
     }
 

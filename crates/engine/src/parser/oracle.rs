@@ -1840,7 +1840,8 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
         return None;
     }
 
-    let cost = parse_oracle_cost(cost_text);
+    let (cost_text, constraints) = strip_activated_constraints(cost_text);
+    let cost = parse_equip_cost(&cost_text);
     let mut ability = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::Attach {
@@ -1853,8 +1854,37 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     .cost(cost)
     .description(line.to_string())
     .sorcery_speed();
+    if !constraints.restrictions.is_empty() {
+        for restriction in constraints.restrictions {
+            if !ability.activation_restrictions.contains(&restriction) {
+                ability.activation_restrictions.push(restriction);
+            }
+        }
+    }
     ability.cost_reduction = cost_reduction;
     Some(ability)
+}
+
+fn parse_equip_cost(cost_text: &str) -> AbilityCost {
+    let cost = parse_oracle_cost(cost_text);
+    if !matches!(cost, AbilityCost::Unimplemented { .. }) {
+        return cost;
+    }
+
+    parse_first_mana_cost_in_text(cost_text)
+        .map(|cost| AbilityCost::Mana { cost })
+        .unwrap_or(cost)
+}
+
+fn parse_first_mana_cost_in_text(text: &str) -> Option<ManaCost> {
+    let upper = text.to_ascii_uppercase();
+    let (_, cost) = nom::sequence::preceded(
+        take_until::<_, _, VerboseError<&str>>("{"),
+        super::oracle_nom::primitives::parse_mana_cost,
+    )
+    .parse(upper.as_str())
+    .ok()?;
+    Some(cost)
 }
 
 fn split_trailing_self_cost_reduction(
@@ -8457,6 +8487,48 @@ mod tests {
         // "equipped" → caller's separate guard handles this, but defending
         // try_parse_equip itself is fail-safe.
         assert!(super::try_parse_equip("Equipped creature gets +2/+0.").is_none());
+    }
+
+    #[test]
+    fn restricted_equip_costs_use_embedded_mana_cost() {
+        for (line, expected_generic) in [
+            ("Equip Elf {2}", 2),
+            ("Equip creature token {1}", 1),
+            ("Equip legendary creature {3}", 3),
+            ("Equip commander {3}", 3),
+            ("Equip {2} or {B}", 2),
+        ] {
+            let ability = super::try_parse_equip(line).expect("restricted equip should parse");
+            assert!(
+                matches!(
+                    ability.cost,
+                    Some(AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic, .. },
+                    }) if generic == expected_generic
+                ),
+                "{line} parsed unexpected cost: {:?}",
+                ability.cost
+            );
+        }
+    }
+
+    #[test]
+    fn equip_once_per_turn_constraint_strips_from_cost() {
+        let ability = super::try_parse_equip("Equip {0}. Activate only once each turn.")
+            .expect("equip should parse");
+        assert_eq!(
+            ability.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            })
+        );
+        assert!(
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "expected only-once-each-turn restriction: {:?}",
+            ability.activation_restrictions
+        );
     }
 
     #[test]

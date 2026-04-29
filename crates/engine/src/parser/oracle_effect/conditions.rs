@@ -23,7 +23,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::zones::Zone;
 
@@ -1063,6 +1063,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         return Some(condition);
     }
 
+    if let Some(condition) = parse_mana_color_spent_condition_text(text) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_paid_x_condition_text(text) {
         return Some(condition);
     }
@@ -1108,6 +1112,56 @@ fn parse_cast_during_phase_condition(
         ))
         .parse(rest)
     })
+    .parse(input)
+}
+
+fn parse_mana_color_spent_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, parse_mana_color_spent_condition)
+}
+
+fn parse_mana_color_spent_condition(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
+    all_consuming(|input| {
+        let (mut rest, first_color) = parse_basic_colored_mana_symbol(input)?;
+        let mut counts = vec![(first_color, 1_u32)];
+        while let Ok((after_symbol, color)) = parse_basic_colored_mana_symbol(rest) {
+            if let Some((_, count)) = counts.iter_mut().find(|(seen, _)| *seen == color) {
+                *count += 1;
+            } else {
+                counts.push((color, 1));
+            }
+            rest = after_symbol;
+        }
+        let (rest, _) = tag(" was spent to cast ").parse(rest)?;
+        let (rest, _) = alt((tag("this spell"), tag("it"), tag("~"))).parse(rest)?;
+        let condition = if counts.len() == 1 {
+            let (color, minimum) = counts[0];
+            AbilityCondition::ManaColorSpent { color, minimum }
+        } else {
+            AbilityCondition::And {
+                conditions: counts
+                    .into_iter()
+                    .map(|(color, minimum)| AbilityCondition::ManaColorSpent { color, minimum })
+                    .collect(),
+            }
+        };
+        Ok((rest, condition))
+    })
+    .parse(input)
+}
+
+fn parse_basic_colored_mana_symbol(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, ManaColor> {
+    alt((
+        value(ManaColor::White, tag("{w}")),
+        value(ManaColor::Blue, tag("{u}")),
+        value(ManaColor::Black, tag("{b}")),
+        value(ManaColor::Red, tag("{r}")),
+        value(ManaColor::Green, tag("{g}")),
+    ))
     .parse(input)
 }
 
@@ -2151,6 +2205,41 @@ mod tests {
             panic!("expected typed object-count filter");
         };
         assert_eq!(filter.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn suffix_symbolic_mana_spent_condition_parses_single_color() {
+        let (condition, body) = strip_suffix_conditional(
+            "Each player loses 1 life for each attacking creature they control if {B} was spent to cast this spell.",
+        );
+        assert_eq!(
+            body,
+            "Each player loses 1 life for each attacking creature they control"
+        );
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::ManaColorSpent {
+                color: ManaColor::Black,
+                minimum: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn suffix_symbolic_mana_spent_condition_parses_mixed_colors() {
+        let condition = parse_condition_text("{W}{B} was spent to cast this spell")
+            .expect("mixed color spend condition should parse");
+        let AbilityCondition::And { conditions } = condition else {
+            panic!("expected And condition");
+        };
+        assert!(conditions.contains(&AbilityCondition::ManaColorSpent {
+            color: ManaColor::White,
+            minimum: 1,
+        }));
+        assert!(conditions.contains(&AbilityCondition::ManaColorSpent {
+            color: ManaColor::Black,
+            minimum: 1,
+        }));
     }
 
     /// CR 122.1 + CR 608.2c: "there are no counters on ~" round-trips through

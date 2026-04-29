@@ -6000,6 +6000,9 @@ pub enum AbilityCondition {
     /// `phases` is parameterized so grouped phrases like "main phase" can map to
     /// both concrete main phases without proliferating condition variants.
     CastDuringPhase { phases: Vec<Phase> },
+    /// CR 601.2h + CR 608.2c: "if {C} was spent to cast this spell" gates
+    /// resolution on the source object's recorded paid-mana colors.
+    ManaColorSpent { color: ManaColor, minimum: u32 },
     /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last revealed card's type.
     /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`.
     /// `additional_filter` holds optional extra filter properties (e.g., `IsChosenCreatureType`
