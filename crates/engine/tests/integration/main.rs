@@ -10,6 +10,7 @@ mod export_runtime_canaries;
 mod exquisite_blood_routing;
 mod floodpits_drowner;
 mod gran_gran_integration;
+mod greasefang_integration;
 mod harrow_regression;
 mod integration_adventure;
 mod integration_bending;

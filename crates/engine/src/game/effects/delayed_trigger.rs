@@ -65,6 +65,12 @@ pub fn resolve(
     // time `last_created_token_ids` will have been overwritten by other
     // token-creating effects (CR 603.7c: a delayed trigger refers to a
     // particular object even if later events change it).
+    //
+    // CR 603.7c: If the delayed inner effect references the original target via
+    // `TargetFilter::ParentTarget` (e.g., "Return it to its owner's hand at the
+    // beginning of your next end step"), snapshot the parent ability's targets
+    // into the delayed ability NOW so "it" resolves to the correct object when
+    // the trigger fires, not the ability source.
     let snapshot_targets = if effect_references_last_created(&delayed_effect)
         && !state.last_created_token_ids.is_empty()
     {
@@ -73,6 +79,8 @@ pub fn resolve(
             .iter()
             .map(|&id| TargetRef::Object(id))
             .collect()
+    } else if effect_references_parent_target(&delayed_effect) && !ability.targets.is_empty() {
+        ability.targets.to_vec()
     } else {
         vec![]
     };
@@ -112,6 +120,15 @@ pub fn resolve(
 /// into the delayed ability's `targets` at creation time.
 fn effect_references_last_created(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::LastCreated))
+}
+
+/// CR 603.7c: Check whether the delayed inner effect uses `TargetFilter::ParentTarget`
+/// to refer to the originally targeted object (e.g., "Return it to its owner's hand
+/// at the beginning of your next end step"). When true, the parent ability's targets
+/// must be snapshotted into the delayed ability at creation time so "it" resolves
+/// correctly when the trigger fires.
+fn effect_references_parent_target(effect: &Effect) -> bool {
+    matches!(effect.target_filter(), Some(TargetFilter::ParentTarget))
 }
 
 fn bind_contextual_filter_to_condition(
