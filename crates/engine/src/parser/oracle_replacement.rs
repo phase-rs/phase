@@ -3164,7 +3164,16 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
 /// route through this helper.
 fn extract_prevention_followup(original_text: &str) -> Option<String> {
     let lower = original_text.to_lowercase();
-    let (_, after) = split_once_on_lower(original_text, &lower, "prevent that damage. ")?;
+    let (_, after) =
+        split_once_on_lower(original_text, &lower, "prevent that damage. ").or_else(|| {
+            let (_, after) = split_once_on_lower(original_text, &lower, ". ")?;
+            let after_lower = after.to_lowercase();
+            if nom_primitives::scan_contains(&after_lower, "prevented this way") {
+                Some(("", after))
+            } else {
+                None
+            }
+        })?;
     let trimmed = after.trim();
     if trimmed.is_empty() {
         return None;
@@ -3536,6 +3545,77 @@ mod tests {
             .as_deref(),
             Some("Put a -1/-1 counter on ~ for each 1 damage prevented this way.")
         );
+    }
+
+    #[test]
+    fn extract_prevention_followup_accepts_turn_duration_counter_followup() {
+        assert_eq!(
+            extract_prevention_followup(
+                "Prevent the next 3 damage that would be dealt to target creature this turn. \
+                 For each 1 damage prevented this way, put a +1/+1 counter on that creature."
+            )
+            .as_deref(),
+            Some("For each 1 damage prevented this way, put a +1/+1 counter on that creature.")
+        );
+    }
+
+    #[test]
+    fn extract_prevention_followup_accepts_turn_duration_life_followup() {
+        assert_eq!(
+            extract_prevention_followup(
+                "Prevent all damage target spell would deal this turn. \
+                 You gain life equal to the damage prevented this way."
+            )
+            .as_deref(),
+            Some("You gain life equal to the damage prevented this way.")
+        );
+    }
+
+    #[test]
+    fn prevention_counter_followup_uses_prevented_amount_repeat() {
+        let def = parse_replacement_line(
+            "Prevent the next 3 damage that would be dealt to target creature this turn. \
+             For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
+            "Test of Faith",
+        )
+        .unwrap();
+
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            execute.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            })
+        ));
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            } if counter_type == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn prevention_life_followup_uses_prevented_amount() {
+        let def = parse_replacement_line(
+            "Prevent all damage target spell would deal this turn. \
+             You gain life equal to the damage prevented this way.",
+            "Hallow",
+        )
+        .unwrap();
+
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
