@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
@@ -558,6 +558,10 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
+
+  useEffect(() => {
+    setSelectedSet(new Set());
+  }, [data]);
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
