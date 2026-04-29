@@ -17,8 +17,8 @@ use crate::convert::{
     action, build_ability_from_actions, condition, cost, filter, quantity, trigger,
 };
 use crate::schema::types::{
-    CardType, CheckHasable, Expiration, LayerEffect, ModX, Permanent, Player, Rule, SettableColor,
-    SimpleColor, StaticLayerEffect, PT,
+    CardType, CheckHasable, Condition, Expiration, LayerEffect, ModX, Permanent, Player, Players,
+    Rule, SettableColor, SimpleColor, StaticLayerEffect, PT,
 };
 
 /// CR 613: Convert one `StaticLayerEffect` into one or more engine
@@ -296,6 +296,18 @@ pub fn convert_permanent_rule(
         P::MustAttack => StaticMode::MustAttack,
         P::MustBlock => StaticMode::MustBlock,
         P::MustBeBlocked => StaticMode::MustBeBlocked,
+        P::CantAttackIfDefendingPlayer(condition) => {
+            return Ok(StaticDefinition::new(StaticMode::CantAttack)
+                .affected(affected)
+                .condition(defending_player_static_condition(condition)?));
+        }
+        P::CantAttackUnlessDefendingPlayer(condition) => {
+            return Ok(StaticDefinition::new(StaticMode::CantAttack)
+                .affected(affected)
+                .condition(StaticCondition::Not {
+                    condition: Box::new(defending_player_static_condition(condition)?),
+                }));
+        }
 
         // CR 502.3: Untap-step variants. `DoesntUntapDuringControllersUntap`
         // and `CantBecomeUntapped` both express "this permanent doesn't untap
@@ -348,6 +360,34 @@ pub fn convert_permanent_rule(
         }
     };
     Ok(StaticDefinition::new(mode).affected(affected))
+}
+
+fn defending_player_static_condition(condition: &Condition) -> ConvResult<StaticCondition> {
+    match condition {
+        Condition::PlayerPassesFilter(player, predicate)
+            if matches!(&**player, Player::DefendingPlayer) =>
+        {
+            defending_player_predicate_static(predicate)
+        }
+        other => Err(ConversionGap::MalformedIdiom {
+            idiom: "PermanentRule/defending-player-condition",
+            path: String::new(),
+            detail: format!("unsupported defending-player condition: {other:?}"),
+        }),
+    }
+}
+
+fn defending_player_predicate_static(predicate: &Players) -> ConvResult<StaticCondition> {
+    match predicate {
+        Players::ControlsA(perms) => Ok(StaticCondition::DefendingPlayerControls {
+            filter: filter::convert(perms)?,
+        }),
+        other => Err(ConversionGap::MalformedIdiom {
+            idiom: "PermanentRule/defending-player-predicate",
+            path: String::new(),
+            detail: format!("unsupported defending-player predicate: {other:?}"),
+        }),
+    }
 }
 
 /// Build a `StaticDefinition` for a `Rule::PermanentLayerEffect` /
@@ -600,6 +640,43 @@ pub fn expiration_to_duration(exp: &Expiration) -> ConvResult<Duration> {
             });
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::types::{PermanentRule, Player};
+    use engine::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+
+    #[test]
+    fn cant_attack_unless_defending_player_controls_lowers_to_negated_condition() {
+        let condition = Condition::PlayerPassesFilter(
+            Box::new(Player::DefendingPlayer),
+            Box::new(Players::ControlsA(Box::new(
+                crate::schema::types::Permanents::IsCardtype(CardType::Creature),
+            ))),
+        );
+
+        let converted = convert_permanent_rule(
+            &PermanentRule::CantAttackUnlessDefendingPlayer(condition),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert_eq!(converted.mode, StaticMode::CantAttack);
+        assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+
+        let Some(StaticCondition::Not { condition }) = converted.condition else {
+            panic!("expected negated defending-player condition");
+        };
+        let StaticCondition::DefendingPlayerControls {
+            filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+        } = *condition
+        else {
+            panic!("expected DefendingPlayerControls condition");
+        };
+        assert!(type_filters.contains(&TypeFilter::Creature));
+    }
 }
 
 /// True when the `Player` reference resolves to the effect's own controller —
