@@ -46,6 +46,8 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 
 Violating this rule causes cascading failures across the team. Treat every line you didn't write as load-bearing.
 
+**Defer to other active agents to fix their own errors.** If you run into compile, clippy, formatting, or test errors that are unrelated to your own work, wait a few minutes and check again before intervening. Repeat this patience loop while the error appears likely to belong to another active agent's in-progress changes. If the same unrelated error is still present after multiple waiting iterations, such as roughly 10 minutes, then you may proceed to fix the issue while preserving all unrelated work.
+
 ### Agent Team Orchestration Standards
 
 When creating or participating in an agent team (whether triggered by `/batch-mechanics` or auto-initiated):
