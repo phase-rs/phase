@@ -1309,11 +1309,11 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     // Global filter-scoped variants (Clarion/Karn) are handled by parse_filter_scoped_cant_be_activated
     // which runs earlier via the "activated abilities of " prefix dispatch.
     if nom_primitives::scan_contains(tp.lower, "activated abilities can't be activated") {
+        let exemption = parse_cant_be_activated_exemption_in_text(tp.lower);
         let mut def = StaticDefinition::new(StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
-            // CR 605.1a: Self-ref form has no "unless they're..." suffix.
-            exemption: ActivationExemption::None,
+            exemption,
         })
         .affected(TargetFilter::SelfRef)
         .description(text.to_string());
@@ -1917,8 +1917,7 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
             StaticDefinition::new(StaticMode::CantBeActivated {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
-                // CR 605.1a: Self-ref form has no "unless they're..." suffix.
-                exemption: ActivationExemption::None,
+                exemption: parse_cant_be_activated_exemption_in_text(&lower),
             })
             .affected(TargetFilter::SelfRef)
             .description(stripped.to_string()),
@@ -4361,6 +4360,21 @@ fn parse_activation_exemption_suffix(input: &str) -> OracleResult<'_, Activation
     ));
     let (rest, exemption) = parser.parse(input)?;
     Ok((rest, exemption.unwrap_or_default()))
+}
+
+fn parse_cant_be_activated_exemption_in_text(lower: &str) -> ActivationExemption {
+    nom_primitives::scan_preceded(lower, |i| {
+        preceded(tag("can't be activated"), parse_activation_exemption_suffix).parse(i)
+    })
+    .and_then(|(_, exemption, tail)| {
+        let trimmed_tail = tail.trim_end_matches('.').trim();
+        if trimmed_tail.is_empty() {
+            Some(exemption)
+        } else {
+            None
+        }
+    })
+    .unwrap_or_default()
 }
 
 /// CR 602.5 + CR 603.2a: Parse global filter-scoped activation prohibitions.
@@ -13594,6 +13608,49 @@ mod tests {
                 assert_eq!(source_filter, TargetFilter::SelfRef);
                 // CR 605.1a: Self-ref form has no exemption suffix.
                 assert_eq!(exemption, ActivationExemption::None);
+            }
+            other => panic!("expected CantBeActivated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_be_activated_self_ref_mana_exemption_suffix() {
+        let def = parse_static_line(
+            "Its activated abilities can't be activated unless they're mana abilities.",
+        )
+        .expect("self-reference CantBeActivated with mana exemption should parse");
+        match def.mode {
+            StaticMode::CantBeActivated {
+                who,
+                source_filter,
+                exemption,
+            } => {
+                assert_eq!(who, ProhibitionScope::AllPlayers);
+                assert_eq!(source_filter, TargetFilter::SelfRef);
+                assert_eq!(exemption, ActivationExemption::ManaAbilities);
+            }
+            other => panic!("expected CantBeActivated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_be_activated_compound_aura_mana_exemption_suffix() {
+        let defs = parse_static_line_multi(
+            "Enchanted permanent can't attack or block, and its activated abilities can't be activated unless they're mana abilities.",
+        );
+        let cant_be_activated = defs
+            .iter()
+            .find(|def| matches!(def.mode, StaticMode::CantBeActivated { .. }))
+            .expect("compound Aura text should emit CantBeActivated");
+        match &cant_be_activated.mode {
+            StaticMode::CantBeActivated {
+                who,
+                source_filter,
+                exemption,
+            } => {
+                assert_eq!(*who, ProhibitionScope::AllPlayers);
+                assert_eq!(source_filter, &TargetFilter::SelfRef);
+                assert_eq!(*exemption, ActivationExemption::ManaAbilities);
             }
             other => panic!("expected CantBeActivated, got {other:?}"),
         }

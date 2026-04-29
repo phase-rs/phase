@@ -1124,6 +1124,9 @@ fn detect_condition_unless(cleaned: &str, original: &str, ast_json: &str) {
         "\"unless_payment\":{",
         "\"condition\":{",
         "Unless",
+        // CR 605.1a: `CantBeActivated { exemption: ManaAbilities }` is the
+        // structural encoding of "can't be activated unless they're mana abilities."
+        "\"exemption\":\"ManaAbilities\"",
         // CR 118.12: "Counter target spell unless its controller pays X" —
         // captured as `Effect::Counter { unless_payment: Some(_) }` (Censor,
         // Mana Leak, Disrupt, Spell Shrivel, etc.).
