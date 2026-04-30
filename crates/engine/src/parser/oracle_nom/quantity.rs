@@ -473,6 +473,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // "<type> you control" arm — the trailing "in your party" is what
         // distinguishes party-size from a controlled-creature count.
         parse_creatures_in_your_party_tail,
+        parse_entered_this_turn_ref,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -1387,6 +1388,9 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_subtype_died_this_turn,
         parse_for_each_creature_died_this_turn,
+        parse_entered_this_turn_ref,
+    ))
+    .or(alt((
         parse_for_each_combat_creature_controlled,
         parse_for_each_combat_creature_other_than_source,
         parse_for_each_attacking_controller_type,
@@ -1396,8 +1400,72 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_for_each_commander_cast_count,
         parse_for_each_mana_spent,
         parse_for_each_controlled_type,
-    ))
+    )))
     .parse(input)
+}
+
+/// CR 400.7: Parse "[type] that entered (the battlefield) this turn" into
+/// the shared entered-this-turn battlefield count. The "under your control"
+/// surface form stamps `ControllerRef::You` onto the typed filter; phrases
+/// that already include "you control" keep the controller supplied by
+/// `parse_type_phrase`.
+fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, (type_text, inject_you)) = parse_entered_this_turn_clause(input)?;
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("entered this turn quantity"),
+            )],
+        }));
+    }
+    let filter = if inject_you {
+        inject_controller(filter, ControllerRef::You)
+    } else {
+        filter
+    };
+    Ok((rest, QuantityRef::EnteredThisTurn { filter }))
+}
+
+fn parse_entered_this_turn_clause(input: &str) -> OracleResult<'_, (&str, bool)> {
+    map(
+        pair(
+            take_until(" that entered"),
+            preceded(
+                tag(" that entered"),
+                alt((
+                    value(true, tag(" the battlefield under your control this turn")),
+                    value(false, tag(" the battlefield this turn")),
+                    value(false, tag(" this turn")),
+                )),
+            ),
+        ),
+        |(type_text, inject_you)| (type_text, inject_you),
+    )
+    .parse(input)
+}
+
+fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(tf.controller(controller)),
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| inject_controller(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| inject_controller(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(inject_controller(*filter, controller)),
+        },
+        other => other,
+    }
 }
 
 /// CR 601.2h + CR 202.2: Parse "color[s] of mana spent to cast <self>" and
@@ -3064,6 +3132,69 @@ mod tests {
             _ => panic!("expected ObjectCount"),
         }
         assert_eq!(rest, "");
+    }
+
+    fn assert_entered_this_turn_typed(
+        q: QuantityRef,
+    ) -> (Vec<TypeFilter>, Option<ControllerRef>, Vec<FilterProp>) {
+        match q {
+            QuantityRef::EnteredThisTurn {
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }),
+            } => (type_filters, controller, properties),
+            other => panic!("expected typed EnteredThisTurn ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_entered_this_turn_under_your_control() {
+        let (rest, q) = parse_for_each_clause_ref(
+            "land that entered the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, properties) = assert_entered_this_turn_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Land]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.is_empty());
+    }
+
+    #[test]
+    fn parse_for_each_other_subtype_entered_this_turn() {
+        let (rest, q) = parse_for_each_clause_ref(
+            "other zombie that entered the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, properties) = assert_entered_this_turn_typed(q);
+        assert_eq!(
+            type_filters,
+            vec![TypeFilter::Subtype("Zombie".to_string())]
+        );
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.iter().any(|prop| prop == &FilterProp::Another));
+    }
+
+    #[test]
+    fn parse_number_of_controlled_entered_this_turn() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of nontoken creatures you control that entered this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, properties) = assert_entered_this_turn_typed(q);
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Token".to_string()
+            ))))
+        );
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.is_empty());
     }
 
     #[test]

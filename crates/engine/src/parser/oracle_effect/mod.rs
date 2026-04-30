@@ -7021,9 +7021,20 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
         let (repeat_for, text) = strip_for_each_prefix(&text);
+        let (text_without_where_x, local_where_x_expression) = {
+            let text_where_x_lower = text.to_lowercase();
+            let (without_where_x, where_x_expression) =
+                strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
+            (without_where_x.original.to_string(), where_x_expression)
+        };
         // CR 609.3: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
-            strip_repeat_count_suffix(&text)
+            let (repeat_count, stripped_text) = strip_repeat_count_suffix(&text_without_where_x);
+            if repeat_count.is_some() {
+                (repeat_count, stripped_text)
+            } else {
+                (None, text)
+            }
         } else {
             (None, text)
         };
@@ -7073,9 +7084,6 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
         let (text_after_prefix, prefix_delayed) = strip_temporal_prefix(&text);
-        let text_where_x_lower = text.to_lowercase();
-        let (_, local_where_x_expression) =
-            strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
         // CR 107.3i: If this chunk has no local "where X is" but a sibling clause
         // in the same sentence binds X, propagate the sibling binding so "target
         // player loses X life" and "you gain X life" in the same sentence share
@@ -9672,6 +9680,12 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
 }
 
 fn apply_where_x_ability_expression(def: &mut AbilityDefinition, where_x_expression: Option<&str>) {
+    if let Some(repeat_for) = def.repeat_for.take() {
+        def.repeat_for = Some(apply_where_x_quantity_expression(
+            repeat_for,
+            where_x_expression,
+        ));
+    }
     apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
     if let Some(sub) = def.sub_ability.as_mut() {
         apply_where_x_ability_expression(sub, where_x_expression);
@@ -12384,6 +12398,22 @@ mod tests {
             def.repeat_for,
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Variable { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn effect_proliferate_x_times_applies_where_x_repeat_for() {
+        let def = parse_effect_chain(
+            "Proliferate X times, where X is the number of nontoken creatures you control that entered this turn",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(*def.effect, Effect::Proliferate));
+        assert!(def.duration.is_none());
+        assert!(matches!(
+            def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EnteredThisTurn { .. },
             })
         ));
     }
