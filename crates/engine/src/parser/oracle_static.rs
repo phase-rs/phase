@@ -29,9 +29,9 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
-    ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind,
+    Comparator, ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr,
+    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -2292,6 +2292,10 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                 // No combat-status prefix — use original dispatch path
                 if let Some(filter) = parse_modified_creature_subject_filter(full_subject) {
                     filter
+                } else if let Some(filter) =
+                    parse_attachment_creatures_you_control_descriptor(descriptor)
+                {
+                    filter
                 } else if let Some(color) = parse_named_color(descriptor) {
                     TargetFilter::Typed(
                         TypedFilter::creature()
@@ -3757,11 +3761,15 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
             TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
         ));
     }
+    if tp.lower == "equipped creatures you control" {
+        return Some(attachment_creatures_you_control_filter(
+            AttachmentKind::Equipment,
+        ));
+    }
 
     let controlled_patterns = [
         ("tapped creatures you control", FilterProp::Tapped),
         ("attacking creatures you control", FilterProp::Attacking),
-        ("equipped creatures you control", FilterProp::EquippedBy),
         // CR 700.9: "modified creatures you control" — permanents with
         // counters, equipped, or enchanted by own-controlled Aura.
         ("modified creatures you control", FilterProp::Modified),
@@ -3817,6 +3825,34 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
     }
 
     None
+}
+
+fn parse_attachment_creatures_you_control_descriptor(descriptor: &str) -> Option<TargetFilter> {
+    // CR 303.4b + CR 301.5a: plural/global "enchanted/equipped creatures you
+    // control" is not source-relative. It means creatures with a qualifying
+    // Aura/Equipment attached, unlike Aura/Equipment text such as "Enchanted
+    // creature gets ..." where `EnchantedBy`/`EquippedBy` intentionally points
+    // at the static ability's source.
+    let kind = if descriptor.eq_ignore_ascii_case("enchanted") {
+        AttachmentKind::Aura
+    } else if descriptor.eq_ignore_ascii_case("equipped") {
+        AttachmentKind::Equipment
+    } else {
+        return None;
+    };
+
+    Some(attachment_creatures_you_control_filter(kind))
+}
+
+fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::HasAttachment {
+                kind,
+                controller: None,
+            }]),
+    )
 }
 
 /// CR 903.3d: Parse "commander(s) [you control | your opponents control]"
@@ -9625,7 +9661,10 @@ mod tests {
             Some(TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::EquippedBy]),
+                    .properties(vec![FilterProp::HasAttachment {
+                        kind: AttachmentKind::Equipment,
+                        controller: None,
+                    }]),
             ))
         );
         assert!(def
@@ -13783,6 +13822,29 @@ mod tests {
                 TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
             ))
         );
+    }
+
+    #[test]
+    fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
+        let def = parse_static_line("Enchanted creatures you control get +2/+2.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasAttachment {
+                        kind: AttachmentKind::Aura,
+                        controller: None,
+                    }])
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
     }
 
     #[test]
