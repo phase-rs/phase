@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-05-13T00:00:00Z",
+  "updated": "2026-05-14T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -893,8 +893,8 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Disrupting Shoal"
+          "count": 1,
+          "name": "Strix Serenade"
         },
         {
           "count": 3,
@@ -909,7 +909,7 @@
           "name": "Hydroelectric Specimen"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Spell Snare"
         },
         {
@@ -917,8 +917,8 @@
           "name": "Jwari Disruption"
         },
         {
-          "count": 3,
-          "name": "Flare of Denial"
+          "count": 4,
+          "name": "Goblin Charbelcher"
         },
         {
           "count": 4,
@@ -933,12 +933,12 @@
           "name": "Suppression Ray"
         },
         {
-          "count": 4,
-          "name": "Lotus Bloom"
-        },
-        {
           "count": 1,
           "name": "Force of Negation"
+        },
+        {
+          "count": 4,
+          "name": "Lotus Bloom"
         },
         {
           "count": 4,
@@ -953,20 +953,16 @@
           "name": "Stern Scolding"
         },
         {
-          "count": 4,
-          "name": "Goblin Charbelcher"
+          "count": 3,
+          "name": "Flare of Denial"
         },
         {
-          "count": 1,
-          "name": "Strix Serenade"
+          "count": 4,
+          "name": "Disrupting Shoal"
         },
         {
           "count": 1,
           "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
         },
         {
           "count": 1,
@@ -992,11 +988,11 @@
         },
         {
           "count": 2,
-          "name": "Harbinger of the Seas"
+          "name": "Engineered Explosives"
         },
         {
           "count": 1,
-          "name": "Tezzeret the Seeker"
+          "name": "Island"
         },
         {
           "count": 2,
@@ -1008,7 +1004,7 @@
         },
         {
           "count": 1,
-          "name": "Island"
+          "name": "Tezzeret the Seeker"
         },
         {
           "count": 1,
@@ -1016,7 +1012,7 @@
         },
         {
           "count": 2,
-          "name": "Engineered Explosives"
+          "name": "Harbinger of the Seas"
         }
       ]
     },
@@ -1024,18 +1020,26 @@
       "name": "Goryo's Vengeance",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "W",
+        "U",
         "G",
-        "U"
+        "B",
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 4,
+          "name": "Psychic Frog"
+        },
+        {
           "count": 1,
-          "name": "Cephalid Coliseum"
+          "name": "Breeding Pool"
+        },
+        {
+          "count": 1,
+          "name": "Consign to Memory"
         },
         {
           "count": 4,
@@ -1046,8 +1050,44 @@
           "name": "Faithful Mending"
         },
         {
+          "count": 2,
+          "name": "Force of Negation"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 3,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Pest Control"
+        },
+        {
           "count": 1,
           "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Shadowy Backstreet"
+        },
+        {
+          "count": 1,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 4,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 4,
+          "name": "Atraxa, Grand Unifier"
         },
         {
           "count": 4,
@@ -1055,23 +1095,11 @@
         },
         {
           "count": 1,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 1,
-          "name": "Shadowy Backstreet"
-        },
-        {
-          "count": 4,
-          "name": "Psychic Frog"
-        },
-        {
-          "count": 1,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 1,
           "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Prismatic Ending"
         },
         {
           "count": 1,
@@ -1086,8 +1114,8 @@
           "name": "Island"
         },
         {
-          "count": 4,
-          "name": "Polluted Delta"
+          "count": 1,
+          "name": "Godless Shrine"
         },
         {
           "count": 1,
@@ -1098,82 +1126,54 @@
           "name": "Griselbrand"
         },
         {
-          "count": 1,
-          "name": "Quantum Riddler"
-        },
-        {
           "count": 4,
           "name": "Goryo's Vengeance"
-        },
-        {
-          "count": 3,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 2,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 1,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 4,
-          "name": "Atraxa, Grand Unifier"
-        },
-        {
-          "count": 3,
-          "name": "Thoughtseize"
         },
         {
           "count": 1,
           "name": "Undercity Sewers"
         },
         {
-          "count": 1,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 3,
-          "name": "Quantum Riddler"
-        },
-        {
           "count": 4,
-          "name": "Prismatic Ending"
+          "name": "Flooded Strand"
         }
       ],
       "sideboard": [
         {
+          "count": 1,
+          "name": "Ashiok, Dream Render"
+        },
+        {
           "count": 2,
-          "name": "Damping Sphere"
+          "name": "Consign to Memory"
         },
         {
           "count": 1,
-          "name": "Teferi, Time Raveler"
+          "name": "Nihil Spellbomb"
         },
         {
           "count": 3,
           "name": "Mystical Dispute"
         },
         {
-          "count": 2,
+          "count": 1,
+          "name": "Emperor of Bones"
+        },
+        {
+          "count": 1,
           "name": "Pest Control"
         },
         {
           "count": 1,
-          "name": "Teferi, Time Raveler"
+          "name": "Celestial Purge"
         },
         {
           "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
           "name": "Wrath of the Skies"
         },
         {
-          "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
+          "count": 2,
+          "name": "Teferi, Time Raveler"
         }
       ]
     },
