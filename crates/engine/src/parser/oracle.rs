@@ -348,6 +348,7 @@ struct SpellResolutionLine {
     line: String,
     effect_text: String,
     ability_word_condition: Option<StaticCondition>,
+    has_ability_word_prefix: bool,
 }
 
 fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> {
@@ -363,18 +364,67 @@ fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> 
         return None;
     }
 
-    let (ability_word_condition, effect_text) =
+    let (ability_word_condition, effect_text, has_ability_word_prefix) =
         if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
-            (ability_word_to_condition(&aw_name), effect_text)
+            (ability_word_to_condition(&aw_name), effect_text, true)
         } else {
-            (None, line.clone())
+            (None, line.clone(), false)
         };
 
     Some(SpellResolutionLine {
         line,
         effect_text,
         ability_word_condition,
+        has_ability_word_prefix,
     })
+}
+
+fn is_self_exile_cleanup_line(line: &str, card_name: &str) -> bool {
+    let normalized = normalize_card_name_refs(line, card_name);
+    let normalized_lower = normalized.to_lowercase();
+
+    nom_on_lower(&normalized, &normalized_lower, |i| {
+        value(
+            (),
+            (
+                tag::<_, _, VerboseError<&str>>("exile "),
+                tag::<_, _, VerboseError<&str>>("~"),
+                opt(tag::<_, _, VerboseError<&str>>(".")),
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
+fn starts_with_until_duration(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    nom_on_lower(line, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag("until your next turn, "),
+                tag("until the end of your next turn, "),
+                tag("until end of turn, "),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
+fn is_standalone_spell_keyword_action_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let parsed = all_consuming(value(
+        (),
+        (
+            tag::<_, _, VerboseError<&str>>("time travel"),
+            opt(tag::<_, _, VerboseError<&str>>(".")),
+        ),
+    ))
+    .parse(lower.as_str())
+    .is_ok();
+    parsed
 }
 
 fn is_semicolon_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> bool {
@@ -1768,14 +1818,14 @@ pub fn parse_oracle_text(
                 continue;
             };
             let aw_condition = prepared_line.ability_word_condition.clone();
-            spell_body_lines.push(prepared_line.effect_text);
+            spell_body_lines.push(prepared_line.effect_text.clone());
             spell_description_lines.push(prepared_line.line);
 
             let mut next_i = i + 1;
             while next_i < lines.len() {
-                if level_consumed.iter().any(|idx| *idx == next_i)
-                    || saga_consumed.iter().any(|idx| *idx == next_i)
-                    || spacecraft_consumed.iter().any(|idx| *idx == next_i)
+                if level_consumed.contains(&next_i)
+                    || saga_consumed.contains(&next_i)
+                    || spacecraft_consumed.contains(&next_i)
                     || parse_oracle_block(&lines, next_i).is_some()
                 {
                     break;
@@ -1785,7 +1835,10 @@ pub fn parse_oracle_text(
                     break;
                 };
 
-                if next_prepared.ability_word_condition.is_some()
+                if next_prepared.has_ability_word_prefix
+                    || starts_with_until_duration(&next_prepared.effect_text)
+                    || is_self_exile_cleanup_line(&next_prepared.effect_text, card_name)
+                    || is_standalone_spell_keyword_action_line(&prepared_line.effect_text)
                     || !is_spell_resolution_instruction_line(
                         &next_prepared,
                         card_name,
