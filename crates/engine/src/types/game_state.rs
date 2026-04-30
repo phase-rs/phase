@@ -155,6 +155,18 @@ pub struct LKISnapshot {
     pub counters: HashMap<CounterType, u32>,
 }
 
+/// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.
+///
+/// Mana remembers the source that produced it, and source-qualified Oracle text
+/// ("mana from a Treasure", "mana from an artifact source") needs the source's
+/// characteristics as they existed when the mana was paid, not a post-hoc lookup
+/// after the source may have left the battlefield or changed characteristics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaSpentSourceSnapshot {
+    pub source_id: ObjectId,
+    pub lki: LKISnapshot,
+}
+
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpellCastRecord {

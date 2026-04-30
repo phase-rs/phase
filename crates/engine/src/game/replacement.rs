@@ -2104,7 +2104,7 @@ enum ReplacementBranch {
 ///
 /// `event` scopes the quantity resolution: for a `ZoneChange` to the battlefield
 /// the entering object is threaded through `QuantityContext::entering`, so
-/// self-scoped spell refs (`ColorsSpentOnSelf`, `ManaSpentOnTriggeringSpell`-style
+/// self-scoped spell refs (`ManaSpentToCast` with self/trigger scopes
 /// lookups) resolve against the spell that is ETB'ing rather than the static
 /// replacement source. CR 614.1c treats these as replacement effects; CR 601.2h
 /// guarantees `colors_spent_to_cast` is still populated at this point (the clear
@@ -2132,7 +2132,7 @@ fn extract_etb_counters(
         } => {
             // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
             // object for ETB replacements. `CostXPaid` reads the spell's paid X
-            // (stashed by `finalize_cast`); `ColorsSpentOnSelf` reads the spell's
+            // (stashed by `finalize_cast`); self-scoped spent-mana refs read the spell's
             // per-color mana tally; other dynamic refs resolve against current
             // state.
             let entering = match event {
@@ -5025,7 +5025,10 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 counter_type: "P1P1".to_string(),
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::ColorsSpentOnSelf,
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                        metric: crate::types::ability::CastManaSpentMetric::DistinctColors,
+                    },
                 },
             },
         );
@@ -5078,7 +5081,7 @@ mod tests {
         }
     }
 
-    /// Regression: when `QuantityRef::ColorsSpentOnSelf` is used outside an ETB
+    /// Regression: when a self-scoped spent-mana quantity is used outside an ETB
     /// context (no entering object), it resolves against the static source. This
     /// keeps `CountersOnSelf`-style refs working for static abilities that inspect
     /// their own source without reach-around via the replacement pipeline.
@@ -5101,7 +5104,10 @@ mod tests {
         state.objects.insert(source, obj);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::ColorsSpentOnSelf,
+            qty: QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::DistinctColors,
+            },
         };
         // No entering object — resolves against `source` directly.
         let n = crate::game::quantity::resolve_quantity(&state, &expr, PlayerId(0), source);

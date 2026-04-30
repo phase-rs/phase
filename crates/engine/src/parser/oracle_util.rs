@@ -957,6 +957,7 @@ const SUBTYPES: &[&str] = &[
     "Zombie",
     "Zubera",
     // ── Land subtypes ──
+    "Cave",
     "Desert",
     "Forest",
     "Gate",

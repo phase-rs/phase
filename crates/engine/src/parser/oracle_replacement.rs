@@ -4602,7 +4602,7 @@ mod tests {
                 },
                 target: TargetFilter::SelfRef,
             } if counter_type == "P1P1"
-                && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ColorsSpentOnSelf })
+                && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::DistinctColors } })
         ));
     }
 
@@ -4620,7 +4620,7 @@ mod tests {
             Effect::PutCounter {
                 ref counter_type,
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::ManaSpentOnSelf,
+                    qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
             } if counter_type == "P1P1"
@@ -4641,7 +4641,7 @@ mod tests {
             Effect::PutCounter {
                 ref counter_type,
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::ManaSpentOnSelf,
+                    qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
             } if counter_type == "P1P1"
@@ -4662,7 +4662,7 @@ mod tests {
             Effect::PutCounter {
                 ref counter_type,
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::ManaSpentOnSelf,
+                    qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
             } if counter_type == "P1P1"
@@ -6652,7 +6652,7 @@ mod tests {
     /// ("Whenever you cast a creature spell, that creature enters with X
     /// additional +1/+1 counters on it, where X is the number of colors of
     /// mana spent to cast it.") parses into a `ChangeZone` replacement on the
-    /// entering creature with `PutCounter { count: Ref(ColorsSpentOnSelf) }`.
+    /// entering creature with a self-scoped spent-mana counter quantity.
     #[test]
     fn parses_wildgrowth_archaic_replacement() {
         let text = "Whenever you cast a creature spell, that creature enters with X additional +1/+1 counters on it, where X is the number of colors of mana spent to cast it.";
@@ -6668,7 +6668,7 @@ mod tests {
         assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
         assert_eq!(tf.controller, Some(ControllerRef::You));
 
-        // execute: PutCounter { target: SelfRef, count: Ref(ColorsSpentOnSelf) }.
+        // execute: PutCounter { target: SelfRef, count: Ref(self spent-mana colors) }.
         let exec = def.execute.as_ref().expect("execute set");
         let Effect::PutCounter {
             counter_type,
@@ -6683,7 +6683,10 @@ mod tests {
         assert_eq!(
             count,
             &QuantityExpr::Ref {
-                qty: QuantityRef::ColorsSpentOnSelf
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                    metric: crate::types::ability::CastManaSpentMetric::DistinctColors
+                }
             }
         );
     }

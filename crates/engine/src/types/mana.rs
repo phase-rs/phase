@@ -698,7 +698,7 @@ impl ColoredManaCount {
     }
 
     /// CR 202.2: Number of distinct colors with a non-zero tally.
-    /// Used by `QuantityRef::ColorsSpentOnSelf` for "X is the number of colors
+    /// Used by self-scoped spent-mana quantities for "X is the number of colors
     /// of mana spent to cast it" patterns (Wildgrowth Archaic family).
     pub fn distinct_colors(&self) -> usize {
         ManaColor::ALL.iter().filter(|c| self.get(**c) > 0).count()

@@ -1011,15 +1011,7 @@ pub fn spell_object_matches_filter_from(
     source_controller: PlayerId,
     all_creature_types: &[String],
 ) -> bool {
-    let record = SpellCastRecord {
-        core_types: spell_obj.card_types.core_types.clone(),
-        supertypes: spell_obj.card_types.supertypes.clone(),
-        subtypes: spell_obj.card_types.subtypes.clone(),
-        keywords: spell_obj.keywords.clone(),
-        colors: spell_obj.color.clone(),
-        mana_value: spell_obj.mana_cost.mana_value(),
-        has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
-    };
+    let record = spell_cast_record_from_object(spell_obj);
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -1027,7 +1019,58 @@ pub fn spell_object_matches_filter_from(
         filter,
         source_controller,
         all_creature_types,
+        None,
     )
+}
+
+/// State-aware variant of [`spell_object_matches_filter_from`] for live cast
+/// evaluation. Dynamic CMC thresholds on battlefield statics resolve against
+/// the static source's controller and source object.
+pub fn spell_object_matches_filter_from_state(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+) -> bool {
+    let Some(source_obj) = state.objects.get(&source_id) else {
+        return false;
+    };
+    let record = spell_cast_record_from_object(spell_obj);
+    spell_object_matches_filter_inner(
+        &record,
+        origin_zone,
+        caster,
+        filter,
+        source_obj.controller,
+        all_creature_types,
+        Some(SpellFilterContext {
+            state,
+            source_id,
+            source_controller: source_obj.controller,
+        }),
+    )
+}
+
+fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
+    SpellCastRecord {
+        core_types: spell_obj.card_types.core_types.clone(),
+        supertypes: spell_obj.card_types.supertypes.clone(),
+        subtypes: spell_obj.card_types.subtypes.clone(),
+        keywords: spell_obj.keywords.clone(),
+        colors: spell_obj.color.clone(),
+        mana_value: spell_obj.mana_cost.mana_value(),
+        has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SpellFilterContext<'a> {
+    state: &'a GameState,
+    source_id: ObjectId,
+    source_controller: PlayerId,
 }
 
 fn spell_object_matches_filter_inner(
@@ -1037,6 +1080,7 @@ fn spell_object_matches_filter_inner(
     filter: &TargetFilter,
     source_controller: PlayerId,
     all_creature_types: &[String],
+    context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match filter {
         TargetFilter::Any => true,
@@ -1061,7 +1105,7 @@ fn spell_object_matches_filter_inner(
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
             }) && properties
                 .iter()
-                .all(|prop| spell_object_matches_property(record, zone, prop))
+                .all(|prop| spell_object_matches_property(record, zone, prop, context))
         }
         TargetFilter::Or { filters } => filters.iter().any(|inner| {
             spell_object_matches_filter_inner(
@@ -1071,6 +1115,7 @@ fn spell_object_matches_filter_inner(
                 inner,
                 source_controller,
                 all_creature_types,
+                context,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|inner| {
@@ -1081,6 +1126,7 @@ fn spell_object_matches_filter_inner(
                 inner,
                 source_controller,
                 all_creature_types,
+                context,
             )
         }),
         TargetFilter::Not { filter: inner } => !spell_object_matches_filter_inner(
@@ -1090,6 +1136,7 @@ fn spell_object_matches_filter_inner(
             inner,
             source_controller,
             all_creature_types,
+            context,
         ),
         TargetFilter::None
         | TargetFilter::Player
@@ -1119,10 +1166,32 @@ fn spell_object_matches_filter_inner(
     }
 }
 
-fn spell_object_matches_property(record: &SpellCastRecord, zone: Zone, prop: &FilterProp) -> bool {
+fn spell_object_matches_property(
+    record: &SpellCastRecord,
+    zone: Zone,
+    prop: &FilterProp,
+    context: Option<SpellFilterContext<'_>>,
+) -> bool {
     match prop {
         FilterProp::InZone { zone: required } => zone == *required,
         FilterProp::InAnyZone { zones } => zones.contains(&zone),
+        FilterProp::Cmc { comparator, value } => {
+            let threshold = match value {
+                QuantityExpr::Fixed { value } => *value,
+                _ => {
+                    let Some(context) = context else {
+                        return false;
+                    };
+                    resolve_quantity(
+                        context.state,
+                        value,
+                        context.source_controller,
+                        context.source_id,
+                    )
+                }
+            };
+            comparator.evaluate(record.mana_value as i32, threshold)
+        }
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -2429,13 +2498,14 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ChosenAttribute, Comparator, ControllerRef, FilterProp, TargetFilter,
+        AggregateFunction, ChosenAttribute, Comparator, ControllerRef, FilterProp, PlayerScope,
+        QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaColor;
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -3843,6 +3913,92 @@ mod tests {
             PlayerId(1),
             &filter,
             PlayerId(0),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn spell_object_filter_state_resolves_dynamic_cmc_threshold() {
+        let mut state = setup();
+        state.players[1].life_lost_this_turn = 3;
+
+        let source_id = add_creature(&mut state, PlayerId(0), "Abaddon");
+        let small_id = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Small Spell".to_string(),
+            Zone::Hand,
+        );
+        let large_id = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(0),
+            "Large Spell".to_string(),
+            Zone::Hand,
+        );
+        let exile_id = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(0),
+            "Exiled Spell".to_string(),
+            Zone::Exile,
+        );
+
+        for (id, mana_value) in [(small_id, 3), (large_id, 4), (exile_id, 3)] {
+            let spell = state.objects.get_mut(&id).unwrap();
+            spell.card_types.core_types.push(CoreType::Sorcery);
+            spell.mana_cost = ManaCost::generic(mana_value);
+        }
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::card()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::InZone { zone: Zone::Hand },
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn {
+                                player: PlayerScope::Opponent {
+                                    aggregate: AggregateFunction::Sum,
+                                },
+                            },
+                        },
+                    },
+                ]),
+        );
+
+        let small = state.objects.get(&small_id).unwrap();
+        assert!(spell_object_matches_filter_from_state(
+            &state,
+            small,
+            Zone::Hand,
+            PlayerId(0),
+            &filter,
+            source_id,
+            &[],
+        ));
+
+        let large = state.objects.get(&large_id).unwrap();
+        assert!(!spell_object_matches_filter_from_state(
+            &state,
+            large,
+            Zone::Hand,
+            PlayerId(0),
+            &filter,
+            source_id,
+            &[],
+        ));
+
+        let exiled = state.objects.get(&exile_id).unwrap();
+        assert!(!spell_object_matches_filter_from_state(
+            &state,
+            exiled,
+            Zone::Exile,
+            PlayerId(0),
+            &filter,
+            source_id,
             &[],
         ));
     }

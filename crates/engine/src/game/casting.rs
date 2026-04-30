@@ -517,12 +517,13 @@ fn granted_spell_keywords(
         };
 
         let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from(
+            super::filter::spell_object_matches_filter_from_state(
+                state,
                 spell_obj,
                 origin_zone,
                 caster,
                 filter,
-                source_obj.controller,
+                source_obj.id,
                 &state.all_creature_types,
             )
         });
@@ -3162,15 +3163,37 @@ pub(super) fn pay_mana_cost_with_choices(
     apply_mana_spell_grants(state, source_id, &spent_units);
 
     // CR 601.2h: Track whether mana was actually spent to cast this spell,
-    // and the per-color breakdown for Adamant-style intervening-if checks
-    // (CR 207.2c).
+    // the per-color breakdown for Adamant-style intervening-if checks
+    // (CR 207.2c), and source snapshots for "mana from <source>" queries.
+    if let Some(obj) = state.objects.get_mut(&source_id) {
+        obj.mana_spent_to_cast = false;
+        obj.mana_spent_to_cast_amount = 0;
+        obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
+        obj.mana_spent_source_snapshots.clear();
+    }
+
     if !spent_units.is_empty() {
+        let source_snapshots: Vec<_> = spent_units
+            .iter()
+            .filter_map(|unit| {
+                state
+                    .objects
+                    .get(&unit.source_id)
+                    .map(|source| source.snapshot_for_mana_spent())
+                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
+                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
+                        source_id: unit.source_id,
+                        lki,
+                    })
+            })
+            .collect();
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
             obj.mana_spent_to_cast_amount = spent_units.len() as u32;
             for unit in &spent_units {
                 obj.colors_spent_to_cast.add_unit(unit);
             }
+            obj.mana_spent_source_snapshots = source_snapshots;
         }
     }
 

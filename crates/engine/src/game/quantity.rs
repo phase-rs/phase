@@ -14,9 +14,9 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, FilterProp, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
-    RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
+    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
+    CountScope, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{parse_counter_type, CounterMatch, CounterType};
@@ -29,7 +29,7 @@ use crate::types::player::PlayerId;
 ///
 /// Some `QuantityRef` variants need to distinguish between "the static ability
 /// source" and "the object entering the battlefield" — e.g., Wildgrowth
-/// Archaic's `ColorsSpentOnSelf` during an ETB replacement refers to the
+/// Archaic's self-scoped spent-mana quantity during an ETB replacement refers to the
 /// *entering* creature's paid colors, not the Archaic itself. Most callers
 /// resolve against the source only and go through `resolve_quantity`; the
 /// replacement pipeline threads a richer context via `resolve_quantity_with_ctx`.
@@ -126,6 +126,13 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ObjectCountDistinctNames { filter }
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Objects { filter },
+            }
+            | QuantityRef::ManaSpentToCast {
+                metric:
+                    CastManaSpentMetric::FromSource {
+                        source_filter: filter,
+                    },
+                ..
             } => filter_uses_recipient(filter),
             QuantityRef::ObjectColorCount {
                 scope: ObjectScope::Recipient,
@@ -171,7 +178,7 @@ fn filter_prop_uses_recipient(prop: &FilterProp) -> bool {
 }
 
 /// Resolve a QuantityExpr with an explicit `QuantityContext` so variants like
-/// `ColorsSpentOnSelf` can distinguish entering-object scope from static-source
+/// self-scoped spent-mana quantities can distinguish entering-object scope from static-source
 /// scope. Used by the replacement pipeline for ETB-counter effects.
 pub fn resolve_quantity_with_ctx(
     state: &GameState,
@@ -222,7 +229,7 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
 /// explicit `trigger_event` override. `state.current_trigger_event` is not
 /// populated at trigger-detection time (it is only set at resolution via
 /// `stack::resolve_top`), so event-scoped refs like
-/// `QuantityRef::ManaSpentOnTriggeringSpell` would otherwise resolve to 0
+/// triggering-spell spent-mana refs would otherwise resolve to 0
 /// during the detection-time condition check. This function substitutes the
 /// event-scoped value from the passed `event` before delegating to
 /// `resolve_quantity` for everything else.
@@ -300,8 +307,7 @@ fn filter_contains_other_than_trigger_object(filter: &crate::types::ability::Tar
     }
 }
 
-/// Substitute an event-scoped `QuantityRef` (currently only
-/// `ManaSpentOnTriggeringSpell`) using an explicit event, returning `None`
+/// Substitute an event-scoped `QuantityRef` using an explicit event, returning `None`
 /// when the expression does not reference an event-scoped quantity.
 fn resolve_event_scoped_ref(
     state: &GameState,
@@ -310,14 +316,51 @@ fn resolve_event_scoped_ref(
 ) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
-            qty: QuantityRef::ManaSpentOnTriggeringSpell,
+            qty:
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::TriggeringSpell,
+                    metric,
+                },
         } => {
             let id = crate::game::targeting::extract_source_from_event(event)?;
-            let obj = state.objects.get(&id)?;
-            Some(u32_to_i32_saturating(obj.mana_spent_to_cast_amount))
+            resolve_mana_spent_to_cast_metric(
+                state,
+                id,
+                metric,
+                &FilterContext::from_source(state, id),
+            )
         }
         _ => None,
     }
+}
+
+fn resolve_mana_spent_to_cast_metric(
+    state: &GameState,
+    cast_object: ObjectId,
+    metric: &CastManaSpentMetric,
+    filter_ctx: &FilterContext<'_>,
+) -> Option<i32> {
+    let obj = state.objects.get(&cast_object)?;
+    Some(match metric {
+        CastManaSpentMetric::Total => u32_to_i32_saturating(obj.mana_spent_to_cast_amount),
+        CastManaSpentMetric::DistinctColors => {
+            usize_to_i32_saturating(obj.colors_spent_to_cast.distinct_colors())
+        }
+        CastManaSpentMetric::FromSource { source_filter } => usize_to_i32_saturating(
+            obj.mana_spent_source_snapshots
+                .iter()
+                .filter(|snapshot| {
+                    crate::game::filter::matches_target_filter_on_lki_snapshot(
+                        state,
+                        snapshot.source_id,
+                        &snapshot.lki,
+                        source_filter,
+                        filter_ctx,
+                    )
+                })
+                .count(),
+        ),
+    })
 }
 
 /// Resolve a QuantityExpr with access to the ability's targets.
@@ -1039,40 +1082,23 @@ fn resolve_ref(
             .and_then(|obj| obj.cost_x_paid)
             .map(u32_to_i32_saturating)
             .unwrap_or(0),
-        // CR 601.2h + CR 603.4: Total mana actually spent to cast the triggering
-        // spell. Reads `GameObject::mana_spent_to_cast_amount` on the spell
-        // object referenced by `current_trigger_event`. Distinct from
-        // `EventContextSourceManaValue` which reads the printed mana value —
-        // the two differ for X spells, alternative costs, and cost reduction.
-        QuantityRef::ManaSpentOnTriggeringSpell => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_source_from_event)
-            .and_then(|id| state.objects.get(&id))
-            .map(|obj| u32_to_i32_saturating(obj.mana_spent_to_cast_amount))
-            .unwrap_or(0),
-        // CR 601.2h: Total mana actually spent to cast the ability's source
-        // object. Used by spell effects that reference their own cost at
-        // resolution time (Molten Note). The `mana_spent_to_cast_amount`
-        // field persists through resolution (not cleared by
-        // `clear_transient_cast_state`). Resolves against the entering object
-        // when in an ETB-replacement context, else the static source.
-        QuantityRef::ManaSpentOnSelf => state
-            .objects
-            .get(&ctx.self_object())
-            .map(|obj| u32_to_i32_saturating(obj.mana_spent_to_cast_amount))
-            .unwrap_or(0),
-        // CR 601.2h + CR 202.2: Number of distinct colors of mana spent to cast
-        // the "self" object. Resolves against the entering object when in an
-        // ETB-replacement context (threaded by `extract_etb_counters`), else
-        // the static source. Reads `GameObject::colors_spent_to_cast`, which
-        // is populated by `pay_mana_cost` during casting and survives until
-        // `process_triggers` clears it after trigger collection.
-        QuantityRef::ColorsSpentOnSelf => state
-            .objects
-            .get(&ctx.self_object())
-            .map(|obj| usize_to_i32_saturating(obj.colors_spent_to_cast.distinct_colors()))
-            .unwrap_or(0),
+        // CR 106.3 + CR 601.2h: Mana spent to cast a spell, parameterized by
+        // scope and metric. Source-qualified metrics read one payment-time
+        // source snapshot per mana unit, so Treasure/Cave/artifact-source
+        // queries do not depend on the producing permanent still existing or
+        // retaining the same type.
+        QuantityRef::ManaSpentToCast { scope, metric } => {
+            let cast_object = match scope {
+                CastManaObjectScope::SelfObject => Some(ctx.self_object()),
+                CastManaObjectScope::TriggeringSpell => state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_source_from_event),
+            };
+            cast_object
+                .and_then(|id| resolve_mana_spent_to_cast_metric(state, id, metric, &filter_ctx))
+                .unwrap_or(0)
+        }
         // CR 903.4 + CR 903.4f: Number of distinct colors in the controller's
         // commander(s)' combined color identity. Returns 0 when the controller
         // has no commander (per CR 903.4f: "that quality is undefined if that
@@ -1884,12 +1910,149 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
-    use crate::types::game_state::{ExileLink, ExileLinkKind, ZoneChangeRecord};
+    use crate::types::game_state::{
+        ExileLink, ExileLinkKind, ManaSpentSourceSnapshot, ZoneChangeRecord,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::zones::Zone;
     use crate::types::SpellCastRecord;
+
+    fn add_spent_mana_source_snapshot(
+        state: &mut GameState,
+        cast_object: ObjectId,
+        source_id: ObjectId,
+    ) {
+        let lki = state.objects[&source_id].snapshot_for_mana_spent();
+        state
+            .objects
+            .get_mut(&cast_object)
+            .unwrap()
+            .mana_spent_source_snapshots
+            .push(ManaSpentSourceSnapshot { source_id, lki });
+    }
+
+    #[test]
+    fn resolve_source_qualified_mana_spent_counts_matching_snapshots() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Bat Colony".to_string(),
+            Zone::Stack,
+        );
+        let cave = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Hidden Grotto".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cave)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state
+            .objects
+            .get_mut(&cave)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Cave".to_string());
+        let forest = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        add_spent_mana_source_snapshot(&mut state, spell, cave);
+        add_spent_mana_source_snapshot(&mut state, spell, cave);
+        add_spent_mana_source_snapshot(&mut state, spell, forest);
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                        "Cave".into(),
+                    ))),
+                },
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), spell), 2);
+    }
+
+    #[test]
+    fn resolve_source_qualified_mana_spent_uses_entering_context() {
+        let mut state = GameState::new_two_player(42);
+        let static_source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Coin of Mastery".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Creature Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let treasure = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&treasure)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        add_spent_mana_source_snapshot(&mut state, entering, treasure);
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                },
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity_with_ctx(
+                &state,
+                &qty,
+                PlayerId(0),
+                QuantityContext {
+                    entering: Some(entering),
+                    source: static_source,
+                    recipient: None,
+                },
+            ),
+            1
+        );
+    }
 
     /// CR 700.8 + CR 700.8b: party size — building-block test exercising
     /// `compute_party_size` directly across the full assignment surface.

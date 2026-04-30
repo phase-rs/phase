@@ -453,6 +453,13 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
+    // --- "[Type] spells you cast [from zone] have [keyword]" (CR 702.51a) ---
+    // Dispatch before generic "has/have" continuous parsing; spell keyword
+    // grants function during casting, not as battlefield continuous grants.
+    if let Some(def) = parse_spells_have_keyword(&tp, &text) {
+        return Some(def);
+    }
+
     if tp.lower == "your speed can increase beyond 4."
         || tp.lower == "your speed can increase beyond 4"
     {
@@ -3485,22 +3492,67 @@ fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
     .min()
 }
 
+fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRef>)> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    let input = input.trim().trim_end_matches('.');
+    let (rest, keyword_text) = nom::bytes::complete::take_till::<_, _, VE<'_>>(|c| c == ',')
+        .parse(input)
+        .ok()?;
+    let keyword = Keyword::from_str(keyword_text.trim()).ok()?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some((keyword, None));
+    }
+
+    let (_, qty_text) = preceded(tag::<_, _, VE<'_>>(", where x is "), nom::combinator::rest)
+        .parse(rest)
+        .ok()?;
+    let qty = parse_quantity_ref(qty_text.trim())?;
+    Some((keyword, Some(qty)))
+}
+
+#[cfg(test)]
+fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    parse_spells_have_keyword(&tp, text)
+}
+
+fn bind_where_x_in_quantity_expr(
+    value: QuantityExpr,
+    where_x: &QuantityRef,
+) -> Option<QuantityExpr> {
+    match value {
+        QuantityExpr::Fixed { .. } => Some(value),
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X" => Some(QuantityExpr::Ref {
+            qty: where_x.clone(),
+        }),
+        _ => None,
+    }
+}
+
 /// Parse "[Type] spells you cast [from zone] have [keyword]" patterns.
 /// CR 702.51a: Grants a keyword (typically convoke) to spells matching a filter during casting.
 /// Also handles "Creature cards you own that aren't on the battlefield have flash."
 fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     type VE<'a> = nom_language::error::VerboseError<&'a str>;
 
+    let scoped_tp = nom_tag_tp(tp, "during your turn, ");
+    let condition = scoped_tp.as_ref().map(|_| StaticCondition::DuringYourTurn);
+    let tp = scoped_tp.as_ref().unwrap_or(tp);
+
     // Pattern 1: "[type] spells you cast [from zone] have [keyword]."
     // Find " have " to split subject from keyword
-    let have_pos = tp.lower.rfind(" have ")?;
+    let have_pos = tp.lower.match_indices(" have ").next()?.0;
     let subject = &tp.lower[..have_pos];
-    let keyword_str = tp.lower[have_pos + " have ".len()..]
-        .trim()
-        .trim_end_matches('.');
+    let keyword_str = tp.lower[have_pos + " have ".len()..].trim();
 
-    // Parse the keyword — must be a valid keyword
-    let keyword = Keyword::from_str(keyword_str).ok()?;
+    // Parse the keyword — must be a valid keyword. A trailing "where X is …"
+    // clause binds an earlier variable-X mana-value qualifier on the subject.
+    let (keyword, where_x) = parse_keyword_with_where_x(keyword_str)?;
 
     // Find "spells you cast" in the subject — may be preceded by a type descriptor
     let spells_marker = "spells you cast";
@@ -3514,39 +3566,35 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         let mut cursor = after_spells;
 
         // Parse optional zone qualifier: "from exile", "from your graveyard"
-        let zone_filter = if let Ok((rest, _)) = tag::<_, _, VE<'_>>("from exile").parse(cursor) {
+        let zone_filter = if let Ok((rest, zone)) = alt((
+            value(Zone::Exile, tag::<_, _, VE<'_>>("from exile")),
+            value(Zone::Hand, tag("from your hand")),
+        ))
+        .parse(cursor)
+        {
             cursor = rest.trim_start();
-            Some(FilterProp::InZone { zone: Zone::Exile })
+            Some(FilterProp::InZone { zone })
         } else {
             None
         };
 
         // CR 202.3: Optional "with mana value N or greater/less" qualifier
         // (Imoti, Celebrant of Bounty: "Spells you cast with mana value 6 or
-        // greater have cascade."). Restricted to fixed-value variants — the
-        // dynamic Ref/Offset variants (e.g. "less than that creature's mana
-        // value") presume a triggering source object that doesn't exist in a
-        // CastWithKeyword grant evaluation.
+        // greater have cascade."). Variable-X thresholds may be bound by the
+        // keyword clause's trailing "where X is …" quantity (Abaddon class).
         let mv_filter = parse_mana_value_suffix(cursor).and_then(|(prop, consumed)| {
-            let is_fixed = matches!(
-                &prop,
-                FilterProp::Cmc {
-                    comparator: Comparator::GE,
-                    value: QuantityExpr::Fixed { .. }
-                } | FilterProp::Cmc {
-                    comparator: Comparator::LE,
-                    value: QuantityExpr::Fixed { .. }
-                } | FilterProp::Cmc {
-                    comparator: Comparator::EQ,
-                    value: QuantityExpr::Fixed { .. }
+            let FilterProp::Cmc { comparator, value } = prop else {
+                return None;
+            };
+            let value = match where_x.as_ref() {
+                Some(qty) => bind_where_x_in_quantity_expr(value, qty)?,
+                None => match value {
+                    QuantityExpr::Fixed { .. } => value,
+                    _ => return None,
                 },
-            );
-            if is_fixed {
-                cursor = cursor[consumed..].trim_start();
-                Some(prop)
-            } else {
-                None
-            }
+            };
+            cursor = cursor[consumed..].trim_start();
+            Some(FilterProp::Cmc { comparator, value })
         });
         let _ = cursor; // qualifiers are optional; remaining slice is unused
 
@@ -3571,11 +3619,13 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
             typed.properties.push(mv_prop);
         }
 
-        return Some(
-            StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-                .affected(TargetFilter::Typed(typed))
-                .description(text.to_string()),
-        );
+        let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+            .affected(TargetFilter::Typed(typed))
+            .description(text.to_string());
+        if let Some(condition) = condition.clone() {
+            def = def.condition(condition);
+        }
+        return Some(def);
     }
 
     // Pattern 2: "Creature cards you own that aren't on the battlefield have flash"
@@ -3596,11 +3646,13 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
             }
             _ => base_filter,
         };
-        return Some(
-            StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-                .affected(affected)
-                .description(text.to_string()),
-        );
+        let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+            .affected(affected)
+            .description(text.to_string());
+        if let Some(condition) = condition.clone() {
+            def = def.condition(condition);
+        }
+        return Some(def);
     }
 
     None
@@ -13558,6 +13610,50 @@ mod tests {
                         value: QuantityExpr::Fixed { value: 6 },
                     }),
                     "Expected CmcGE(6) property, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_spells_from_hand_with_dynamic_mana_value_have_cascade() {
+        let text = "During your turn, spells you cast from your hand with mana value X or less have cascade, where X is the total amount of life your opponents have lost this turn.";
+        assert!(
+            parse_spells_have_keyword_for_test(text).is_some(),
+            "CastWithKeyword parser should own the Abaddon shape"
+        );
+        let def = parse_static_line(text).unwrap();
+
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Cascade,
+            }
+        );
+        assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.properties
+                        .contains(&FilterProp::InZone { zone: Zone::Hand }),
+                    "Expected InZone(Hand), got {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn {
+                                player: PlayerScope::Opponent {
+                                    aggregate: AggregateFunction::Sum,
+                                },
+                            },
+                        },
+                    }),
+                    "Expected dynamic CmcLE(opponents life lost), got {:?}",
                     tf.properties
                 );
             }

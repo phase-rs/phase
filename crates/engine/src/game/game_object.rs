@@ -12,6 +12,7 @@ use crate::types::card::{LayoutKind, PrintedCardRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
+use crate::types::game_state::LKISnapshot;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
@@ -556,8 +557,8 @@ pub struct GameObject {
     /// CR 601.2h: Total amount of mana actually spent to cast this object
     /// (sum across all colors and generic). Populated during casting
     /// finalization alongside `mana_spent_to_cast` and `colors_spent_to_cast`.
-    /// Consumed by `QuantityRef::ManaSpentOnTriggeringSpell` for intervening-if
-    /// comparisons (Increment, CR 603.4) and by `QuantityRef::ManaSpentOnSelf`
+    /// Consumed by spent-mana quantity refs for intervening-if
+    /// comparisons (Increment, CR 603.4) and self-referential spell effects
     /// for spell-resolution effects that read their own cost (Molten Note,
     /// "deals damage equal to the amount of mana spent to cast this spell").
     ///
@@ -567,6 +568,13 @@ pub struct GameObject {
     /// at cast finalization; initialized to 0 by `GameObject::new`.
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub mana_spent_to_cast_amount: u32,
+
+    /// CR 106.3 + CR 601.2h: Source snapshots for each mana spent to cast this
+    /// object. One entry per spent mana lets source-qualified dynamic quantities
+    /// count "mana from a Cave/Treasure/artifact source" without depending on
+    /// the mana source still existing or retaining the same characteristics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_source_snapshots: Vec<crate::types::game_state::ManaSpentSourceSnapshot>,
 
     /// CR 702.26b / CR 702.26d: Phasing status. A phased-out permanent stays
     /// on the battlefield but is treated as though it doesn't exist for almost
@@ -747,7 +755,27 @@ impl GameObject {
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
             mana_spent_to_cast_amount: 0,
+            mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
+        }
+    }
+
+    /// CR 106.3 + CR 601.2h: Capture the public source characteristics needed
+    /// by source-qualified "mana spent to cast" effects.
+    pub fn snapshot_for_mana_spent(&self) -> LKISnapshot {
+        LKISnapshot {
+            name: self.name.clone(),
+            power: self.power,
+            toughness: self.toughness,
+            mana_value: self.mana_cost.mana_value(),
+            controller: self.controller,
+            owner: self.owner,
+            card_types: self.card_types.core_types.clone(),
+            subtypes: self.card_types.subtypes.clone(),
+            supertypes: self.card_types.supertypes.clone(),
+            keywords: self.keywords.clone(),
+            colors: self.color.clone(),
+            counters: self.counters.clone(),
         }
     }
 

@@ -1197,7 +1197,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
         let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
         // CR 601.2h + CR 603.7c: "the amount of mana spent to cast that spell"
         // resolves via `parse_event_context_quantity` to
-        // `ManaSpentOnTriggeringSpell`; fall back to `parse_cda_quantity` for
+        // triggering-spell spent-mana ref; fall back to `parse_cda_quantity` for
         // non-event quantities (e.g. "~'s power").
         let count = parse_event_context_quantity(quantity_text)
             .or_else(|| parse_cda_quantity(quantity_text))?;
@@ -1409,7 +1409,7 @@ mod tests {
     /// The `{C}` colorless branch routes to `ManaProduction::Colorless`
     /// (since `parse_mana_production` only recognizes W/U/B/R/G and would
     /// otherwise silently fail), and the quantity clause routes through
-    /// `parse_event_context_quantity` to `ManaSpentOnTriggeringSpell`.
+    /// `parse_event_context_quantity` to the triggering-spell spent-mana ref.
     #[test]
     fn amount_equal_to_mana_spent_on_triggering_spell() {
         let effect = try_parse_add_mana_effect(
@@ -1424,7 +1424,10 @@ mod tests {
                 assert_eq!(
                     count,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total
+                        }
                     },
                     "count must reference mana spent on the triggering spell"
                 );

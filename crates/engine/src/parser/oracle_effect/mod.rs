@@ -13898,7 +13898,7 @@ mod tests {
     /// - sub_ability's effect is `CreateDelayedTrigger` with
     ///   `AtNextPhaseForPlayer { PreCombatMain, PlayerId(0) /* placeholder */ }`,
     /// - delayed trigger's inner effect is `Mana { Colorless { count:
-    ///   Ref(ManaSpentOnTriggeringSpell) } }`.
+    ///   Ref(triggering-spell spent-mana) } }`.
     #[test]
     fn mana_sculpt_full_parse_tree() {
         let def = parse_effect_chain(
@@ -13963,7 +13963,7 @@ mod tests {
             "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
         );
 
-        // Inner delayed effect: Mana(Colorless, Ref(ManaSpentOnTriggeringSpell)).
+        // Inner delayed effect: Mana(Colorless, Ref(triggering-spell spent-mana)).
         let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
             panic!(
                 "expected Mana effect on delayed trigger, got {:?}",
@@ -13975,7 +13975,10 @@ mod tests {
                 assert_eq!(
                     *count,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total
+                        }
                     },
                     "Colorless count must reference mana spent on triggering spell"
                 );
@@ -18704,11 +18707,14 @@ mod tests {
                 e,
                 Effect::GainEnergy {
                     amount: QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total
+                        },
                     },
                 }
             ),
-            "expected dynamic GainEnergy ManaSpentOnTriggeringSpell, got: {e:?}"
+            "expected dynamic GainEnergy triggering-spell spent-mana ref, got: {e:?}"
         );
     }
 

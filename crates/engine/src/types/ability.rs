@@ -1912,6 +1912,27 @@ pub enum CardTypeSetSource {
     Objects { filter: TargetFilter },
 }
 
+/// CR 601.2h: Which cast object a mana-spent quantity reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CastManaObjectScope {
+    /// The ability's source object, or the entering object in ETB replacement context.
+    SelfObject,
+    /// The spell object referenced by the current trigger event.
+    TriggeringSpell,
+}
+
+/// CR 106.3 + CR 601.2h: What to measure about mana spent to cast a spell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CastManaSpentMetric {
+    /// Total amount of mana spent.
+    Total,
+    /// Number of distinct colors of mana spent.
+    DistinctColors,
+    /// Amount of mana whose source matched the filter at payment time.
+    FromSource { source_filter: TargetFilter },
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -2232,34 +2253,14 @@ pub enum QuantityRef {
     /// spell that became the source permanent. Reads `GameObject::convoked_creatures`;
     /// ETB replacement contexts resolve against the entering object.
     ConvokedCreatureCount,
-    /// CR 601.2h + CR 603.4: Total amount of mana actually spent to cast the
-    /// spell that caused the current trigger event. Resolves against the
-    /// spell object referenced by `trigger_event` (e.g., `SpellCast`), reading
-    /// `GameObject::mana_spent_to_cast_amount`. Used by intervening-if
-    /// comparisons like Increment ("if the amount of mana you spent is greater
-    /// than this creature's power or toughness"). Returns 0 outside a
-    /// trigger-event scope.
-    ManaSpentOnTriggeringSpell,
-    /// CR 601.2h: Total amount of mana actually spent to cast the ability's
-    /// own source object. Resolves against `state.objects[source_id]`, reading
-    /// `GameObject::mana_spent_to_cast_amount`. Used by spell-resolution
-    /// effects that reference their own paid cost (Molten Note: "deals damage
-    /// to target creature equal to the amount of mana spent to cast this
-    /// spell"). Distinct from `ManaSpentOnTriggeringSpell`, which reads the
-    /// spell referenced by the current trigger event. For an activated
-    /// ability on a permanent, this returns the cost paid to cast the
-    /// permanent — typically useful only for self-referential spell effects.
-    ManaSpentOnSelf,
-    /// CR 601.2h + CR 202.2: Number of distinct colors of mana spent to cast
-    /// the source object itself. Counts colors of `GameObject::colors_spent_to_cast`
-    /// with a non-zero tally. Used by Wildgrowth Archaic ("that creature enters
-    /// with X additional +1/+1 counters on it, where X is the number of colors
-    /// of mana spent to cast it") and similar patterns.
-    ///
-    /// Resolution scope: when used inside an ETB-counter replacement effect,
-    /// resolves against the entering object (via `QuantityContext::entering`);
-    /// otherwise resolves against the static source.
-    ColorsSpentOnSelf,
+    /// CR 106.3 + CR 601.2h: Mana spent to cast a spell, parameterized by
+    /// which cast object is being measured and which spent-mana metric is
+    /// needed. Covers total amount, distinct colors, and source-qualified
+    /// amounts without proliferating sibling variants.
+    ManaSpentToCast {
+        scope: CastManaObjectScope,
+        metric: CastManaSpentMetric,
+    },
     /// CR 903.4 + CR 903.4f: Number of distinct colors in the controller's
     /// commander(s)' combined color identity. Color identity is the union of
     /// every commander's mana-cost colors plus color indicator/CDA colors.

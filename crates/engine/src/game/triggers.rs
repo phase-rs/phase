@@ -2008,7 +2008,7 @@ pub(crate) fn check_trigger_condition(
         } => {
             // CR 603.4: Intervening-if check runs at both detection and resolution.
             // At detection time `state.current_trigger_event` is not yet populated,
-            // so event-scoped refs (e.g. `ManaSpentOnTriggeringSpell`) must resolve
+            // so event-scoped refs (e.g. triggering-spell mana spent) must resolve
             // against the explicit `trigger_event` parameter.
             let source_id = source_id.unwrap_or(ObjectId(0));
             let lhs = crate::game::quantity::resolve_quantity_for_trigger_check(
@@ -6287,7 +6287,10 @@ pub mod tests {
             conditions: vec![
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total,
+                        },
                     },
                     comparator: Comparator::GT,
                     rhs: QuantityExpr::Ref {
@@ -6298,7 +6301,10 @@ pub mod tests {
                 },
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total,
+                        },
                     },
                     comparator: Comparator::GT,
                     rhs: QuantityExpr::Ref {

@@ -17,9 +17,9 @@ use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{parse_shared_quality_clause, parse_type_phrase};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, DevotionColors, FilterProp,
-    ObjectProperty, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
-    TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
+    CountScope, DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerScope, QuantityExpr,
+    QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterMatch;
 use crate::types::player::PlayerCounterKind;
@@ -495,7 +495,10 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // CR 202.2 + CR 601.2h: "the number of colors of mana spent to cast it"
         // (Wildgrowth Archaic and the cousin-card family).
         value(
-            QuantityRef::ColorsSpentOnSelf,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::DistinctColors,
+            },
             tag("colors of mana spent to cast it"),
         ),
         parse_number_of_object_name_words_tail,
@@ -958,6 +961,22 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(
             QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+            tag("the total amount of life your opponents have lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+            tag("total amount of life your opponents have lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::Controller,
             },
             tag("total life you lost this turn"),
@@ -1391,15 +1410,62 @@ fn parse_for_each_mana_spent(input: &str) -> OracleResult<'_, QuantityRef> {
     {
         let (rest, _) = tag(" of mana spent to cast ").parse(rest)?;
         let (rest, _) = parse_mana_spent_self_subject(rest)?;
-        return Ok((rest, QuantityRef::ColorsSpentOnSelf));
+        return Ok((
+            rest,
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::DistinctColors,
+            },
+        ));
+    }
+
+    if let Ok((rest, source_filter)) = parse_mana_from_source_spent_to_cast(input) {
+        return Ok((
+            rest,
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::FromSource { source_filter },
+            },
+        ));
     }
 
     let (rest, _) = tag("mana spent to cast ").parse(input)?;
     let (rest, _) = parse_mana_spent_self_subject(rest)?;
-    Ok((rest, QuantityRef::ManaSpentOnSelf))
+    Ok((
+        rest,
+        QuantityRef::ManaSpentToCast {
+            scope: CastManaObjectScope::SelfObject,
+            metric: CastManaSpentMetric::Total,
+        },
+    ))
 }
 
-fn parse_mana_spent_self_subject(input: &str) -> OracleResult<'_, ()> {
+/// CR 106.3 + CR 601.2h: Parse
+/// "mana from [a/an] <source-filter> [source] spent to cast <self>" and the
+/// "that was spent" variant.
+pub(crate) fn parse_mana_from_source_spent_to_cast(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("mana from ").parse(input)?;
+    let (rest, source_filter) = parse_mana_source_filter(rest)?;
+    let (rest, _) = alt((tag(" that was spent to cast "), tag(" spent to cast "))).parse(rest)?;
+    let (rest, _) = parse_mana_spent_self_subject(rest)?;
+    Ok((rest, source_filter))
+}
+
+pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (source_filter, rest) = parse_type_phrase(input);
+    if rest.len() == input.len() {
+        return Err(nom::Err::Error(VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("mana source filter"),
+            )],
+        }));
+    }
+    let (rest, _) = opt(alt((tag(" sources"), tag(" source")))).parse(rest)?;
+    Ok((rest, source_filter))
+}
+
+pub(crate) fn parse_mana_spent_self_subject(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
@@ -1407,6 +1473,7 @@ fn parse_mana_spent_self_subject(input: &str) -> OracleResult<'_, ()> {
             tag("this spell"),
             tag("this creature"),
             tag("this permanent"),
+            tag("them"),
             tag("~"),
         )),
     )
@@ -2201,18 +2268,105 @@ mod tests {
         let (rest, q) =
             parse_for_each_clause_ref("color of mana spent to cast this spell").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(q, QuantityRef::ColorsSpentOnSelf);
+        assert_eq!(
+            q,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::DistinctColors
+            }
+        );
 
         let (rest, q) = parse_for_each_clause_ref("colors of mana spent to cast it").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(q, QuantityRef::ColorsSpentOnSelf);
+        assert_eq!(
+            q,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::DistinctColors
+            }
+        );
     }
 
     #[test]
     fn parse_for_each_mana_spent_to_cast_it() {
         let (rest, q) = parse_for_each_clause_ref("mana spent to cast it").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(q, QuantityRef::ManaSpentOnSelf);
+        assert_eq!(
+            q,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::Total
+            }
+        );
+    }
+
+    #[test]
+    fn parse_for_each_mana_from_source_spent_to_cast_it() {
+        let (rest, q) = parse_for_each_clause_ref("mana from a cave spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::FromSource { source_filter },
+            } => match source_filter {
+                TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                    assert_eq!(type_filters, vec![TypeFilter::Subtype("Cave".into())]);
+                }
+                other => panic!("expected typed source filter, got {other:?}"),
+            },
+            other => panic!("expected source-qualified mana spent ref, got {other:?}"),
+        }
+
+        let (rest, q) =
+            parse_for_each_clause_ref("mana from an artifact source spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::FromSource { source_filter },
+            } => match source_filter {
+                TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                    assert_eq!(type_filters, vec![TypeFilter::Artifact]);
+                }
+                other => panic!("expected typed source filter, got {other:?}"),
+            },
+            other => panic!("expected source-qualified mana spent ref, got {other:?}"),
+        }
+
+        let (rest, q) =
+            parse_for_each_clause_ref("mana from a treasure that was spent to cast this spell")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::FromSource { .. },
+            }
+        ));
+
+        let (rest, q) =
+            parse_for_each_clause_ref("mana from a treasure spent to cast them").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::FromSource { .. },
+            }
+        ));
+
+        let (rest, q) =
+            parse_for_each_clause_ref("mana from an artifact or creature source spent to cast it")
+                .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ManaSpentToCast {
+                metric: crate::types::ability::CastManaSpentMetric::FromSource { source_filter },
+                ..
+            } => assert!(matches!(source_filter, TargetFilter::Or { .. })),
+            other => panic!("expected source-qualified mana spent ref, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2658,6 +2812,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_opponents_total_life_lost_this_turn() {
+        let (rest, q) =
+            parse_quantity_ref("the total amount of life your opponents have lost this turn")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn test_parse_distinct_card_types_in_exile() {
         let (rest, q) =
             parse_quantity_ref("the number of card types among cards in exile").unwrap();
@@ -2781,13 +2951,19 @@ mod tests {
     }
 
     /// CR 202.2 + CR 601.2h: "the number of colors of mana spent to cast it"
-    /// resolves to `QuantityRef::ColorsSpentOnSelf`. Used by Wildgrowth Archaic
+    /// resolves to `QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::DistinctColors }`. Used by Wildgrowth Archaic
     /// and the cousin-card family for ETB-counter quantity expressions.
     #[test]
     fn parses_colors_spent_to_cast_it() {
         let (rest, q) =
             parse_quantity_ref("the number of colors of mana spent to cast it").unwrap();
-        assert_eq!(q, QuantityRef::ColorsSpentOnSelf);
+        assert_eq!(
+            q,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::DistinctColors
+            }
+        );
         assert_eq!(rest, "");
     }
 

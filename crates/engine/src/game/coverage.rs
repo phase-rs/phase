@@ -800,9 +800,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::KickerCount => "kicker payments for this spell".into(),
         QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
-        QuantityRef::ManaSpentOnTriggeringSpell => "mana spent on triggering spell".into(),
-        QuantityRef::ManaSpentOnSelf => "mana spent on self".into(),
-        QuantityRef::ColorsSpentOnSelf => "colors of mana spent on self".into(),
+        QuantityRef::ManaSpentToCast { scope, metric } => {
+            format!("mana spent to cast ({scope:?}, {metric:?})")
+        }
         QuantityRef::EventContextSourceCostX => "X of triggering spell".into(),
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
@@ -4341,9 +4341,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
-        QuantityRef::ManaSpentOnTriggeringSpell => ("ManaSpentOnTriggeringSpell", Handled),
-        QuantityRef::ManaSpentOnSelf => ("ManaSpentOnSelf", Handled),
-        QuantityRef::ColorsSpentOnSelf => ("ColorsSpentOnSelf", Handled),
+        QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)

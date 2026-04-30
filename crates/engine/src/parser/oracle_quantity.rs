@@ -480,9 +480,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
 /// "the amount of mana spent to cast <subject>" and map the subject phrase to
 /// the correct `QuantityRef`.
 ///
-/// - `this spell` / `it` / `~` / `this creature` → `ManaSpentOnSelf` (spell
+/// - `this spell` / `it` / `~` / `this creature` → self-scoped spent-mana ref (spell
 ///   resolution reading its own cost; Molten Note).
-/// - `that spell` / `that creature` → `ManaSpentOnTriggeringSpell` (trigger
+/// - `that spell` / `that creature` → triggering-spell spent-mana ref (trigger
 ///   effect reading the triggering spell's cost; Wildgrowth Archaic,
 ///   Expressive Firedancer rider, Mana Sculpt rider).
 fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
@@ -504,7 +504,10 @@ fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
     // Dispatch on subject: self-referential vs triggering-spell anaphora.
     alt((
         value(
-            QuantityRef::ManaSpentOnSelf,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::Total,
+            },
             alt((
                 tag::<_, _, VerboseError<&str>>("this spell"),
                 tag("this creature"),
@@ -513,7 +516,10 @@ fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
             )),
         ),
         value(
-            QuantityRef::ManaSpentOnTriggeringSpell,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                metric: crate::types::ability::CastManaSpentMetric::Total,
+            },
             alt((tag("that spell"), tag("that creature"))),
         ),
     ))
@@ -1899,27 +1905,33 @@ mod tests {
     }
 
     /// CR 601.2h: "the amount of mana spent to cast this spell" in a spell
-    /// effect context → `ManaSpentOnSelf`. Used by Molten Note.
+    /// effect context → self-scoped spent-mana ref. Used by Molten Note.
     #[test]
     fn mana_spent_self_this_spell() {
         let result = parse_event_context_quantity("the amount of mana spent to cast this spell");
         assert_eq!(
             result,
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::ManaSpentOnSelf
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                    metric: crate::types::ability::CastManaSpentMetric::Total
+                }
             })
         );
     }
 
     /// CR 601.2h: "the amount of mana spent to cast that spell" (anaphoric to
-    /// the triggering spell) → `ManaSpentOnTriggeringSpell`.
+    /// the triggering spell) → triggering-spell spent-mana ref.
     #[test]
     fn mana_spent_that_spell_is_triggering_ref() {
         let result = parse_event_context_quantity("the amount of mana spent to cast that spell");
         assert_eq!(
             result,
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::ManaSpentOnTriggeringSpell
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    metric: crate::types::ability::CastManaSpentMetric::Total
+                }
             })
         );
     }
@@ -1932,7 +1944,10 @@ mod tests {
         assert_eq!(
             result,
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::ManaSpentOnSelf
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                    metric: crate::types::ability::CastManaSpentMetric::Total
+                }
             })
         );
     }
