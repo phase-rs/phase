@@ -23,7 +23,7 @@ use crate::schema::types::{
 /// `Err(MalformedIdiom)` for shapes we don't yet support, so callers can
 /// degrade gracefully (the keyword arm in turn fails the rule).
 pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
-    Ok(match p {
+    let filter = match p {
         Permanents::AnyPermanent => TargetFilter::Typed(TypedFilter::permanent()),
         Permanents::SinglePermanent(p) => convert_permanent(p)?,
         Permanents::IsPermanent => TargetFilter::Typed(TypedFilter::permanent()),
@@ -444,14 +444,15 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
                 needed_variant: format!("Permanents::{}", variant_tag(other)),
             });
         }
-    })
+    };
+    Ok(filter.normalized())
 }
 
 /// CR 609.7 + CR 120.7: Translate mtgish damage-source predicates to the
 /// engine's source-object filter language. These filters describe which source
 /// objects are legal for a damage-source choice or replacement shield.
 pub(crate) fn damage_sources_to_filter(sources: &DamageSources) -> ConvResult<TargetFilter> {
-    Ok(match sources {
+    let filter = match sources {
         DamageSources::AnyDamageSource => TargetFilter::Any,
         DamageSources::And(parts) => {
             let mut filters = Vec::with_capacity(parts.len());
@@ -510,7 +511,8 @@ pub(crate) fn damage_sources_to_filter(sources: &DamageSources) -> ConvResult<Ta
                 needed_variant: format!("DamageSources::{}", damage_sources_variant_tag(other)),
             });
         }
-    })
+    };
+    Ok(filter.normalized())
 }
 
 /// Build a battlefield-scoped TypedFilter carrying a single property.
@@ -690,7 +692,7 @@ fn player_variant_tag(p: &Player) -> String {
 /// the_permanent_*_this_way) that bind to a specific resolution-time object.
 /// We map the most common stable refs; the rest fail strict.
 pub fn convert_permanent(p: &Permanent) -> ConvResult<TargetFilter> {
-    Ok(match p {
+    let filter = match p {
         Permanent::ThisPermanent | Permanent::Self_It => TargetFilter::SelfRef,
         Permanent::HostPermanent => TargetFilter::SelfRef,
         Permanent::ThatEnteringPermanent => TargetFilter::TriggeringSource,
@@ -745,7 +747,8 @@ pub fn convert_permanent(p: &Permanent) -> ConvResult<TargetFilter> {
                 needed_variant: format!("Permanent::{}", permanent_tag(other)),
             });
         }
-    })
+    };
+    Ok(filter.normalized())
 }
 
 /// Singular `Permanent` reference used as a static's affected object.
@@ -755,12 +758,13 @@ pub fn convert_permanent(p: &Permanent) -> ConvResult<TargetFilter> {
 /// Aura/Equipment need the host object instead, so only this static-affected
 /// helper maps `HostPermanent` to `AttachedTo`.
 pub(crate) fn convert_permanent_for_static_affected(p: &Permanent) -> ConvResult<TargetFilter> {
-    Ok(match p {
+    let filter = match p {
         // CR 301.5a/f + CR 303.4b/m: "equipped/enchanted [object]" is the
         // object the source is attached to.
         Permanent::HostPermanent => TargetFilter::AttachedTo,
         _ => convert_permanent(p)?,
-    })
+    };
+    Ok(filter.normalized())
 }
 
 fn permanent_tag(p: &Permanent) -> String {
@@ -809,7 +813,7 @@ fn damage_sources_variant_tag(s: &DamageSources) -> String {
 /// so the report tracks the work queue.
 pub(crate) fn spells_to_filter(s: &crate::schema::types::Spells) -> ConvResult<TargetFilter> {
     use crate::schema::types::Spells as S;
-    Ok(match s {
+    let filter = match s {
         S::AnySpell => TargetFilter::Typed(TypedFilter::default()),
         S::IsCardtype(ct) => TargetFilter::Typed(TypedFilter::new(card_type(ct))),
         S::IsNonCardtype(ct) => {
@@ -1016,7 +1020,8 @@ pub(crate) fn spells_to_filter(s: &crate::schema::types::Spells) -> ConvResult<T
                 needed_variant: format!("Spells::{}", spells_variant_tag(other)),
             });
         }
-    })
+    };
+    Ok(filter.normalized())
 }
 
 fn spells_variant_tag(s: &crate::schema::types::Spells) -> String {
@@ -1041,145 +1046,145 @@ pub(crate) fn cards_in_graveyard_to_filter(
     c: &crate::schema::types::CardsInGraveyard,
 ) -> ConvResult<TargetFilter> {
     use crate::schema::types::CardsInGraveyard as C;
-    Ok(match c {
-        C::AnyCardInAnyGraveyard => TargetFilter::Typed(TypedFilter::default()),
-        // CR 115.1 / CR 608.2b: Resolution-time references to outer
-        // graveyard-card target slots. The outer targeted wrapper provides
-        // the graveyard-card legality; inside the action body these refs are
-        // anaphoric selectors, so the engine target axis can stay unconstrained.
-        C::Ref_TargetGraveyardCards
-        | C::Ref_TargetGraveyardCards1
-        | C::Ref_TargetGraveyardCards2 => TargetFilter::Any,
-        C::IsCardtype(ct) => TargetFilter::Typed(TypedFilter::new(card_type(ct))),
-        C::IsNonCardtype(ct) => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(card_type(ct)))))
-        }
-        // Subtype/supertype/permanence/color/keyword arms mirror the Cards
-        // and Permanents dispatchers — graveyard cards retain their printed
-        // properties (CR 401.1 + CR 205) so the typed-filter shape composes
-        // identically.
-        C::IsCreatureType(s) => TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Creature)
-                .with_type(TypeFilter::Subtype(creature_type_name(s))),
-        ),
-        C::IsSupertype(s) => TargetFilter::Typed(
-            TypedFilter::default().with_type(TypeFilter::Subtype(supertype_name(s))),
-        ),
-        C::IsLandType(lt) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Land)
-                .with_type(TypeFilter::Subtype(land_type_name(lt))),
-        ),
-        C::IsArtifactType(at) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Artifact)
-                .with_type(TypeFilter::Subtype(artifact_type_name(at))),
-        ),
-        C::IsEnchantmentType(et) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Enchantment)
-                .with_type(TypeFilter::Subtype(enchantment_type_name(et))),
-        ),
-        C::IsPlaneswalkerType(pt) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Planeswalker)
-                .with_type(TypeFilter::Subtype(planeswalker_type_name(pt))),
-        ),
-        C::IsPermanent => TargetFilter::Typed(TypedFilter::permanent()),
-        C::IsNonCreatureType(s) => TargetFilter::Typed(TypedFilter::creature().with_type(
-            TypeFilter::Non(Box::new(TypeFilter::Subtype(creature_type_name(s)))),
-        )),
-        C::IsNonEnchantmentType(et) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Enchantment)
-                .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                    enchantment_type_name(et),
-                )))),
-        ),
-        C::IsNonSupertype(s) => {
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::NotSupertype {
-                    value: supertype_to_engine(s),
-                }]),
-            )
-        }
-        // CR 105: color predicates on graveyard cards.
-        C::IsColor(c) => match concrete_color(c) {
-            Some(color) => TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+    let filter =
+        match c {
+            C::AnyCardInAnyGraveyard => TargetFilter::Typed(TypedFilter::default()),
+            // CR 115.1 / CR 608.2b: Resolution-time references to outer
+            // graveyard-card target slots. The outer targeted wrapper provides
+            // the graveyard-card legality; inside the action body these refs are
+            // anaphoric selectors, so the engine target axis can stay unconstrained.
+            C::Ref_TargetGraveyardCards
+            | C::Ref_TargetGraveyardCards1
+            | C::Ref_TargetGraveyardCards2 => TargetFilter::Any,
+            C::IsCardtype(ct) => TargetFilter::Typed(TypedFilter::new(card_type(ct))),
+            C::IsNonCardtype(ct) => {
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(card_type(ct)))))
+            }
+            // Subtype/supertype/permanence/color/keyword arms mirror the Cards
+            // and Permanents dispatchers — graveyard cards retain their printed
+            // properties (CR 401.1 + CR 205) so the typed-filter shape composes
+            // identically.
+            C::IsCreatureType(s) => TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature)
+                    .with_type(TypeFilter::Subtype(creature_type_name(s))),
             ),
-            None => {
-                return Err(ConversionGap::MalformedIdiom {
-                    idiom: "CardsInGraveyard/IsColor",
-                    path: String::new(),
-                    detail: format!("non-concrete color: {c:?}"),
+            C::IsSupertype(s) => TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Subtype(supertype_name(s))),
+            ),
+            C::IsLandType(lt) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Land)
+                    .with_type(TypeFilter::Subtype(land_type_name(lt))),
+            ),
+            C::IsArtifactType(at) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Artifact)
+                    .with_type(TypeFilter::Subtype(artifact_type_name(at))),
+            ),
+            C::IsEnchantmentType(et) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Enchantment)
+                    .with_type(TypeFilter::Subtype(enchantment_type_name(et))),
+            ),
+            C::IsPlaneswalkerType(pt) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Planeswalker)
+                    .with_type(TypeFilter::Subtype(planeswalker_type_name(pt))),
+            ),
+            C::IsPermanent => TargetFilter::Typed(TypedFilter::permanent()),
+            C::IsNonCreatureType(s) => TargetFilter::Typed(TypedFilter::creature().with_type(
+                TypeFilter::Non(Box::new(TypeFilter::Subtype(creature_type_name(s)))),
+            )),
+            C::IsNonEnchantmentType(et) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Enchantment)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        enchantment_type_name(et),
+                    )))),
+            ),
+            C::IsNonSupertype(s) => TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::NotSupertype {
+                    value: supertype_to_engine(s),
+                },
+            ])),
+            // CR 105: color predicates on graveyard cards.
+            C::IsColor(c) => match concrete_color(c) {
+                Some(color) => TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+                ),
+                None => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "CardsInGraveyard/IsColor",
+                        path: String::new(),
+                        detail: format!("non-concrete color: {c:?}"),
+                    });
+                }
+            },
+            C::IsColorless => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
+            }
+            C::IsMulticolored => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Multicolored]),
+            ),
+            C::IsHistoric => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
+            }
+            // CR 700.4 / CR 202.3 / CR 208.1: numeric comparisons.
+            C::ManaValueIs(cmp) => cmc_comparison_filter(cmp)?,
+            C::PowerIs(cmp) => power_comparison_filter(cmp)?,
+            C::ToughnessIs(cmp) => toughness_comparison_filter(cmp)?,
+            // CR 201.2.
+            C::IsNamed(nf) => name_filter_to_filter(nf)?,
+            C::IsNotNamed(nf) => TargetFilter::Not {
+                filter: Box::new(name_filter_to_filter(nf)?),
+            },
+            // CR 702 keyword presence.
+            C::HasAbility(check) => has_ability_filter(check)?,
+            C::DoesntHaveAbility(check) => TargetFilter::Not {
+                filter: Box::new(has_ability_filter(check)?),
+            },
+            // CR 700.2 / CR 201.4: chosen creature type binding.
+            C::IsCreatureTypeVariable(CreatureTypeVariable::TheChosenCreatureType) => {
+                TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
+                )
+            }
+            // CR 109.4: graveyard scope for owner — `affected_zone` is set by the
+            // caller; `controller` axis on TypedFilter still drives the per-player
+            // filter.
+            C::InAPlayersGraveyard(players) => {
+                let ctrl = players_to_controller(players)?;
+                TargetFilter::Typed(TypedFilter::default().controller(ctrl))
+            }
+            C::And(parts) => {
+                let mut filters = Vec::with_capacity(parts.len());
+                for part in parts {
+                    filters.push(cards_in_graveyard_to_filter(part)?);
+                }
+                TargetFilter::And { filters }
+            }
+            C::Or(parts) => {
+                let mut filters = Vec::with_capacity(parts.len());
+                for part in parts {
+                    filters.push(cards_in_graveyard_to_filter(part)?);
+                }
+                TargetFilter::Or { filters }
+            }
+            C::Not(inner) => TargetFilter::Not {
+                filter: Box::new(cards_in_graveyard_to_filter(inner)?),
+            },
+
+            other => {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "TargetFilter",
+                    needed_variant: format!(
+                        "CardsInGraveyard::{}",
+                        cards_in_graveyard_variant_tag(other)
+                    ),
                 });
             }
-        },
-        C::IsColorless => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
-        }
-        C::IsMulticolored => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Multicolored]))
-        }
-        C::IsHistoric => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
-        }
-        // CR 700.4 / CR 202.3 / CR 208.1: numeric comparisons.
-        C::ManaValueIs(cmp) => cmc_comparison_filter(cmp)?,
-        C::PowerIs(cmp) => power_comparison_filter(cmp)?,
-        C::ToughnessIs(cmp) => toughness_comparison_filter(cmp)?,
-        // CR 201.2.
-        C::IsNamed(nf) => name_filter_to_filter(nf)?,
-        C::IsNotNamed(nf) => TargetFilter::Not {
-            filter: Box::new(name_filter_to_filter(nf)?),
-        },
-        // CR 702 keyword presence.
-        C::HasAbility(check) => has_ability_filter(check)?,
-        C::DoesntHaveAbility(check) => TargetFilter::Not {
-            filter: Box::new(has_ability_filter(check)?),
-        },
-        // CR 700.2 / CR 201.4: chosen creature type binding.
-        C::IsCreatureTypeVariable(CreatureTypeVariable::TheChosenCreatureType) => {
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
-            )
-        }
-        // CR 109.4: graveyard scope for owner — `affected_zone` is set by the
-        // caller; `controller` axis on TypedFilter still drives the per-player
-        // filter.
-        C::InAPlayersGraveyard(players) => {
-            let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(TypedFilter::default().controller(ctrl))
-        }
-        C::And(parts) => {
-            let mut filters = Vec::with_capacity(parts.len());
-            for part in parts {
-                filters.push(cards_in_graveyard_to_filter(part)?);
-            }
-            TargetFilter::And { filters }
-        }
-        C::Or(parts) => {
-            let mut filters = Vec::with_capacity(parts.len());
-            for part in parts {
-                filters.push(cards_in_graveyard_to_filter(part)?);
-            }
-            TargetFilter::Or { filters }
-        }
-        C::Not(inner) => TargetFilter::Not {
-            filter: Box::new(cards_in_graveyard_to_filter(inner)?),
-        },
-
-        other => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "TargetFilter",
-                needed_variant: format!(
-                    "CardsInGraveyard::{}",
-                    cards_in_graveyard_variant_tag(other)
-                ),
-            });
-        }
-    })
+        };
+    Ok(filter.normalized())
 }
 
 fn cards_in_graveyard_variant_tag(c: &crate::schema::types::CardsInGraveyard) -> String {
@@ -1202,204 +1207,204 @@ fn cards_in_graveyard_variant_tag(c: &crate::schema::types::CardsInGraveyard) ->
 /// `Cards` and `CardsInGraveyard` share.
 pub(crate) fn cards_to_filter(c: &crate::schema::types::Cards) -> ConvResult<TargetFilter> {
     use crate::schema::types::Cards as C;
-    Ok(match c {
-        C::AnyCard => TargetFilter::Typed(TypedFilter::default()),
-        C::IsCardtype(ct) => TargetFilter::Typed(TypedFilter::new(card_type(ct))),
-        C::IsNonCardtype(ct) => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(card_type(ct)))))
-        }
-        C::IsCreatureType(ct) => TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Creature)
-                .with_type(TypeFilter::Subtype(creature_type_name(ct))),
-        ),
-        C::IsSupertype(s) => TargetFilter::Typed(
-            TypedFilter::permanent().with_type(TypeFilter::Subtype(supertype_name(s))),
-        ),
-        C::IsPermanent => TargetFilter::Typed(TypedFilter::permanent()),
-
-        // CR 205.3i / CR 205.3g / CR 205.3h / CR 205.3j: Subtype filters that
-        // mirror the Permanents arms — Cards in non-battlefield zones still
-        // carry their printed subtypes, so the type+subtype shape is the
-        // same TypedFilter composition.
-        C::IsLandType(lt) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Land)
-                .with_type(TypeFilter::Subtype(land_type_name(lt))),
-        ),
-        C::IsArtifactType(at) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Artifact)
-                .with_type(TypeFilter::Subtype(artifact_type_name(at))),
-        ),
-        C::IsEnchantmentType(et) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Enchantment)
-                .with_type(TypeFilter::Subtype(enchantment_type_name(et))),
-        ),
-        C::IsPlaneswalkerType(pt) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Planeswalker)
-                .with_type(TypeFilter::Subtype(planeswalker_type_name(pt))),
-        ),
-
-        // CR 205.4b: Type-negation predicates within the same type axis.
-        C::IsNonCreatureType(s) => TargetFilter::Typed(TypedFilter::creature().with_type(
-            TypeFilter::Non(Box::new(TypeFilter::Subtype(creature_type_name(s)))),
-        )),
-        C::IsNonArtifactType(at) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Artifact)
-                .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                    artifact_type_name(at),
-                )))),
-        ),
-        C::IsNonEnchantmentType(et) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Enchantment)
-                .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                    enchantment_type_name(et),
-                )))),
-        ),
-        C::IsNonLandType(lt) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Land)
-                .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                    land_type_name(lt),
-                )))),
-        ),
-        // CR 205.4a: nonbasic / nonlegendary / etc.
-        C::IsNonSupertype(s) => {
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::NotSupertype {
-                    value: supertype_to_engine(s),
-                }]),
-            )
-        }
-
-        // CR 105.1 / CR 105.2c: Color filters. Non-concrete colors strict-fail
-        // because they require a runtime "chosen color" binding the converter
-        // cannot resolve at static-conversion time.
-        C::IsColor(c) => match concrete_color(c) {
-            Some(color) => TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+    let filter =
+        match c {
+            C::AnyCard => TargetFilter::Typed(TypedFilter::default()),
+            C::IsCardtype(ct) => TargetFilter::Typed(TypedFilter::new(card_type(ct))),
+            C::IsNonCardtype(ct) => {
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(card_type(ct)))))
+            }
+            C::IsCreatureType(ct) => TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature)
+                    .with_type(TypeFilter::Subtype(creature_type_name(ct))),
             ),
-            None => {
-                return Err(ConversionGap::MalformedIdiom {
-                    idiom: "Cards/IsColor",
-                    path: String::new(),
-                    detail: format!("non-concrete color: {c:?}"),
-                });
-            }
-        },
-        C::IsNonColor(c) => match concrete_color(c) {
-            Some(color) => TargetFilter::Not {
-                filter: Box::new(TargetFilter::Typed(
+            C::IsSupertype(s) => TargetFilter::Typed(
+                TypedFilter::permanent().with_type(TypeFilter::Subtype(supertype_name(s))),
+            ),
+            C::IsPermanent => TargetFilter::Typed(TypedFilter::permanent()),
+
+            // CR 205.3i / CR 205.3g / CR 205.3h / CR 205.3j: Subtype filters that
+            // mirror the Permanents arms — Cards in non-battlefield zones still
+            // carry their printed subtypes, so the type+subtype shape is the
+            // same TypedFilter composition.
+            C::IsLandType(lt) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Land)
+                    .with_type(TypeFilter::Subtype(land_type_name(lt))),
+            ),
+            C::IsArtifactType(at) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Artifact)
+                    .with_type(TypeFilter::Subtype(artifact_type_name(at))),
+            ),
+            C::IsEnchantmentType(et) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Enchantment)
+                    .with_type(TypeFilter::Subtype(enchantment_type_name(et))),
+            ),
+            C::IsPlaneswalkerType(pt) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Planeswalker)
+                    .with_type(TypeFilter::Subtype(planeswalker_type_name(pt))),
+            ),
+
+            // CR 205.4b: Type-negation predicates within the same type axis.
+            C::IsNonCreatureType(s) => TargetFilter::Typed(TypedFilter::creature().with_type(
+                TypeFilter::Non(Box::new(TypeFilter::Subtype(creature_type_name(s)))),
+            )),
+            C::IsNonArtifactType(at) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Artifact)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        artifact_type_name(at),
+                    )))),
+            ),
+            C::IsNonEnchantmentType(et) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Enchantment)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        enchantment_type_name(et),
+                    )))),
+            ),
+            C::IsNonLandType(lt) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Land)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        land_type_name(lt),
+                    )))),
+            ),
+            // CR 205.4a: nonbasic / nonlegendary / etc.
+            C::IsNonSupertype(s) => TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::NotSupertype {
+                    value: supertype_to_engine(s),
+                },
+            ])),
+
+            // CR 105.1 / CR 105.2c: Color filters. Non-concrete colors strict-fail
+            // because they require a runtime "chosen color" binding the converter
+            // cannot resolve at static-conversion time.
+            C::IsColor(c) => match concrete_color(c) {
+                Some(color) => TargetFilter::Typed(
                     TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
-                )),
+                ),
+                None => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "Cards/IsColor",
+                        path: String::new(),
+                        detail: format!("non-concrete color: {c:?}"),
+                    });
+                }
             },
-            None => {
-                return Err(ConversionGap::MalformedIdiom {
-                    idiom: "Cards/IsNonColor",
-                    path: String::new(),
-                    detail: format!("non-concrete color: {c:?}"),
+            C::IsNonColor(c) => match concrete_color(c) {
+                Some(color) => TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+                    )),
+                },
+                None => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "Cards/IsNonColor",
+                        path: String::new(),
+                        detail: format!("non-concrete color: {c:?}"),
+                    });
+                }
+            },
+            C::IsColorless => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
+            }
+            C::IsMulticolored => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Multicolored]),
+            ),
+
+            // CR 700.6: "historic" — legendary, artifact, or Saga.
+            C::IsHistoric => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
+            }
+
+            // CR 202.3 / CR 208.1: Numeric comparisons. Reuse the same comparison
+            // helpers Permanents uses; the resulting TargetFilter shape is
+            // zone-agnostic (FilterProp::CmcGE / PowerGE / ToughnessGE evaluate
+            // against the card's printed/current values).
+            C::ManaValueIs(cmp) => cmc_comparison_filter(cmp)?,
+            C::PowerIs(cmp) => power_comparison_filter(cmp)?,
+            C::ToughnessIs(cmp) => toughness_comparison_filter(cmp)?,
+
+            // CR 201.2: Static name match / mismatch.
+            C::IsNamed(nf) => name_filter_to_filter(nf)?,
+            C::IsNotNamed(nf) => TargetFilter::Not {
+                filter: Box::new(name_filter_to_filter(nf)?),
+            },
+
+            // CR 702: Keyword presence / absence (vanilla and parameterized
+            // keyword kinds). Composite shapes strict-fail via has_ability_filter.
+            C::HasAbility(check) => has_ability_filter(check)?,
+            C::DoesntHaveAbility(check) => TargetFilter::Not {
+                filter: Box::new(has_ability_filter(check)?),
+            },
+
+            // CR 903.3: "your commander" — controller-scoped commander predicate.
+            C::IsYourCommander => TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander]),
+            ),
+
+            // CR 109.4: Owner / controller axis. Reuse `players_to_controller` so
+            // mtgish's Players enum maps consistently across Permanents and Cards.
+            C::OwnedByAPlayer(players) => {
+                let ctrl = players_to_controller(players)?;
+                TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::Owned { controller: ctrl }]),
+                )
+            }
+            C::ControlledByAPlayer(players) => {
+                let ctrl = players_to_controller(players)?;
+                TargetFilter::Typed(TypedFilter::default().controller(ctrl))
+            }
+
+            C::And(parts) => {
+                let mut filters = Vec::with_capacity(parts.len());
+                for part in parts {
+                    filters.push(cards_to_filter(part)?);
+                }
+                TargetFilter::And { filters }
+            }
+            C::Or(parts) => {
+                let mut filters = Vec::with_capacity(parts.len());
+                for part in parts {
+                    filters.push(cards_to_filter(part)?);
+                }
+                TargetFilter::Or { filters }
+            }
+            C::Not(inner) => TargetFilter::Not {
+                filter: Box::new(cards_to_filter(inner)?),
+            },
+
+            // CR 700.2 / CR 201.4: chosen-type bindings. Mirrors the Permanents
+            // dispatcher — the engine's `IsChosenCreatureType` / `IsChosenCardType`
+            // resolve against the source's `ChosenAttribute` slot regardless of
+            // the card's current zone.
+            C::IsCreatureTypeVariable(CreatureTypeVariable::TheChosenCreatureType) => {
+                TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
+                )
+            }
+            C::IsCardtypeVariable(CardtypeVariable::TheChosenCardtype) => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::IsChosenCardType]),
+            ),
+            // CR 107.3 + CR 202.1: spell/card with {X} in its mana cost.
+            C::HasXInManaCost => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
+            ),
+
+            other => {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "TargetFilter",
+                    needed_variant: format!("Cards::{}", cards_variant_tag(other)),
                 });
             }
-        },
-        C::IsColorless => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
-        }
-        C::IsMulticolored => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Multicolored]))
-        }
-
-        // CR 700.6: "historic" — legendary, artifact, or Saga.
-        C::IsHistoric => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
-        }
-
-        // CR 202.3 / CR 208.1: Numeric comparisons. Reuse the same comparison
-        // helpers Permanents uses; the resulting TargetFilter shape is
-        // zone-agnostic (FilterProp::CmcGE / PowerGE / ToughnessGE evaluate
-        // against the card's printed/current values).
-        C::ManaValueIs(cmp) => cmc_comparison_filter(cmp)?,
-        C::PowerIs(cmp) => power_comparison_filter(cmp)?,
-        C::ToughnessIs(cmp) => toughness_comparison_filter(cmp)?,
-
-        // CR 201.2: Static name match / mismatch.
-        C::IsNamed(nf) => name_filter_to_filter(nf)?,
-        C::IsNotNamed(nf) => TargetFilter::Not {
-            filter: Box::new(name_filter_to_filter(nf)?),
-        },
-
-        // CR 702: Keyword presence / absence (vanilla and parameterized
-        // keyword kinds). Composite shapes strict-fail via has_ability_filter.
-        C::HasAbility(check) => has_ability_filter(check)?,
-        C::DoesntHaveAbility(check) => TargetFilter::Not {
-            filter: Box::new(has_ability_filter(check)?),
-        },
-
-        // CR 903.3: "your commander" — controller-scoped commander predicate.
-        C::IsYourCommander => TargetFilter::Typed(
-            TypedFilter::default()
-                .controller(ControllerRef::You)
-                .properties(vec![FilterProp::IsCommander]),
-        ),
-
-        // CR 109.4: Owner / controller axis. Reuse `players_to_controller` so
-        // mtgish's Players enum maps consistently across Permanents and Cards.
-        C::OwnedByAPlayer(players) => {
-            let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::Owned { controller: ctrl }]),
-            )
-        }
-        C::ControlledByAPlayer(players) => {
-            let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(TypedFilter::default().controller(ctrl))
-        }
-
-        C::And(parts) => {
-            let mut filters = Vec::with_capacity(parts.len());
-            for part in parts {
-                filters.push(cards_to_filter(part)?);
-            }
-            TargetFilter::And { filters }
-        }
-        C::Or(parts) => {
-            let mut filters = Vec::with_capacity(parts.len());
-            for part in parts {
-                filters.push(cards_to_filter(part)?);
-            }
-            TargetFilter::Or { filters }
-        }
-        C::Not(inner) => TargetFilter::Not {
-            filter: Box::new(cards_to_filter(inner)?),
-        },
-
-        // CR 700.2 / CR 201.4: chosen-type bindings. Mirrors the Permanents
-        // dispatcher — the engine's `IsChosenCreatureType` / `IsChosenCardType`
-        // resolve against the source's `ChosenAttribute` slot regardless of
-        // the card's current zone.
-        C::IsCreatureTypeVariable(CreatureTypeVariable::TheChosenCreatureType) => {
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::IsChosenCreatureType]),
-            )
-        }
-        C::IsCardtypeVariable(CardtypeVariable::TheChosenCardtype) => TargetFilter::Typed(
-            TypedFilter::default().properties(vec![FilterProp::IsChosenCardType]),
-        ),
-        // CR 107.3 + CR 202.1: spell/card with {X} in its mana cost.
-        C::HasXInManaCost => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]))
-        }
-
-        other => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "TargetFilter",
-                needed_variant: format!("Cards::{}", cards_variant_tag(other)),
-            });
-        }
-    })
+        };
+    Ok(filter.normalized())
 }
 
 pub(crate) fn cards_variant_tag(c: &crate::schema::types::Cards) -> String {

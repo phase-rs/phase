@@ -1700,6 +1700,12 @@ impl TypedFilter {
             .any(|tf| !matches!(tf, TypeFilter::Card | TypeFilter::Any))
             || !self.properties.is_empty()
     }
+
+    pub fn normalized(mut self) -> Self {
+        self.type_filters = normalized_type_filters(self.type_filters);
+        self.properties = normalized_filter_props(self.properties);
+        self
+    }
 }
 
 impl From<TypedFilter> for TargetFilter {
@@ -4786,6 +4792,149 @@ fn target_filter_is_self_ref(filter: &TargetFilter) -> bool {
     matches!(filter, TargetFilter::SelfRef)
 }
 
+fn normalize_and_filter(filters: Vec<TargetFilter>) -> TargetFilter {
+    let mut typed_filters = Vec::new();
+    let mut other_filters = Vec::new();
+
+    for filter in filters.into_iter().map(TargetFilter::normalized) {
+        match filter {
+            TargetFilter::And { filters } => {
+                for nested in filters {
+                    collect_and_filter(nested, &mut typed_filters, &mut other_filters);
+                }
+            }
+            filter => collect_and_filter(filter, &mut typed_filters, &mut other_filters),
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(typed_filters.len() + other_filters.len());
+    normalized.extend(typed_filters.into_iter().map(TargetFilter::Typed));
+    normalized.extend(other_filters);
+
+    match normalized.len() {
+        0 => TargetFilter::And {
+            filters: normalized,
+        },
+        1 => normalized.pop().expect("length checked"),
+        _ => TargetFilter::And {
+            filters: normalized,
+        },
+    }
+}
+
+fn collect_and_filter(
+    filter: TargetFilter,
+    typed_filters: &mut Vec<TypedFilter>,
+    other_filters: &mut Vec<TargetFilter>,
+) {
+    match filter {
+        TargetFilter::Typed(filter) => merge_typed_filter(filter.normalized(), typed_filters),
+        filter => other_filters.push(filter),
+    }
+}
+
+fn merge_typed_filter(filter: TypedFilter, typed_filters: &mut Vec<TypedFilter>) {
+    if let Some(existing) = typed_filters
+        .iter_mut()
+        .find(|existing| typed_filters_are_mergeable(existing, &filter))
+    {
+        merge_type_filter_vec(&mut existing.type_filters, filter.type_filters);
+        merge_controller(&mut existing.controller, filter.controller);
+        merge_filter_prop_vec(&mut existing.properties, filter.properties);
+    } else {
+        typed_filters.push(filter);
+    }
+}
+
+fn typed_filters_are_mergeable(left: &TypedFilter, right: &TypedFilter) -> bool {
+    match (&left.controller, &right.controller) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+fn merge_controller(existing: &mut Option<ControllerRef>, incoming: Option<ControllerRef>) {
+    if existing.is_none() {
+        *existing = incoming;
+    }
+}
+
+fn merge_type_filter_vec(existing: &mut Vec<TypeFilter>, incoming: Vec<TypeFilter>) {
+    for filter in incoming {
+        if !existing.contains(&filter) {
+            existing.push(filter);
+        }
+    }
+    *existing = normalized_type_filters(std::mem::take(existing));
+}
+
+fn merge_filter_prop_vec(existing: &mut Vec<FilterProp>, incoming: Vec<FilterProp>) {
+    for prop in incoming {
+        if !existing.contains(&prop) {
+            existing.push(prop);
+        }
+    }
+}
+
+fn normalized_type_filters(filters: Vec<TypeFilter>) -> Vec<TypeFilter> {
+    let mut normalized = Vec::with_capacity(filters.len());
+    for filter in filters {
+        if !normalized.contains(&filter) {
+            normalized.push(filter);
+        }
+    }
+
+    if normalized.iter().any(|filter| {
+        matches!(
+            filter,
+            TypeFilter::Creature
+                | TypeFilter::Land
+                | TypeFilter::Artifact
+                | TypeFilter::Enchantment
+                | TypeFilter::Planeswalker
+                | TypeFilter::Battle
+        )
+    }) {
+        normalized.retain(|filter| !matches!(filter, TypeFilter::Permanent));
+    }
+
+    normalized
+}
+
+fn normalized_filter_props(props: Vec<FilterProp>) -> Vec<FilterProp> {
+    let mut normalized = Vec::with_capacity(props.len());
+    for prop in props.into_iter().map(normalized_filter_prop) {
+        if !normalized.contains(&prop) {
+            normalized.push(prop);
+        }
+    }
+    normalized
+}
+
+fn normalized_filter_prop(prop: FilterProp) -> FilterProp {
+    match prop {
+        FilterProp::DifferentNameFrom { filter } => FilterProp::DifferentNameFrom {
+            filter: Box::new(filter.normalized()),
+        },
+        FilterProp::SharesQuality {
+            quality,
+            reference,
+            relation,
+        } => FilterProp::SharesQuality {
+            quality,
+            reference: reference.map(|filter| Box::new(filter.normalized())),
+            relation,
+        },
+        FilterProp::TargetsOnly { filter } => FilterProp::TargetsOnly {
+            filter: Box::new(filter.normalized()),
+        },
+        FilterProp::Targets { filter } => FilterProp::Targets {
+            filter: Box::new(filter.normalized()),
+        },
+        prop => prop,
+    }
+}
+
 /// CR 701.38a + CR 101.4: Default starting voter for `Effect::Vote` is the
 /// ability controller ("starting with you"). Defining this as a free function
 /// (not an enum default) keeps the serde shape stable across schema upgrades.
@@ -4794,6 +4943,24 @@ fn default_controller_ref_you() -> ControllerRef {
 }
 
 impl TargetFilter {
+    pub fn normalized(self) -> Self {
+        match self {
+            TargetFilter::Typed(filter) => TargetFilter::Typed(filter.normalized()),
+            TargetFilter::Not { filter } => TargetFilter::Not {
+                filter: Box::new(filter.normalized()),
+            },
+            TargetFilter::Or { filters } => TargetFilter::Or {
+                filters: filters.into_iter().map(TargetFilter::normalized).collect(),
+            },
+            TargetFilter::And { filters } => normalize_and_filter(filters),
+            TargetFilter::TrackedSetFiltered { id, filter } => TargetFilter::TrackedSetFiltered {
+                id,
+                filter: Box::new(filter.normalized()),
+            },
+            filter => filter,
+        }
+    }
+
     /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
     /// context references (triggering event participants per CR 603.7c),
     /// parent target anaphora, and self-references resolve automatically
@@ -7792,6 +7959,76 @@ mod tests {
         let t = TargetRef::Object(ObjectId(5));
         assert_eq!(t, TargetRef::Object(ObjectId(5)));
         assert_ne!(t, TargetRef::Object(ObjectId(6)));
+    }
+
+    #[test]
+    fn target_filter_normalized_merges_compatible_typed_conjunctions() {
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                    FilterProp::HasAttachment {
+                        kind: AttachmentKind::Aura,
+                        controller: None,
+                    },
+                ])),
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+            ],
+        };
+
+        assert_eq!(
+            filter.normalized(),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn target_filter_normalized_preserves_conflicting_controller_conjunctions() {
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::Opponent)),
+            ],
+        };
+
+        assert_eq!(
+            filter.normalized(),
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    TargetFilter::Typed(
+                        TypedFilter::permanent().controller(ControllerRef::Opponent)
+                    ),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn target_filter_normalized_recurses_through_nested_filter_props() {
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Targets {
+                filter: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::permanent()),
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ],
+                }),
+            }]));
+
+        assert_eq!(
+            filter.normalized(),
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Targets {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            }]))
+        );
     }
 
     /// CR 107.1c + CR 608.2d: `QuantityExpr::up_to(max)` constructs the
