@@ -1268,11 +1268,9 @@ fn parse_enters_with_counters(
 
     let counter_entries = parse_enters_counter_entries(after_additional);
     // Detect dynamic count: "a number of [type] counters ... equal to [qty]"
-    let (dynamic_remainder, after_prefix) =
-        match tag::<_, _, VerboseError<&str>>("a number of ").parse(after_additional) {
-            Ok((rest, _)) => (Some(after_additional), rest),
-            Err(_) => (None, after_additional),
-        };
+    let after_prefix = tag::<_, _, VerboseError<&str>>("a number of ")
+        .parse(after_additional)
+        .map_or(after_additional, |(rest, _)| rest);
     // CR 107.3 + CR 107.3m + CR 107.1a: Parse the counter count as a full
     // `QuantityExpr`, so "N", "X", "twice X", "three times X", and
     // "half X, rounded up/down" all compose through the same typed arithmetic
@@ -1293,15 +1291,19 @@ fn parse_enters_with_counters(
     if let Some(for_each_count) = parse_enters_counter_for_each_suffix(after_counter) {
         count_expr = multiply_counter_count_by_for_each(count_expr, for_each_count);
     }
-    // CR 122.6: For "a number of counters equal to [quantity]", parse the dynamic expression
-    if dynamic_remainder.is_some() {
-        if let Ok((_, (_, qty_text))) = nom_primitives::split_once_on(work_text, "equal to ") {
-            let trimmed = qty_text.trim().trim_end_matches('.');
-            if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
-                count_expr = QuantityExpr::Ref { qty: qty_ref };
-            } else if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
-                count_expr = qty;
-            }
+    // CR 122.6: For "a number of counters equal to [quantity]" and the
+    // sibling shorthand "counters on it equal to [quantity]", parse the
+    // dynamic expression.
+    if let Ok((_, (_, qty_text))) = nom_primitives::split_once_on(work_text, "equal to ") {
+        let trimmed = qty_text.trim().trim_end_matches('.');
+        if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
+            count_expr = QuantityExpr::Ref { qty: qty_ref };
+        } else if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
+            count_expr = qty;
+        } else if let Some(qty) =
+            crate::parser::oracle_quantity::parse_event_context_quantity(trimmed)
+        {
+            count_expr = qty;
         }
     }
 
@@ -1422,11 +1424,6 @@ fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityE
             return Some(qty);
         }
     }
-    if let Ok((rest, qty)) = parse_for_each_mana_spent_clause(rest) {
-        if rest.trim().is_empty() {
-            return Some(qty);
-        }
-    }
     let clause = match nom_primitives::split_once_on(rest, ".") {
         Ok((_, (before_period, after_period))) if after_period.trim().is_empty() => {
             before_period.trim()
@@ -1457,48 +1454,6 @@ fn parse_for_each_convoked_creature_clause(
             qty: QuantityRef::ConvokedCreatureCount,
         },
     ))
-}
-
-fn parse_for_each_mana_spent_clause(
-    input: &str,
-) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
-    if let Ok((rest, _)) =
-        pair(tag::<_, _, VerboseError<&str>>("color"), opt(tag("s"))).parse(input)
-    {
-        let (rest, _) = tag(" of mana spent to cast ").parse(rest)?;
-        let (rest, _) = parse_mana_spent_self_subject(rest)?;
-        let (rest, _) = opt(tag(".")).parse(rest)?;
-        return Ok((
-            rest,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ColorsSpentOnSelf,
-            },
-        ));
-    }
-
-    let (rest, _) = tag("mana spent to cast ").parse(input)?;
-    let (rest, _) = parse_mana_spent_self_subject(rest)?;
-    let (rest, _) = opt(tag(".")).parse(rest)?;
-    Ok((
-        rest,
-        QuantityExpr::Ref {
-            qty: QuantityRef::ManaSpentOnSelf,
-        },
-    ))
-}
-
-fn parse_mana_spent_self_subject(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            tag("it"),
-            tag("this spell"),
-            tag("this creature"),
-            tag("this permanent"),
-            tag("~"),
-        )),
-    )
-    .parse(input)
 }
 
 fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, QuantityExpr)>> {
@@ -4656,6 +4611,48 @@ mod tests {
         let def = parse_replacement_line(
             "Verazol enters with a +1/+1 counter on it for each mana spent to cast it.",
             "Verazol, the Split Current",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentOnSelf,
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn enters_with_number_of_counters_equal_to_amount_of_mana_spent() {
+        let def = parse_replacement_line(
+            "Gyrus enters with a number of +1/+1 counters on it equal to the amount of mana spent to cast it.",
+            "Gyrus, Waker of Corpses",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentOnSelf,
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn enters_with_implicit_counter_count_equal_to_amount_of_mana_spent() {
+        let def = parse_replacement_line(
+            "The Spike Cactus enters the battlefield with +1/+1 counters on it equal to the amount of mana spent to cast it.",
+            "The Spike Cactus",
         )
         .unwrap();
 

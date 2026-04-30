@@ -7,8 +7,9 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::combinator::{map, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{pair, preceded};
 use nom::Parser;
+use nom_language::error::VerboseError;
 
 use super::error::OracleResult;
 use super::primitives::{parse_counter_type_typed, parse_number};
@@ -1374,8 +1375,41 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_for_each_recipient_shared_quality,
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
+        parse_for_each_mana_spent,
         parse_for_each_controlled_type,
     ))
+    .parse(input)
+}
+
+/// CR 601.2h + CR 202.2: Parse "color[s] of mana spent to cast <self>" and
+/// "mana spent to cast <self>" after "for each" into self-scoped cast-spend
+/// quantities. Used by Converge token creation and Sunburst/ETB-counter
+/// cousins.
+fn parse_for_each_mana_spent(input: &str) -> OracleResult<'_, QuantityRef> {
+    if let Ok((rest, _)) =
+        pair(tag::<_, _, VerboseError<&str>>("color"), opt(tag("s"))).parse(input)
+    {
+        let (rest, _) = tag(" of mana spent to cast ").parse(rest)?;
+        let (rest, _) = parse_mana_spent_self_subject(rest)?;
+        return Ok((rest, QuantityRef::ColorsSpentOnSelf));
+    }
+
+    let (rest, _) = tag("mana spent to cast ").parse(input)?;
+    let (rest, _) = parse_mana_spent_self_subject(rest)?;
+    Ok((rest, QuantityRef::ManaSpentOnSelf))
+}
+
+fn parse_mana_spent_self_subject(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("it"),
+            tag("this spell"),
+            tag("this creature"),
+            tag("this permanent"),
+            tag("~"),
+        )),
+    )
     .parse(input)
 }
 
@@ -2160,6 +2194,25 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             }
         );
+    }
+
+    #[test]
+    fn parse_for_each_color_of_mana_spent_to_cast_this_spell() {
+        let (rest, q) =
+            parse_for_each_clause_ref("color of mana spent to cast this spell").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::ColorsSpentOnSelf);
+
+        let (rest, q) = parse_for_each_clause_ref("colors of mana spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::ColorsSpentOnSelf);
+    }
+
+    #[test]
+    fn parse_for_each_mana_spent_to_cast_it() {
+        let (rest, q) = parse_for_each_clause_ref("mana spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::ManaSpentOnSelf);
     }
 
     #[test]
