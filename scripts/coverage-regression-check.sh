@@ -9,10 +9,12 @@
 #                        These are the only flips that fail CI by default:
 #                        the engine no longer handles something it used to.
 #
-#   REGRESSED (parser) — card flipped true -> false but the only new gap
-#                        handlers are ParseWarning:*. These are accuracy
-#                        wins: the parser now admits it was guessing.
-#                        Listed but non-fatal.
+#   REGRESSED (coverage honesty)
+#                      — card flipped true -> false, but no previously parsed
+#                        supported handler was lost. This covers ParseWarning:*
+#                        and explicit Effect:* gaps for Oracle text the baseline
+#                        parse tree had already swallowed into a broader
+#                        supported node. Listed but non-fatal.
 #
 #   GAINED             — card flipped false -> true. Informational.
 #
@@ -73,6 +75,23 @@ fi
 # Emit one JSON object per card that flipped, with categorized new gaps.
 # Cards absent from the baseline are skipped (new cards don't count as regressions).
 jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
+  def flatten_items(items):
+    (items // [])
+    | map(
+        . as $item
+        | [$item] + flatten_items($item.children)
+      )
+    | add // [];
+
+  def item_handler:
+    if .category == "keyword" then "Keyword:\(.label)"
+    elif .category == "ability" then "Effect:\(.label)"
+    elif .category == "trigger" then "Trigger:\(.label)"
+    elif .category == "static" then "Static:\(.label)"
+    elif .category == "cost" then "Cost:\(.label)"
+    elif .category == "replacement" then empty
+    else empty end;
+
   ($base[0].cards // []) as $bcards |
   ($curr[0].cards // []) as $ccards |
   ($bcards | map({key: (.card_name | ascii_downcase), value: .}) | from_entries) as $bmap |
@@ -81,6 +100,9 @@ jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
       . as $c
       | ($bmap[$c.card_name | ascii_downcase]) as $b
       | select($b != null and $b.supported != $c.supported)
+      | (flatten_items($b.parse_details)
+          | map(select(.supported == true) | item_handler | ascii_downcase)
+          | unique) as $baseline_supported_handlers
       | {
           name: $c.card_name,
           was: $b.supported,
@@ -93,10 +115,15 @@ jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
         }
       | .new_parser = [.new_handlers[] | select(startswith("ParseWarning:"))]
       | .new_engine = [.new_handlers[] | select(startswith("ParseWarning:") | not)]
+      | .new_engine_lost = [
+          .new_engine[]
+          | select(. as $handler | $baseline_supported_handlers | index($handler | ascii_downcase))
+        ]
+      | .new_honesty = (.new_parser + (.new_engine - .new_engine_lost))
       | .bucket = (
           if .was and (.now | not) then
             if .oracle_changed then "oracle_changed"
-            elif (.new_engine | length) > 0 then "engine_regress"
+            elif (.new_engine_lost | length) > 0 then "engine_regress"
             else "parser_regress" end
           elif (.was | not) and .now then "gained"
           else "other" end
@@ -125,15 +152,15 @@ echo
 # upstream `jq`, which `pipefail` then surfaces as a script failure even
 # when every bucket was within expected bounds.
 printf "REGRESSED (engine) — %d cards — engine handler lost for a previously-supported card:\n" "$engine_count"
-jq -r '[.[] | select(.bucket=="engine_regress")][:30][] | "  \(.name)  [\(.new_engine | join(", "))]"' \
+jq -r '[.[] | select(.bucket=="engine_regress")][:30][] | "  \(.name)  [\(.new_engine_lost | join(", "))]"' \
     "$tmpdir/flips.json"
 if [[ "$engine_count" -gt 30 ]]; then
     echo "  ... $((engine_count - 30)) more"
 fi
 echo
 
-printf "REGRESSED (parser honesty) — %d cards — newly flagged by ParseWarning only (accuracy win):\n" "$parser_count"
-jq -r '[.[] | select(.bucket=="parser_regress")][:10][] | "  \(.name)  [\(.new_parser | join(", "))]"' \
+printf "REGRESSED (coverage honesty) — %d cards — newly surfaced parser gaps without a lost baseline handler:\n" "$parser_count"
+jq -r '[.[] | select(.bucket=="parser_regress")][:10][] | "  \(.name)  [\(.new_honesty | join(", "))]"' \
     "$tmpdir/flips.json"
 if [[ "$parser_count" -gt 10 ]]; then
     echo "  ... $((parser_count - 10)) more"

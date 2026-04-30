@@ -2142,7 +2142,7 @@ fn build_trigger_item(
         category: ParseCategory::Trigger,
         label: format!("{}", trig.mode),
         source_text: trig.description.clone(),
-        supported: mode_supported && children.iter().all(|c| c.is_fully_supported()),
+        supported: mode_supported,
         details: trigger_details(trig),
         children,
     }
@@ -7466,6 +7466,28 @@ mod tests {
             category: ParseCategory::Replacement,
             label: "EntersBattlefield".to_string(),
             source_text: None,
+            supported: true,
+            details: vec![],
+            children: vec![ParsedItem {
+                category: ParseCategory::Ability,
+                label: "unknown".to_string(),
+                source_text: Some("do something".to_string()),
+                supported: false,
+                details: vec![],
+                children: vec![],
+            }],
+        }];
+        let gaps = extract_gap_details(&items);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].handler, "Effect:unknown");
+    }
+
+    #[test]
+    fn extract_gap_details_does_not_blame_supported_trigger_for_child_gap() {
+        let items = vec![ParsedItem {
+            category: ParseCategory::Trigger,
+            label: "ChangesZone".to_string(),
+            source_text: Some("when this enters".to_string()),
             supported: true,
             details: vec![],
             children: vec![ParsedItem {
