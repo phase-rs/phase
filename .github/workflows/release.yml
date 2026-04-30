@@ -94,7 +94,7 @@ jobs:
     name: Build WASM + Frontend
     needs: [tauri-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -176,6 +176,27 @@ jobs:
 
       - name: Generate Scryfall data
         run: ./scripts/gen-scryfall-images.sh
+
+      - name: Run semantic audit
+        # Produces data/semantic-audit.json with structured findings for cards
+        # that parse without `Unimplemented` markers but disagree semantically
+        # with their Oracle text. Release uploads use data-files.json as the
+        # single source of truth, so every manifest entry must exist before R2
+        # upload begins.
+        # Pass data/ explicitly — gen-card-data.sh mirrors card-data.json into
+        # data/ so this matches deploy.yml and avoids relying on client/public.
+        run: cargo semantic-audit data/
+
+      - name: Stamp shared card_data_hash on coverage + audit JSONs
+        # Both files are uploaded to R2 as separate PUTs with no transactional
+        # guarantee. Embedding the same card_data_hash in both lets downstream
+        # consumers verify they're reading a consistent snapshot.
+        env:
+          CARD_DATA_HASH: ${{ steps.card-data-hash.outputs.hash }}
+        run: |
+          jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' data/semantic-audit.json > client/public/semantic-audit.json
+          jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' client/public/coverage-data.json > client/public/coverage-data.json.tmp
+          mv client/public/coverage-data.json.tmp client/public/coverage-data.json
 
       - name: Upload Scryfall image lookup artifact
         uses: actions/upload-artifact@v4
