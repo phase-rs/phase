@@ -417,6 +417,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
 
+    // CR 510.1c: Attached-object conditional variants must precede the generic
+    // inverted "As long as ..." rewrite so the condition binds to the
+    // enchanted/equipped creature rather than becoming an unrecognized SelfRef
+    // condition.
+    if let Some(def) = parse_attached_assigns_damage_from_toughness(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
@@ -2546,6 +2554,65 @@ fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<Static
     Some(
         StaticDefinition::continuous()
             .affected(TargetFilter::Typed(filter))
+            .modifications(vec![ContinuousModification::AssignDamageFromToughness])
+            .description(text.to_string()),
+    )
+}
+
+fn parse_attached_assigns_damage_from_toughness(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    #[derive(Clone, Copy)]
+    enum AttachedSubject {
+        Enchanted,
+        Equipped,
+    }
+
+    let lower = tp.lower.trim_end_matches('.');
+    let (rest, subject) = preceded(
+        tag::<_, _, VE<'_>>("as long as "),
+        alt((
+            value(AttachedSubject::Enchanted, tag("enchanted creature")),
+            value(AttachedSubject::Equipped, tag("equipped creature")),
+        )),
+    )
+    .parse(lower)
+    .ok()?;
+
+    let (rest, condition_prop) = if let Ok((rest, _)) =
+        tag::<_, _, VE<'_>>("'s toughness is greater than its power").parse(rest)
+    {
+        (rest, FilterProp::ToughnessGTPower)
+    } else {
+        let (after_has, _) = tag::<_, _, VE<'_>>(" has ").parse(rest).ok()?;
+        let (rest, keyword_text) = take_until::<_, _, VE<'_>>(", it assigns")
+            .parse(after_has)
+            .ok()?;
+        let keyword = map_keyword(keyword_text.trim())?;
+        (rest, FilterProp::WithKeyword { value: keyword })
+    };
+    let (rest, _) = tag::<_, _, VE<'_>>(
+        ", it assigns combat damage equal to its toughness rather than its power",
+    )
+    .parse(rest)
+    .ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+
+    let attachment_prop = match subject {
+        AttachedSubject::Enchanted => FilterProp::EnchantedBy,
+        AttachedSubject::Equipped => FilterProp::EquippedBy,
+    };
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![attachment_prop, condition_prop]),
+            ))
             .modifications(vec![ContinuousModification::AssignDamageFromToughness])
             .description(text.to_string()),
     )
@@ -5919,6 +5986,16 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             modifications.push(ContinuousModification::AddPower { value: p });
             modifications.push(ContinuousModification::AddToughness { value: t });
         }
+    }
+
+    // CR 510.1c: Aura/Equipment-style compound statics can attach the
+    // toughness-combat-damage rule to the same affected object as a P/T
+    // modification ("Enchanted creature gets +0/+2 and assigns...").
+    if nom_primitives::scan_contains(
+        lower,
+        "assigns combat damage equal to its toughness rather than its power",
+    ) {
+        modifications.push(ContinuousModification::AssignDamageFromToughness);
     }
 
     // CR 613.4c: Scan for "get +X/+X" / "gets +X/+X" anywhere in the text
@@ -9946,6 +10023,63 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::AssignDamageFromToughness));
+    }
+
+    #[test]
+    fn static_enchanted_creature_gets_pt_and_assigns_damage_from_toughness() {
+        let def = parse_static_line(
+            "Enchanted creature gets +0/+2 and assigns combat damage equal to its toughness rather than its power.",
+        )
+        .expect("Gauntlets of Light static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 0 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AssignDamageFromToughness));
+    }
+
+    #[test]
+    fn static_attached_conditional_assigns_damage_from_toughness() {
+        let cases = [
+            (
+                "As long as equipped creature's toughness is greater than its power, it assigns combat damage equal to its toughness rather than its power.",
+                vec![FilterProp::EquippedBy, FilterProp::ToughnessGTPower],
+            ),
+            (
+                "As long as enchanted creature has vigilance, it assigns combat damage equal to its toughness rather than its power.",
+                vec![
+                    FilterProp::EnchantedBy,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Vigilance,
+                    },
+                ],
+            ),
+        ];
+
+        for (text, properties) in cases {
+            let def = parse_static_line(text).expect("attached toughness-damage static must parse");
+            assert_eq!(def.mode, StaticMode::Continuous);
+            assert_eq!(
+                def.affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::creature().properties(properties),
+                ))
+            );
+            assert!(def
+                .modifications
+                .contains(&ContinuousModification::AssignDamageFromToughness));
+        }
     }
 
     // --- Conditional counter-based keyword grants (CR 613.7) ---

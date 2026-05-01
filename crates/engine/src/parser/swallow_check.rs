@@ -95,7 +95,7 @@ pub fn check_swallowed_clauses(oracle_text: &str, parsed: &ParsedAbilities) {
     detect_dynamic_qty(&cleaned, oracle_text, &ast_json);
     detect_condition_if(&cleaned, oracle_text, &ast_json, parsed);
     detect_condition_unless(&cleaned, oracle_text, &ast_json);
-    detect_condition_as_long_as(&cleaned, oracle_text, &ast_json);
+    detect_condition_as_long_as(&cleaned, oracle_text, &ast_json, parsed);
     detect_duration_this_turn(&cleaned, oracle_text, &ast_json);
     detect_duration_next_turn(&cleaned, oracle_text, &ast_json);
     detect_optional_may_have(&cleaned, oracle_text, &ast_json);
@@ -1145,7 +1145,12 @@ fn detect_condition_unless(cleaned: &str, original: &str, ast_json: &str) {
 
 /// CR 611.3: "as long as [X]" — duration tied to a condition (typically a
 /// static ability with a `condition` field).
-fn detect_condition_as_long_as(cleaned: &str, original: &str, ast_json: &str) {
+fn detect_condition_as_long_as(
+    cleaned: &str,
+    original: &str,
+    ast_json: &str,
+    parsed: &ParsedAbilities,
+) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("as long as ") {
         return;
@@ -1165,10 +1170,46 @@ fn detect_condition_as_long_as(cleaned: &str, original: &str, ast_json: &str) {
     if json_has_any(ast_json, markers) {
         return;
     }
+    if any_static_has_per_object_as_long_as_gate(parsed) {
+        return;
+    }
     push_warning(format!(
         "Swallow:Condition_AsLongAs — \"as long as\" not captured as conditional static: {}",
         truncate(original, 140)
     ));
+}
+
+fn any_static_has_per_object_as_long_as_gate(parsed: &ParsedAbilities) -> bool {
+    parsed.statics.iter().any(|static_def| {
+        static_def
+            .description
+            .as_ref()
+            .is_some_and(|description| description.to_ascii_lowercase().contains("as long as ")) // allow-noncombinator: swallow detector marker scan on parsed static description
+            && static_def
+                .modifications
+                .contains(&ContinuousModification::AssignDamageFromToughness)
+            && static_def
+                .affected
+                .as_ref()
+                .is_some_and(target_filter_has_per_object_condition_property)
+    })
+}
+
+fn target_filter_has_per_object_condition_property(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                crate::types::ability::FilterProp::ToughnessGTPower
+                    | crate::types::ability::FilterProp::WithKeyword { .. }
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(target_filter_has_per_object_condition_property),
+        TargetFilter::Not { filter } => target_filter_has_per_object_condition_property(filter),
+        _ => false,
+    }
 }
 
 // ── Detector J: Duration_ThisTurn ───────────────────────────────────────

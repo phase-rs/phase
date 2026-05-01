@@ -9042,6 +9042,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gauntlets_treefolk_umbra_assign_damage_from_toughness_no_dynamic_qty_warning() {
+        for (name, oracle) in [
+            (
+                "Gauntlets of Light",
+                "Enchant creature\nEnchanted creature gets +0/+2 and assigns combat damage equal to its toughness rather than its power.\nEnchanted creature has \"{2}{W}: Untap this creature.\"",
+            ),
+            (
+                "Treefolk Umbra",
+                "Enchant creature\nEnchanted creature gets +0/+2 and assigns combat damage equal to its toughness rather than its power.\nUmbra armor",
+            ),
+        ] {
+            let parsed = parse(oracle, name, &[], &["Enchantment"], &["Aura"]);
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .all(|warning| !matches!(
+                        warning.split_whitespace().next(),
+                        Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
+                    )),
+                "unexpected toughness-damage warning for {name}: {:?}",
+                parsed.parse_warnings
+            );
+
+            let static_def = parsed
+                .statics
+                .iter()
+                .find(|static_def| {
+                    static_def.affected
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                        ))
+                        && static_def
+                            .modifications
+                            .contains(&ContinuousModification::AddToughness { value: 2 })
+                })
+                .expect("expected enchanted creature +0/+2 static");
+            assert!(static_def
+                .modifications
+                .contains(&ContinuousModification::AssignDamageFromToughness));
+        }
+    }
+
+    #[test]
+    fn attached_conditional_toughness_damage_cards_no_dynamic_qty_warning() {
+        for (name, types, subtypes, expected_props, oracle) in [
+            (
+                "Bark of Doran",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                vec![FilterProp::EquippedBy, FilterProp::ToughnessGTPower],
+                "Equipped creature gets +0/+1.\nAs long as equipped creature's toughness is greater than its power, it assigns combat damage equal to its toughness rather than its power.\nEquip {1}",
+            ),
+            (
+                "Solid Footing",
+                &["Enchantment"][..],
+                &["Aura"][..],
+                vec![
+                    FilterProp::EnchantedBy,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Vigilance,
+                    },
+                ],
+                "Flash\nEnchant creature\nEnchanted creature gets +1/+1.\nAs long as enchanted creature has vigilance, it assigns combat damage equal to its toughness rather than its power.",
+            ),
+        ] {
+            let parsed = parse(oracle, name, &[], types, subtypes);
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .all(|warning| !matches!(
+                        warning.split_whitespace().next(),
+                        Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
+                    )),
+                "unexpected toughness-damage warning for {name}: {:?}",
+                parsed.parse_warnings
+            );
+
+            let static_def = parsed
+                .statics
+                .iter()
+                .find(|static_def| {
+                    static_def.affected
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(expected_props.clone()),
+                        ))
+                })
+                .expect("expected attached conditional toughness-damage static");
+            assert!(static_def
+                .modifications
+                .contains(&ContinuousModification::AssignDamageFromToughness));
+        }
+    }
+
     // ------------------------------------------------------------------
     // merge_ability_condition — single-authority merge for ability-word
     // plus literal-if condition composition.
