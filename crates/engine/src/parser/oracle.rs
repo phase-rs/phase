@@ -2922,7 +2922,8 @@ mod tests {
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
         ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, ReplacementCondition, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        QuantityRef, ReplacementCondition, RoundingMode, StaticCondition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -3295,6 +3296,72 @@ mod tests {
                     other => panic!("expected dynamic power multiplier, got {other:?}"),
                 },
                 other => panic!("expected Pump, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bhaal_myrkul_half_starting_life_static_has_typed_condition_no_dynamic_qty_warning() {
+        for (name, subject) in [
+            ("Bane, Lord of Darkness", "Bane"),
+            ("Bhaal, Lord of Murder", "Bhaal"),
+            ("Myrkul, Lord of Bones", "Myrkul"),
+        ] {
+            let r = parse(
+                &format!(
+                    "As long as your life total is less than or equal to half your starting life total, {subject} has indestructible."
+                ),
+                name,
+                &[],
+                &["Creature"],
+                &[],
+            );
+
+            assert_eq!(r.statics.len(), 1, "{name}: {r:#?}");
+            assert!(
+                r.parse_warnings
+                    .iter()
+                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                "unexpected DynamicQty warning for {name}: {:?}",
+                r.parse_warnings
+            );
+            assert!(
+                r.statics[0]
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Indestructible,
+                    }),
+                "expected indestructible grant for {name}: {:?}",
+                r.statics[0].modifications
+            );
+            match r.statics[0]
+                .condition
+                .as_ref()
+                .expect("expected static condition")
+            {
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::LifeTotal {
+                                    player: PlayerScope::Controller,
+                                },
+                        },
+                    comparator: Comparator::LE,
+                    rhs:
+                        QuantityExpr::HalfRounded {
+                            inner,
+                            rounding: RoundingMode::Down,
+                        },
+                } => {
+                    assert!(matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::StartingLifeTotal
+                        }
+                    ));
+                }
+                other => panic!("expected typed half-starting-life comparison, got {other:?}"),
             }
         }
     }

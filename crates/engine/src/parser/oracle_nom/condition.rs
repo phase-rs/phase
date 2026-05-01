@@ -927,11 +927,32 @@ fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
     }
 }
 
-/// Parse "your life total is N or less/greater" conditions.
-///
-/// Note: "you have N or more life" is handled by `parse_you_have_conditions`.
+/// CR 119: Parse "your life total is N or less/greater" and
+/// "your life total is [comparator] [quantity]" conditions. Fractional RHS
+/// quantities such as "half your starting life total" compose through
+/// `parse_quantity` (CR 107.1a). Note: "you have N or more life" is handled by
+/// `parse_you_have_conditions`.
 fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("your life total is ").parse(input)?;
+
+    if let Ok((rest, comparator)) = parse_life_total_comparator(rest) {
+        // Comparator phrases and numeric "N or less/greater" phrases are disjoint:
+        // after matching a comparator, an unparseable RHS should be a hard parser error.
+        let (rest, rhs) = nom_quantity::parse_quantity(rest)?;
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator,
+                rhs,
+            },
+        ));
+    }
+
     let (rest, n) = parse_number(rest)?;
     // Try "or less" then "or greater"
     if let Ok((rest, _)) =
@@ -963,6 +984,22 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
+}
+
+/// CR 119: Comparator phrase for current life total checks. Longest
+/// alternatives must precede their prefixes ("less than or equal to" before
+/// "less than").
+fn parse_life_total_comparator(input: &str) -> OracleResult<'_, Comparator> {
+    alt((
+        value(
+            Comparator::LE,
+            tag::<_, _, nom_language::error::VerboseError<&str>>("less than or equal to "),
+        ),
+        value(Comparator::GE, tag("greater than or equal to ")),
+        value(Comparator::LT, tag("less than ")),
+        value(Comparator::GT, tag("greater than ")),
+    ))
+    .parse(input)
 }
 
 /// CR 113.6b: Parse zone-based source conditions.
@@ -2196,7 +2233,7 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CardTypeSetSource, TypeFilter, TypedFilter};
+    use crate::types::ability::{CardTypeSetSource, RoundingMode, TypeFilter, TypedFilter};
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -3194,6 +3231,85 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 5 },
             } => {}
             other => panic!("expected LifeTotal LE 5, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_your_life_total_le_half_starting_life_total() {
+        let (rest, c) = parse_inner_condition(
+            "your life total is less than or equal to half your starting life total",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
+                    },
+                comparator: Comparator::LE,
+                rhs:
+                    QuantityExpr::HalfRounded {
+                        inner,
+                        rounding: RoundingMode::Down,
+                    },
+            } => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal
+                    }
+                ));
+            }
+            other => panic!("expected LifeTotal LE HalfRounded(StartingLifeTotal), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_your_life_total_comparator_variants() {
+        for (text, expected_comparator, expected_rhs) in [
+            (
+                "your life total is less than 7",
+                Comparator::LT,
+                QuantityExpr::Fixed { value: 7 },
+            ),
+            (
+                "your life total is greater than your starting life total",
+                Comparator::GT,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal,
+                },
+            ),
+            (
+                "your life total is greater than or equal to your starting life total",
+                Comparator::GE,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal,
+                },
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "");
+            match c {
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::LifeTotal {
+                                    player: PlayerScope::Controller,
+                                },
+                        },
+                    comparator,
+                    rhs,
+                } => {
+                    assert_eq!(comparator, expected_comparator);
+                    assert_eq!(rhs, expected_rhs);
+                }
+                other => panic!("expected life total comparison for {text}, got {other:?}"),
+            }
         }
     }
 
