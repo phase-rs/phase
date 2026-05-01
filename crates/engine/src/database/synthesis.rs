@@ -3569,6 +3569,33 @@ mod idempotency_tests {
     }
 
     #[test]
+    fn synthesize_mobilize_preserves_dynamic_quantity() {
+        use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
+
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![TypeFilter::Creature],
+                scope: CountScope::Controller,
+            },
+        };
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Mobilize(quantity.clone()));
+
+        synthesize_mobilize(&mut face);
+
+        let trigger = face.triggers.first().expect("mobilize trigger");
+        match trigger
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref())
+        {
+            Some(Effect::Token { count, .. }) => assert_eq!(count, &quantity),
+            other => panic!("expected mobilize token effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn synthesize_case_solve_is_idempotent() {
         let mut face = CardFace::default();
         face.card_type.subtypes.push("Case".to_string());

@@ -10,15 +10,14 @@
 //! type-system lookup; there is no semantic translation. Cost/filter
 //! keywords need real conversion logic, so they land with their phase.
 
-use engine::types::ability::QuantityExpr;
 use engine::types::keywords::{
     BuybackCost, CyclingCost, FlashbackCost, HexproofFilter, ProtectionTarget, WardCost,
 };
 use engine::types::mana::ManaColor;
 use engine::types::Keyword;
 
-use crate::convert::cost as cost_conv;
 use crate::convert::result::{ConvResult, ConversionGap};
+use crate::convert::{cost as cost_conv, quantity};
 use crate::schema::types::{
     CardType, Cards, Color, Cost, CreatureType, GameNumber, Protectable, ProtectableColor, Rule,
 };
@@ -129,9 +128,7 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Casualty(g) => Keyword::Casualty(int_or_gap(g, "Rule::Casualty", path)?),
         Rule::Dredge(g) => Keyword::Dredge(int_or_gap(g, "Rule::Dredge", path)?),
         Rule::Modular(g) => Keyword::Modular(int_or_gap(g, "Rule::Modular", path)?),
-        Rule::Mobilize(g) => Keyword::Mobilize(QuantityExpr::Fixed {
-            value: int_or_gap(g, "Rule::Mobilize", path)? as i32,
-        }),
+        Rule::Mobilize(g) => Keyword::Mobilize(quantity::convert(g)?),
         // CR 702.60a: Ripple N. The engine keyword is currently the fixed
         // Oracle corpus shape (Ripple 4), so strict-fail any non-4 payload
         // instead of dropping semantic data.
@@ -826,6 +823,7 @@ fn int_or_gap(g: &GameNumber, idiom: &'static str, path: &str) -> ConvResult<u32
 
 #[cfg(test)]
 mod tests {
+    use engine::types::ability::{CountScope, QuantityExpr, QuantityRef, TypeFilter, ZoneRef};
     use engine::types::Keyword;
 
     use super::*;
@@ -838,5 +836,35 @@ mod tests {
                 .expect("rule should be recognized as a keyword"),
             Keyword::Aftermath
         );
+    }
+
+    #[test]
+    fn mobilize_preserves_dynamic_quantity() {
+        let rule = Rule::Mobilize(Box::new(GameNumber::TheNumberOfGraveyardCards(Box::new(
+            crate::schema::types::CardsInGraveyard::And(vec![
+                crate::schema::types::CardsInGraveyard::IsCardtype(CardType::Creature),
+                crate::schema::types::CardsInGraveyard::InAPlayersGraveyard(Box::new(
+                    crate::schema::types::Players::SinglePlayer(Box::new(
+                        crate::schema::types::Player::You,
+                    )),
+                )),
+            ]),
+        ))));
+
+        let keyword = try_convert(&rule, "test")
+            .expect("conversion should succeed")
+            .expect("rule should be recognized as a keyword");
+
+        match keyword {
+            Keyword::Mobilize(QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types,
+                        scope: CountScope::Controller,
+                    },
+            }) => assert_eq!(card_types, vec![TypeFilter::Creature]),
+            other => panic!("expected dynamic Mobilize quantity, got {other:?}"),
+        }
     }
 }

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::space0;
 use nom::combinator::{opt, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -9,10 +10,11 @@ use nom_language::error::VerboseError;
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
+use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, ControllerRef, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, AdditionalCost, ControllerRef, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost};
 
@@ -155,6 +157,12 @@ pub(crate) fn extract_keyword_line(
         return None;
     }
 
+    if mtgjson_keyword_names.iter().any(|n| n == "mobilize") {
+        if let Some(kw) = parse_mobilize_keyword_line(line) {
+            return Some(vec![kw]);
+        }
+    }
+
     // CR 303.4a: "Enchant A, B, [and/or] C" — multi-type enchant restriction.
     // The comma-separated list is a single keyword (one TargetFilter::Or), not
     // multiple comma-separated keywords. Detect and handle before the generic
@@ -229,6 +237,33 @@ pub(crate) fn extract_keyword_line(
     } else {
         None
     }
+}
+
+// CR 702.181a: "Mobilize N" creates N tapped and attacking Warrior tokens.
+fn parse_mobilize_keyword_line(line: &str) -> Option<Keyword> {
+    let lower = line.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("mobilize ")
+        .parse(lower.as_str())
+        .ok()?;
+    let rest = rest.trim();
+
+    if let Ok((remaining, value)) = nom_primitives::parse_number.parse(rest) {
+        if remaining.trim().is_empty() {
+            return Some(Keyword::Mobilize(QuantityExpr::Fixed {
+                value: value as i32,
+            }));
+        }
+    }
+
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("x").parse(rest).ok()?;
+    let (rest, _) = space0::<_, VerboseError<&str>>.parse(rest).ok()?;
+    let (quantity_text, _) = alt((
+        tag::<_, _, VerboseError<&str>>(", where x is "),
+        tag("where x is "),
+    ))
+    .parse(rest)
+    .ok()?;
+    parse_cda_quantity(quantity_text).map(Keyword::Mobilize)
 }
 
 /// Nom leaf combinator: match one of the six enchantable core types and yield
@@ -1452,6 +1487,47 @@ mod tests {
         let keywords = result.unwrap();
         assert_eq!(keywords.len(), 1);
         assert!(matches!(keywords[0], Keyword::Splice(_)));
+    }
+
+    #[test]
+    fn extract_keyword_line_mobilize_where_x_quantity() {
+        use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
+
+        let mtgjson_kws = vec!["mobilize".to_string()];
+        let result = extract_keyword_line(
+            "Mobilize X, where X is the number of creature cards in your graveyard",
+            &mtgjson_kws,
+        )
+        .expect("mobilize where-X line should be recognized");
+
+        assert_eq!(result.len(), 1);
+        match &result[0] {
+            Keyword::Mobilize(QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone,
+                        card_types,
+                        scope,
+                    },
+            }) => {
+                assert_eq!(*zone, ZoneRef::Graveyard);
+                assert_eq!(card_types, &vec![TypeFilter::Creature]);
+                assert_eq!(*scope, CountScope::Controller);
+            }
+            other => panic!("expected dynamic Mobilize ZoneCardCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_keyword_line_mobilize_fixed_quantity() {
+        let mtgjson_kws = vec!["mobilize".to_string()];
+        let result = extract_keyword_line("Mobilize 2", &mtgjson_kws)
+            .expect("fixed mobilize line should be recognized");
+
+        assert_eq!(
+            result,
+            vec![Keyword::Mobilize(QuantityExpr::Fixed { value: 2 })]
+        );
     }
 
     #[test]

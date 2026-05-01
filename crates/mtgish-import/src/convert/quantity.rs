@@ -8,19 +8,19 @@
 use engine::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CountScope,
     DevotionColors, FilterProp, ObjectProperty, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, RoundingMode, TargetFilter, TypedFilter, ZoneRef,
+    QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use engine::types::player::PlayerCounterKind;
 use engine::types::zones::Zone;
 
 use crate::convert::filter::{
-    cards_in_graveyard_to_filter, concrete_color, convert as convert_permanents, convert_permanent,
-    spells_to_filter,
+    card_type, cards_in_graveyard_to_filter, concrete_color, convert as convert_permanents,
+    convert_permanent, spells_to_filter,
 };
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
-    CardInExile, CardType, CardsInExile, CounterType, GameNumber, Permanent, Permanents, Player,
-    Players, Spell,
+    CardInExile, CardType, CardsInExile, CardsInGraveyard, CounterType, GameNumber, Permanent,
+    Permanents, Player, Players, Spell,
 };
 
 pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
@@ -96,13 +96,13 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             },
         },
 
-        // CR 107.3 + CR 404.1: "the number of cards in [scope]'s graveyard"
-        // → GraveyardSize when scope is the controller; else strict-fail
-        // until the engine adds a target-player graveyard ref.
+        // CR 107.3 + CR 404.1: "the number of cards in [scope]'s graveyard".
         GameNumber::TheNumberOfGraveyardCards(filter) => QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount {
-                filter: cards_in_graveyard_to_filter(filter)?,
-            },
+            qty: cards_in_graveyard_to_zone_card_count(filter).unwrap_or(
+                QuantityRef::ObjectCount {
+                    filter: cards_in_graveyard_to_filter(filter)?,
+                },
+            ),
         },
 
         // CR 601.2h + CR 202.2: Sunburst / Converge.
@@ -1084,6 +1084,68 @@ fn players_to_count_scope(players: &Players) -> Option<CountScope> {
         Players::AnyPlayer => Some(CountScope::All),
         _ => None,
     }
+}
+
+fn cards_in_graveyard_to_zone_card_count(cards: &CardsInGraveyard) -> Option<QuantityRef> {
+    let parts = graveyard_count_parts(cards)?;
+    Some(QuantityRef::ZoneCardCount {
+        zone: ZoneRef::Graveyard,
+        card_types: parts.card_types,
+        scope: parts.scope.unwrap_or(CountScope::All),
+    })
+}
+
+#[derive(Default)]
+struct GraveyardCountParts {
+    card_types: Vec<TypeFilter>,
+    scope: Option<CountScope>,
+}
+
+fn graveyard_count_parts(cards: &CardsInGraveyard) -> Option<GraveyardCountParts> {
+    match cards {
+        CardsInGraveyard::AnyCardInAnyGraveyard => Some(GraveyardCountParts::default()),
+        CardsInGraveyard::IsCardtype(card) => Some(GraveyardCountParts {
+            card_types: vec![card_type(card)],
+            scope: None,
+        }),
+        CardsInGraveyard::InAPlayersGraveyard(players) => Some(GraveyardCountParts {
+            card_types: Vec::new(),
+            scope: Some(players_to_count_scope(players)?),
+        }),
+        CardsInGraveyard::And(parts) => {
+            let parts = graveyard_count_parts_from_iter(parts.iter())?;
+            (parts.card_types.len() <= 1).then_some(parts)
+        }
+        CardsInGraveyard::Or(parts) => {
+            let card_types = parts
+                .iter()
+                .map(|part| match part {
+                    CardsInGraveyard::IsCardtype(card) => Some(card_type(card)),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(GraveyardCountParts {
+                card_types,
+                scope: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn graveyard_count_parts_from_iter<'a>(
+    mut parts: impl Iterator<Item = &'a CardsInGraveyard>,
+) -> Option<GraveyardCountParts> {
+    parts.try_fold(GraveyardCountParts::default(), |mut acc, part| {
+        let part = graveyard_count_parts(part)?;
+        acc.card_types.extend(part.card_types);
+        match (acc.scope.as_ref(), part.scope) {
+            (None, Some(scope)) => acc.scope = Some(scope),
+            (Some(existing), Some(scope)) if *existing != scope => return None,
+            _ => {}
+        }
+        Some(acc)
+    })
 }
 
 /// CR 122.1: Map (counter_type, permanent) → CountersOnSelf / CountersOnTarget.

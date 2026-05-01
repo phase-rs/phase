@@ -9750,7 +9750,8 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
-        | Effect::ExileTop { count: amount, .. } => {
+        | Effect::ExileTop { count: amount, .. }
+        | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
         }
         Effect::Pump {
@@ -10557,6 +10558,34 @@ mod tests {
                 other => panic!("expected GainLife Aggregate, got {other:?}"),
             },
             other => panic!("expected GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_x_applies_to_incubate_count() {
+        let def = parse_effect_chain(
+            "Mill two cards, then incubate X, where X is the number of creature cards in your graveyard.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Mill { .. }),
+            "expected Mill root effect, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.as_ref().expect("incubate sub-ability");
+        match &*sub.effect {
+            Effect::Incubate {
+                count:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Graveyard,
+                                card_types,
+                                scope: CountScope::Controller,
+                            },
+                    },
+            } => assert_eq!(card_types, &vec![TypeFilter::Creature]),
+            other => panic!("expected dynamic Incubate count, got {other:?}"),
         }
     }
 

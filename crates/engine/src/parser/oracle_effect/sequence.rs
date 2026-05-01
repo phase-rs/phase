@@ -417,6 +417,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("untap ")),
         value((), tag("you may ")),
         value((), tag("you ")),
+        value((), tag("incubate ")),
         value((), tag("it ")),
         value((), tag("copy ")),
         value((), tag("double ")),
