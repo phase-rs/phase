@@ -2796,13 +2796,16 @@ pub enum ParsedCondition {
     FirstSpellThisGame,
     OpponentSearchedLibraryThisTurn,
     BeenAttackedThisStep,
-    GraveyardCardCountAtLeast {
+    ZoneCardCountAtLeast {
+        zone: crate::types::zones::Zone,
         count: usize,
     },
-    GraveyardCardTypeCountAtLeast {
+    ZoneCardTypeCountAtLeast {
+        zone: crate::types::zones::Zone,
         count: usize,
     },
-    GraveyardSubtypeCardCountAtLeast {
+    ZoneSubtypeCardCountAtLeast {
+        zone: crate::types::zones::Zone,
         subtype: String,
         count: usize,
     },

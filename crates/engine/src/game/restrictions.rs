@@ -584,31 +584,29 @@ fn evaluate_condition(
             .iter()
             .any(|searched| *searched != player),
         ParsedCondition::BeenAttackedThisStep => state.players_attacked_this_step.contains(&player),
-        ParsedCondition::GraveyardCardCountAtLeast { count } => {
-            player_graveyard_ids(state, player).count() >= *count
+        ParsedCondition::ZoneCardCountAtLeast { zone, count } => {
+            player_zone_ids(state, player, *zone).count() >= *count
         }
-        ParsedCondition::GraveyardCardTypeCountAtLeast { count } => {
-            distinct_graveyard_card_type_count(state, player) >= *count
+        ParsedCondition::ZoneCardTypeCountAtLeast { zone, count } => {
+            distinct_zone_card_type_count(state, player, *zone) >= *count
         }
-        ParsedCondition::GraveyardSubtypeCardCountAtLeast { subtype, count } => state
-            .players
-            .iter()
-            .find(|candidate| candidate.id == player)
-            .is_some_and(|candidate| {
-                candidate
-                    .graveyard
-                    .iter()
-                    .filter(|object_id| {
-                        state.objects.get(object_id).is_some_and(|obj| {
-                            obj.card_types
-                                .subtypes
-                                .iter()
-                                .any(|item| item.eq_ignore_ascii_case(subtype))
-                        })
+        ParsedCondition::ZoneSubtypeCardCountAtLeast {
+            zone,
+            subtype,
+            count,
+        } => {
+            player_zone_ids(state, player, *zone)
+                .filter(|object_id| {
+                    state.objects.get(object_id).is_some_and(|obj| {
+                        obj.card_types
+                            .subtypes
+                            .iter()
+                            .any(|item| item.eq_ignore_ascii_case(subtype))
                     })
-                    .count()
-                    >= *count
-            }),
+                })
+                .count()
+                >= *count
+        }
         ParsedCondition::OpponentPoisonAtLeast { count } => state
             .players
             .iter()
@@ -982,24 +980,33 @@ fn player_hand_size(state: &crate::types::game_state::GameState, player: PlayerI
         .unwrap_or(0)
 }
 
-fn player_graveyard_ids(
-    state: &crate::types::game_state::GameState,
+fn player_zone_ids<'a>(
+    state: &'a crate::types::game_state::GameState,
     player: PlayerId,
-) -> impl Iterator<Item = &ObjectId> + '_ {
-    state
+    zone: crate::types::zones::Zone,
+) -> Box<dyn Iterator<Item = &'a ObjectId> + 'a> {
+    let Some(p) = state
         .players
         .iter()
         .find(|candidate| candidate.id == player)
-        .into_iter()
-        .flat_map(|candidate| candidate.graveyard.iter())
+    else {
+        return Box::new(std::iter::empty());
+    };
+    match zone {
+        crate::types::zones::Zone::Graveyard => Box::new(p.graveyard.iter()),
+        crate::types::zones::Zone::Hand => Box::new(p.hand.iter()),
+        crate::types::zones::Zone::Library => Box::new(p.library.iter()),
+        _ => Box::new(std::iter::empty()),
+    }
 }
 
-fn distinct_graveyard_card_type_count(
+fn distinct_zone_card_type_count(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
+    zone: crate::types::zones::Zone,
 ) -> usize {
     let mut card_types = std::collections::HashSet::new();
-    for object_id in player_graveyard_ids(state, player) {
+    for object_id in player_zone_ids(state, player, zone) {
         let Some(obj) = state.objects.get(object_id) else {
             continue;
         };
@@ -1015,7 +1022,7 @@ fn graveyard_has_subtype_card(
     player: PlayerId,
     subtype: &str,
 ) -> bool {
-    player_graveyard_ids(state, player).any(|object_id| {
+    player_zone_ids(state, player, crate::types::zones::Zone::Graveyard).any(|object_id| {
         state.objects.get(object_id).is_some_and(|obj| {
             obj.card_types
                 .subtypes

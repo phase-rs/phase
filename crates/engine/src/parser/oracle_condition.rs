@@ -93,7 +93,7 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
     if let Some(condition) = parse_you_control_condition(text) {
         return Some(condition);
     }
-    if let Some(condition) = parse_graveyard_condition(text) {
+    if let Some(condition) = parse_zone_card_condition(text) {
         return Some(condition);
     }
     if let Some(condition) = parse_hand_condition(text) {
@@ -384,40 +384,80 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     None
 }
 
-fn parse_graveyard_condition(text: &str) -> Option<ParsedCondition> {
-    if let Some(count) =
-        parse_numeric_threshold(text, "there are ", " or more cards in your graveyard")
-    {
-        return Some(ParsedCondition::GraveyardCardCountAtLeast { count });
+fn parse_zone_card_condition(text: &str) -> Option<ParsedCondition> {
+    // "there are N or more ..." forms
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("there are ").parse(text) {
+        if let Some((count, after_num)) = super::oracle_util::parse_number(rest) {
+            let count = count as usize;
+            // "there are N or more card types among cards in your <zone>"
+            if let Ok((zone_text, _)) =
+                tag::<_, _, VerboseError<&str>>("or more card types among cards ").parse(after_num)
+            {
+                if let Some((_, zone)) = extract_zone_from_suffix(zone_text) {
+                    return Some(ParsedCondition::ZoneCardTypeCountAtLeast { zone, count });
+                }
+            }
+            // "there are N or more cards in your <zone>"
+            if let Ok((zone_text, _)) =
+                tag::<_, _, VerboseError<&str>>("or more cards ").parse(after_num)
+            {
+                if let Some((_, zone)) = extract_zone_from_suffix(zone_text) {
+                    return Some(ParsedCondition::ZoneCardCountAtLeast { zone, count });
+                }
+            }
+        }
+        // "there are no <subtype> cards in your <zone>"
+        if let Ok((no_rest, _)) = tag::<_, _, VerboseError<&str>>("no ").parse(rest) {
+            if let Some((subtype, zone)) = parse_subtype_zone_suffix(no_rest, " cards ") {
+                return Some(ParsedCondition::ZoneSubtypeCardCountAtLeast {
+                    zone,
+                    subtype: subtype.trim_end_matches('s').to_string(),
+                    count: 0,
+                });
+            }
+        }
     }
-    if let Some(count) = parse_numeric_threshold(
-        text,
-        "there are ",
-        " or more card types among cards in your graveyard",
-    ) {
-        return Some(ParsedCondition::GraveyardCardTypeCountAtLeast { count });
+    // "there is an <subtype> card in your <zone>"
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("there is an ").parse(text) {
+        if let Some((subtype, zone)) = parse_subtype_zone_suffix(rest, " card ") {
+            return Some(ParsedCondition::ZoneSubtypeCardCountAtLeast {
+                zone,
+                subtype: subtype.to_string(),
+                count: 1,
+            });
+        }
     }
-    if let Some(subtype) = tag::<_, _, VerboseError<&str>>("there is an ")
-        .parse(text)
-        .ok()
-        .and_then(|(rest, _)| rest.strip_suffix(" card in your graveyard"))
-    {
-        return Some(ParsedCondition::GraveyardSubtypeCardCountAtLeast {
-            subtype: subtype.to_string(),
-            count: 1,
-        });
-    }
-    if let Some(subtype) = tag::<_, _, VerboseError<&str>>("two or more ")
-        .parse(text)
-        .ok()
-        .and_then(|(rest, _)| rest.strip_suffix(" cards are in your graveyard"))
-    {
-        return Some(ParsedCondition::GraveyardSubtypeCardCountAtLeast {
-            subtype: subtype.trim_end_matches('s').to_string(),
-            count: 2,
-        });
+    // "two or more <subtype> cards are in your <zone>"
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("two or more ").parse(text) {
+        if let Some((subtype, zone)) = parse_subtype_zone_suffix(rest, " cards are ") {
+            return Some(ParsedCondition::ZoneSubtypeCardCountAtLeast {
+                zone,
+                subtype: subtype.trim_end_matches('s').to_string(),
+                count: 2,
+            });
+        }
     }
     None
+}
+
+/// Extract a zone from a suffix like "in your graveyard" or "from your hand"
+/// using the existing `parse_zone_suffix` combinator.
+fn extract_zone_from_suffix(suffix: &str) -> Option<(usize, Zone)> {
+    let (props, _ctrl, consumed) = super::oracle_target::parse_zone_suffix(suffix)?;
+    props.iter().find_map(|p| match p {
+        crate::types::ability::FilterProp::InZone { zone } => Some((consumed, *zone)),
+        _ => None,
+    })
+}
+
+/// Split text on a card-word separator (e.g. " card ", " cards are ") and extract the
+/// zone from the suffix via `parse_zone_suffix`. Returns `(subtype_text, zone)`.
+fn parse_subtype_zone_suffix<'a>(text: &'a str, separator: &str) -> Option<(&'a str, Zone)> {
+    let pos = text.find(separator)?;
+    let subtype = &text[..pos];
+    let after = &text[pos + separator.len()..];
+    let (_, zone) = extract_zone_from_suffix(after)?;
+    Some((subtype, zone))
 }
 
 fn parse_hand_condition(text: &str) -> Option<ParsedCondition> {
@@ -1009,16 +1049,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_graveyard_conditions() {
+    fn parses_zone_card_conditions() {
         assert!(matches!(
             parse_restriction_condition(
                 "there are four or more card types among cards in your graveyard"
             ),
-            Some(ParsedCondition::GraveyardCardTypeCountAtLeast { count: 4 })
+            Some(ParsedCondition::ZoneCardTypeCountAtLeast {
+                zone: Zone::Graveyard,
+                count: 4
+            })
         ));
         assert!(matches!(
             parse_restriction_condition("there are seven or more cards in your graveyard"),
-            Some(ParsedCondition::GraveyardCardCountAtLeast { count: 7 })
+            Some(ParsedCondition::ZoneCardCountAtLeast {
+                zone: Zone::Graveyard,
+                count: 7
+            })
         ));
     }
 

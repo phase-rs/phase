@@ -447,6 +447,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{ParsedCondition, QuantityExpr, TargetFilter};
     use crate::types::mana::ManaCost;
+    use crate::types::zones::Zone;
 
     #[test]
     fn spell_cast_restriction_condition_is_preserved() {
@@ -520,7 +521,10 @@ mod tests {
             vec![
                 CastingRestriction::AsSorcery,
                 CastingRestriction::RequiresCondition {
-                    condition: Some(ParsedCondition::GraveyardCardTypeCountAtLeast { count: 4 }),
+                    condition: Some(ParsedCondition::ZoneCardTypeCountAtLeast {
+                        zone: Zone::Graveyard,
+                        count: 4
+                    }),
                 },
             ]
         );

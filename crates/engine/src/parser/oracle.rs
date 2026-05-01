@@ -4375,7 +4375,10 @@ mod tests {
         assert!(restrictions.iter().any(|restriction| matches!(
             restriction,
             ActivationRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::GraveyardCardTypeCountAtLeast { count: 4 })
+                condition: Some(ParsedCondition::ZoneCardTypeCountAtLeast {
+                    zone: Zone::Graveyard,
+                    count: 4
+                })
             }
         )));
         assert_eq!(r.parse_warnings, Vec::<String>::new());
