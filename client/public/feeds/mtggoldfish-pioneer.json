@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-14T00:00:00Z",
+  "updated": "2026-05-15T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -706,14 +706,6 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 3,
-          "name": "Sunspine Lynx"
-        },
-        {
           "count": 2,
           "name": "Den of the Bugbear"
         },
@@ -722,8 +714,8 @@
           "name": "Kumano Faces Kakkazan"
         },
         {
-          "count": 2,
-          "name": "Lightning Strike"
+          "count": 4,
+          "name": "Monastery Swiftspear"
         },
         {
           "count": 4,
@@ -734,20 +726,12 @@
           "name": "Burst Lightning"
         },
         {
-          "count": 3,
-          "name": "Ramunap Ruins"
-        },
-        {
           "count": 4,
           "name": "Reckless Rage"
         },
         {
           "count": 2,
           "name": "Rockface Village"
-        },
-        {
-          "count": 4,
-          "name": "Screaming Nemesis"
         },
         {
           "count": 1,
@@ -759,11 +743,27 @@
         },
         {
           "count": 4,
-          "name": "Monastery Swiftspear"
+          "name": "Screaming Nemesis"
         },
         {
           "count": 14,
           "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Lightning Strike"
+        },
+        {
+          "count": 3,
+          "name": "Sunspine Lynx"
+        },
+        {
+          "count": 3,
+          "name": "Ramunap Ruins"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
         },
         {
           "count": 4,
@@ -772,24 +772,12 @@
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Flowstone Infusion"
-        },
-        {
           "count": 4,
           "name": "Magebane Lizard"
         },
         {
           "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 2,
-          "name": "Redcap Melee"
+          "name": "Pyroclasm"
         },
         {
           "count": 2,
@@ -797,11 +785,23 @@
         },
         {
           "count": 2,
-          "name": "Pyroclasm"
+          "name": "Redcap Melee"
+        },
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
         },
         {
           "count": 1,
           "name": "The Legend of Roku"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Flowstone Infusion"
         }
       ]
     },
@@ -1071,22 +1071,23 @@
       "name": "Rakdos Midrange",
       "author": "MTGGoldfish",
       "colors": [
-        "B"
+        "B",
+        "R"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Thoughtseize"
+          "count": 2,
+          "name": "Duress"
         },
         {
-          "count": 3,
-          "name": "Swamp"
+          "count": 1,
+          "name": "Sulfurous Springs"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Blazemire Verge"
         },
         {
@@ -1094,8 +1095,8 @@
           "name": "Blightstep Pathway"
         },
         {
-          "count": 1,
-          "name": "Sulfurous Springs"
+          "count": 4,
+          "name": "Blood Crypt"
         },
         {
           "count": 4,
@@ -1103,71 +1104,71 @@
         },
         {
           "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 1,
-          "name": "Go for the Throat"
-        },
-        {
-          "count": 3,
-          "name": "Fear of Missing Out"
-        },
-        {
-          "count": 4,
           "name": "Fatal Push"
         },
         {
           "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 2,
-          "name": "Graveyard Trespasser"
-        },
-        {
-          "count": 1,
-          "name": "Kroxa, Titan of Death's Hunger"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
-        },
-        {
-          "count": 3,
-          "name": "Sheoldred, the Apocalypse"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
+          "name": "Fable of the Mirror-Breaker"
         },
         {
           "count": 4,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
+          "name": "Mutavault"
         },
         {
           "count": 1,
           "name": "Torch the Tower"
         },
         {
+          "count": 4,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
           "count": 2,
-          "name": "Abrade"
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 3,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
         },
         {
           "count": 1,
           "name": "Urborg, Tomb of Yawgmoth"
         },
         {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
           "count": 4,
-          "name": "Fable of the Mirror-Breaker"
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Kroxa, Titan of Death's Hunger"
+        },
+        {
+          "count": 3,
+          "name": "Bonecrusher Giant"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 3,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Haunted Ridge"
         }
       ],
       "sideboard": [
@@ -1180,7 +1181,7 @@
           "name": "Go Blank"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Hidetsugu Consumes All"
         },
         {
@@ -1188,20 +1189,28 @@
           "name": "Invoke Despair"
         },
         {
-          "count": 1,
-          "name": "Shadows' Verdict"
-        },
-        {
-          "count": 1,
-          "name": "Torch the Tower"
-        },
-        {
-          "count": 3,
+          "count": 2,
           "name": "Unlicensed Hearse"
         },
         {
-          "count": 2,
+          "count": 1,
+          "name": "Kroxa, Titan of Death's Hunger"
+        },
+        {
+          "count": 1,
+          "name": "Reckoner Bankbuster"
+        },
+        {
+          "count": 1,
+          "name": "Ray of Enfeeblement"
+        },
+        {
+          "count": 1,
           "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
         }
       ]
     },
