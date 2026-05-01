@@ -3837,6 +3837,14 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         }
     }
 
+    // CR 205.3m: "creature [you control] that's a Wolf or a Werewolf" — relative
+    // clause restricting a base creature/permanent phrase to a subtype disjunction.
+    // Split on " that's a " / " that is a ", parse the base phrase (with controller
+    // suffix) via recursive call, then compose with the subtype filter.
+    if let Some(filter) = parse_thats_a_subject_filter(trimmed, &lower) {
+        return Some(filter);
+    }
+
     if let Some(filter) = parse_modified_creature_subject_filter(trimmed) {
         return Some(filter);
     }
@@ -3859,6 +3867,102 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     }
 
     parse_rule_static_subject_filter(trimmed)
+}
+
+/// CR 205.3m: Parse "creature [you control] that's a Wolf or a Werewolf" subjects.
+/// Splits on "that's a " / "that is a ", parses the base phrase (with controller/zone
+/// suffix) via `parse_type_phrase`, then parses a comma/or/and-separated subtype list
+/// and composes with `TargetFilter::And`.
+fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<TargetFilter> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    let (before, subtype_lower, _) = nom_primitives::scan_preceded(lower, |i| {
+        preceded(
+            alt((tag::<_, _, VE>("that's a "), tag::<_, _, VE>("that is a "))),
+            nom::combinator::rest,
+        )
+        .parse(i)
+    })?;
+    let base_text = text[..before.len()].trim();
+    let subtype_text = text[text.len() - subtype_lower.len()..].trim();
+
+    let (base_filter, base_rest) = parse_type_phrase(base_text);
+    if !base_rest.trim().is_empty() || matches!(base_filter, TargetFilter::Any) {
+        return None;
+    }
+
+    let subtype_filter = parse_subtype_or_list(subtype_text)?;
+
+    Some(TargetFilter::And {
+        filters: vec![base_filter, subtype_filter],
+    })
+}
+
+/// CR 205.3m: Parse a comma/or/and/and-or-separated list of capitalized subtypes.
+/// Handles: "Wolf or a Werewolf", "Barbarian, a Warrior, or a Berserker",
+/// "Cleric, Rogue, Warrior, and/or Wizard", "Cat, Elemental, Nightmare, Dinosaur, or Beast".
+/// Returns `TargetFilter::Or` for multiple subtypes, single `TargetFilter::Typed` for one.
+fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
+    fn parse_subtype_word(
+        input: &str,
+    ) -> nom::IResult<&str, &str, nom_language::error::VerboseError<&str>> {
+        use nom::bytes::complete::take_while1;
+        let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
+        if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return Err(nom::Err::Error(VerboseError {
+                errors: vec![(
+                    input,
+                    nom_language::error::VerboseErrorKind::Context("expected capitalized subtype"),
+                )],
+            }));
+        }
+        Ok((rest, word))
+    }
+
+    fn parse_list_separator(
+        input: &str,
+    ) -> nom::IResult<&str, &str, nom_language::error::VerboseError<&str>> {
+        alt((
+            tag(", and/or a "),
+            tag(", and/or "),
+            tag(", or a "),
+            tag(", and a "),
+            tag(", or "),
+            tag(", and "),
+            tag(", a "),
+            tag(", "),
+            tag(" and/or a "),
+            tag(" and/or "),
+            tag(" or a "),
+            tag(" and a "),
+            tag(" or "),
+            tag(" and "),
+        ))
+        .parse(input)
+    }
+
+    use nom::multi::separated_list1;
+    let (rest, words): (&str, Vec<&str>) =
+        separated_list1(parse_list_separator, parse_subtype_word)
+            .parse(input)
+            .ok()?;
+    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('.') {
+        return None;
+    }
+    let filters: Vec<TargetFilter> = words
+        .iter()
+        .map(|w| {
+            let canonical = parse_subtype(w)
+                .map(|(c, _)| c)
+                .unwrap_or_else(|| w.to_string());
+            TargetFilter::Typed(typed_filter_for_subtype(&canonical))
+        })
+        .collect();
+    if filters.len() == 1 {
+        filters.into_iter().next()
+    } else {
+        Some(TargetFilter::Or { filters })
+    }
 }
 
 /// Try to strip a leading "with [counter] counter(s) on it/them" clause from `text`,
@@ -15194,5 +15298,100 @@ mod tests {
             "cast that card without paying its mana cost.",
         )
         .is_none());
+    }
+
+    #[test]
+    fn subtype_or_list_single() {
+        let f = parse_subtype_or_list("Wolf").unwrap();
+        assert!(matches!(f, TargetFilter::Typed(ref t) if t.get_subtype() == Some("Wolf")));
+    }
+
+    #[test]
+    fn subtype_or_list_two_with_article() {
+        let f = parse_subtype_or_list("Wolf or a Werewolf").unwrap();
+        match f {
+            TargetFilter::Or { filters } => {
+                assert_eq!(filters.len(), 2);
+            }
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn subtype_or_list_three_with_commas() {
+        let f = parse_subtype_or_list("Barbarian, a Warrior, or a Berserker").unwrap();
+        match f {
+            TargetFilter::Or { filters } => assert_eq!(filters.len(), 3),
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn subtype_or_list_and_or() {
+        let f = parse_subtype_or_list("Cleric, Rogue, Warrior, and/or Wizard").unwrap();
+        match f {
+            TargetFilter::Or { filters } => assert_eq!(filters.len(), 4),
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn subtype_or_list_five() {
+        let f = parse_subtype_or_list("Cat, Elemental, Nightmare, Dinosaur, or Beast").unwrap();
+        match f {
+            TargetFilter::Or { filters } => assert_eq!(filters.len(), 5),
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn thats_a_subject_creature_you_control_two_types() {
+        let text = "creature you control that's a Wolf or a Werewolf";
+        let lower = text.to_lowercase();
+        let f = parse_thats_a_subject_filter(text, &lower).unwrap();
+        match f {
+            TargetFilter::And { filters } => {
+                assert_eq!(filters.len(), 2);
+                assert!(
+                    matches!(&filters[0], TargetFilter::Typed(t) if t.controller == Some(ControllerRef::You))
+                );
+                assert!(matches!(&filters[1], TargetFilter::Or { filters } if filters.len() == 2));
+            }
+            other => panic!("expected And, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn thats_a_subject_no_controller() {
+        let text = "creature that's a Barbarian, a Warrior, or a Berserker";
+        let lower = text.to_lowercase();
+        let f = parse_thats_a_subject_filter(text, &lower).unwrap();
+        match f {
+            TargetFilter::And { filters } => {
+                assert_eq!(filters.len(), 2);
+                assert!(matches!(&filters[0], TargetFilter::Typed(t) if t.controller.is_none()));
+            }
+            other => panic!("expected And, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn static_line_each_other_wolf_werewolf() {
+        let def = parse_static_line(
+            "Each other creature you control that's a Wolf or a Werewolf gets +1/+1.",
+        )
+        .expect("should parse Immerwolf line");
+        assert!(matches!(def.mode, StaticMode::Continuous));
+        assert_eq!(def.modifications.len(), 2);
+    }
+
+    #[test]
+    fn static_line_lovisa_coldeyes() {
+        let def = parse_static_line(
+            "Each creature that's a Barbarian, a Warrior, or a Berserker gets +2/+2 and has haste.",
+        )
+        .expect("should parse Lovisa Coldeyes line");
+        assert!(matches!(def.mode, StaticMode::Continuous));
+        assert_eq!(def.modifications.len(), 3);
     }
 }
