@@ -541,9 +541,9 @@ jobs:
           mkdir -p staging
           find client/src-tauri/target/release/bundle \
             -maxdepth 2 \
-            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.AppImage.tar.gz' -o -name '*.AppImage.tar.gz.sig' \
+            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.AppImage.sig' \
                -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \
-               -o -name '*.exe' -o -name '*.nsis.zip' -o -name '*.nsis.zip.sig' \) \
+               -o -name '*.exe' -o -name '*.exe.sig' \) \
             -exec cp {} staging/ \;
           ls -la staging/
         shell: bash
@@ -640,16 +640,18 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
 
           # Read signatures for available platforms (skip missing ones).
-          # The updater downloads .tar.gz bundles and verifies with .tar.gz.sig.
-          LINUX_SIG=$(cat artifacts/phase-tauri-linux/*.AppImage.tar.gz.sig 2>/dev/null || echo "")
+          # Tauri v2 v3-compatible updater format: the raw installer is the
+          # updater payload (`.AppImage`, `-setup.exe`, `.app.tar.gz`); each
+          # has a sibling `.sig`. Set in tauri.conf.json: createUpdaterArtifacts: true.
+          LINUX_SIG=$(cat artifacts/phase-tauri-linux/*.AppImage.sig 2>/dev/null || echo "")
           MACOS_SIG=$(cat artifacts/phase-tauri-macos/*.app.tar.gz.sig 2>/dev/null || echo "")
-          WINDOWS_SIG=$(cat artifacts/phase-tauri-windows/*.nsis.zip.sig 2>/dev/null || echo "")
+          WINDOWS_SIG=$(cat artifacts/phase-tauri-windows/*-setup.exe.sig 2>/dev/null || echo "")
 
           # Build platforms object with only available platforms
           PLATFORMS="{"
           SEP=""
           if [ -n "$LINUX_SIG" ]; then
-            PLATFORMS="${PLATFORMS}${SEP}\"linux-x86_64\":{\"signature\":\"${LINUX_SIG}\",\"url\":\"https://github.com/${REPO}/releases/download/${TAG}/phase_${TAG#v}_amd64.AppImage.tar.gz\"}"
+            PLATFORMS="${PLATFORMS}${SEP}\"linux-x86_64\":{\"signature\":\"${LINUX_SIG}\",\"url\":\"https://github.com/${REPO}/releases/download/${TAG}/Phase_${TAG#v}_amd64.AppImage\"}"
             SEP=","
           fi
           if [ -n "$MACOS_SIG" ]; then
@@ -657,7 +659,7 @@ jobs:
             SEP=","
           fi
           if [ -n "$WINDOWS_SIG" ]; then
-            PLATFORMS="${PLATFORMS}${SEP}\"windows-x86_64\":{\"signature\":\"${WINDOWS_SIG}\",\"url\":\"https://github.com/${REPO}/releases/download/${TAG}/Phase_${TAG#v}_x64-setup.nsis.zip\"}"
+            PLATFORMS="${PLATFORMS}${SEP}\"windows-x86_64\":{\"signature\":\"${WINDOWS_SIG}\",\"url\":\"https://github.com/${REPO}/releases/download/${TAG}/Phase_${TAG#v}_x64-setup.exe\"}"
           fi
           PLATFORMS="${PLATFORMS}}"
 
@@ -701,9 +703,7 @@ jobs:
             artifacts/phase-server-windows-x86_64/*.sha256
             artifacts/phase-tauri-linux/*.deb
             artifacts/phase-tauri-linux/*.AppImage
-            artifacts/phase-tauri-linux/*.AppImage.tar.gz
             artifacts/phase-tauri-macos/*.dmg
             artifacts/phase-tauri-macos/*.app.tar.gz
             artifacts/phase-tauri-windows/*.exe
-            artifacts/phase-tauri-windows/*.nsis.zip
             artifacts/update.json
