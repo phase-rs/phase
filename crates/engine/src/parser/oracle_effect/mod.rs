@@ -9424,7 +9424,8 @@ fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Durati
     let predicate_tp = TextPair::new(predicate, &predicate_lower);
     let (without_where, where_x_expression) = strip_trailing_where_x(predicate_tp);
     // Strip "for each [clause]" suffix before duration extraction.
-    let (without_for_each, for_each_qty) = strip_trailing_for_each_clause(without_where.original);
+    let (without_for_each, for_each_qty) =
+        strip_trailing_for_each_clause_expr(without_where.original);
     let (without_duration, duration) = strip_trailing_duration(without_for_each);
     let lower = without_duration.to_lowercase();
 
@@ -9450,8 +9451,7 @@ fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Durati
     let toughness = apply_where_x_expression(toughness, where_x_expression.as_deref());
 
     // CR 613.4c: Compose with "for each" quantity to produce dynamic PtValue.
-    let (power, toughness) = if let Some(qty) = for_each_qty {
-        let quantity = QuantityExpr::Ref { qty };
+    let (power, toughness) = if let Some(quantity) = for_each_qty {
         (
             compose_pt_with_for_each(power, &quantity),
             compose_pt_with_for_each(toughness, &quantity),
@@ -9464,14 +9464,14 @@ fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Durati
 }
 
 /// Strip a trailing "for each [clause]" from pump text, returning the remaining text
-/// and the parsed QuantityRef (if any). Handles both "until end of turn for each X"
+/// and the parsed QuantityExpr (if any). Handles both "until end of turn for each X"
 /// (duration already stripped) and bare "for each X".
-fn strip_trailing_for_each_clause(text: &str) -> (&str, Option<QuantityRef>) {
+fn strip_trailing_for_each_clause_expr(text: &str) -> (&str, Option<QuantityExpr>) {
     let lower = text.to_lowercase();
     if let Some(pos) = lower.rfind(" for each ") {
         let clause_text = lower[pos + " for each ".len()..].trim_end_matches('.');
-        if let Some(qty) = parse_for_each_clause(clause_text) {
-            return (text[..pos].trim(), Some(qty));
+        if let Some(quantity) = parse_for_each_clause_expr(clause_text) {
+            return (text[..pos].trim(), Some(quantity));
         }
     }
     (text, None)
@@ -18581,6 +18581,36 @@ mod tests {
                     PtValue::Fixed(0),
                     "toughness should stay Fixed(0)"
                 );
+            }
+            other => panic!("expected Pump, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_each_pump_beyond_first_offsets_quantity_before_scaling() {
+        let def = parse_effect_chain(
+            "~ gets -2/-1 until end of turn for each creature blocking it beyond the first",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::Pump {
+                power, toughness, ..
+            } => {
+                assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+                assert!(matches!(
+                    power,
+                    PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -2,
+                        inner,
+                    }) if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                ));
+                assert!(matches!(
+                    toughness,
+                    PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner,
+                    }) if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                ));
             }
             other => panic!("expected Pump, got {:?}", other),
         }

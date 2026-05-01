@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
+use nom::combinator::{all_consuming, value};
 use nom::sequence::terminated;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -629,6 +629,12 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
         }
     }
 
+    if let Ok((rest, expr)) = parse_for_each_beyond_first_clause_expr(clause) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     fn segment(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
         alt((take_until(" and each "), rest)).parse(i)
     }
@@ -650,6 +656,25 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
         return exprs.pop();
     }
     Some(QuantityExpr::Sum { exprs })
+}
+
+/// CR 702.23a: "for each [object] beyond the first" composes a
+/// normal object-count quantity with an offset of -1. This preserves the
+/// shared `for each` grammar and keeps "beyond the first" as an expression
+/// modifier rather than adding a leaf-level `QuantityRef` variant.
+fn parse_for_each_beyond_first_clause_expr(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, VerboseError<&str>> {
+    let (input, base_clause) =
+        terminated(take_until(" beyond the first"), tag(" beyond the first")).parse(input)?;
+    let (_, qty) = all_consuming(nom_quantity::parse_for_each_clause_ref).parse(base_clause)?;
+    Ok((
+        input,
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref { qty }),
+            offset: -1,
+        },
+    ))
 }
 
 /// CR 109.4 + CR 400.1 + CR 608.2c: Parse an anaphoric hand-card union like
@@ -1969,6 +1994,28 @@ mod tests {
             ),
             "expected bare Ref{{ZoneCardCount{{Hand,..}}}}, got {result:?}"
         );
+    }
+
+    #[test]
+    fn for_each_beyond_the_first_offsets_base_count() {
+        let result = parse_for_each_clause_expr("creature blocking it beyond the first");
+        let Some(QuantityExpr::Offset { inner, offset }) = result else {
+            panic!("expected Offset, got {result:?}");
+        };
+        assert_eq!(offset, -1);
+        match inner.as_ref() {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(filter),
+                    },
+            } => {
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(filter.controller, None);
+                assert_eq!(filter.properties, vec![FilterProp::BlockingSource]);
+            }
+            other => panic!("expected blocking-source ObjectCount, got {other:?}"),
+        }
     }
 
     #[test]

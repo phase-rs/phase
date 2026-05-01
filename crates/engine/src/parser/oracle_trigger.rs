@@ -5961,6 +5961,21 @@ mod tests {
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
 
+    fn blocking_source_beyond_first_expr() -> QuantityExpr {
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![FilterProp::BlockingSource],
+                    }),
+                },
+            }),
+            offset: -1,
+        }
+    }
+
     #[test]
     fn trigger_etb_self() {
         let def = parse_trigger_line(
@@ -7348,6 +7363,43 @@ mod tests {
                         other => panic!("expected scaled dynamic P/T value, got {other:?}"),
                     }
                 }
+            }
+            other => panic!("expected Pump, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_becomes_blocked_pump_scales_with_blockers_beyond_first() {
+        let def = parse_trigger_line(
+            "Whenever this creature becomes blocked, it gets -2/-1 until end of turn for each creature blocking it beyond the first.",
+            "Johtull Wurm",
+        );
+
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+        match execute.effect.as_ref() {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(target, &TargetFilter::SelfRef);
+                assert_eq!(
+                    power,
+                    &PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -2,
+                        inner: Box::new(blocking_source_beyond_first_expr()),
+                    })
+                );
+                assert_eq!(
+                    toughness,
+                    &PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(blocking_source_beyond_first_expr()),
+                    })
+                );
             }
             other => panic!("expected Pump, got {other:?}"),
         }

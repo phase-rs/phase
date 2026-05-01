@@ -2921,8 +2921,8 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
-        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-        ReplacementCondition, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, ReplacementCondition, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -3253,6 +3253,50 @@ mod tests {
             "Expected PutAtLibraryPosition(Bottom), got {:?}",
             bottom_def.effect,
         );
+    }
+
+    #[test]
+    fn blocked_wurms_beyond_first_pump_have_dynamic_quantity_no_warning() {
+        for (name, pt, expected_power_factor) in
+            [("Johtull Wurm", "-2/-1", -2), ("Jungle Wurm", "-1/-1", -1)]
+        {
+            let r = parse(
+                &format!(
+                    "Whenever this creature becomes blocked, it gets {pt} until end of turn for each creature blocking it beyond the first."
+                ),
+                name,
+                &[],
+                &["Creature"],
+                &["Wurm"],
+            );
+
+            assert_eq!(r.triggers.len(), 1);
+            assert_eq!(r.triggers[0].mode, TriggerMode::BecomesBlocked);
+            assert!(
+                r.parse_warnings
+                    .iter()
+                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                "unexpected DynamicQty warning for {name}: {:?}",
+                r.parse_warnings
+            );
+            let execute = r.triggers[0]
+                .execute
+                .as_ref()
+                .expect("trigger should have execute");
+            match execute.effect.as_ref() {
+                Effect::Pump { power, .. } => match power {
+                    PtValue::Quantity(QuantityExpr::Multiply { factor, inner }) => {
+                        assert_eq!(*factor, expected_power_factor);
+                        assert!(matches!(
+                            inner.as_ref(),
+                            QuantityExpr::Offset { offset: -1, .. }
+                        ));
+                    }
+                    other => panic!("expected dynamic power multiplier, got {other:?}"),
+                },
+                other => panic!("expected Pump, got {other:?}"),
+            }
+        }
     }
 
     #[test]
