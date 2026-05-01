@@ -10163,6 +10163,116 @@ mod tests {
     }
 
     #[test]
+    fn escape_phyrexian_cost_deducts_life_after_exile() {
+        let mut state = setup_game_at_main_phase();
+        let card_id_counter = state.next_object_id;
+        let obj_id = create_object(
+            &mut state,
+            CardId(card_id_counter),
+            PlayerId(0),
+            "Gitaxian Probe".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianBlue],
+            generic: 0,
+        };
+        Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        Arc::make_mut(&mut obj.base_abilities).push(obj.abilities.last().unwrap().clone());
+
+        let source_id = create_object(
+            &mut state,
+            CardId(card_id_counter + 100),
+            PlayerId(0),
+            "Underworld Breach".to_string(),
+            Zone::Battlefield,
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
+            "Underworld Breach",
+            &[],
+            &[String::from("Enchantment")],
+            &[],
+        );
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.card_types.core_types.push(CoreType::Enchantment);
+        source.base_card_types = source.card_types.clone();
+        source.static_definitions = parsed.statics.clone().into();
+        source.base_static_definitions = Arc::new(parsed.statics);
+
+        let mut filler_ids = Vec::new();
+        for idx in 0..3u64 {
+            let filler_id = create_object(
+                &mut state,
+                CardId(card_id_counter + 200 + idx),
+                PlayerId(0),
+                format!("Filler {idx}"),
+                Zone::Graveyard,
+            );
+            let filler = state.objects.get_mut(&filler_id).unwrap();
+            filler.card_types.core_types.push(CoreType::Sorcery);
+            filler.base_card_types = filler.card_types.clone();
+            filler_ids.push(filler_id);
+        }
+
+        let life_before = state.players[0].life;
+        let card_id = state.objects.get(&obj_id).unwrap().card_id;
+        let mut events = Vec::new();
+
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), obj_id, card_id, &mut events)
+            .expect("escape cast should begin");
+        let (exile_cards, pending_cast) = match waiting {
+            WaitingFor::ExileForCost {
+                cards,
+                pending_cast,
+                count: 3,
+                ..
+            } => (cards, pending_cast),
+            other => panic!("expected ExileForCost, got {other:?}"),
+        };
+
+        let chosen: Vec<ObjectId> = exile_cards.iter().copied().take(3).collect();
+        let _waiting2 = super::casting_costs::handle_exile_for_cost(
+            &mut state,
+            PlayerId(0),
+            crate::types::zones::ExileCostSourceZone::Graveyard,
+            *pending_cast,
+            3,
+            &exile_cards,
+            &chosen,
+            &mut events,
+        )
+        .expect("exile cost payment should succeed");
+
+        // After exile cost, the flow should auto-resolve the Phyrexian mana
+        // cost ({U/P}) by paying 2 life (no mana available).
+        assert_eq!(
+            state.players[0].life,
+            life_before - 2,
+            "CR 107.4f: Phyrexian mana paid with life must deduct 2 life"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::LifeChanged {
+                    player_id,
+                    amount: -2
+                } if *player_id == PlayerId(0)
+            )),
+            "must emit LifeChanged -2 for Phyrexian life payment"
+        );
+    }
+
+    #[test]
     fn granted_non_mana_flashback_pays_additional_cost() {
         let mut state = setup_game_at_main_phase();
         let obj_id = add_flashback_instant_to_graveyard(

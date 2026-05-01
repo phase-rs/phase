@@ -133,13 +133,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 if is_spell {
                     // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
                     // Aftermath, and Harmonize exile when leaving the stack
-                    // for any reason, including fizzle. Escape is included for consistency.
+                    // for any reason, including fizzle. Escape (CR 702.138)
+                    // has no such clause — escaped spells go to graveyard normally.
                     let dest = if matches!(
                         casting_variant,
                         CastingVariant::Flashback
                             | CastingVariant::Aftermath
                             | CastingVariant::Harmonize
-                            | CastingVariant::Escape
                     ) {
                         Zone::Exile
                     } else {

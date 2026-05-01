@@ -121,12 +121,12 @@ pub fn resolve(
                 let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
                 // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
                 // Aftermath, and Harmonize exile when leaving the stack for
-                // any reason, including when countered. Escape included for consistency.
+                // any reason, including when countered. Escape (CR 702.138)
+                // has no such clause — countered escape spells go to graveyard.
                 let exiles_on_counter = matches!(
                     &state.stack[idx].kind,
                     StackEntryKind::Spell {
                         casting_variant: CastingVariant::Harmonize
-                            | CastingVariant::Escape
                             | CastingVariant::Flashback
                             | CastingVariant::Aftermath,
                         ..
@@ -256,13 +256,12 @@ pub fn resolve_all(
 
         let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
         // CR 702.34a / CR 702.127a / CR 702.180a: Flashback / Aftermath /
-        // Harmonize / Escape exile on leaving the stack for any reason,
-        // including counter.
+        // Harmonize exile on leaving the stack for any reason, including
+        // counter. Escape (CR 702.138) has no such clause.
         let exiles_on_counter = matches!(
             &state.stack[idx].kind,
             StackEntryKind::Spell {
                 casting_variant: CastingVariant::Harmonize
-                    | CastingVariant::Escape
                     | CastingVariant::Flashback
                     | CastingVariant::Aftermath,
                 ..

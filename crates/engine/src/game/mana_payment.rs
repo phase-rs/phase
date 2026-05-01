@@ -89,7 +89,6 @@ pub enum PaymentError {
 /// with one mana of its color or by paying 2 life.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LifePayment {
-    pub player_id: PlayerId,
     pub amount: i32,
 }
 
@@ -582,10 +581,7 @@ pub fn pay_cost_with_demand_and_choices(
                         }
                         match explicit_choice {
                             Some(ShardChoice::PayLife) => {
-                                life_payments.push(LifePayment {
-                                    player_id: PlayerId(0),
-                                    amount: 2,
-                                });
+                                life_payments.push(LifePayment { amount: 2 });
                             }
                             Some(ShardChoice::PayMana) => {
                                 let unit = if any_color {
@@ -602,18 +598,12 @@ pub fn pay_cost_with_demand_and_choices(
                                     if let Some(unit) = spend_any_eligible(pool, spell) {
                                         spent.push(unit);
                                     } else {
-                                        life_payments.push(LifePayment {
-                                            player_id: PlayerId(0),
-                                            amount: 2,
-                                        });
+                                        life_payments.push(LifePayment { amount: 2 });
                                     }
                                 } else if let Some(unit) = spend_eligible(pool, color, spell) {
                                     spent.push(unit);
                                 } else {
-                                    life_payments.push(LifePayment {
-                                        player_id: PlayerId(0),
-                                        amount: 2,
-                                    });
+                                    life_payments.push(LifePayment { amount: 2 });
                                 }
                             }
                         }
@@ -665,10 +655,7 @@ pub fn pay_cost_with_demand_and_choices(
                         }
                         match explicit_choice {
                             Some(ShardChoice::PayLife) => {
-                                life_payments.push(LifePayment {
-                                    player_id: PlayerId(0),
-                                    amount: 2,
-                                });
+                                life_payments.push(LifePayment { amount: 2 });
                             }
                             Some(ShardChoice::PayMana) => {
                                 let unit = if any_color {
@@ -685,20 +672,14 @@ pub fn pay_cost_with_demand_and_choices(
                                     if let Some(unit) = spend_any_eligible(pool, spell) {
                                         spent.push(unit);
                                     } else {
-                                        life_payments.push(LifePayment {
-                                            player_id: PlayerId(0),
-                                            amount: 2,
-                                        });
+                                        life_payments.push(LifePayment { amount: 2 });
                                     }
                                 } else {
                                     let color = auto_pay_hybrid(pool, a, b, hand_demand);
                                     if let Some(unit) = spend_eligible(pool, color, spell) {
                                         spent.push(unit);
                                     } else {
-                                        life_payments.push(LifePayment {
-                                            player_id: PlayerId(0),
-                                            amount: 2,
-                                        });
+                                        life_payments.push(LifePayment { amount: 2 });
                                     }
                                 }
                             }

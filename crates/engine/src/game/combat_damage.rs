@@ -629,9 +629,15 @@ pub(crate) fn apply_combat_damage(
             .map(|o| o.is_commander)
             .unwrap_or(false);
         // In practice, from_source always succeeds during combat (source is on battlefield).
-        // Fallback uses PlayerId(0) — matches existing behavior.
-        let ctx = DamageContext::from_source(state, *source_id)
-            .unwrap_or_else(|| DamageContext::fallback(*source_id, PlayerId(0)));
+        // CR 702.15c: Fallback uses LKI controller when the source is gone.
+        let ctx = DamageContext::from_source(state, *source_id).unwrap_or_else(|| {
+            let controller = state
+                .lki_cache
+                .get(source_id)
+                .map(|lki| lki.controller)
+                .unwrap_or(state.active_player);
+            DamageContext::fallback(*source_id, controller)
+        });
 
         let target_ref = match &assignment.target {
             DamageTarget::Object(id) => TargetRef::Object(*id),
