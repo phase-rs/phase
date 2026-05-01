@@ -5991,6 +5991,10 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::Player)
     } else if tag::<_, _, E>("two colors").parse(rest).is_ok() {
         Some(ChoiceType::TwoColors)
+    } else if tag::<_, _, E>("a word").parse(rest).is_ok() {
+        Some(ChoiceType::Word)
+    } else if tag::<_, _, E>("an artist").parse(rest).is_ok() {
+        Some(ChoiceType::Artist)
     } else {
         // Generic "X or Y" pattern — must come AFTER all specific patterns above
         try_parse_binary_choice(rest).map(|options| ChoiceType::Labeled { options })

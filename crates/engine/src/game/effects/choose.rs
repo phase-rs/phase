@@ -153,6 +153,7 @@ fn compute_options(
         // CR 102.1: A player is one of the people in the game.
         ChoiceType::Player => state.seat_order.iter().map(|id| id.0.to_string()).collect(),
         ChoiceType::TwoColors => two_color_options(),
+        ChoiceType::Word | ChoiceType::Artist => Vec::new(),
     }
 }
 

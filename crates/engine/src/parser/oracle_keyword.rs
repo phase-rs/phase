@@ -728,6 +728,22 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.113a: Awaken N—{cost} — same N—{cost} format as Suspend.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("awaken ").parse(text) {
+        if let Ok((after_count, count)) = nom_primitives::parse_number.parse(rest.trim()) {
+            let cost_str = after_count
+                .strip_prefix('\u{2014}') // allow-noncombinator: em-dash punctuation separator
+                .or_else(|| after_count.strip_prefix("—")) // allow-noncombinator: em-dash variant
+                .or_else(|| after_count.strip_prefix("--")) // allow-noncombinator: ascii dash fallback
+                .unwrap_or(after_count)
+                .trim();
+            if !cost_str.is_empty() {
+                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                return Some(Keyword::Awaken { count, cost });
+            }
+        }
+    }
+
     // For parameterized keywords, find the first space to split name from parameter.
     // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
@@ -949,7 +965,9 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Station => "station".to_string(),
         Keyword::Paradigm => "paradigm".to_string(),
         Keyword::Replicate(_) => "replicate".to_string(),
-        Keyword::Awaken(_) => "awaken".to_string(),
+        Keyword::Awaken { .. } => "awaken".to_string(),
+        Keyword::Escalate(_) => "escalate".to_string(),
+        Keyword::Recover(_) => "recover".to_string(),
         Keyword::ForMirrodin => "for mirrodin!".to_string(),
         Keyword::MoreThanMeetsTheEye(_) => "more than meets the eye".to_string(),
         Keyword::Freerunning(_) => "freerunning".to_string(),
@@ -1010,6 +1028,8 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "transmute",
         "forecast",
         "recover",
+        "escalate",
+        "awaken",
         "reinforce",
         "retrace",
         "adapt",

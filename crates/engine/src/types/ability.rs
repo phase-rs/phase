@@ -104,6 +104,10 @@ pub enum ChoiceType {
     Player,
     /// "Choose two colors" — selects two distinct mana colors.
     TwoColors,
+    /// "Choose a word" — names any English word (Un-set and silver-border cards).
+    Word,
+    /// "Choose an artist" — selects a Magic card artist name.
+    Artist,
 }
 
 /// The five basic land types (CR 305.6).
@@ -382,6 +386,7 @@ impl ChoiceValue {
                 let c2 = b.parse::<ManaColor>().ok()?;
                 Some(Self::TwoColors([c1, c2]))
             }
+            ChoiceType::Word | ChoiceType::Artist => Some(Self::Label(value.to_string())),
         }
     }
 }
@@ -3880,6 +3885,9 @@ pub enum Effect {
         mana_value_limit: Option<CopyManaValueLimit>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
+        /// CR 614.1c: When true, the copy enters tapped (Vesuva class).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        enter_tapped: bool,
     },
     ChooseCard {
         #[serde(default)]

@@ -966,6 +966,8 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::Opponent => "opponent",
         ChoiceType::Player => "player",
         ChoiceType::TwoColors => "two colors",
+        ChoiceType::Word => "word",
+        ChoiceType::Artist => "artist",
     }
     .into()
 }

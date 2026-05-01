@@ -459,7 +459,10 @@ fn convert_rule(
         // override.
         Rule::SpellActions_Awaken(cost, was, wasnt) => {
             let mana = require_pure_mana(cost, "Rule::SpellActions_Awaken")?;
-            stub.keywords.push(Keyword::Awaken(mana));
+            stub.keywords.push(Keyword::Awaken {
+                count: 0,
+                cost: mana,
+            });
             let was_acts = unwrap_actions(was, "Rule::SpellActions_Awaken/was")?;
             let wasnt_acts = unwrap_actions(wasnt, "Rule::SpellActions_Awaken/wasnt")?;
             let ability = build_two_branch_spell(

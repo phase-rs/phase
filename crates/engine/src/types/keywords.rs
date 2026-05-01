@@ -182,6 +182,10 @@ pub enum KeywordKind {
     Specialize,
     /// CR 702.48: Offering — see `Keyword::Offering`.
     Offering,
+    /// CR 702.120: Escalate — see `Keyword::Escalate`.
+    Escalate,
+    /// CR 702.59: Recover — see `Keyword::Recover`.
+    Recover,
     Unknown,
 }
 
@@ -645,6 +649,13 @@ pub enum Keyword {
     /// CR 702.52a: Transmute {cost} — discard this card and pay {cost} to search
     /// your library for a card with the same mana value.
     Transmute(ManaCost),
+    /// CR 702.120a: Escalate {cost} — additional cost for each mode chosen beyond the first
+    /// on a modal spell.
+    Escalate(ManaCost),
+    /// CR 702.59a: Recover {cost} — triggered ability: when a creature is put into your
+    /// graveyard from the battlefield, you may pay {cost} to return this card from your
+    /// graveyard to your hand; otherwise exile it.
+    Recover(ManaCost),
     /// CR 702.148a: Cleave — alternative cost that removes bracketed text from Oracle text.
     Cleave(ManaCost),
     /// CR 702.125a: Undaunted — costs {1} less for each opponent.
@@ -680,15 +691,13 @@ pub enum Keyword {
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
     /// behavioral handler (alt-cast hook + awaken-paid branch not wired).
-    /// CR 702.113a: Awaken N—{cost} — alternative cost. "You may pay
-    /// [cost] rather than pay this spell's mana cost as you cast this
-    /// spell" + "If this spell's awaken cost was paid, put N +1/+1
-    /// counters on target land you control. That land becomes a 0/0
-    /// Elemental creature with haste. It's still a land." mtgish encodes
-    /// the awaken-paid branch separately; the runtime hook for the
-    /// awaken alt-cast path is not yet wired. Stores the alt-cost mana
-    /// cost.
-    Awaken(ManaCost),
+    /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts
+    /// N +1/+1 counters on target land, animating it as a 0/0 Elemental
+    /// creature with haste.
+    Awaken {
+        count: u32,
+        cost: ManaCost,
+    },
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
     /// behavioral handler (ETB token + auto-attach trigger not wired).
@@ -903,13 +912,15 @@ impl Keyword {
             Keyword::Station => KeywordKind::Station,
             Keyword::Paradigm => KeywordKind::Paradigm,
             Keyword::Replicate(_) => KeywordKind::Replicate,
-            Keyword::Awaken(_) => KeywordKind::Awaken,
+            Keyword::Awaken { .. } => KeywordKind::Awaken,
             Keyword::ForMirrodin => KeywordKind::ForMirrodin,
             Keyword::MoreThanMeetsTheEye(_) => KeywordKind::MoreThanMeetsTheEye,
             Keyword::Freerunning(_) => KeywordKind::Freerunning,
             Keyword::Increment => KeywordKind::Increment,
             Keyword::Specialize(_) => KeywordKind::Specialize,
             Keyword::Offering(_) => KeywordKind::Offering,
+            Keyword::Escalate(_) => KeywordKind::Escalate,
+            Keyword::Recover(_) => KeywordKind::Recover,
             Keyword::Unknown(_) => KeywordKind::Unknown,
             // Variants whose KeywordKind axis is currently the catch-all `Unknown`
             // because the AI/coverage layer that consumes `KeywordKind` does not
@@ -1370,6 +1381,10 @@ impl FromStr for Keyword {
                 }
                 // CR 702.52a: Transmute {cost}
                 "transmute" => return Ok(Keyword::Transmute(parse_keyword_mana_cost(p))),
+                // CR 702.120a: Escalate {cost}
+                "escalate" => return Ok(Keyword::Escalate(parse_keyword_mana_cost(p))),
+                // CR 702.59a: Recover {cost}
+                "recover" => return Ok(Keyword::Recover(parse_keyword_mana_cost(p))),
                 // CR 702.148a: Cleave {cost}
                 "cleave" => return Ok(Keyword::Cleave(parse_keyword_mana_cost(p))),
                 // CR 702.74a
