@@ -104,7 +104,6 @@ mod tests {
     use super::*;
     use crate::pack_source::FixturePackSource;
     use crate::session;
-    use crate::validation::STANDARD_BASIC_LANDS;
 
     use engine::types::player::PlayerId;
 

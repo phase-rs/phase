@@ -158,10 +158,8 @@ mod tests {
 
     fn assert_pack_conservation(session: &DraftSession, expected_total: usize) {
         let mut total = 0;
-        for pack_opt in &session.current_pack {
-            if let Some(pack) = pack_opt {
-                total += pack.0.len();
-            }
+        for pack in session.current_pack.iter().flatten() {
+            total += pack.0.len();
         }
         for seat_packs in &session.packs_by_seat {
             for pack in seat_packs {
