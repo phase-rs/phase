@@ -272,7 +272,20 @@ pub fn can_pay_for_spell(
             // Clone pool to simulate payment
             let mut sim = pool.clone();
             let mut life_budget = max_life_payments;
-            // Pay colored shards first
+
+            // CR 107.4f + CR 118.3: Phyrexian shards are deferred until after
+            // non-Phyrexian shards are resolved. A greedy "prefer mana" policy
+            // for Phyrexian shards can starve the generic portion (e.g. 3 Islands
+            // + cost {3}{U/P}: spending U for the shard leaves only 2 for generic
+            // 3, but paying 2 life instead leaves 3U for generic). Deferral lets
+            // us see remaining pool capacity before committing mana vs life.
+            enum PhyrexianDeferred {
+                Single(ManaType),
+                Hybrid(ManaType, ManaType),
+            }
+            let mut deferred_phyrexian: Vec<PhyrexianDeferred> = Vec::new();
+
+            // Pay non-Phyrexian colored shards first
             for shard in shards {
                 match shard_to_mana_type(*shard) {
                     ShardRequirement::Single(mt) => {
@@ -297,22 +310,9 @@ pub fn can_pay_for_spell(
                             return false;
                         }
                     }
-                    // CR 107.4f: Phyrexian mana — pay one mana of indicated color or 2 life.
-                    // Prefer mana when available (matches `pay_cost_with_demand`);
-                    // otherwise consume a life payment from the budget.
+                    // CR 107.4f: Phyrexian mana — defer decision.
                     ShardRequirement::Phyrexian(color) => {
-                        let mana_ok = if any_color {
-                            spend_any_eligible(&mut sim, spell).is_some()
-                        } else {
-                            spend_eligible(&mut sim, color, spell).is_some()
-                        };
-                        if !mana_ok {
-                            // CR 118.3 + CR 119.8: Life fallback requires budget.
-                            if life_budget == 0 {
-                                return false;
-                            }
-                            life_budget -= 1;
-                        }
+                        deferred_phyrexian.push(PhyrexianDeferred::Single(color));
                     }
                     // CR 107.4e: Monocolored hybrid {2/C} — pay 1 colored or 2 generic.
                     ShardRequirement::TwoGenericHybrid(color) => {
@@ -350,24 +350,58 @@ pub fn can_pay_for_spell(
                             return false;
                         }
                     }
-                    // CR 107.4f: Hybrid Phyrexian — pay either component color or 2 life.
+                    // CR 107.4f: Hybrid Phyrexian — defer decision.
                     ShardRequirement::HybridPhyrexian(a, b) => {
-                        let mana_ok = if any_color {
-                            spend_any_eligible(&mut sim, spell).is_some()
-                        } else {
-                            spend_eligible(&mut sim, a, spell).is_some()
-                                || spend_eligible(&mut sim, b, spell).is_some()
-                        };
-                        if !mana_ok {
-                            // CR 118.3 + CR 119.8: Life fallback requires budget.
-                            if life_budget == 0 {
-                                return false;
-                            }
-                            life_budget -= 1;
-                        }
+                        deferred_phyrexian.push(PhyrexianDeferred::Hybrid(a, b));
                     }
                 }
             }
+
+            // CR 107.4f + CR 118.3 + CR 119.8: Resolve deferred Phyrexian shards.
+            // For each shard, pay with mana only if the pool will still have enough
+            // to cover the generic cost plus remaining Phyrexian shards that might
+            // also need mana. Otherwise fall back to life payment.
+            let total_pool_after_shards = sim.total();
+            let mut mana_spent_on_phyrexian: usize = 0;
+            for deferred in &deferred_phyrexian {
+                let remaining_after_this =
+                    total_pool_after_shards.saturating_sub(mana_spent_on_phyrexian);
+                let still_needed_for_generic = *generic as usize;
+                let can_spare_mana = remaining_after_this > still_needed_for_generic;
+
+                let mana_ok = if can_spare_mana {
+                    match deferred {
+                        PhyrexianDeferred::Single(color) => {
+                            if any_color {
+                                spend_any_eligible(&mut sim, spell).is_some()
+                            } else {
+                                spend_eligible(&mut sim, *color, spell).is_some()
+                            }
+                        }
+                        PhyrexianDeferred::Hybrid(a, b) => {
+                            if any_color {
+                                spend_any_eligible(&mut sim, spell).is_some()
+                            } else {
+                                spend_eligible(&mut sim, *a, spell).is_some()
+                                    || spend_eligible(&mut sim, *b, spell).is_some()
+                            }
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                if mana_ok {
+                    mana_spent_on_phyrexian += 1;
+                } else {
+                    // CR 118.3 + CR 119.8: Life fallback requires budget.
+                    if life_budget == 0 {
+                        return false;
+                    }
+                    life_budget -= 1;
+                }
+            }
+
             // Pay generic
             for _ in 0..*generic {
                 if spend_any_eligible(&mut sim, spell).is_none() {
@@ -1764,5 +1798,35 @@ mod tests {
         let (spent, _) = result.unwrap();
         assert_eq!(spent.len(), 1);
         assert_eq!(spent[0].color, ManaType::Red);
+    }
+
+    /// CR 107.4f + CR 118.3: Phyrexian Metamorph scenario — {3}{U/P} with only
+    /// 3 Blue available. Greedy mana-first for the Phyrexian shard would spend 1U
+    /// leaving only 2U for generic 3 (fail). The deferred approach recognizes that
+    /// paying life for {U/P} leaves the full 3U for generic (success).
+    #[test]
+    fn can_pay_phyrexian_defers_to_life_when_mana_needed_for_generic() {
+        let pool = pool_with(&[(ManaType::Blue, 3)]);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianBlue],
+            generic: 3,
+        };
+        // With life budget, payable: 3U covers generic, 2 life covers {U/P}.
+        assert!(can_pay_for_spell(&pool, &cost, None, false, 1));
+        // Without life budget and only 3 mana for a 4-mana effective cost: unpayable.
+        assert!(!can_pay_for_spell(&pool, &cost, None, false, 0));
+    }
+
+    /// CR 107.4f: When the pool has surplus mana beyond generic, prefer mana for
+    /// Phyrexian shards (preserves life).
+    #[test]
+    fn can_pay_phyrexian_prefers_mana_when_pool_has_surplus() {
+        let pool = pool_with(&[(ManaType::Blue, 4)]);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianBlue],
+            generic: 3,
+        };
+        // 4U covers both: 1U for {U/P} + 3U for generic. Life not needed.
+        assert!(can_pay_for_spell(&pool, &cost, None, false, 0));
     }
 }

@@ -5245,6 +5245,47 @@ mod tests {
         );
     }
 
+    /// CR 107.4f + CR 118.3: Phyrexian Metamorph with 3 Islands — cost {3}{U/P}
+    /// is payable by tapping all 3 for generic and paying 2 life for {U/P}.
+    #[test]
+    fn can_cast_phyrexian_cost_spell_when_life_covers_phyrexian_shard() {
+        let mut state = setup_game_at_main_phase();
+        state.turn_number = 2;
+        // Give player 20 life (default, but explicit for clarity)
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap()
+            .life = 20;
+
+        // 3 Islands on the battlefield
+        add_basic_land(&mut state, CardId(501), "Island", "Island");
+        add_basic_land(&mut state, CardId(502), "Island", "Island");
+        add_basic_land(&mut state, CardId(503), "Island", "Island");
+
+        // Phyrexian Metamorph in hand: {3}{U/P} artifact creature
+        let obj_id = create_object(
+            &mut state,
+            CardId(504),
+            PlayerId(0),
+            "Phyrexian Metamorph".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianBlue],
+            generic: 3,
+        };
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Phyrexian Metamorph should be castable with 3 Islands + life for {{U/P}}"
+        );
+    }
+
     fn create_sorcery_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
         let obj_id = create_object(
             state,
