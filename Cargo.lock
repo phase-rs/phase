@@ -511,6 +511,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "draft-core"
+version = "0.1.21"
+dependencies = [
+ "engine",
+ "rand 0.9.4",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
