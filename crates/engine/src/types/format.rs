@@ -11,6 +11,7 @@ pub enum FormatGroup {
     Constructed,
     Commander,
     Multiplayer,
+    Limited,
 }
 
 /// Authoritative metadata for a single user-selectable format. Produced by
@@ -33,6 +34,7 @@ pub struct FormatMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameFormat {
     Standard,
+    Limited,
     Commander,
     Pioneer,
     Modern,
@@ -99,7 +101,7 @@ impl GameFormat {
             GameFormat::DuelCommander => Some(LegalityFormat::DuelCommander),
             GameFormat::Brawl => Some(LegalityFormat::StandardBrawl),
             GameFormat::HistoricBrawl => Some(LegalityFormat::Brawl),
-            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => None,
+            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => None,
         }
     }
 
@@ -123,7 +125,9 @@ impl GameFormat {
             | GameFormat::DuelCommander
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
-            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => SideboardPolicy::Unlimited,
+            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
+                SideboardPolicy::Unlimited
+            }
         }
     }
 
@@ -149,6 +153,7 @@ impl GameFormat {
     pub fn label(self) -> &'static str {
         match self {
             GameFormat::Standard => "Standard",
+            GameFormat::Limited => "Limited",
             GameFormat::Commander => "Commander",
             GameFormat::Pioneer => "Pioneer",
             GameFormat::Modern => "Modern",
@@ -284,6 +289,14 @@ impl GameFormat {
                 description: "3\u{2013}6 player battle royale",
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::free_for_all(),
+            },
+            FormatMetadata {
+                format: GameFormat::Limited,
+                label: "Limited",
+                short_label: "LIM",
+                description: "Draft or sealed, 40-card deck",
+                group: FormatGroup::Limited,
+                default_config: FormatConfig::limited(),
             },
         ]
     }
@@ -437,6 +450,23 @@ impl FormatConfig {
         }
     }
 
+    /// Limited: 40-card minimum, 20 starting life, 2-player, no singleton,
+    /// no command zone. Used by all Draft variants.
+    pub fn limited() -> Self {
+        FormatConfig {
+            format: GameFormat::Limited,
+            starting_life: 20,
+            min_players: 2,
+            max_players: 2,
+            deck_size: 40,
+            singleton: false,
+            command_zone: false,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+        }
+    }
+
     pub fn two_headed_giant() -> Self {
         FormatConfig {
             format: GameFormat::TwoHeadedGiant,
@@ -462,6 +492,7 @@ impl FormatConfig {
     pub fn for_format(format: GameFormat) -> Self {
         match format {
             GameFormat::Standard => Self::standard(),
+            GameFormat::Limited => Self::limited(),
             GameFormat::Commander => Self::commander(),
             GameFormat::Pioneer => Self::pioneer(),
             GameFormat::Modern => Self::modern(),
@@ -590,11 +621,68 @@ mod tests {
             FormatConfig::historic_brawl(),
             FormatConfig::free_for_all(),
             FormatConfig::two_headed_giant(),
+            FormatConfig::limited(),
         ];
         for config in configs {
             let json = serde_json::to_string(&config).unwrap();
             let deserialized: FormatConfig = serde_json::from_str(&json).unwrap();
             assert_eq!(config, deserialized);
         }
+    }
+
+    #[test]
+    fn format_config_limited() {
+        let config = FormatConfig::limited();
+        assert_eq!(config.format, GameFormat::Limited);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 2);
+        assert_eq!(config.deck_size, 40);
+        assert!(!config.singleton);
+        assert!(!config.command_zone);
+        assert_eq!(config.commander_damage_threshold, None);
+        assert!(!config.team_based);
+    }
+
+    #[test]
+    fn limited_legality_format_is_none() {
+        assert_eq!(GameFormat::Limited.legality_format(), None);
+    }
+
+    #[test]
+    fn limited_sideboard_policy_is_unlimited() {
+        assert_eq!(
+            GameFormat::Limited.sideboard_policy(),
+            SideboardPolicy::Unlimited
+        );
+    }
+
+    #[test]
+    fn limited_no_free_first_mulligan() {
+        assert!(!GameFormat::Limited.grants_free_first_mulligan());
+    }
+
+    #[test]
+    fn limited_label() {
+        assert_eq!(GameFormat::Limited.label(), "Limited");
+    }
+
+    #[test]
+    fn limited_for_format_roundtrip() {
+        assert_eq!(
+            FormatConfig::for_format(GameFormat::Limited),
+            FormatConfig::limited()
+        );
+    }
+
+    #[test]
+    fn limited_in_registry() {
+        let registry = GameFormat::registry();
+        let entry = registry
+            .iter()
+            .find(|m| m.format == GameFormat::Limited)
+            .expect("Limited must be in registry");
+        assert_eq!(entry.group, FormatGroup::Limited);
+        assert_eq!(entry.short_label, "LIM");
     }
 }

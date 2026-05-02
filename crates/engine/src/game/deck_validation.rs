@@ -695,7 +695,7 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => true,
+        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
     };
 
     // CR 100.4 × MatchType::Bo3: BO3 requires a sideboard regardless of format.
