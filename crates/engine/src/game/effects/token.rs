@@ -610,9 +610,16 @@ pub fn apply_create_token_after_replacement(
             }
             obj.tapped = enter_tapped.resolve(spec.tapped);
 
-            // CR 113.3d: Apply static abilities from the token definition.
-            for static_def in &spec.static_abilities {
-                obj.static_definitions.push(static_def.clone());
+            // CR 113.3d + CR 613.1: Apply static abilities from the token
+            // definition. Mirror onto `base_static_definitions` so the
+            // layers-reset (`base_*` → `*`) at the start of each layers pass
+            // doesn't wipe them before layer 7 reads dynamic P/T grants.
+            if !spec.static_abilities.is_empty() {
+                Arc::make_mut(&mut obj.base_static_definitions)
+                    .extend(spec.static_abilities.iter().cloned());
+                for static_def in &spec.static_abilities {
+                    obj.static_definitions.push(static_def.clone());
+                }
             }
         }
 
@@ -2397,6 +2404,90 @@ mod tests {
                 .effect,
             Effect::Explore
         ));
+    }
+
+    #[test]
+    fn apply_create_token_mirrors_static_abilities_to_base() {
+        // Urza's Saga's chapter II creates a 0/0 Construct whose only saving
+        // grace is "+1/+1 for each artifact you control". CR 613.1 resets
+        // `static_definitions` from `base_static_definitions` at the start of
+        // every layers pass — if the resolver only writes to live `*` and not
+        // `base_*`, the boost is wiped before layer 7c reads it and the token
+        // dies as a 0/0 to SBAs (CR 704.5f). Both must be populated.
+        use crate::types::ability::{
+            ContinuousModification, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::proposed_event::TokenSpec;
+        use std::collections::HashSet;
+
+        let boost = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::new(
+                            crate::types::ability::TypeFilter::Artifact,
+                        )),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::new(
+                            crate::types::ability::TypeFilter::Artifact,
+                        )),
+                        },
+                    },
+                },
+            ]);
+
+        let mut state = GameState::new_two_player(42);
+        let spec = TokenSpec {
+            display_name: "Construct".to_string(),
+            script_name: "Construct".to_string(),
+            power: Some(0),
+            toughness: Some(0),
+            core_types: vec![CoreType::Artifact, CoreType::Creature],
+            subtypes: vec!["Construct".to_string()],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+            static_abilities: vec![boost],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+        };
+
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let id = state.last_created_token_ids[0];
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.static_definitions.len(),
+            1,
+            "live static_definitions must carry the boost"
+        );
+        assert_eq!(
+            obj.base_static_definitions.len(),
+            1,
+            "base_static_definitions must mirror live so the layers reset (CR 613.1) preserves it"
+        );
     }
 
     #[test]
