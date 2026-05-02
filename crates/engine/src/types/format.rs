@@ -590,11 +590,68 @@ mod tests {
             FormatConfig::historic_brawl(),
             FormatConfig::free_for_all(),
             FormatConfig::two_headed_giant(),
+            FormatConfig::limited(),
         ];
         for config in configs {
             let json = serde_json::to_string(&config).unwrap();
             let deserialized: FormatConfig = serde_json::from_str(&json).unwrap();
             assert_eq!(config, deserialized);
         }
+    }
+
+    #[test]
+    fn format_config_limited() {
+        let config = FormatConfig::limited();
+        assert_eq!(config.format, GameFormat::Limited);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 2);
+        assert_eq!(config.deck_size, 40);
+        assert!(!config.singleton);
+        assert!(!config.command_zone);
+        assert_eq!(config.commander_damage_threshold, None);
+        assert!(!config.team_based);
+    }
+
+    #[test]
+    fn limited_legality_format_is_none() {
+        assert_eq!(GameFormat::Limited.legality_format(), None);
+    }
+
+    #[test]
+    fn limited_sideboard_policy_is_unlimited() {
+        assert_eq!(
+            GameFormat::Limited.sideboard_policy(),
+            SideboardPolicy::Unlimited
+        );
+    }
+
+    #[test]
+    fn limited_no_free_first_mulligan() {
+        assert!(!GameFormat::Limited.grants_free_first_mulligan());
+    }
+
+    #[test]
+    fn limited_label() {
+        assert_eq!(GameFormat::Limited.label(), "Limited");
+    }
+
+    #[test]
+    fn limited_for_format_roundtrip() {
+        assert_eq!(
+            FormatConfig::for_format(GameFormat::Limited),
+            FormatConfig::limited()
+        );
+    }
+
+    #[test]
+    fn limited_in_registry() {
+        let registry = GameFormat::registry();
+        let entry = registry
+            .iter()
+            .find(|m| m.format == GameFormat::Limited)
+            .expect("Limited must be in registry");
+        assert_eq!(entry.group, FormatGroup::Limited);
+        assert_eq!(entry.short_label, "LIM");
     }
 }
