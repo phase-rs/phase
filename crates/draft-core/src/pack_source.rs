@@ -33,3 +33,58 @@ impl PackSource for FixturePackSource {
         DraftPack(cards)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    fn fixture(cards_per_pack: u8) -> FixturePackSource {
+        FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack,
+        }
+    }
+
+    #[test]
+    fn generates_correct_number_of_cards() {
+        let source = fixture(14);
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let pack = source.generate_pack(&mut rng, 0, 0);
+        assert_eq!(pack.0.len(), 14);
+    }
+
+    #[test]
+    fn same_seed_same_seat_same_pack_is_deterministic() {
+        let source = fixture(14);
+        let mut rng1 = ChaCha8Rng::seed_from_u64(42);
+        let mut rng2 = ChaCha8Rng::seed_from_u64(42);
+        let pack1 = source.generate_pack(&mut rng1, 3, 1);
+        let pack2 = source.generate_pack(&mut rng2, 3, 1);
+        assert_eq!(pack1, pack2);
+    }
+
+    #[test]
+    fn different_seats_produce_different_packs() {
+        let source = fixture(14);
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let pack_a = source.generate_pack(&mut rng, 0, 0);
+        let pack_b = source.generate_pack(&mut rng, 1, 0);
+        // Different seats produce different instance IDs
+        assert_ne!(pack_a.0[0].instance_id, pack_b.0[0].instance_id);
+    }
+
+    #[test]
+    fn card_naming_convention() {
+        let source = fixture(3);
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let pack = source.generate_pack(&mut rng, 2, 1);
+        assert_eq!(pack.0[0].instance_id, "TST-2-1-0");
+        assert_eq!(pack.0[0].name, "TST Card 2-1-0");
+        assert_eq!(pack.0[0].set_code, "TST");
+        assert_eq!(pack.0[0].rarity, "rare");
+        assert_eq!(pack.0[1].rarity, "uncommon");
+        assert_eq!(pack.0[2].rarity, "uncommon");
+    }
+}
