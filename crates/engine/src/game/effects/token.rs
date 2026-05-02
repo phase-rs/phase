@@ -2429,8 +2429,8 @@ mod tests {
                     value: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
                             filter: TargetFilter::Typed(TypedFilter::new(
-                            crate::types::ability::TypeFilter::Artifact,
-                        )),
+                                crate::types::ability::TypeFilter::Artifact,
+                            )),
                         },
                     },
                 },
@@ -2438,8 +2438,8 @@ mod tests {
                     value: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
                             filter: TargetFilter::Typed(TypedFilter::new(
-                            crate::types::ability::TypeFilter::Artifact,
-                        )),
+                                crate::types::ability::TypeFilter::Artifact,
+                            )),
                         },
                     },
                 },

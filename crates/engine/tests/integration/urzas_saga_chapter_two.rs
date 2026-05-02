@@ -42,9 +42,8 @@ fn add_mana(
 /// Saga: `{2}, {T}: Create a 0/0 colorless Construct artifact creature token
 /// with "This token gets +1/+1 for each artifact you control."`
 fn chapter_two_granted_ability() -> AbilityDefinition {
-    let artifact_filter = TargetFilter::Typed(
-        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
-    );
+    let artifact_filter =
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
 
     let boost = StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
@@ -111,7 +110,13 @@ fn chapter_two_construct_survives_sba_via_self_count_boost() {
     let saga_id = {
         let state = runner.state_mut();
         let card_id = CardId(state.next_object_id);
-        let id = zones::create_object(state, card_id, P0, "Urza's Saga".to_string(), Zone::Battlefield);
+        let id = zones::create_object(
+            state,
+            card_id,
+            P0,
+            "Urza's Saga".to_string(),
+            Zone::Battlefield,
+        );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.core_types.push(CoreType::Enchantment);
@@ -124,7 +129,6 @@ fn chapter_two_construct_survives_sba_via_self_count_boost() {
         state.layers_dirty = true;
         id
     };
-
 
     add_mana(&mut runner, P0, ManaType::Colorless, 2);
 
