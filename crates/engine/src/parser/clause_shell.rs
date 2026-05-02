@@ -13,22 +13,42 @@
 //! the existing body parsers, and the accumulated context is applied onto
 //! the resulting `AbilityDefinition`/`ParsedEffectClause` before return.
 //!
+//! ## Canonical entry
+//!
+//! `peel_clause` is the **canonical structural-slot entry point** for every
+//! clause-emitting parser pipeline:
+//!
+//! - **Effects / spells / activated bodies**: invoked directly from
+//!   `parse_effect_clause` (`oracle_effect/mod.rs`).
+//! - **Trigger bodies**: routed through
+//!   `parse_effect_chain_with_context` → `parse_effect_clause` → here.
+//! - **Static "quoted-ability" bodies**: routed through `parse_effect_chain`.
+//! - **Replacement bodies**: routed through `parse_effect_chain`.
+//!
+//! Phase 3 of the AST refactor (see `PLAN.md` §5) confirmed this transitive
+//! coverage as part of the documented audit. The `strip_*` helpers in
+//! `oracle_effect/` (`strip_trailing_duration`, `strip_leading_general_conditional`,
+//! `strip_optional_effect_prefix`) are NOT redundant with this shell — they
+//! serve as intermediate sub-extraction inside specialized parsers (e.g.,
+//! extracting duration from a predicate phrase mid-pipeline) and operate on
+//! parser-internal sub-strings, not on whole clauses. Do not introduce new
+//! top-of-clause structural-slot stripping outside this module.
+//!
 //! ## Migrated slots
 //!
 //! - **Optional** (`you may [verb]` → `optional: true`)
 //! - **Duration** (`... this turn` / `... until end of turn` /
 //!   `... until your next turn` / `... for as long as ~ remains tapped` etc.
 //!   → `Duration` variant)
+//! - **Condition** (`if [condition], [effect]` → `AbilityCondition` variant)
 //!
-//! Every other slot continues to flow through its existing per-callsite
-//! handling until a follow-up commit migrates it here.
-//!
-//! As slots migrate, each becomes:
-//! 1. A new field on `ClauseContext`.
-//! 2. A new branch in `peel_inner`.
-//! 3. A new `apply_*` method on `ClauseContext`.
+//! Adding a new slot kind:
+//! 1. New field on `ClauseContext`.
+//! 2. New branch in `peel_inner`.
+//! 3. New `apply_*` method on `ClauseContext`.
 //! 4. Removal of the corresponding linear `strip_*` helper at its call
-//!    sites.
+//!    sites — only when the helper is truly top-of-clause; intermediate
+//!    sub-extraction strippers stay where they are.
 //!
 //! ## Specialized-phrase blocklist
 //!

@@ -401,10 +401,7 @@ pub(super) fn parse_numeric_imperative_ast(
         // Accept any pump — discard the target. Callers that need subject threading
         // (e.g., try_parse_for_each_effect) extract the subject separately via
         // thread_for_each_subject after lowering the AST.
-        if let Some(Effect::Pump {
-            power, toughness, ..
-        }) = super::try_parse_pump(lower, text)
-        {
+        if let Some((power, toughness)) = super::try_parse_pump_pt(lower, text) {
             return Some(NumericImperativeAst::Pump { power, toughness });
         }
     }
@@ -2287,6 +2284,73 @@ pub(super) fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
     }
 }
 
+/// CR 701.24g: Extract `(target, count)` from a "put …" imperative whose
+/// position has already been recognized as TopOfLibrary / BottomOfLibrary /
+/// NthFromTop. Isolates the noun phrase between `"put "` and the first
+/// positional terminator (`" on top of"`, `" on the bottom of"`, `" into "`)
+/// and resolves it via `parse_target` plus a leading-cardinality peel.
+///
+/// Returns the existing fallbacks (`TargetFilter::Any`, `Fixed(1)`) when the
+/// noun phrase doesn't isolate cleanly — this preserves byte-identical output
+/// vs. the pre-Phase-2b lowerer-side patcher that produced the same defaults.
+fn extract_put_at_library_noun_phrase(lower: &str) -> (TargetFilter, QuantityExpr) {
+    let default = (TargetFilter::Any, QuantityExpr::Fixed { value: 1 });
+    let Ok((after_put, _)) = tag::<_, _, VerboseError<&str>>("put ").parse(lower) else {
+        return default;
+    };
+    let Some(before) = [" on top of", " on the bottom of", " into "]
+        .iter()
+        .find_map(|term| {
+            take_until::<_, _, VerboseError<&str>>(*term)
+                .parse(after_put)
+                .ok()
+                .map(|(_, before)| before)
+        })
+    else {
+        return default;
+    };
+    let (count_expr, after_count) =
+        peel_put_at_library_count(before).unwrap_or((None, before));
+    let (filter, _) = parse_target(after_count);
+    let target = if matches!(filter, TargetFilter::Any) {
+        TargetFilter::Any
+    } else {
+        filter
+    };
+    let count = count_expr.unwrap_or(QuantityExpr::Fixed { value: 1 });
+    (target, count)
+}
+
+/// Peel an optional cardinality prefix from the noun phrase that precedes a
+/// positional placement terminator ("on top of" / "on the bottom of" / "into").
+///
+/// Returns `Some((Some(count), remainder))` when an explicit cardinality is
+/// recognized (e.g. "two cards from your hand" → `Fixed(2)` + "cards from your
+/// hand"), or `Some((None, input))` when the noun phrase has no leading
+/// quantity (the existing `count: Fixed(1)` is preserved).
+///
+/// Recognized prefixes (CR 701.24g positional placement, multi-card form):
+///   - `"x "` (with X-cost)     → `QuantityExpr::Ref { Variable("X") }`
+///   - numeric word/digit + " " → `QuantityExpr::Fixed { value: N }`
+fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)> {
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("x ").parse(input) {
+        return Some((
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+            rest,
+        ));
+    }
+    if let Ok((after_num, n)) = nom_primitives::parse_number.parse(input) {
+        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" ").parse(after_num) {
+            return Some((Some(QuantityExpr::Fixed { value: n as i32 }), rest));
+        }
+    }
+    Some((None, input))
+}
+
 pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
     tag::<_, _, VerboseError<&str>>("put ").parse(lower).ok()?;
 
@@ -2309,14 +2373,16 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
     {
         let has_origin = nom_primitives::scan_contains(lower, " from ");
         if !has_origin {
-            return Some(PutImperativeAst::TopOfLibrary);
+            let (target, count) = extract_put_at_library_noun_phrase(lower);
+            return Some(PutImperativeAst::TopOfLibrary { target, count });
         }
     }
 
     // CR 701.24g: "put that card on top" / "put it on top" / "put them on top" —
     // abbreviated form used after "shuffle" in search-and-put-on-top tutors (41 cards).
     if lower.ends_with("on top") {
-        return Some(PutImperativeAst::TopOfLibrary);
+        let (target, count) = extract_put_at_library_noun_phrase(lower);
+        return Some(PutImperativeAst::TopOfLibrary { target, count });
     }
 
     // CR 701.24g: "put X on the bottom of Y's library" — specific position without
@@ -2327,14 +2393,16 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
     {
         let has_origin = nom_primitives::scan_contains(lower, " from ");
         if !has_origin {
-            return Some(PutImperativeAst::BottomOfLibrary);
+            let (target, count) = extract_put_at_library_noun_phrase(lower);
+            return Some(PutImperativeAst::BottomOfLibrary { target, count });
         }
     }
 
     // CR 701.24g: "put that card on the bottom" / "put it on the bottom" —
     // abbreviated form without "of Y's library".
     if lower.ends_with("on the bottom") {
-        return Some(PutImperativeAst::BottomOfLibrary);
+        let (target, count) = extract_put_at_library_noun_phrase(lower);
+        return Some(PutImperativeAst::BottomOfLibrary { target, count });
     }
 
     // CR 701.24g: "put X into Y's library Nth from the top" —
@@ -2348,7 +2416,8 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             if let Some(last_space) = before.rfind(' ') {
                 let ordinal_word = &before[last_space + 1..];
                 if let Some((n, _)) = parse_ordinal(ordinal_word) {
-                    return Some(PutImperativeAst::NthFromTop { n });
+                    let (target, count) = extract_put_at_library_noun_phrase(lower);
+                    return Some(PutImperativeAst::NthFromTop { n, target, count });
                 }
             }
         }
@@ -2432,23 +2501,22 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             }
         }
         // CR 701.24g: Place at a specific position — uses move_to_library_position,
-        // not ChangeZone which auto-shuffles per CR 401.3. `count` defaults to
-        // `Fixed(1)` here; the cardinality patcher in `oracle_effect/mod.rs`
-        // upgrades it (and the target filter) by re-inspecting the imperative
-        // text once the clause has been lowered.
-        PutImperativeAst::TopOfLibrary => Effect::PutAtLibraryPosition {
-            target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 1 },
+        // not ChangeZone which auto-shuffles per CR 401.3. `target` and `count`
+        // are populated by the noun-phrase extractor in `parse_put_ast` so the
+        // lowering phase has nothing left to compute.
+        PutImperativeAst::TopOfLibrary { target, count } => Effect::PutAtLibraryPosition {
+            target,
+            count,
             position: LibraryPosition::Top,
         },
-        PutImperativeAst::BottomOfLibrary => Effect::PutAtLibraryPosition {
-            target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 1 },
+        PutImperativeAst::BottomOfLibrary { target, count } => Effect::PutAtLibraryPosition {
+            target,
+            count,
             position: LibraryPosition::Bottom,
         },
-        PutImperativeAst::NthFromTop { n } => Effect::PutAtLibraryPosition {
-            target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 1 },
+        PutImperativeAst::NthFromTop { n, target, count } => Effect::PutAtLibraryPosition {
+            target,
+            count,
             position: LibraryPosition::NthFromTop { n },
         },
     }

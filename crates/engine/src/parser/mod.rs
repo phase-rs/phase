@@ -1,3 +1,4 @@
+pub(crate) mod ast;
 pub(crate) mod clause_shell;
 pub mod oracle;
 pub mod oracle_casting;
