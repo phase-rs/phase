@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-15T00:00:00Z",
+  "updated": "2026-05-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -163,80 +163,16 @@
           "name": "Swamp"
         },
         {
-          "count": 1,
-          "name": "Professor Dellian Fel"
-        },
-        {
-          "count": 2,
-          "name": "Witherbloom Charm"
-        },
-        {
           "count": 4,
           "name": "Badgermole Cub"
-        },
-        {
-          "count": 1,
-          "name": "Wastewood Verge"
-        },
-        {
-          "count": 4,
-          "name": "Sentinel of the Nameless City"
-        },
-        {
-          "count": 2,
-          "name": "Culling Ritual"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 3,
-          "name": "Sheoldred, the Apocalypse"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 3,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 3,
-          "name": "Abrupt Decay"
         },
         {
           "count": 4,
           "name": "Mutavault"
         },
         {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 4,
+          "count": 3,
           "name": "Llanowar Wastes"
-        },
-        {
-          "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
         },
         {
           "count": 2,
@@ -244,65 +180,109 @@
         },
         {
           "count": 1,
+          "name": "Tear Asunder"
+        },
+        {
+          "count": 1,
+          "name": "Witherbloom Charm"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Llanowar Wastes"
+        },
+        {
+          "count": 3,
+          "name": "Culling Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 3,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 4,
+          "name": "Sentinel of the Nameless City"
+        },
+        {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 3,
           "name": "Professor Dellian Fel"
         },
         {
           "count": 3,
-          "name": "Overgrown Tomb"
+          "name": "Abrupt Decay"
         },
         {
           "count": 4,
-          "name": "Llanowar Elves"
+          "name": "Unholy Annex // Ritual Chamber"
         },
         {
           "count": 1,
-          "name": "Sheoldred's Edict"
+          "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
+          "count": 1,
+          "name": "Wastewood Verge"
+        },
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Decorum Dissertation"
-        },
-        {
-          "count": 1,
-          "name": "Professor Dellian Fel"
-        },
-        {
-          "count": 1,
+          "count": 3,
           "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 2,
+          "name": "Duress"
         },
         {
           "count": 2,
           "name": "Invoke Despair"
         },
         {
-          "count": 1,
+          "count": 4,
           "name": "Ray of Enfeeblement"
         },
         {
-          "count": 2,
-          "name": "Go Blank"
-        },
-        {
           "count": 1,
-          "name": "Shadows' Verdict"
-        },
-        {
-          "count": 1,
-          "name": "Kaervek, the Spiteful"
-        },
-        {
-          "count": 1,
-          "name": "Kalitas, Traitor of Ghet"
-        },
-        {
-          "count": 2,
           "name": "Culling Ritual"
         },
         {
           "count": 2,
-          "name": "Duress"
+          "name": "Carnage Tyrant"
+        },
+        {
+          "count": 1,
+          "name": "Go for the Throat"
         }
       ]
     },

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-05-15T00:00:00Z",
+  "updated": "2026-05-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -619,7 +619,7 @@
           "name": "Past in Flames"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Flashback"
         },
         {
@@ -701,6 +701,10 @@
         {
           "count": 1,
           "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Glimpse the Impossible"
         }
       ],
       "sideboard": [
@@ -731,6 +735,110 @@
         {
           "count": 4,
           "name": "Prismatic Ending"
+        }
+      ]
+    },
+    {
+      "name": "Belcher",
+      "author": "MTGGoldfish",
+      "colors": [],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Orim's Chant"
+        },
+        {
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Legion Leadership"
+        },
+        {
+          "count": 4,
+          "name": "Goblin Charbelcher"
+        },
+        {
+          "count": 4,
+          "name": "Irencrag Feat"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        },
+        {
+          "count": 4,
+          "name": "Pinnacle Monk"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Talisman of Conviction"
+        },
+        {
+          "count": 4,
+          "name": "Shatterskull Smashing"
+        },
+        {
+          "count": 4,
+          "name": "Stormscale Scion"
+        },
+        {
+          "count": 4,
+          "name": "Strike It Rich"
+        },
+        {
+          "count": 4,
+          "name": "Sundering Eruption"
+        },
+        {
+          "count": 1,
+          "name": "Razorgrass Ambush"
+        },
+        {
+          "count": 4,
+          "name": "Witch Enchanter"
+        },
+        {
+          "count": 3,
+          "name": "Vessel of Volatility"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 3,
+          "name": "Blood Moon"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Silence"
+        },
+        {
+          "count": 2,
+          "name": "Shatterstorm"
+        },
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 1,
+          "name": "March of Reckless Joy"
         }
       ]
     },
@@ -873,138 +981,6 @@
         {
           "count": 1,
           "name": "Vexing Bauble"
-        }
-      ]
-    },
-    {
-      "name": "Belcher",
-      "author": "MTGGoldfish",
-      "colors": [],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Strix Serenade"
-        },
-        {
-          "count": 3,
-          "name": "Fallaji Archaeologist"
-        },
-        {
-          "count": 4,
-          "name": "Tameshi, Reality Architect"
-        },
-        {
-          "count": 4,
-          "name": "Hydroelectric Specimen"
-        },
-        {
-          "count": 2,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 3,
-          "name": "Jwari Disruption"
-        },
-        {
-          "count": 4,
-          "name": "Goblin Charbelcher"
-        },
-        {
-          "count": 4,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 4,
-          "name": "Whir of Invention"
-        },
-        {
-          "count": 4,
-          "name": "Suppression Ray"
-        },
-        {
-          "count": 1,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 4,
-          "name": "Lotus Bloom"
-        },
-        {
-          "count": 4,
-          "name": "Sea Gate Restoration"
-        },
-        {
-          "count": 3,
-          "name": "Waterlogged Teachings"
-        },
-        {
-          "count": 2,
-          "name": "Stern Scolding"
-        },
-        {
-          "count": 3,
-          "name": "Flare of Denial"
-        },
-        {
-          "count": 4,
-          "name": "Disrupting Shoal"
-        },
-        {
-          "count": 1,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Beyeen Veil"
-        },
-        {
-          "count": 4,
-          "name": "Thundertrap Trainer"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Engineered Explosives"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 1,
-          "name": "Grafdigger's Cage"
-        },
-        {
-          "count": 1,
-          "name": "Tezzeret the Seeker"
-        },
-        {
-          "count": 1,
-          "name": "Unable to Scream"
-        },
-        {
-          "count": 2,
-          "name": "Harbinger of the Seas"
         }
       ]
     },
