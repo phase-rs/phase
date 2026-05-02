@@ -1,0 +1,71 @@
+---
+source: crates/engine/src/parser/oracle_effect/mod.rs
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "Destroy",
+    "target": {
+      "type": "Typed",
+      "type_filters": [
+        "Creature"
+      ],
+      "controller": null,
+      "properties": []
+    },
+    "cant_regenerate": false
+  },
+  "cost": null,
+  "sub_ability": {
+    "kind": "Spell",
+    "effect": {
+      "type": "LoseLife",
+      "amount": {
+        "type": "Fixed",
+        "value": 2
+      },
+      "target": {
+        "type": "ParentTargetController"
+      }
+    },
+    "cost": null,
+    "sub_ability": {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainLife",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "player": "controller"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "sorcery_speed": false,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "sorcery_speed": false,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "sorcery_speed": false,
+  "condition": null,
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}

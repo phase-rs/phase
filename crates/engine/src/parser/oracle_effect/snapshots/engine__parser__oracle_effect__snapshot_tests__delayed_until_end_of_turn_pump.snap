@@ -1,0 +1,36 @@
+---
+source: crates/engine/src/parser/oracle_effect/mod.rs
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "Pump",
+    "power": {
+      "type": "Fixed",
+      "value": 3
+    },
+    "toughness": {
+      "type": "Fixed",
+      "value": 3
+    },
+    "target": {
+      "type": "Typed",
+      "type_filters": [
+        "Creature"
+      ],
+      "controller": null,
+      "properties": []
+    }
+  },
+  "cost": null,
+  "sub_ability": null,
+  "duration": "UntilEndOfTurn",
+  "description": null,
+  "target_prompt": null,
+  "sorcery_speed": false,
+  "condition": null,
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}

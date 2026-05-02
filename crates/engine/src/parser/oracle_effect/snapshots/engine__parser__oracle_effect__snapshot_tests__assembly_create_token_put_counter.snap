@@ -1,0 +1,55 @@
+---
+source: crates/engine/src/parser/oracle_effect/mod.rs
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "Token",
+    "name": "Soldier",
+    "power": {
+      "type": "Fixed",
+      "value": 1
+    },
+    "toughness": {
+      "type": "Fixed",
+      "value": 1
+    },
+    "types": [
+      "Creature",
+      "Soldier"
+    ],
+    "colors": [
+      "White"
+    ],
+    "keywords": [],
+    "tapped": false,
+    "count": {
+      "type": "Fixed",
+      "value": 1
+    },
+    "owner": {
+      "type": "Controller"
+    },
+    "enters_attacking": false,
+    "enter_with_counters": [
+      [
+        "P1P1",
+        {
+          "type": "Fixed",
+          "value": 1
+        }
+      ]
+    ]
+  },
+  "cost": null,
+  "sub_ability": null,
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "sorcery_speed": false,
+  "condition": null,
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}

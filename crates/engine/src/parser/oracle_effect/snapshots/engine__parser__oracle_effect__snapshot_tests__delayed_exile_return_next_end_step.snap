@@ -1,0 +1,81 @@
+---
+source: crates/engine/src/parser/oracle_effect/mod.rs
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "ChangeZone",
+    "origin": null,
+    "destination": "Exile",
+    "target": {
+      "type": "Typed",
+      "type_filters": [
+        "Creature"
+      ],
+      "controller": null,
+      "properties": []
+    },
+    "owner_library": false,
+    "enter_transformed": false,
+    "under_your_control": false,
+    "enter_tapped": false,
+    "enters_attacking": false
+  },
+  "cost": null,
+  "sub_ability": {
+    "kind": "Spell",
+    "effect": {
+      "type": "CreateDelayedTrigger",
+      "condition": {
+        "type": "AtNextPhase",
+        "phase": "End"
+      },
+      "effect": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZone",
+          "origin": null,
+          "destination": "Battlefield",
+          "target": {
+            "type": "ParentTarget"
+          },
+          "owner_library": false,
+          "enter_transformed": false,
+          "under_your_control": false,
+          "enter_tapped": false,
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "uses_tracked_set": true
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "sorcery_speed": false,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "sorcery_speed": false,
+  "condition": null,
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}

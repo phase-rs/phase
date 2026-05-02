@@ -1,0 +1,48 @@
+---
+source: crates/engine/src/parser/oracle_effect/mod.rs
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "Draw",
+    "count": {
+      "type": "Fixed",
+      "value": 1
+    },
+    "target": {
+      "type": "Controller"
+    }
+  },
+  "cost": null,
+  "sub_ability": null,
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "sorcery_speed": false,
+  "condition": {
+    "type": "QuantityCheck",
+    "lhs": {
+      "type": "Ref",
+      "qty": {
+        "type": "ObjectCount",
+        "filter": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": "You",
+          "properties": []
+        }
+      }
+    },
+    "comparator": "GE",
+    "rhs": {
+      "type": "Fixed",
+      "value": 1
+    }
+  },
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}

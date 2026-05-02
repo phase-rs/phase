@@ -21876,3 +21876,182 @@ mod tests {
         );
     }
 }
+
+/// Snapshot tests locking current `parse_effect_chain` behavior before the
+/// IR/lowering split in Phase 48 Plan 02. Per D-05/D-06, these test 4 groups:
+/// continuation patching, condition lifting, delayed-trigger wrapping, and
+/// sub_ability assembly.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use insta::assert_json_snapshot;
+
+    // -----------------------------------------------------------------------
+    // Group 1: Continuation patching
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn continuation_search_put_onto_battlefield_then_shuffle() {
+        let def = parse_effect_chain(
+            "search your library for a creature card, put it onto the battlefield, then shuffle",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("continuation_search_put_battlefield_shuffle", def);
+    }
+
+    #[test]
+    fn continuation_search_reveal_put_into_hand_then_shuffle() {
+        let def = parse_effect_chain(
+            "search your library for a card, reveal it, put it into your hand, then shuffle",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("continuation_search_reveal_hand_shuffle", def);
+    }
+
+    #[test]
+    fn continuation_draw_then_discard() {
+        let def = parse_effect_chain(
+            "draw two cards, then discard a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("continuation_draw_then_discard", def);
+    }
+
+    #[test]
+    fn continuation_search_put_onto_battlefield_tapped_then_shuffle() {
+        let def = parse_effect_chain(
+            "search your library for a basic land card, put it onto the battlefield tapped, then shuffle",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("continuation_search_battlefield_tapped_shuffle", def);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 2: Condition lifting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn condition_if_then_draw() {
+        let def = parse_effect_chain(
+            "if you control a creature, draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("condition_if_control_creature_draw", def);
+    }
+
+    #[test]
+    fn condition_unless_pay() {
+        let def = parse_effect_chain(
+            "counter target spell unless its controller pays {2}",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("condition_counter_unless_pays", def);
+    }
+
+    #[test]
+    fn condition_optional_you_may_draw() {
+        let def = parse_effect_chain(
+            "you may draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("condition_you_may_draw", def);
+    }
+
+    #[test]
+    fn condition_you_may_pay_then_effect() {
+        let def = parse_effect_chain(
+            "you may pay {2}. if you do, draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("condition_you_may_pay_if_do_draw", def);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 3: Delayed-trigger wrapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delayed_trigger_at_beginning_of_next_end_step() {
+        let def = parse_effect_chain(
+            "at the beginning of the next end step, sacrifice it",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("delayed_trigger_next_end_step_sacrifice", def);
+    }
+
+    #[test]
+    fn delayed_trigger_beginning_of_next_upkeep() {
+        let def = parse_effect_chain(
+            "at the beginning of your next upkeep, draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("delayed_trigger_next_upkeep_draw", def);
+    }
+
+    #[test]
+    fn delayed_trigger_until_end_of_turn() {
+        let def = parse_effect_chain(
+            "target creature gets +3/+3 until end of turn",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("delayed_until_end_of_turn_pump", def);
+    }
+
+    #[test]
+    fn delayed_trigger_exile_return_end_step() {
+        let def = parse_effect_chain(
+            "exile target creature. return it to the battlefield under its owner's control at the beginning of the next end step",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("delayed_exile_return_next_end_step", def);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 4: Sub_ability assembly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assembly_two_clause_chain() {
+        let def = parse_effect_chain(
+            "target creature gets +2/+2 until end of turn. draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("assembly_two_clause_pump_draw", def);
+    }
+
+    #[test]
+    fn assembly_three_clause_chain() {
+        let def = parse_effect_chain(
+            "destroy target creature. its controller loses 2 life. you gain 2 life",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("assembly_three_clause_destroy_lose_gain", def);
+    }
+
+    #[test]
+    fn assembly_each_opponent_discard() {
+        let def = parse_effect_chain(
+            "each opponent discards a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("assembly_each_opponent_discard", def);
+    }
+
+    #[test]
+    fn assembly_gain_life_and_draw() {
+        let def = parse_effect_chain(
+            "you gain 3 life. draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("assembly_gain_life_draw", def);
+    }
+
+    #[test]
+    fn assembly_create_token_and_pump() {
+        let def = parse_effect_chain(
+            "create a 1/1 white Soldier creature token. put a +1/+1 counter on it",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("assembly_create_token_put_counter", def);
+    }
+}

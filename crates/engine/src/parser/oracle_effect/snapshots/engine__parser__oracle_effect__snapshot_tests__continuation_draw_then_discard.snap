@@ -1,0 +1,49 @@
+---
+source: crates/engine/src/parser/oracle_effect/mod.rs
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "Draw",
+    "count": {
+      "type": "Fixed",
+      "value": 2
+    },
+    "target": {
+      "type": "Controller"
+    }
+  },
+  "cost": null,
+  "sub_ability": {
+    "kind": "Spell",
+    "effect": {
+      "type": "Discard",
+      "count": {
+        "type": "Fixed",
+        "value": 1
+      },
+      "target": {
+        "type": "Controller"
+      }
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "sorcery_speed": false,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "sorcery_speed": false,
+  "condition": null,
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}

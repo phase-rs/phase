@@ -1,0 +1,76 @@
+---
+source: crates/engine/src/parser/oracle_effect/mod.rs
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "SearchLibrary",
+    "filter": {
+      "type": "Typed",
+      "type_filters": [
+        "Card"
+      ],
+      "controller": null,
+      "properties": []
+    },
+    "count": {
+      "type": "Fixed",
+      "value": 1
+    },
+    "reveal": true
+  },
+  "cost": null,
+  "sub_ability": {
+    "kind": "Spell",
+    "effect": {
+      "type": "ChangeZone",
+      "origin": "Library",
+      "destination": "Hand",
+      "target": {
+        "type": "Any"
+      },
+      "owner_library": false,
+      "enter_transformed": false,
+      "under_your_control": false,
+      "enter_tapped": false,
+      "enters_attacking": false
+    },
+    "cost": null,
+    "sub_ability": {
+      "kind": "Spell",
+      "effect": {
+        "type": "Shuffle",
+        "target": {
+          "type": "Controller"
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "sorcery_speed": false,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "sorcery_speed": false,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "sorcery_speed": false,
+  "condition": null,
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}
