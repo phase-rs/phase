@@ -559,41 +559,97 @@ fn parse_token_name_clause(text: &str) -> (Option<String>, &str) {
 /// Handles patterns like:
 /// - `and "This token can't block."` → `[StaticDefinition::new(StaticMode::CantBlock)]`
 /// - `and "This creature can't block."` → same
-/// - `and '~ can't block.'` → same
+/// - `with 'This token gets +1/+1 for each artifact you control.'` → continuous
+///   `BoostByCount`-style modifications.
+///
+/// Double-quoted spans are unambiguous and parsed greedily. Single-quoted spans
+/// only appear when the token-creation effect is itself nested inside a
+/// double-quoted activated ability ("This Saga gains \"…create a token with
+/// 'X.'\""). They are extracted only via a structurally-anchored single pass:
+/// the opening `'` must follow a phrase boundary (`with `, `and `, `or `, or
+/// `, `) and the closing `'` is the last `'` in the text. This pairing rule
+/// guarantees that any `'` inside the span (apostrophes from "can't" /
+/// possessives) is never mistaken for the close quote.
 fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDefinition> {
     let mut statics = Vec::new();
 
-    // Look for quoted ability text between double quotes.
-    // Single quotes are unreliable because "can't" contains an apostrophe.
-    for (open, close) in [('"', '"')] {
-        let search = text;
-        let mut pos = 0;
-        while pos < search.len() {
-            if let Some(start) = search[pos..].find(open) {
-                let abs_start = pos + start + open.len_utf8();
-                if let Some(end) = search[abs_start..].find(close) {
-                    let quoted = &search[abs_start..abs_start + end];
-                    let ability_text = quoted.trim();
-                    let normalized;
-                    let static_text = if token_name.is_empty() {
-                        ability_text
-                    } else {
-                        normalized = normalize_card_name_refs(ability_text, token_name);
-                        &normalized
-                    };
-                    statics.extend(parse_static_line_multi(static_text));
+    // Pass 1: double-quoted abilities — unambiguous delimiters.
+    let mut pos = 0;
+    while pos < text.len() {
+        let Some(start) = text[pos..].find('"') else {
+            break;
+        };
+        let abs_start = pos + start + '"'.len_utf8();
+        let Some(end) = text[abs_start..].find('"') else {
+            break;
+        };
+        let quoted = &text[abs_start..abs_start + end];
+        push_parsed_statics(quoted.trim(), token_name, &mut statics);
+        pos = abs_start + end + '"'.len_utf8();
+    }
 
-                    pos = abs_start + end + close.len_utf8();
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
+    // Pass 2: single-quoted abilities (nested inside a double-quoted
+    // activated ability). Skipped when double-quoted spans were found —
+    // Oracle text never mixes both delimiters at the same nesting level.
+    if statics.is_empty() {
+        if let Some(span) = find_anchored_single_quoted_span(text) {
+            push_parsed_statics(span.trim(), token_name, &mut statics);
         }
     }
 
     statics
+}
+
+fn push_parsed_statics(ability_text: &str, token_name: &str, out: &mut Vec<StaticDefinition>) {
+    let normalized;
+    let static_text = if token_name.is_empty() {
+        ability_text
+    } else {
+        normalized = normalize_card_name_refs(ability_text, token_name);
+        &normalized
+    };
+    out.extend(parse_static_line_multi(static_text));
+}
+
+/// Locate a single-quoted ability span in `text`, returning the content
+/// between the open and close quotes (exclusive).
+///
+/// Anchoring rules (both must hold):
+///   - The opening `'` must immediately follow one of the phrase boundaries
+///     `with `, `and `, `or `, `, ` — at the start of `text` or preceded by
+///     whitespace (so apostrophes embedded in possessives like "creature's"
+///     cannot pose as opening quotes).
+///   - The closing `'` is the last `'` in `text` (so any internal apostrophe
+///     from contractions or possessives is treated as content, not delimiter).
+fn find_anchored_single_quoted_span(text: &str) -> Option<&str> {
+    let close = text.rfind('\'')?;
+    let prefix = &text[..close];
+
+    // Phrase anchors paired (start-of-text form, mid-text form). The mid-text
+    // form requires a leading space; the start form does not.
+    const ANCHORS: &[(&str, &str)] = &[
+        ("with '", " with '"),
+        ("and '", " and '"),
+        ("or '", " or '"),
+        (", '", ", '"),
+    ];
+    let mut earliest: Option<usize> = None;
+    for &(start_anchor, mid_anchor) in ANCHORS {
+        if prefix.starts_with(start_anchor) {
+            let open = start_anchor.len();
+            earliest = Some(earliest.map_or(open, |prev| prev.min(open)));
+        }
+        if let Some(pos) = prefix.find(mid_anchor) {
+            let open = pos + mid_anchor.len();
+            earliest = Some(earliest.map_or(open, |prev| prev.min(open)));
+        }
+    }
+
+    let open = earliest?;
+    if close <= open {
+        return None;
+    }
+    Some(&text[open..close])
 }
 
 fn extract_token_where_x_expression(text: &str) -> Option<String> {
@@ -868,11 +924,34 @@ mod tests {
     }
 
     #[test]
-    fn extract_static_no_false_positive_on_single_quotes() {
-        // Single quotes around "can't" are ambiguous (apostrophe = close quote).
-        // Only double quotes reliably delimit abilities in Oracle text.
+    fn extract_static_single_quoted_ability_with_apostrophe_content() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::statics::StaticMode;
+
+        // Anchored single-quoted span: open `'` follows `and `, close `'`
+        // is the last apostrophe. The internal apostrophe in "can't" is
+        // treated as content, not a delimiter.
         let statics = extract_token_static_abilities("and '~ can't block.'", "");
-        assert!(statics.is_empty());
+        assert_eq!(statics.len(), 1);
+        assert_eq!(statics[0].mode, StaticMode::CantBlock);
+        assert_eq!(statics[0].affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn extract_static_single_quoted_boost_by_count() {
+        // Urza's Saga's chapter II ability: the create-token clause is itself
+        // nested inside a double-quoted activated ability, so the granted
+        // static uses single quotes. The Construct token must enter with the
+        // +1/+1 modifier or it dies to SBAs as a 0/0 immediately.
+        let statics = extract_token_static_abilities(
+            "with 'This token gets +1/+1 for each artifact you control.'",
+            "Construct",
+        );
+        assert_eq!(
+            statics.len(),
+            1,
+            "expected one continuous static from single-quoted ability, got {statics:?}",
+        );
     }
 
     #[test]
