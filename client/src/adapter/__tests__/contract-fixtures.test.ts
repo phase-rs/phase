@@ -39,7 +39,7 @@ const SERVER_HELLO = JSON.stringify({
   data: {
     server_version: "0.0.0-test",
     build_commit: "testhash",
-    protocol_version: 4,
+    protocol_version: 5,
     mode: "Full",
   },
 });

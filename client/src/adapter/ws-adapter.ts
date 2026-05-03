@@ -30,7 +30,7 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {
