@@ -79,6 +79,17 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
         {formatLabel}
       </span>
 
+      {/* Draft badge — rendered when the lobby entry is a draft pod.
+          Shows set code and draft kind for quick identification. */}
+      {game.draft_metadata && (
+        <span
+          className="flex-shrink-0 rounded bg-purple-500/20 px-1.5 py-0.5 text-xs font-semibold text-purple-300"
+          title={`${game.draft_metadata.draftKind} Draft — ${game.draft_metadata.setCode}`}
+        >
+          {game.draft_metadata.setCode} Draft
+        </span>
+      )}
+
       {/* P2P badge — rendered only when the row is explicitly a P2P-brokered
           room. Using `=== true` rather than truthiness is deliberate: older
           server builds omit the field entirely, and treating `undefined` as
