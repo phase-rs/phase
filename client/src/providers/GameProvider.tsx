@@ -888,11 +888,14 @@ export function GameProvider({
           if (cancelled) return;
           await resumeGame(gameId, adapter, savedState);
           if (cancelled) return;
+          // Derive player count from the restored state — the URL param may be
+          // absent on resume (e.g. navigating directly to a saved game URL).
+          const resumedPlayerCount = savedState.players?.length ?? playerCount;
           controller = createGameLoopController({
             mode,
             difficulty,
-            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
-            playerCount,
+            aiSeats: resolveAiSeatBindings(gameId, resumedPlayerCount, difficulty),
+            playerCount: resumedPlayerCount,
           });
           controller.start();
           audioManager.setContext("battlefield");

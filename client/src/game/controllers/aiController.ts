@@ -1,4 +1,4 @@
-import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS } from "../../constants/game";
+import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
 import type { GameAction } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
@@ -72,9 +72,13 @@ export function createAIController(config: AIControllerConfig): AIController {
     // Game over -- stop scheduling
     if (waitingFor.type === "GameOver") return;
 
-    // Check if it's an AI player's turn
+    // Check if it's an AI player's turn — any non-human player is AI.
+    // This is dynamic rather than gating on a static set so that
+    // restoreGameState (debug panel import) with a different player count
+    // works without rebuilding the controller.
     if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) return;
-    if (!aiPlayerIds.has(waitingFor.data.player)) return;
+    const waitingPlayerId = waitingFor.data.player;
+    if (waitingPlayerId === PLAYER_ID) return;
 
     // Reset failure counters when the WaitingFor state changes (type or player).
     // `consecutiveFailures` gates normal→fallback escalation; `totalFailures`
@@ -250,7 +254,7 @@ export function createAIController(config: AIControllerConfig): AIController {
 
   function start() {
     active = true;
-    debugLog(`AI controller started for players [${[...aiPlayerIds].join(",")}]`, "warn");
+    debugLog(`AI controller started (configured seats: [${[...aiPlayerIds].join(",")}], dynamic for all non-human)`, "warn");
     // Event-driven design: subscribe to WaitingFor changes and let each
     // seat's turn naturally surface via the store. This means reconnect
     // is implicit — whichever seat holds priority after a reconnect
