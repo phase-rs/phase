@@ -16,9 +16,7 @@
  */
 
 import type {
-  DraftCardInstance,
   DraftPlayerView,
-  DraftStatus,
   SeatPublicView,
 } from "../adapter/draft-adapter";
 
