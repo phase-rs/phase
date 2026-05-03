@@ -233,7 +233,9 @@ impl DraftSessionManager {
         if let Some(session) = self.sessions.get_mut(draft_code) {
             session.connected[seat] = false;
             let fake_pid = PlayerId(seat as u8);
-            self.reconnect.record_disconnect(draft_code, fake_pid);
+            let default_grace = self.reconnect.grace_period;
+            self.reconnect
+                .record_disconnect(draft_code, fake_pid, default_grace);
             info!(draft = %draft_code, seat, "player disconnected");
         }
     }

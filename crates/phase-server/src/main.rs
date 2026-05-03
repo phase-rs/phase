@@ -369,10 +369,15 @@ async fn main() {
 
                             // Register all non-AI human players as disconnected
                             // to start the 120s grace period from now
+                            let default_grace = mgr.reconnect.grace_period;
                             for (i, token) in session.player_tokens.iter().enumerate() {
                                 let pid = PlayerId(i as u8);
                                 if !token.is_empty() && !session.ai_seats.contains(&pid) {
-                                    mgr.reconnect.record_disconnect(&session.game_code, pid);
+                                    mgr.reconnect.record_disconnect(
+                                        &session.game_code,
+                                        pid,
+                                        default_grace,
+                                    );
                                 }
                             }
 

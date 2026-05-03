@@ -4,6 +4,8 @@ use engine::types::game_state::GameState;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
+use draft_core::types::{DraftConfig, DraftSession as DraftCoreSession};
+
 /// Serializable snapshot of a game session for disk persistence.
 ///
 /// Fields that can be reconstructed at restore time are excluded:
@@ -35,4 +37,21 @@ pub struct PersistedLobbyMeta {
     pub public: bool,
     pub password: Option<String>,
     pub timer_seconds: Option<u32>,
+}
+
+/// Serializable snapshot of a draft session for disk persistence.
+///
+/// Fields excluded (reconstructed at restore time):
+/// - `connected` — all players are disconnected on restore
+/// - `timer_task` — JoinHandle is not serializable; re-arm from `timer_remaining_ms`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedDraftSession {
+    pub draft_code: String,
+    pub session: DraftCoreSession,
+    pub player_tokens: Vec<String>,
+    pub display_names: Vec<String>,
+    pub config: DraftConfig,
+    pub active_matches: HashMap<String, String>,
+    pub lobby_meta: Option<PersistedLobbyMeta>,
+    pub timer_remaining_ms: Option<u32>,
 }

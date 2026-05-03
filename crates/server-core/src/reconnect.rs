@@ -7,6 +7,7 @@ pub struct DisconnectInfo {
     pub player_id: PlayerId,
     pub disconnect_time: Instant,
     pub game_code: String,
+    pub grace_period: Duration,
 }
 
 pub struct ReconnectManager {
@@ -30,7 +31,10 @@ impl ReconnectManager {
     }
 
     /// Record a player disconnect for potential reconnection.
-    pub fn record_disconnect(&mut self, game_code: &str, player: PlayerId) {
+    ///
+    /// The `grace` parameter sets the per-disconnect grace period. Existing game
+    /// sessions pass the manager's default; draft sessions pass phase-adaptive durations.
+    pub fn record_disconnect(&mut self, game_code: &str, player: PlayerId, grace: Duration) {
         let key = format!("{}:{}", game_code, player.0);
         self.disconnected.insert(
             key,
@@ -38,6 +42,7 @@ impl ReconnectManager {
                 player_id: player,
                 disconnect_time: Instant::now(),
                 game_code: game_code.to_string(),
+                grace_period: grace,
             },
         );
     }
@@ -49,7 +54,7 @@ impl ReconnectManager {
         let key = format!("{}:{}", game_code, player.0);
         match self.disconnected.remove(&key) {
             Some(info) => {
-                if info.disconnect_time.elapsed() <= self.grace_period {
+                if info.disconnect_time.elapsed() <= info.grace_period {
                     ReconnectResult::Ok {
                         game_code: info.game_code,
                     }
@@ -65,7 +70,7 @@ impl ReconnectManager {
     pub fn check_expired(&mut self) -> Vec<String> {
         let mut expired = Vec::new();
         self.disconnected.retain(|_key, info| {
-            if info.disconnect_time.elapsed() > self.grace_period {
+            if info.disconnect_time.elapsed() > info.grace_period {
                 expired.push(info.game_code.clone());
                 false
             } else {
@@ -99,7 +104,7 @@ mod tests {
     #[test]
     fn reconnect_within_grace_period_succeeds() {
         let mut mgr = ReconnectManager::new(Duration::from_secs(120));
-        mgr.record_disconnect("GAME01", PlayerId(0));
+        mgr.record_disconnect("GAME01", PlayerId(0), Duration::from_secs(120));
 
         // Immediately reconnect (within grace period)
         let result = mgr.attempt_reconnect("GAME01", PlayerId(0));
@@ -112,7 +117,7 @@ mod tests {
     #[test]
     fn reconnect_after_expiry_fails() {
         let mut mgr = ReconnectManager::new(Duration::from_millis(0));
-        mgr.record_disconnect("GAME01", PlayerId(0));
+        mgr.record_disconnect("GAME01", PlayerId(0), Duration::from_millis(0));
 
         // Grace period is 0ms, so it's already expired
         std::thread::sleep(Duration::from_millis(1));
@@ -136,8 +141,8 @@ mod tests {
     #[test]
     fn check_expired_returns_expired_games() {
         let mut mgr = ReconnectManager::new(Duration::from_millis(0));
-        mgr.record_disconnect("GAME01", PlayerId(0));
-        mgr.record_disconnect("GAME02", PlayerId(1));
+        mgr.record_disconnect("GAME01", PlayerId(0), Duration::from_millis(0));
+        mgr.record_disconnect("GAME02", PlayerId(1), Duration::from_millis(0));
         std::thread::sleep(Duration::from_millis(1));
 
         let expired = mgr.check_expired();
@@ -149,10 +154,27 @@ mod tests {
     #[test]
     fn check_expired_retains_non_expired() {
         let mut mgr = ReconnectManager::new(Duration::from_secs(120));
-        mgr.record_disconnect("GAME01", PlayerId(0));
+        mgr.record_disconnect("GAME01", PlayerId(0), Duration::from_secs(120));
 
         let expired = mgr.check_expired();
         assert!(expired.is_empty());
         assert!(mgr.is_disconnected("GAME01", PlayerId(0)));
+    }
+
+    #[test]
+    fn per_disconnect_grace_periods_are_independent() {
+        let mut mgr = ReconnectManager::new(Duration::from_secs(120));
+        // Short grace for one disconnect, long for another
+        mgr.record_disconnect("DRAFT01", PlayerId(0), Duration::from_millis(0));
+        mgr.record_disconnect("DRAFT01", PlayerId(1), Duration::from_secs(120));
+        std::thread::sleep(Duration::from_millis(1));
+
+        // Seat 0's short grace expired
+        let result = mgr.attempt_reconnect("DRAFT01", PlayerId(0));
+        assert!(matches!(result, ReconnectResult::Expired));
+
+        // Seat 1's long grace still active
+        let result = mgr.attempt_reconnect("DRAFT01", PlayerId(1));
+        assert!(matches!(result, ReconnectResult::Ok { .. }));
     }
 }

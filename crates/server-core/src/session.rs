@@ -764,7 +764,9 @@ impl SessionManager {
     pub fn handle_disconnect(&mut self, game_code: &str, player: PlayerId) {
         if let Some(session) = self.sessions.get_mut(game_code) {
             session.connected[player.0 as usize] = false;
-            self.reconnect.record_disconnect(game_code, player);
+            let default_grace = self.reconnect.grace_period;
+            self.reconnect
+                .record_disconnect(game_code, player, default_grace);
             info!(game = %game_code, player = ?player, "player disconnected");
         }
     }
