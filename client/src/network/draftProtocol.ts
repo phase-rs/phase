@@ -27,8 +27,9 @@ import type {
  *
  * Bumps to date:
  *   1 — initial P2P draft tournament protocol
+ *   2 — add timer sync, match start, round advance messages (Phase 57)
  */
-export const DRAFT_PROTOCOL_VERSION = 1 as const;
+export const DRAFT_PROTOCOL_VERSION = 2 as const;
 
 // ── Message Types ──────────────────────────────────────────────────────
 
@@ -36,12 +37,13 @@ export const DRAFT_PROTOCOL_VERSION = 1 as const;
  * Discriminated union of all draft-specific P2P messages.
  *
  * Flow:
- *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_submit_deck`
+ *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_submit_deck`,
+ *                 `draft_request_advance`
  *   Host → Guest: `draft_welcome`, `draft_reconnect_ack`, `draft_reconnect_rejected`,
  *                 `draft_state_update`, `draft_pick_ack`, `draft_error`,
  *                 `draft_kicked`, `draft_pairing`, `draft_match_result`,
  *                 `draft_paused`, `draft_resumed`, `draft_lobby_update`,
- *                 `draft_host_left`
+ *                 `draft_host_left`, `draft_timer_sync`, `draft_match_start`
  */
 export type DraftP2PMessage =
   // ── Guest → Host ───────────────────────────────────────────────────
@@ -132,6 +134,28 @@ export type DraftP2PMessage =
   | {
       type: "draft_host_left";
       reason: string;
+    }
+  | {
+      /** Host → Guest: lightweight timer tick with host-authoritative remaining time. */
+      type: "draft_timer_sync";
+      /** Milliseconds remaining for the current pick. Host-authoritative. */
+      remainingMs: number;
+    }
+  | {
+      /** Host UI only: trigger manual round advance in Casual mode. */
+      type: "draft_request_advance";
+    }
+  | {
+      /** Host → Guest: instructs player to start their match for this round. */
+      type: "draft_match_start";
+      matchId: string;
+      round: number;
+      opponentSeat: number;
+      opponentName: string;
+      /** PeerJS peer ID of the player who hosts the game match (lower seat# hosts). */
+      matchHostPeerId: string;
+      /** Whether this recipient is the match host (lower seat# hosts). */
+      isMatchHost: boolean;
     };
 
 // ── Validation ─────────────────────────────────────────────────────────
@@ -154,6 +178,9 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_resumed",
   "draft_lobby_update",
   "draft_host_left",
+  "draft_timer_sync",
+  "draft_request_advance",
+  "draft_match_start",
 ]);
 
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */
