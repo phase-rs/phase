@@ -19,6 +19,7 @@ import type {
   DraftPlayerView,
   SeatPublicView,
 } from "../adapter/draft-adapter";
+import type { DeckCardCount, MatchScore } from "../adapter/types";
 
 // ── Protocol Version ───────────────────────────────────────────────────
 
@@ -158,55 +159,61 @@ export type DraftP2PMessage =
       /** Whether this recipient is the match host (lower seat# hosts). */
       isMatchHost: boolean;
     }
-  // ── Bo3 (Traditional Draft) Messages ─────────────────────────────────
+  // ── Bo3 (Traditional Draft) Messages ────────────────────────��────────
   | {
-      /** Host → Guest: prompt player to sideboard between games in a Bo3 match. */
+      /** Host → Both: prompt players to sideboard between games in a Bo3 match. */
       type: "draft_bo3_sideboard_prompt";
       matchId: string;
       gameNumber: number;
-      /** Current score: wins for the receiving player. */
-      yourWins: number;
-      /** Current score: wins for the opponent. */
-      opponentWins: number;
+      score: MatchScore;
+      /** Seat index of the loser (who gets play/draw choice), or null if draw. */
+      loserSeat: number | null;
+      /** Sideboard timer duration in ms (0 = no timer). */
+      timerMs: number;
     }
   | {
       /** Guest → Host: player submits their sideboarded deck for the next game. */
       type: "draft_bo3_sideboard_submit";
       matchId: string;
-      gameNumber: number;
       mainDeck: string[];
+      sideboard: DeckCardCount[];
     }
   | {
-      /** Host → Guest: acknowledge sideboard submission, game will start shortly. */
-      type: "draft_bo3_sideboard_ack";
+      /** Host → Guest: prompt the loser to choose play or draw for the next game. */
+      type: "draft_bo3_play_draw_prompt";
       matchId: string;
       gameNumber: number;
+      score: MatchScore;
+      /** Play/draw timer duration in ms (0 = no timer). */
+      timerMs: number;
     }
   | {
-      /** Host → Guest: report the result of a single game within a Bo3 match. */
-      type: "draft_bo3_game_result";
+      /** Guest → Host: loser's play/draw choice for the next game. */
+      type: "draft_bo3_play_draw_choice";
+      matchId: string;
+      playFirst: boolean;
+    }
+  | {
+      /** Host → Both: signal that the next game is starting. */
+      type: "draft_bo3_game_start";
       matchId: string;
       gameNumber: number;
-      winnerSeat: number | null;
-      /** Updated score for seat A after this game. */
+      firstPlayerSeat: number;
+    }
+  | {
+      /** Host → All: broadcast updated Bo3 score to pod for standings display. */
+      type: "draft_bo3_score_update";
+      matchId: string;
       scoreA: number;
-      /** Updated score for seat B after this game. */
       scoreB: number;
     }
   | {
-      /** Host → Guest: the Bo3 match is complete (one player reached 2 wins). */
+      /** Host → Both: the Bo3 match is complete (one player reached 2 wins). */
       type: "draft_bo3_match_complete";
       matchId: string;
       winnerSeat: number;
       finalScoreA: number;
       finalScoreB: number;
-    }
-  | {
-      /** Guest → Host: report a single game result from within a Bo3 match. */
-      type: "draft_bo3_game_report";
-      matchId: string;
-      gameNumber: number;
-      winnerSeat: number | null;
     };
 
 // ── Validation ─────────────────────────────────────────────────────────
@@ -234,10 +241,11 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_match_start",
   "draft_bo3_sideboard_prompt",
   "draft_bo3_sideboard_submit",
-  "draft_bo3_sideboard_ack",
-  "draft_bo3_game_result",
+  "draft_bo3_play_draw_prompt",
+  "draft_bo3_play_draw_choice",
+  "draft_bo3_game_start",
+  "draft_bo3_score_update",
   "draft_bo3_match_complete",
-  "draft_bo3_game_report",
 ]);
 
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */

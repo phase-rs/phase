@@ -49,6 +49,10 @@ export type DraftPodGuestEvent =
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
   | { type: "timerSync"; remainingMs: number }
   | { type: "matchStart"; matchId: string; round: number; opponentSeat: number; opponentName: string; matchHostPeerId: string; isMatchHost: boolean }
+  | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
+  | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
+  | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
+  | { type: "bo3ScoreUpdate"; matchId: string; scoreA: number; scoreB: number }
   | { type: "kicked"; reason: string }
   | { type: "hostLeft"; reason: string }
   | { type: "error"; message: string }
@@ -254,6 +258,41 @@ export class DraftPodGuestAdapter {
         this.setStatus("error");
         this.emit({ type: "reconnectFailed", reason: event.reason });
         break;
+      case "bo3SideboardPrompt":
+        this.emit({
+          type: "bo3SideboardPrompt",
+          matchId: event.matchId,
+          gameNumber: event.gameNumber,
+          score: event.score,
+          loserSeat: event.loserSeat,
+          timerMs: event.timerMs,
+        });
+        break;
+      case "bo3ChoosePlayDraw":
+        this.emit({
+          type: "bo3ChoosePlayDraw",
+          matchId: event.matchId,
+          gameNumber: event.gameNumber,
+          score: event.score,
+          timerMs: event.timerMs,
+        });
+        break;
+      case "bo3GameStart":
+        this.emit({
+          type: "bo3GameStart",
+          matchId: event.matchId,
+          gameNumber: event.gameNumber,
+          firstPlayerSeat: event.firstPlayerSeat,
+        });
+        break;
+      case "bo3ScoreUpdate":
+        this.emit({
+          type: "bo3ScoreUpdate",
+          matchId: event.matchId,
+          scoreA: event.scoreA,
+          scoreB: event.scoreB,
+        });
+        break;
     }
   }
 
@@ -289,6 +328,16 @@ export class DraftPodGuestAdapter {
   sendMatchResult(matchId: string, winnerSeat: number | null): void {
     if (!this.guest) return;
     this.guest.sendMatchResult(matchId, winnerSeat);
+  }
+
+  sendSideboardSubmit(matchId: string, mainDeck: string[], sideboard: Array<{ name: string; count: number }>): void {
+    if (!this.guest) return;
+    this.guest.sendSideboardSubmit(matchId, mainDeck, sideboard);
+  }
+
+  sendPlayDrawChoice(matchId: string, playFirst: boolean): void {
+    if (!this.guest) return;
+    this.guest.sendPlayDrawChoice(matchId, playFirst);
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────

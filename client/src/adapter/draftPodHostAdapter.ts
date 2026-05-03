@@ -11,6 +11,7 @@
  */
 
 import type { DraftPlayerView, PairingView, PodPolicy, SeatPublicView, TournamentFormat } from "./draft-adapter";
+import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
@@ -50,6 +51,9 @@ export type DraftPodHostEvent =
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced"; newRound: number }
   | { type: "timerExpired" }
+  | { type: "bo3SideboardPromptSent"; matchId: string }
+  | { type: "bo3BothSideboardsSubmitted"; matchId: string }
+  | { type: "bo3GameStarted"; matchId: string; gameNumber: number }
   | { type: "error"; message: string };
 
 type DraftPodHostEventListener = (event: DraftPodHostEvent) => void;
@@ -269,6 +273,15 @@ export class DraftPodHostAdapter {
       case "timerExpired":
         this.emit({ type: "timerExpired" });
         break;
+      case "bo3SideboardPromptSent":
+        this.emit({ type: "bo3SideboardPromptSent", matchId: event.matchId });
+        break;
+      case "bo3BothSideboardsSubmitted":
+        this.emit({ type: "bo3BothSideboardsSubmitted", matchId: event.matchId });
+        break;
+      case "bo3GameStarted":
+        this.emit({ type: "bo3GameStarted", matchId: event.matchId, gameNumber: event.gameNumber });
+        break;
     }
   }
 
@@ -314,6 +327,35 @@ export class DraftPodHostAdapter {
   async replaceSeatWithBot(seat: number): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
     await this.host.replaceSeatWithBot(seat);
+  }
+
+  // ── Bo3 Between-Games forwarding ───────────────────────────────────
+
+  handleMatchBetweenGames(
+    matchId: string,
+    gameNumber: number,
+    score: MatchScore,
+    loserSeat: number | null,
+    seatA: number,
+    seatB: number,
+  ): void {
+    if (!this.host) throw new Error("Host not initialized");
+    this.host.handleMatchBetweenGames(matchId, gameNumber, score, loserSeat, seatA, seatB);
+  }
+
+  handleSideboardSubmit(
+    seat: number,
+    matchId: string,
+    mainDeck: string[],
+    sideboard: Array<{ name: string; count: number }>,
+  ): void {
+    if (!this.host) throw new Error("Host not initialized");
+    this.host.handleSideboardSubmit(seat, matchId, mainDeck, sideboard);
+  }
+
+  handlePlayDrawChosen(seat: number, matchId: string, playFirst: boolean): void {
+    if (!this.host) throw new Error("Host not initialized");
+    this.host.handlePlayDrawChosen(seat, matchId, playFirst);
   }
 
   // ── Host controls ──────────────────────────────────────────────────

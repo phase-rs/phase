@@ -38,6 +38,10 @@ export type DraftGuestEvent =
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
   | { type: "timerSync"; remainingMs: number }
   | { type: "matchStart"; matchId: string; round: number; opponentSeat: number; opponentName: string; matchHostPeerId: string; isMatchHost: boolean }
+  | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
+  | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
+  | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
+  | { type: "bo3ScoreUpdate"; matchId: string; scoreA: number; scoreB: number }
   | { type: "kicked"; reason: string }
   | { type: "hostLeft"; reason: string }
   | { type: "error"; message: string }
@@ -123,6 +127,16 @@ export class P2PDraftGuest {
   sendMatchResult(matchId: string, winnerSeat: number | null): void {
     if (!this.session) return;
     void this.session.send({ type: "draft_match_result", matchId, winnerSeat });
+  }
+
+  sendSideboardSubmit(matchId: string, mainDeck: string[], sideboard: Array<{ name: string; count: number }>): void {
+    if (!this.session) return;
+    void this.session.send({ type: "draft_bo3_sideboard_submit", matchId, mainDeck, sideboard });
+  }
+
+  sendPlayDrawChoice(matchId: string, playFirst: boolean): void {
+    if (!this.session) return;
+    void this.session.send({ type: "draft_bo3_play_draw_choice", matchId, playFirst });
   }
 
   // ── Message handling ───────────────────────────────────────────────
@@ -265,6 +279,49 @@ export class P2PDraftGuest {
       case "draft_host_left": {
         this.terminated = true;
         this.emit({ type: "hostLeft", reason: msg.reason });
+        break;
+      }
+
+      case "draft_bo3_sideboard_prompt": {
+        this.emit({
+          type: "bo3SideboardPrompt",
+          matchId: msg.matchId,
+          gameNumber: msg.gameNumber,
+          score: msg.score,
+          loserSeat: msg.loserSeat,
+          timerMs: msg.timerMs,
+        });
+        break;
+      }
+
+      case "draft_bo3_play_draw_prompt": {
+        this.emit({
+          type: "bo3ChoosePlayDraw",
+          matchId: msg.matchId,
+          gameNumber: msg.gameNumber,
+          score: msg.score,
+          timerMs: msg.timerMs,
+        });
+        break;
+      }
+
+      case "draft_bo3_game_start": {
+        this.emit({
+          type: "bo3GameStart",
+          matchId: msg.matchId,
+          gameNumber: msg.gameNumber,
+          firstPlayerSeat: msg.firstPlayerSeat,
+        });
+        break;
+      }
+
+      case "draft_bo3_score_update": {
+        this.emit({
+          type: "bo3ScoreUpdate",
+          matchId: msg.matchId,
+          scoreA: msg.scoreA,
+          scoreB: msg.scoreB,
+        });
         break;
       }
 

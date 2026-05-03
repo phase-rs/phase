@@ -15,6 +15,7 @@
 import { create } from "zustand";
 
 import type { DraftPlayerView, PairingView, SeatPublicView, StandingEntry } from "../adapter/draft-adapter";
+import type { MatchScore } from "../adapter/types";
 import {
   DraftPodHostAdapter,
   type DraftPodHostConfig,
@@ -90,9 +91,19 @@ interface MultiplayerDraftState {
   sideboardPrompt: {
     matchId: string;
     gameNumber: number;
-    yourWins: number;
-    opponentWins: number;
+    score: MatchScore;
+    loserSeat: number | null;
+    timerMs: number;
   } | null;
+  /** Bo3: play/draw choice prompt. */
+  playDrawPrompt: {
+    matchId: string;
+    gameNumber: number;
+    score: MatchScore;
+    timerMs: number;
+  } | null;
+  /** Bo3: whether this player has submitted their sideboard. */
+  sideboardSubmitted: boolean;
 }
 
 interface MultiplayerDraftActions {
@@ -136,6 +147,12 @@ interface MultiplayerDraftActions {
   overrideMatchResult: (matchId: string, winnerSeat: number | null) => void;
   /** Host: replace a disconnected player with a bot (Casual mode). */
   replaceSeatWithBot: (seat: number) => void;
+  /** Both: submit sideboard between Bo3 games. */
+  submitSideboard: (matchId: string, mainDeck: string[], sideboard: Array<{ name: string; count: number }>) => void;
+  /** Both: choose play or draw (loser of previous game). */
+  choosePlayDraw: (matchId: string, playFirst: boolean) => void;
+  /** Both: handle between-games prompt from match adapter. */
+  handleBetweenGamesPrompt: (prompt: { matchId: string; gameNumber: number; score: MatchScore; loserSeat: number | null; timerMs: number }) => void;
 }
 
 // ── Module-level adapter refs ──────────────────────────────────────────
@@ -149,7 +166,7 @@ function disposeMatchAdapter(set: SetFn): void {
   if (state.matchAdapter) {
     const adapter = state.matchAdapter as { dispose?: () => void };
     adapter.dispose?.();
-    set({ matchAdapter: null, matchPairing: null });
+    set({ matchAdapter: null, matchPairing: null, sideboardPrompt: null, playDrawPrompt: null, sideboardSubmitted: false });
   }
 }
 
@@ -180,6 +197,8 @@ const initialState: MultiplayerDraftState = {
   matchPairing: null,
   matchAdapter: null,
   sideboardPrompt: null,
+  playDrawPrompt: null,
+  sideboardSubmitted: false,
 };
 
 // ── Store ──────────────────────────────────────────────────────────────
@@ -338,11 +357,48 @@ export const useMultiplayerDraftStore = create<
           2, // 1v1 match
         );
 
-        // Wire gameOver to report result back to pod host (Pitfall 4).
         matchAdapter.onEvent((event) => {
+          if (event.type === "stateChanged") {
+            const wf = event.state?.waiting_for;
+            if (!wf) return;
+
+            if (wf.type === "GameOver") {
+              // Match is complete — report result to pod host
+              const winnerSeat = wf.data.winner === 0 ? seatIndex : matchPairing.opponentSeat;
+              get().reportMatchResult(matchPairing.matchId, winnerSeat);
+            } else if (wf.type === "BetweenGamesSideboard") {
+              // Between games in Bo3 — bridge to draft pod host for sideboard orchestration.
+              const score = wf.data.score;
+              const gameNumber = wf.data.game_number;
+              // Determine loser: the player whose wins are fewer
+              const loserSeat = score.p0_wins > score.p1_wins
+                ? matchPairing.opponentSeat
+                : score.p1_wins > score.p0_wins
+                  ? seatIndex
+                  : null; // draw
+              if (activeHostAdapter) {
+                activeHostAdapter.handleMatchBetweenGames(
+                  matchPairing.matchId,
+                  gameNumber,
+                  score,
+                  loserSeat,
+                  seatIndex!,
+                  matchPairing.opponentSeat,
+                );
+              }
+              // Also transition the host's own UI to betweenGames
+              get().handleBetweenGamesPrompt({
+                matchId: matchPairing.matchId,
+                gameNumber,
+                score,
+                loserSeat,
+                timerMs: 0, // Host determines timer internally via podPolicy
+              });
+            }
+          }
           if (event.type === "gameOver") {
-            const winnerSeat =
-              event.winner === 0 ? seatIndex : matchPairing.opponentSeat;
+            // Connection-level failure — report as match loss
+            const winnerSeat = event.winner === 0 ? seatIndex : matchPairing.opponentSeat;
             get().reportMatchResult(matchPairing.matchId, winnerSeat);
           }
         });
@@ -366,14 +422,26 @@ export const useMultiplayerDraftStore = create<
           conn,
         );
 
-        // Guest also reports gameOver as backup — only match host's report
-        // is authoritative, but both sides send to ensure delivery.
         matchAdapter.onEvent((event) => {
-          if (event.type === "gameOver") {
-            const winnerSeat =
-              event.winner === 0
-                ? matchPairing.opponentSeat
+          if (event.type === "stateChanged") {
+            const wf = event.state?.waiting_for;
+            if (!wf) return;
+
+            if (wf.type === "GameOver") {
+              // Guest reports as backup (host's report is authoritative)
+              const winnerSeat = wf.data.winner === 0
+                ? matchPairing.opponentSeat  // Guest's player 0 is the match host (opponent)
                 : seatIndex;
+              get().reportMatchResult(matchPairing.matchId, winnerSeat);
+            }
+            // BetweenGamesSideboard: guest receives sideboard prompt via draft pod channel
+            // (handled by bo3SideboardPrompt event from P2PDraftGuest), not here.
+          }
+          if (event.type === "gameOver") {
+            // Connection failure — report as match loss
+            const winnerSeat = event.winner === 0
+              ? matchPairing.opponentSeat
+              : seatIndex;
             get().reportMatchResult(matchPairing.matchId, winnerSeat);
           }
         });
@@ -409,6 +477,43 @@ export const useMultiplayerDraftStore = create<
   replaceSeatWithBot: (seat) => {
     if (!activeHostAdapter) return;
     void activeHostAdapter.replaceSeatWithBot(seat);
+  },
+
+  submitSideboard: (matchId, mainDeck, sideboard) => {
+    const { role } = get();
+    if (role === "host" && activeHostAdapter) {
+      // Host submits to own P2PDraftHost via DraftPodHostAdapter forwarder (seat 0).
+      activeHostAdapter.handleSideboardSubmit(0, matchId, mainDeck, sideboard);
+    } else if (role === "guest" && activeGuestAdapter) {
+      activeGuestAdapter.sendSideboardSubmit(matchId, mainDeck, sideboard);
+    }
+    set({ sideboardSubmitted: true });
+  },
+
+  choosePlayDraw: (matchId, playFirst) => {
+    const { role } = get();
+    if (role === "host" && activeHostAdapter) {
+      // Host as loser chooses play/draw via DraftPodHostAdapter forwarder (seat 0).
+      activeHostAdapter.handlePlayDrawChosen(0, matchId, playFirst);
+    } else if (role === "guest" && activeGuestAdapter) {
+      activeGuestAdapter.sendPlayDrawChoice(matchId, playFirst);
+    }
+  },
+
+  handleBetweenGamesPrompt: (prompt) => {
+    set({
+      phase: "betweenGames",
+      sideboardPrompt: {
+        matchId: prompt.matchId,
+        gameNumber: prompt.gameNumber,
+        score: prompt.score,
+        loserSeat: prompt.loserSeat,
+        timerMs: prompt.timerMs,
+      },
+      sideboardSubmitted: false,
+      playDrawPrompt: null,
+      timerRemainingMs: prompt.timerMs > 0 ? prompt.timerMs : null,
+    });
   },
 
   leave: async () => {
@@ -550,6 +655,15 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
     case "pickReceived":
     case "deckSubmitted":
       break;
+    case "bo3SideboardPromptSent":
+      // Host UI transition handled by the stateChanged bridge in startMatch.
+      break;
+    case "bo3BothSideboardsSubmitted":
+      // Informational — play/draw prompt or game start follows automatically.
+      break;
+    case "bo3GameStarted":
+      set({ phase: "matchInProgress", sideboardPrompt: null, playDrawPrompt: null, sideboardSubmitted: false });
+      break;
   }
 }
 
@@ -628,6 +742,43 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       break;
     case "reconnecting":
     case "reconnectFailed":
+      break;
+    case "bo3SideboardPrompt":
+      set({
+        phase: "betweenGames",
+        sideboardPrompt: {
+          matchId: event.matchId,
+          gameNumber: event.gameNumber,
+          score: event.score,
+          loserSeat: event.loserSeat,
+          timerMs: event.timerMs,
+        },
+        sideboardSubmitted: false,
+        playDrawPrompt: null,
+        timerRemainingMs: event.timerMs > 0 ? event.timerMs : null,
+      });
+      break;
+    case "bo3ChoosePlayDraw":
+      set({
+        playDrawPrompt: {
+          matchId: event.matchId,
+          gameNumber: event.gameNumber,
+          score: event.score,
+          timerMs: event.timerMs,
+        },
+        timerRemainingMs: event.timerMs > 0 ? event.timerMs : null,
+      });
+      break;
+    case "bo3GameStart":
+      set({
+        phase: "matchInProgress",
+        sideboardPrompt: null,
+        playDrawPrompt: null,
+        sideboardSubmitted: false,
+      });
+      break;
+    case "bo3ScoreUpdate":
+      // Informational — standings update comes via viewUpdated
       break;
   }
 }

@@ -21,6 +21,7 @@ import {
 } from "../network/draftPeerSession";
 import { DRAFT_PROTOCOL_VERSION } from "../network/draftProtocol";
 import type { DraftP2PMessage } from "../network/draftProtocol";
+import type { MatchScore } from "./types";
 import {
   saveDraftHostSession,
   clearDraftHostSession,
@@ -28,6 +29,17 @@ import {
 } from "../services/draftPersistence";
 
 // ── Types ──────────────────────────────────────────────────────────────
+
+/** Tracks Bo3 match state between games for a single pairing. */
+interface Bo3MatchState {
+  seatA: number;
+  seatB: number;
+  submittedA: boolean;
+  submittedB: boolean;
+  loserSeat: number | null;
+  gameNumber: number;
+  score: MatchScore;
+}
 
 export type DraftHostEvent =
   | { type: "seatJoined"; seatIndex: number; displayName: string }
@@ -47,7 +59,10 @@ export type DraftHostEvent =
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced"; newRound: number }
-  | { type: "timerExpired" };
+  | { type: "timerExpired" }
+  | { type: "bo3SideboardPromptSent"; matchId: string }
+  | { type: "bo3BothSideboardsSubmitted"; matchId: string }
+  | { type: "bo3GameStarted"; matchId: string; gameNumber: number };
 
 type DraftHostEventListener = (event: DraftHostEvent) => void;
 
@@ -88,7 +103,9 @@ export class P2PDraftHost {
   private timerInterval: ReturnType<typeof setInterval> | null = null;
   private timerRemainingMs = 0;
   private timerEndAt = 0;
+  private timerContext: "pick" | "sideboard" | "playdraw" | null = null;
   private podPolicy: PodPolicy = "Competitive";
+  private bo3State = new Map<string, Bo3MatchState>();
 
   constructor(
     private readonly hostPeer: Peer,
@@ -320,6 +337,14 @@ export class P2PDraftHost {
         // T-57-07: ignore from guests — only host UI triggers round advance
         break;
       }
+      case "draft_bo3_sideboard_submit": {
+        this.handleSideboardSubmit(seat, msg.matchId, msg.mainDeck, msg.sideboard);
+        break;
+      }
+      case "draft_bo3_play_draw_choice": {
+        this.handlePlayDrawChosen(seat, msg.matchId, msg.playFirst);
+        break;
+      }
       default:
         break;
     }
@@ -399,7 +424,7 @@ export class P2PDraftHost {
       const allPicked = await this.adapter.allPicksSubmitted();
       if (allPicked) {
         this.picksThisRound.clear();
-        this.clearPickTimer();
+        this.clearActiveTimer();
         this.emit({ type: "roundComplete" });
 
         // Broadcast updated views to all players
@@ -408,7 +433,7 @@ export class P2PDraftHost {
         // Check if draft is complete (deckbuilding)
         const hostView = await this.adapter.getViewForSeat(0);
         if (hostView.status === "Deckbuilding") {
-          this.clearPickTimer();
+          this.clearActiveTimer();
           this.emit({ type: "draftComplete" });
         } else if (hostView.status === "Drafting") {
           this.startPickTimer(hostView.pick_number);
@@ -539,34 +564,69 @@ export class P2PDraftHost {
     this.emit({ type: "seatDisconnected", seatIndex: seat });
   }
 
-  // ── Pick timer management ───────────────────────────────────────────
+  // ── Timer management ─────────────────────────────────────────────────
+
+  private clearActiveTimer(): void {
+    if (this.timerInterval !== null) {
+      clearInterval(this.timerInterval);
+      this.timerInterval = null;
+    }
+    this.timerContext = null;
+  }
 
   private startPickTimer(pickNumber: number): void {
-    this.clearPickTimer();
+    this.clearActiveTimer();
     if (this.podPolicy !== "Competitive") return;
+    this.timerContext = "pick";
     const duration = pickTimerDurationMs(pickNumber);
     this.timerRemainingMs = duration;
     this.timerEndAt = Date.now() + duration;
     this.timerInterval = setInterval(() => {
-      this.onTimerTick();
+      this.onPickTimerTick();
     }, 1_000);
   }
 
-  private onTimerTick(): void {
+  private onPickTimerTick(): void {
     this.timerRemainingMs = Math.max(0, this.timerEndAt - Date.now());
     this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
     if (this.timerRemainingMs <= 0) {
-      this.clearPickTimer();
+      this.clearActiveTimer();
       this.emit({ type: "timerExpired" });
       void this.autoPickAllPending();
     }
   }
 
-  private clearPickTimer(): void {
-    if (this.timerInterval !== null) {
-      clearInterval(this.timerInterval);
-      this.timerInterval = null;
-    }
+  private startSideboardTimer(matchId: string): void {
+    this.clearActiveTimer();
+    this.timerContext = "sideboard";
+    const SIDEBOARD_TIMER_MS = 60_000;
+    this.timerRemainingMs = SIDEBOARD_TIMER_MS;
+    this.timerEndAt = Date.now() + SIDEBOARD_TIMER_MS;
+    this.timerInterval = setInterval(() => {
+      this.timerRemainingMs = Math.max(0, this.timerEndAt - Date.now());
+      this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
+      if (this.timerRemainingMs <= 0) {
+        this.clearActiveTimer();
+        this.autoSubmitSideboards(matchId);
+      }
+    }, 1_000);
+  }
+
+  private startPlayDrawTimer(matchId: string): void {
+    this.clearActiveTimer();
+    this.timerContext = "playdraw";
+    const PLAY_DRAW_TIMER_MS = 10_000;
+    this.timerRemainingMs = PLAY_DRAW_TIMER_MS;
+    this.timerEndAt = Date.now() + PLAY_DRAW_TIMER_MS;
+    this.timerInterval = setInterval(() => {
+      this.timerRemainingMs = Math.max(0, this.timerEndAt - Date.now());
+      this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
+      if (this.timerRemainingMs <= 0) {
+        this.clearActiveTimer();
+        // Auto-choose "play" on expiry
+        this.resolvePlayDrawChoice(matchId, true);
+      }
+    }, 1_000);
   }
 
   private async autoPickAllPending(): Promise<void> {
@@ -698,6 +758,137 @@ export class P2PDraftHost {
     await this.reportMatchResult(matchId, winnerSeat);
   }
 
+  // ── Bo3 Between-Games Orchestration ────────────────────────────────────
+
+  /**
+   * Orchestrates the between-games flow for a Bo3 match.
+   * Called when the match adapter detects BetweenGamesSideboard waiting state.
+   */
+  handleMatchBetweenGames(
+    matchId: string,
+    gameNumber: number,
+    score: MatchScore,
+    loserSeat: number | null,
+    seatA: number,
+    seatB: number,
+  ): void {
+    this.bo3State.set(matchId, {
+      seatA, seatB,
+      submittedA: false, submittedB: false,
+      loserSeat, gameNumber, score,
+    });
+
+    const timerMs = this.podPolicy === "Competitive" ? 60_000 : 0;
+
+    // Send sideboard prompt to both pairing players via draft pod channel
+    const prompt: DraftP2PMessage = {
+      type: "draft_bo3_sideboard_prompt",
+      matchId, gameNumber, score, loserSeat, timerMs,
+    };
+    this.sendToSeat(seatA, prompt);
+    this.sendToSeat(seatB, prompt);
+
+    // Broadcast live score to all guests for standings display
+    this.broadcastToGuests({
+      type: "draft_bo3_score_update",
+      matchId,
+      scoreA: score.p0_wins,
+      scoreB: score.p1_wins,
+    });
+
+    if (timerMs > 0) {
+      this.startSideboardTimer(matchId);
+    }
+
+    this.emit({ type: "bo3SideboardPromptSent", matchId });
+  }
+
+  /**
+   * Handle a sideboard submission from a player in a Bo3 match.
+   * T-58-01: validates seat matches seatA or seatB.
+   */
+  handleSideboardSubmit(
+    seat: number,
+    matchId: string,
+    _mainDeck: string[],
+    _sideboard: Array<{ name: string; count: number }>,
+  ): void {
+    const state = this.bo3State.get(matchId);
+    if (!state) return;
+
+    // T-58-01: validate sending seat belongs to this pairing
+    if (seat === state.seatA) state.submittedA = true;
+    else if (seat === state.seatB) state.submittedB = true;
+    else return;
+
+    // Check both-submitted gate
+    if (state.submittedA && state.submittedB) {
+      this.clearActiveTimer();
+      this.emit({ type: "bo3BothSideboardsSubmitted", matchId });
+      this.transitionToPlayDraw(matchId, state);
+    }
+  }
+
+  /**
+   * Handle play/draw choice from the losing player.
+   * T-58-04: validates seat matches loserSeat.
+   */
+  handlePlayDrawChosen(seat: number, matchId: string, playFirst: boolean): void {
+    const state = this.bo3State.get(matchId);
+    if (!state || state.loserSeat !== seat) return;
+    this.resolvePlayDrawChoice(matchId, playFirst);
+  }
+
+  private autoSubmitSideboards(matchId: string): void {
+    const state = this.bo3State.get(matchId);
+    if (!state) return;
+    // Mark both as submitted (they keep their current decks)
+    state.submittedA = true;
+    state.submittedB = true;
+    this.emit({ type: "bo3BothSideboardsSubmitted", matchId });
+    this.transitionToPlayDraw(matchId, state);
+  }
+
+  private transitionToPlayDraw(matchId: string, state: Bo3MatchState): void {
+    if (state.loserSeat !== null) {
+      const timerMs = this.podPolicy === "Competitive" ? 10_000 : 0;
+      const prompt: DraftP2PMessage = {
+        type: "draft_bo3_play_draw_prompt",
+        matchId,
+        gameNumber: state.gameNumber,
+        score: state.score,
+        timerMs,
+      };
+      this.sendToSeat(state.loserSeat, prompt);
+      if (timerMs > 0) this.startPlayDrawTimer(matchId);
+    } else {
+      // Draw — keep previous first player. Signal game start immediately.
+      this.resolvePlayDrawChoice(matchId, true);
+    }
+  }
+
+  private resolvePlayDrawChoice(matchId: string, playFirst: boolean): void {
+    this.clearActiveTimer();
+    const state = this.bo3State.get(matchId);
+    if (!state) return;
+
+    const firstPlayerSeat = playFirst
+      ? (state.loserSeat ?? state.seatA)
+      : (state.loserSeat === state.seatA ? state.seatB : state.seatA);
+
+    const msg: DraftP2PMessage = {
+      type: "draft_bo3_game_start",
+      matchId,
+      gameNumber: state.gameNumber,
+      firstPlayerSeat,
+    };
+    this.sendToSeat(state.seatA, msg);
+    this.sendToSeat(state.seatB, msg);
+
+    this.bo3State.delete(matchId);
+    this.emit({ type: "bo3GameStarted", matchId, gameNumber: state.gameNumber });
+  }
+
   private sendToSeat(seat: number, msg: DraftP2PMessage): void {
     if (seat === 0) {
       // Host is seat 0 — emit event directly instead of sending over network
@@ -741,7 +932,7 @@ export class P2PDraftHost {
 
   requestPause(): void {
     if (!this.paused) {
-      this.clearPickTimer();
+      this.clearActiveTimer();
       this.paused = true;
       this.broadcastToGuests({ type: "draft_paused", reason: "Paused by host" });
     }
@@ -841,12 +1032,13 @@ export class P2PDraftHost {
   // ── Cleanup ────────────────────────────────────────────────────────
 
   dispose(): void {
-    this.clearPickTimer();
+    this.clearActiveTimer();
     if (this.hostConnectionUnsub) this.hostConnectionUnsub();
     for (const { timer } of this.disconnectedSeats.values()) {
       if (timer !== null) clearTimeout(timer);
     }
     this.disconnectedSeats.clear();
+    this.bo3State.clear();
     for (const session of this.guestSessions.values()) {
       session.close();
     }
@@ -936,5 +1128,10 @@ export class P2PDraftHost {
   /** Whether the draft is paused. */
   get isPaused(): boolean {
     return this.paused;
+  }
+
+  /** The active timer type, if any. */
+  get activeTimerContext(): "pick" | "sideboard" | "playdraw" | null {
+    return this.timerContext;
   }
 }
