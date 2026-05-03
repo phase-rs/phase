@@ -369,6 +369,18 @@ impl DraftSessionManager {
             .find(|s| s.active_matches.values().any(|gc| gc == game_code))
             .map(|s| s.draft_code.clone())
     }
+
+    /// Remove a draft session entirely, cleaning up the token_to_draft index.
+    /// Returns the removed session if it existed.
+    pub fn remove_draft(&mut self, draft_code: &str) -> Option<DraftSession> {
+        let session = self.sessions.remove(draft_code)?;
+        for token in &session.player_tokens {
+            if !token.is_empty() {
+                self.token_to_draft.remove(token);
+            }
+        }
+        Some(session)
+    }
 }
 
 impl Default for DraftSessionManager {

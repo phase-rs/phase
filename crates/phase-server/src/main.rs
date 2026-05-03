@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod admin;
 mod logging;
 mod persistence;
 
@@ -594,10 +596,7 @@ struct AppState {
     mode: Mode,
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(app_state): State<AppState>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(app_state): State<AppState>) -> impl IntoResponse {
     let current = app_state.player_count.load(Ordering::Relaxed);
     if current >= MAX_CONNECTIONS {
         warn!(
@@ -950,9 +949,7 @@ async fn report_draft_game_over(
         for (pid, sender) in players.iter() {
             let seat = pid.0 as usize;
             if let Some(view) = views.get(seat) {
-                let _ = sender.send(ServerMessage::DraftStateUpdate {
-                    view: view.clone(),
-                });
+                let _ = sender.send(ServerMessage::DraftStateUpdate { view: view.clone() });
             }
         }
     }
@@ -975,9 +972,7 @@ async fn broadcast_draft_views(
         for (pid, sender) in players.iter() {
             let seat = pid.0 as usize;
             if let Some(view) = views.get(seat) {
-                let msg = ServerMessage::DraftStateUpdate {
-                    view: view.clone(),
-                };
+                let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
                 let _ = sender.send(msg);
             }
         }
@@ -1026,9 +1021,7 @@ fn spawn_pick_timer(
                         seat: seat_idx as u8,
                         card_instance_id: card_id,
                     };
-                    if let Err(e) =
-                        draft_core::session::apply(&mut session.session, action, None)
-                    {
+                    if let Err(e) = draft_core::session::apply(&mut session.session, action, None) {
                         warn!(
                             draft = %timer_draft_code,
                             seat = seat_idx,
@@ -1041,9 +1034,7 @@ fn spawn_pick_timer(
         }
 
         // Broadcast updated views
-        let views: Vec<_> = (0..pod_size)
-            .map(|i| session.view_for_seat(i))
-            .collect();
+        let views: Vec<_> = (0..pod_size).map(|i| session.view_for_seat(i)).collect();
         drop(mgr);
 
         let conns = timer_connections.lock().await;
@@ -1051,9 +1042,7 @@ fn spawn_pick_timer(
             for (pid, sender) in players.iter() {
                 let seat = pid.0 as usize;
                 if let Some(view) = views.get(seat) {
-                    let _ = sender.send(ServerMessage::DraftStateUpdate {
-                        view: view.clone(),
-                    });
+                    let _ = sender.send(ServerMessage::DraftStateUpdate { view: view.clone() });
                 }
             }
         }
@@ -3239,10 +3228,7 @@ async fn handle_client_message(
             }
         }
 
-        ClientMessage::DraftAction {
-            draft_code,
-            action,
-        } => {
+        ClientMessage::DraftAction { draft_code, action } => {
             let token = match &identity.draft_token {
                 Some(t) => t.clone(),
                 None => {
@@ -3269,13 +3255,7 @@ async fn handle_client_message(
             match result {
                 Ok(views) => {
                     // Broadcast DraftStateUpdate to all connected sockets in the pod
-                    broadcast_draft_views(
-                        &draft_code,
-                        &views,
-                        connections,
-                        draft_state,
-                    )
-                    .await;
+                    broadcast_draft_views(&draft_code, &views, connections, draft_state).await;
 
                     // If draft just started, spawn pick timer
                     if is_start {
