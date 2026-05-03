@@ -1,3 +1,4 @@
+import type { CardType } from "../../adapter/types.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 import { DialogShell } from "./DialogShell.tsx";
@@ -16,6 +17,9 @@ interface ChoiceModalProps {
   onClose?: () => void;
   /** Card name to preview above the options. Omit to skip the preview. */
   previewCardName?: string;
+  /** Card type info for the preview. The preview uses this to pick the right
+   * rules-text band for non-standard frames (saga, planeswalker, battle, etc.). */
+  previewCardTypes?: CardType;
 }
 
 export function ChoiceModal({
@@ -25,6 +29,7 @@ export function ChoiceModal({
   onChoose,
   onClose,
   previewCardName,
+  previewCardTypes,
 }: ChoiceModalProps) {
   return (
     <DialogShell
@@ -34,7 +39,10 @@ export function ChoiceModal({
     >
       {previewCardName && (
         <div className="px-3 pt-3 lg:px-5 lg:pt-4">
-          <CardTextboxPreview cardName={previewCardName} />
+          <CardTextboxPreview
+            cardName={previewCardName}
+            cardTypes={previewCardTypes}
+          />
         </div>
       )}
       <div className="px-3 py-3 lg:px-5 lg:py-5">
