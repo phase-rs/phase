@@ -58,6 +58,7 @@ use nom_language::error::VerboseError;
 
 use super::oracle_effect::conditions::strip_leading_general_conditional;
 use super::oracle_effect::strip_trailing_duration;
+use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{AbilityCondition, Duration};
 
@@ -163,7 +164,7 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
     // the same `parse_inner_condition` pipeline that the chunk loop uses
     // is the single authority for condition recognition.
     if ctx.condition.is_none() {
-        let (cond, rest) = strip_leading_general_conditional(&text);
+        let (cond, rest) = strip_leading_general_conditional(&text, &mut ParseContext::default());
         if let Some(cond) = cond {
             ctx.condition = Some(cond);
             return peel_inner(rest, ctx);

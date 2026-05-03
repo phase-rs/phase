@@ -688,7 +688,10 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
-fn try_parse_inline_delayed_trigger(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_inline_delayed_trigger(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     if tag::<_, _, VerboseError<&str>>("when ")
         .parse(tp.lower)
         .is_err()
@@ -1091,7 +1094,10 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     })
 }
 
-fn try_parse_self_name_exile(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_self_name_exile(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let card_name = ctx.card_name.as_deref()?;
     let (_, rest_orig) =
         nom_on_lower(tp.original, tp.lower, |i| value((), tag("exile ")).parse(i))?;
@@ -1457,7 +1463,10 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
 /// CR 608.2d: Parse "have it [verb]" / "have you [verb]" causative constructions.
 /// Used by "any opponent may" effects where the opponent causes the source or controller
 /// to perform an action (e.g., "have it deal 4 damage to them").
-fn try_parse_have_causative(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_have_causative(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     // Pattern A: "have it deal N damage to them" / "have ~ deal N damage to them"
     let after_have = nom_on_lower(tp.original, tp.lower, |input| {
         value((), alt((tag("have it "), tag("have ~ ")))).parse(input)
@@ -2598,7 +2607,10 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
 /// Two Oracle patterns:
 /// - "Target creature's owner puts it on their choice of the top or bottom of their library"
 /// - "The owner of target nonland permanent puts it on their choice of the top or bottom of their library"
-fn try_parse_put_on_top_or_bottom(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_put_on_top_or_bottom(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain the signature suffix
@@ -2658,7 +2670,10 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair, ctx: &mut ParseContext) -> Optio
 /// - "Target permanent's owner shuffles it into their library"
 ///
 /// Produces a `ChangeZone` to Library with `owner_library: true` + a `Shuffle` sub_ability.
-fn try_parse_owner_of_target_shuffle(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_owner_of_target_shuffle(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain both "shuffle" and "library" to be a shuffle-into-library pattern
@@ -2693,7 +2708,10 @@ fn try_parse_owner_of_target_shuffle(tp: TextPair, ctx: &mut ParseContext) -> Op
 ///
 /// The "second from the top or on the bottom" pattern is semantically PutOnTopOrBottom (the
 /// player chooses). We map it to the same `PutOnTopOrBottom` effect.
-fn try_parse_owner_of_target_put_second(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_owner_of_target_put_second(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain the signature suffix
@@ -3620,7 +3638,7 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
         .map(|((), rest)| rest)
         .unwrap_or(&condition_text)
         .trim();
-        let condition = try_nom_condition_as_ability_condition(cond_body);
+        let condition = try_nom_condition_as_ability_condition(cond_body, ctx);
         return ClauseAst::Conditional {
             condition,
             clause: Box::new(parse_clause_ast(&remainder, ctx)),
@@ -6811,7 +6829,7 @@ pub(crate) fn parse_effect_chain_ir(
                 .find(|c| !c.absorbed_by_followup)
                 .map(|c| AbilityDefinition::new(kind, c.parsed.effect.clone()));
             if let Some(alt_def) =
-                try_parse_dig_instead_alternative(normalized_text, prev_temp.as_ref(), kind)
+                try_parse_dig_instead_alternative(normalized_text, prev_temp.as_ref(), kind, ctx)
             {
                 if !clauses.is_empty() {
                     // Store the alt_def's effect as `parsed.effect` so followup continuation
@@ -6909,7 +6927,7 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 608.2e: "if [condition], [effect] instead" — the preceding ability's effect
         // is replaced when the condition holds. Keep the base effect as the root so
         // target collection stays anchored on the printed target-bearing clause.
-        if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind) {
+        if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind, ctx) {
             if !clauses.is_empty() {
                 clauses.push(ClauseIr {
                     parsed: parsed_clause(Effect::Unimplemented {
@@ -6942,7 +6960,7 @@ pub(crate) fn parse_effect_chain_ir(
         // Runs only when no dedicated leading stripper matched. Handles patterns like
         // "if you control 3 or more creatures, draw a card".
         let (leading_cond, text) = if condition.is_none() {
-            strip_leading_general_conditional(&text)
+            strip_leading_general_conditional(&text, ctx)
         } else {
             (None, text)
         };
@@ -7036,7 +7054,7 @@ pub(crate) fn parse_effect_chain_ir(
             && turn_cond.is_none()
             && keyword_instead_cond.is_none()
         {
-            strip_suffix_conditional(&text)
+            strip_suffix_conditional(&text, ctx)
         } else {
             (None, text)
         };
@@ -7054,7 +7072,7 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 608.2c + CR 400.7: "unless ~ entered this turn" — strip suffix and
         // replace condition with SourceDidNotEnterThisTurn. The IfYouDo condition
         // is redundant when the parent is optional (optional already gates the sub).
-        let (unless_entered, text) = strip_unless_entered_suffix(&text);
+        let (unless_entered, text) = strip_unless_entered_suffix(&text, ctx);
         let condition = if unless_entered.is_some() {
             unless_entered
         } else {
@@ -9726,7 +9744,11 @@ fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) -> Option<E
 /// Safety: `pos` is computed from `lower.find(...)` and used to slice both `text`
 /// and `lower` at the same byte offset. This is sound because Oracle text is ASCII
 /// and `to_lowercase()` preserves byte length for ASCII characters.
-fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str, ctx: &mut ParseContext) -> Option<(Effect, &'a str)> {
+fn try_parse_damage_with_remainder<'a>(
+    text: &'a str,
+    lower: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(Effect, &'a str)> {
     // Match: "~ deals N damage to {target}" / "deal N damage to {target}"
     // and variable forms like "deal that much damage" or
     // "deal damage equal to its power".
@@ -11634,8 +11656,10 @@ mod tests {
     #[test]
     fn try_split_damage_compound_lightning_helix() {
         let mut ctx = ParseContext::default();
-        let clause =
-            try_split_damage_compound("~ deals 3 damage to any target and you gain 3 life", &mut ctx);
+        let clause = try_split_damage_compound(
+            "~ deals 3 damage to any target and you gain 3 life",
+            &mut ctx,
+        );
         let clause = clause.expect("should split damage + life gain compound");
         assert!(
             matches!(
@@ -11868,9 +11892,11 @@ mod tests {
     fn try_split_damage_compound_event_context_oath_of_kaya() {
         // CR 608.2k: "that player" event-context ref with compound remainder
         let mut ctx = ParseContext::default();
-        let clause =
-            try_split_damage_compound("~ deals 2 damage to that player and you gain 2 life", &mut ctx)
-                .expect("should split event-context compound");
+        let clause = try_split_damage_compound(
+            "~ deals 2 damage to that player and you gain 2 life",
+            &mut ctx,
+        )
+        .expect("should split event-context compound");
         assert!(
             matches!(
                 clause.effect,
@@ -11904,9 +11930,11 @@ mod tests {
     fn try_split_damage_compound_event_context_torch_the_tower() {
         // CR 608.2k: "that permanent" event-context ref with compound remainder
         let mut ctx = ParseContext::default();
-        let clause =
-            try_split_damage_compound("~ deals 3 damage to that permanent and you scry 1", &mut ctx)
-                .expect("should split event-context compound");
+        let clause = try_split_damage_compound(
+            "~ deals 3 damage to that permanent and you scry 1",
+            &mut ctx,
+        )
+        .expect("should split event-context compound");
         assert!(
             matches!(
                 clause.effect,
@@ -16607,7 +16635,10 @@ mod tests {
 
     #[test]
     fn strip_unless_entered_suffix_strips_correctly() {
-        let (cond, text) = strip_unless_entered_suffix("discard a card unless ~ entered this turn");
+        let (cond, text) = strip_unless_entered_suffix(
+            "discard a card unless ~ entered this turn",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             cond,
             Some(AbilityCondition::Not {
@@ -16620,7 +16651,8 @@ mod tests {
 
     #[test]
     fn strip_unless_entered_suffix_no_match() {
-        let (cond, text) = strip_unless_entered_suffix("discard a card");
+        let (cond, text) =
+            strip_unless_entered_suffix("discard a card", &mut ParseContext::default());
         assert!(cond.is_none());
         assert_eq!(text, "discard a card");
     }
@@ -16628,7 +16660,10 @@ mod tests {
     #[test]
     fn strip_unless_general_your_turn() {
         // "unless it's your turn" → Not(DuringYourTurn) → IsYourTurn { negated: true }
-        let (cond, text) = strip_unless_entered_suffix("draw a card unless it's your turn");
+        let (cond, text) = strip_unless_entered_suffix(
+            "draw a card unless it's your turn",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             cond,
             Some(AbilityCondition::Not {
@@ -16641,8 +16676,10 @@ mod tests {
     #[test]
     fn strip_unless_you_control_a_creature() {
         // "unless you control a creature" → Not(IsPresent) → ObjectCount EQ 0
-        let (cond, text) =
-            strip_unless_entered_suffix("sacrifice this enchantment unless you control a creature");
+        let (cond, text) = strip_unless_entered_suffix(
+            "sacrifice this enchantment unless you control a creature",
+            &mut ParseContext::default(),
+        );
         match cond {
             Some(AbilityCondition::QuantityCheck {
                 comparator: Comparator::EQ,
@@ -16656,8 +16693,10 @@ mod tests {
 
     #[test]
     fn strip_unless_unrecognized_returns_none() {
-        let (cond, text) =
-            strip_unless_entered_suffix("sacrifice it unless something weird happens");
+        let (cond, text) = strip_unless_entered_suffix(
+            "sacrifice it unless something weird happens",
+            &mut ParseContext::default(),
+        );
         assert!(cond.is_none());
         assert_eq!(text, "sacrifice it unless something weird happens");
     }
@@ -16920,7 +16959,10 @@ mod tests {
 
     #[test]
     fn search_filter_creature_with_mana_value_3_or_less() {
-        let filter = parse_search_filter("creature card with mana value 3 or less");
+        let filter = parse_search_filter(
+            "creature card with mana value 3 or less",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -16940,7 +16982,10 @@ mod tests {
 
     #[test]
     fn search_filter_creature_with_mana_value_exact() {
-        let filter = parse_search_filter("creature card with mana value 2");
+        let filter = parse_search_filter(
+            "creature card with mana value 2",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -16962,6 +17007,7 @@ mod tests {
     fn search_filter_artifact_creature_or_enchantment_with_mana_value_1_or_less() {
         let filter = parse_search_filter(
             "artifact, creature, and/or enchantment cards with mana value 1 or less",
+            &mut ParseContext::default(),
         );
         let TargetFilter::Or { filters } = filter else {
             panic!("Expected Or filter, got {filter:?}");
@@ -16985,6 +17031,7 @@ mod tests {
     fn search_filter_aura_preserves_enchantment_type_and_dynamic_mana_value() {
         let filter = parse_search_filter(
             "Aura card with mana value less than or equal to that Aura and with a different name than each Aura you control",
+            &mut ParseContext::default(),
         );
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
@@ -17012,7 +17059,7 @@ mod tests {
 
     #[test]
     fn search_filter_card_with_that_name() {
-        let filter = parse_search_filter("card with that name");
+        let filter = parse_search_filter("card with that name", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter with SameName, got {filter:?}");
         };
@@ -17024,7 +17071,7 @@ mod tests {
 
     #[test]
     fn search_filter_basic_card_with_that_name() {
-        let filter = parse_search_filter("basic card with that name");
+        let filter = parse_search_filter("basic card with that name", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter with Basic + SameName, got {filter:?}");
         };
@@ -17089,8 +17136,10 @@ mod tests {
 
     #[test]
     fn search_library_details_up_to_five() {
-        let details =
-            parse_search_library_details("search your library for up to five creature cards");
+        let details = parse_search_library_details(
+            "search your library for up to five creature cards",
+            &mut ParseContext::default(),
+        );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
@@ -17140,7 +17189,7 @@ mod tests {
 
     #[test]
     fn search_filter_noncreature_card() {
-        let filter = parse_search_filter("noncreature card");
+        let filter = parse_search_filter("noncreature card", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -17152,7 +17201,7 @@ mod tests {
 
     #[test]
     fn search_filter_nonland_card() {
-        let filter = parse_search_filter("nonland card");
+        let filter = parse_search_filter("nonland card", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -17164,7 +17213,7 @@ mod tests {
 
     #[test]
     fn search_filter_card_of_chosen_kind() {
-        let filter = parse_search_filter("card of the chosen kind");
+        let filter = parse_search_filter("card of the chosen kind", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -17176,7 +17225,10 @@ mod tests {
 
     #[test]
     fn search_filter_permanent_card_of_chosen_kind() {
-        let filter = parse_search_filter("permanent card of the chosen kind");
+        let filter = parse_search_filter(
+            "permanent card of the chosen kind",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -17194,7 +17246,7 @@ mod tests {
 
     #[test]
     fn seek_an_elf_card() {
-        let details = parse_seek_details("seek an elf card");
+        let details = parse_seek_details("seek an elf card", &mut ParseContext::default());
         assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
         assert_eq!(details.destination, Zone::Hand);
         assert!(!details.enter_tapped);
@@ -17209,7 +17261,7 @@ mod tests {
 
     #[test]
     fn seek_two_nonland_cards() {
-        let details = parse_seek_details("seek two nonland cards");
+        let details = parse_seek_details("seek two nonland cards", &mut ParseContext::default());
         assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
         assert_eq!(details.destination, Zone::Hand);
         let TargetFilter::Typed(tf) = &details.filter else {
@@ -17223,7 +17275,10 @@ mod tests {
 
     #[test]
     fn seek_cards_of_chosen_kind() {
-        let details = parse_seek_details("seek two cards of the chosen kind");
+        let details = parse_seek_details(
+            "seek two cards of the chosen kind",
+            &mut ParseContext::default(),
+        );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
@@ -17265,7 +17320,10 @@ mod tests {
 
     #[test]
     fn seek_land_onto_battlefield_tapped() {
-        let details = parse_seek_details("seek a land card and put it onto the battlefield tapped");
+        let details = parse_seek_details(
+            "seek a land card and put it onto the battlefield tapped",
+            &mut ParseContext::default(),
+        );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
         assert_eq!(details.destination, Zone::Battlefield);
         assert!(details.enter_tapped);
@@ -18420,8 +18478,11 @@ mod tests {
 
     #[test]
     fn parse_you_controlled_parent_target_condition_variants() {
-        let artifact = try_nom_condition_as_ability_condition("you controlled that artifact")
-            .expect("artifact condition should parse");
+        let artifact = try_nom_condition_as_ability_condition(
+            "you controlled that artifact",
+            &mut ParseContext::default(),
+        )
+        .expect("artifact condition should parse");
         let AbilityCondition::TargetMatchesFilter { filter, use_lki } = artifact else {
             panic!("expected TargetMatchesFilter condition");
         };
@@ -18434,8 +18495,11 @@ mod tests {
             other => panic!("expected typed artifact filter, got {other:?}"),
         }
 
-        let it = try_nom_condition_as_ability_condition("you controlled it")
-            .expect("it condition should parse");
+        let it = try_nom_condition_as_ability_condition(
+            "you controlled it",
+            &mut ParseContext::default(),
+        )
+        .expect("it condition should parse");
         let AbilityCondition::TargetMatchesFilter { filter, use_lki } = it else {
             panic!("expected TargetMatchesFilter condition");
         };
@@ -18477,6 +18541,7 @@ mod tests {
     fn strip_suffix_conditional_extracts_quantity_check() {
         let (cond, text) = strip_suffix_conditional(
             "draw a card if your life total is greater than your starting life total",
+            &mut ParseContext::default(),
         );
         assert_eq!(text, "draw a card");
         let cond = cond.expect("should extract condition");
@@ -18491,21 +18556,27 @@ mod tests {
 
     #[test]
     fn strip_suffix_conditional_excludes_if_able() {
-        let (cond, text) = strip_suffix_conditional("deal 3 damage to that creature if able");
+        let (cond, text) = strip_suffix_conditional(
+            "deal 3 damage to that creature if able",
+            &mut ParseContext::default(),
+        );
         assert!(cond.is_none());
         assert_eq!(text, "deal 3 damage to that creature if able");
     }
 
     #[test]
     fn strip_suffix_conditional_excludes_if_you_do() {
-        let (cond, _) = strip_suffix_conditional("sacrifice it if you do");
+        let (cond, _) =
+            strip_suffix_conditional("sacrifice it if you do", &mut ParseContext::default());
         assert!(cond.is_none());
     }
 
     #[test]
     fn strip_suffix_conditional_parses_control_condition() {
-        let (cond, text) =
-            strip_suffix_conditional("sacrifice a creature if you control a creature");
+        let (cond, text) = strip_suffix_conditional(
+            "sacrifice a creature if you control a creature",
+            &mut ParseContext::default(),
+        );
         assert!(
             cond.is_some(),
             "should now parse 'you control a creature' via nom bridge"
@@ -18525,7 +18596,10 @@ mod tests {
     #[test]
     fn strip_suffix_conditional_unparseable_returns_none() {
         // A condition the bridge cannot handle returns None.
-        let (cond, text) = strip_suffix_conditional("draw a card if the moon is full");
+        let (cond, text) = strip_suffix_conditional(
+            "draw a card if the moon is full",
+            &mut ParseContext::default(),
+        );
         assert!(cond.is_none());
         assert_eq!(text, "draw a card if the moon is full");
     }
@@ -18534,13 +18608,17 @@ mod tests {
 
     #[test]
     fn bridge_during_your_turn() {
-        let result = try_nom_condition_as_ability_condition("it's your turn");
+        let result =
+            try_nom_condition_as_ability_condition("it's your turn", &mut ParseContext::default());
         assert_eq!(result, Some(AbilityCondition::IsYourTurn));
     }
 
     #[test]
     fn bridge_not_your_turn() {
-        let result = try_nom_condition_as_ability_condition("it's not your turn");
+        let result = try_nom_condition_as_ability_condition(
+            "it's not your turn",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(AbilityCondition::Not {
@@ -18551,7 +18629,10 @@ mod tests {
 
     #[test]
     fn bridge_life_total_comparison() {
-        let result = try_nom_condition_as_ability_condition("your life total is 5 or less");
+        let result = try_nom_condition_as_ability_condition(
+            "your life total is 5 or less",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::QuantityCheck {
                 lhs:
@@ -18570,7 +18651,10 @@ mod tests {
 
     #[test]
     fn bridge_hand_size_zero() {
-        let result = try_nom_condition_as_ability_condition("you have no cards in hand");
+        let result = try_nom_condition_as_ability_condition(
+            "you have no cards in hand",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::QuantityCheck {
                 lhs:
@@ -18589,7 +18673,10 @@ mod tests {
 
     #[test]
     fn bridge_you_control_artifact() {
-        let result = try_nom_condition_as_ability_condition("you control an artifact");
+        let result = try_nom_condition_as_ability_condition(
+            "you control an artifact",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::QuantityCheck {
                 comparator: Comparator::GE,
@@ -18602,8 +18689,10 @@ mod tests {
 
     #[test]
     fn bridge_you_control_artifact_and_enchantment() {
-        let result =
-            try_nom_condition_as_ability_condition("you control an artifact and an enchantment");
+        let result = try_nom_condition_as_ability_condition(
+            "you control an artifact and an enchantment",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::And { conditions }) => {
                 assert_eq!(conditions.len(), 2);
@@ -18622,8 +18711,10 @@ mod tests {
 
     #[test]
     fn bridge_if_you_do_or_control_condition() {
-        let result =
-            try_nom_condition_as_ability_condition("you do or if you control another Dinosaur");
+        let result = try_nom_condition_as_ability_condition(
+            "you do or if you control another Dinosaur",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::Or { conditions }) => {
                 assert_eq!(conditions.len(), 2);
@@ -18644,14 +18735,16 @@ mod tests {
     #[test]
     fn bridge_source_tapped_maps_to_ability_condition() {
         // CR 611.2b: SourceIsTapped bridges to AbilityCondition::SourceIsTapped.
-        let result = try_nom_condition_as_ability_condition("~ is tapped");
+        let result =
+            try_nom_condition_as_ability_condition("~ is tapped", &mut ParseContext::default());
         assert_eq!(result, Some(AbilityCondition::SourceIsTapped));
     }
 
     #[test]
     fn bridge_source_untapped_maps_to_negated_condition() {
         // CR 611.2b: Not(SourceIsTapped) bridges to Not(SourceIsTapped).
-        let result = try_nom_condition_as_ability_condition("~ is untapped");
+        let result =
+            try_nom_condition_as_ability_condition("~ is untapped", &mut ParseContext::default());
         assert_eq!(
             result,
             Some(AbilityCondition::Not {
@@ -18663,7 +18756,10 @@ mod tests {
     #[test]
     fn bridge_partial_input_returns_none() {
         // Partial match with leftover text should return None.
-        let result = try_nom_condition_as_ability_condition("it's your turn and stuff");
+        let result = try_nom_condition_as_ability_condition(
+            "it's your turn and stuff",
+            &mut ParseContext::default(),
+        );
         assert!(result.is_none());
     }
 
@@ -20406,7 +20502,10 @@ mod tests {
     #[test]
     fn leading_conditional_threads_condition_through_ast() {
         // "if it's your turn" is parseable by try_nom_condition_as_ability_condition.
-        let ast = parse_clause_ast("if it's your turn, draw a card", &mut ParseContext::default());
+        let ast = parse_clause_ast(
+            "if it's your turn, draw a card",
+            &mut ParseContext::default(),
+        );
         assert!(
             matches!(
                 ast,
@@ -20537,8 +20636,10 @@ mod tests {
         // The subject "~" is stripped, "gets +2/+2 until end of turn" is parsed as
         // imperative Pump with TargetFilter::Any, then inject_subject_target should
         // replace Any with SelfRef from the subject.
-        let clause =
-            parse_effect_clause("~ gets +2/+2 until end of turn", &mut ParseContext::default());
+        let clause = parse_effect_clause(
+            "~ gets +2/+2 until end of turn",
+            &mut ParseContext::default(),
+        );
         assert!(
             matches!(
                 clause.effect,
@@ -21818,6 +21919,7 @@ mod tests {
         // form printed in the LEADING-suffix sentence (Omnath, Teething Wurmlet).
         let result = try_nom_condition_as_ability_condition(
             "this is the first time this ability has resolved this turn",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -21830,6 +21932,7 @@ mod tests {
         // Ashling the Pilgrim print form.
         let result = try_nom_condition_as_ability_condition(
             "this is the third time this ability has resolved this turn",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -21841,7 +21944,10 @@ mod tests {
     fn nth_resolution_anaphoric_second() {
         // Omnath's continuation sentence: "If it's the second time, ..."
         // The "this ability has resolved this turn" tail is anaphoric.
-        let result = try_nom_condition_as_ability_condition("it's the second time");
+        let result = try_nom_condition_as_ability_condition(
+            "it's the second time",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(AbilityCondition::NthResolutionThisTurn { n: 2 })
@@ -21850,7 +21956,10 @@ mod tests {
 
     #[test]
     fn nth_resolution_anaphoric_third() {
-        let result = try_nom_condition_as_ability_condition("it's the third time");
+        let result = try_nom_condition_as_ability_condition(
+            "it's the third time",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(AbilityCondition::NthResolutionThisTurn { n: 3 })
@@ -21862,6 +21971,7 @@ mod tests {
         // Sephiroth, Fabled SOLDIER print form.
         let result = try_nom_condition_as_ability_condition(
             "this is the fourth time this ability has resolved this turn",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -21875,6 +21985,7 @@ mod tests {
         // requires either the full tail or empty remainder (anaphoric).
         let result = try_nom_condition_as_ability_condition(
             "this is the first time something else happened",
+            &mut ParseContext::default(),
         );
         assert!(result.is_none());
     }

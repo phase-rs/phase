@@ -21,7 +21,6 @@ use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
 };
-use crate::parser::oracle_warnings::push_diagnostic;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, Duration, Effect, GainLifePlayer, LibraryPosition,
@@ -1226,9 +1225,10 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
 pub(super) fn parse_search_and_creation_ast(
     text: &str,
     lower: &str,
+    ctx: &mut ParseContext,
 ) -> Option<SearchCreationImperativeAst> {
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("seek ")).parse(input)) {
-        let details = super::parse_seek_details(lower);
+        let details = super::parse_seek_details(lower, ctx);
         return Some(SearchCreationImperativeAst::Seek {
             filter: details.filter,
             count: details.count,
@@ -1254,7 +1254,7 @@ pub(super) fn parse_search_and_creation_ast(
         })
         .is_some()
     {
-        let details = super::parse_search_library_details(lower);
+        let details = super::parse_search_library_details(lower, ctx);
         return Some(SearchCreationImperativeAst::SearchLibrary {
             filter: details.filter,
             count: details.count,
@@ -1463,7 +1463,11 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
     }
 }
 
-pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevealImperativeAst> {
+pub(super) fn parse_hand_reveal_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<HandRevealImperativeAst> {
     if nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input)).is_some()
         && nom_primitives::scan_contains(lower, "hand")
     {
@@ -1475,7 +1479,7 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
             {
                 TargetFilter::TriggeringPlayer
             } else {
-                push_diagnostic(OracleDiagnostic::TargetFallback {
+                ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
                     context: "unrecognized look-at target".into(),
                     text: lower.trim().into(),
                     line_index: 0,
@@ -1563,7 +1567,11 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
     }
 }
 
-pub(super) fn parse_choose_ast(text: &str, lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {
+pub(super) fn parse_choose_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))
     {
@@ -2511,7 +2519,7 @@ fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<E
 /// CR 506.4: Parse "remove [target] from combat" patterns.
 /// Matches: "remove it from combat", "remove ~ from combat",
 /// "remove target [creature] from combat", "remove that creature from combat".
-fn parse_remove_from_combat_ast(lower: &str) -> Option<TargetFilter> {
+fn parse_remove_from_combat_ast(lower: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
     // Strip the "remove " prefix
     let (rest, _) = tag::<_, _, VerboseError<&str>>("remove ")
         .parse(lower)
@@ -2533,7 +2541,7 @@ fn parse_remove_from_combat_ast(lower: &str) -> Option<TargetFilter> {
             }
             // structural: not dispatch — mirrors guard above for warning diagnostic
             if matches!(tf, TargetFilter::Any) && subject.starts_with("target") {
-                push_diagnostic(OracleDiagnostic::TargetFallback {
+                ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
                     context: "'target' prefix but unrecognized filter".into(),
                     text: subject.into(),
                     line_index: 0,
@@ -3583,9 +3591,9 @@ pub(super) fn parse_imperative_family_ast(
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast))),
 
         // Search/creation verbs (CR 701.18, CR 111.2)
-        "search" | "seek" => parse_search_and_creation_ast(text, lower)
+        "search" | "seek" => parse_search_and_creation_ast(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
-        "create" => parse_search_and_creation_ast(text, lower)
+        "create" => parse_search_and_creation_ast(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
 
         // Utility verbs (CR 615, CR 701.19, CR 701.6, CR 613.4d)
@@ -3603,10 +3611,10 @@ pub(super) fn parse_imperative_family_ast(
         "shuffle" | "shuffles" => parse_shuffle_ast(text, lower).map(ImperativeFamilyAst::Shuffle),
 
         // Reveal: "reveal the top N" → Dig (via search path), else hand reveal (CR 701.16, CR 701.20)
-        "reveal" | "reveals" => parse_search_and_creation_ast(text, lower)
+        "reveal" | "reveals" => parse_search_and_creation_ast(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
             .or_else(|| {
-                parse_hand_reveal_ast(text, lower)
+                parse_hand_reveal_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
@@ -3986,7 +3994,7 @@ pub(super) fn parse_imperative_family_ast(
             .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put)),
 
         // "remove" → "remove from combat" (CR 506.4) → counter removal (step 2)
-        "remove" => parse_remove_from_combat_ast(lower)
+        "remove" => parse_remove_from_combat_ast(lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
             .map(ImperativeFamilyAst::RemoveFromCombat)
             .or_else(|| {
                 parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter)
@@ -4054,10 +4062,10 @@ pub(super) fn parse_imperative_family_ast(
         }
 
         // "look" → "look at the top" (step 5) → "look at hand" (step 10)
-        "look" => parse_search_and_creation_ast(text, lower)
+        "look" => parse_search_and_creation_ast(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
             .or_else(|| {
-                parse_hand_reveal_ast(text, lower)
+                parse_hand_reveal_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
@@ -5229,7 +5237,8 @@ mod tests {
             actor: Some(ControllerRef::You),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(
@@ -5253,7 +5262,8 @@ mod tests {
             actor: Some(ControllerRef::Opponent),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(tf.controller, Some(ControllerRef::Opponent)),
@@ -5271,7 +5281,8 @@ mod tests {
             actor: Some(ControllerRef::Opponent),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => {
@@ -5341,7 +5352,8 @@ mod tests {
             actor: Some(ControllerRef::You),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(
@@ -5364,7 +5376,8 @@ mod tests {
         let text = "sacrifice a creature";
         let lower = text.to_lowercase();
         let mut ctx = ParseContext::default();
-        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert!(
@@ -5429,7 +5442,8 @@ mod tests {
         // stripped form "gain control of Mindslaver Toolkit".
         let stripped = "gain control of Mindslaver Toolkit";
         let stripped_lower = stripped.to_lowercase();
-        let result = parse_targeted_action_ast(stripped, &stripped_lower, &mut ParseContext::default());
+        let result =
+            parse_targeted_action_ast(stripped, &stripped_lower, &mut ParseContext::default());
         assert!(result.is_some());
         let effect = lower_targeted_action_ast(result.unwrap());
         assert!(
@@ -6594,7 +6608,7 @@ mod tests {
     fn parse_search_creation_lowering_emits_change_zone_all_with_same_name_as_parent_target() {
         use crate::types::ability::FilterProp;
         let text = "search its owner's graveyard, hand, and library for any number of cards with that name and exile them";
-        let ast = parse_search_and_creation_ast(text, text)
+        let ast = parse_search_and_creation_ast(text, text, &mut ParseContext::default())
             .expect("multi-zone same-name exile must parse");
         let effect = lower_search_and_creation_ast(ast);
         match effect {

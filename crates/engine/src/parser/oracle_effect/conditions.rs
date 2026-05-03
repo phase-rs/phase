@@ -14,9 +14,8 @@ use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantit
 use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_comparison_suffix, TextPair};
 use super::counter::normalize_counter_type;
-use super::{parse_effect_chain, scan_contains_phrase};
+use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::push_diagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
     Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
@@ -106,7 +105,10 @@ pub(super) fn strip_leading_instead(text: &str) -> String {
     }
 }
 
-pub(crate) fn strip_leading_general_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(crate) fn strip_leading_general_conditional(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<AbilityCondition>, String) {
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
@@ -116,7 +118,7 @@ pub(crate) fn strip_leading_general_conditional(text: &str) -> (Option<AbilityCo
         .unwrap_or(&condition_fragment)
         .trim();
 
-        if let Some(condition) = try_nom_condition_as_ability_condition(cond_text)
+        if let Some(condition) = try_nom_condition_as_ability_condition(cond_text, ctx)
             .or_else(|| parse_condition_text(cond_text))
             .or_else(|| parse_control_count_as_ability_condition(cond_text))
         {
@@ -396,7 +398,10 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     (None, text.to_string())
 }
 
-pub(super) fn strip_unless_entered_suffix(text: &str) -> (Option<AbilityCondition>, String) {
+pub(super) fn strip_unless_entered_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     for pattern in &[
@@ -414,7 +419,7 @@ pub(super) fn strip_unless_entered_suffix(text: &str) -> (Option<AbilityConditio
     }
     if let Some((effect_part, condition_part)) = lower.rsplit_once(" unless ") {
         let condition_text = condition_part.trim_end_matches('.');
-        if let Some(cond) = try_nom_condition_as_unless(condition_text) {
+        if let Some(cond) = try_nom_condition_as_unless(condition_text, ctx) {
             let effect_text = text[..effect_part.len()].trim().to_string();
             return (Some(cond), effect_text);
         }
@@ -422,7 +427,10 @@ pub(super) fn strip_unless_entered_suffix(text: &str) -> (Option<AbilityConditio
     (None, text.to_string())
 }
 
-fn try_nom_condition_as_unless(condition_text: &str) -> Option<AbilityCondition> {
+fn try_nom_condition_as_unless(
+    condition_text: &str,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let (rest, inner) = parse_inner_condition(condition_text).ok()?;
@@ -432,7 +440,7 @@ fn try_nom_condition_as_unless(condition_text: &str) -> Option<AbilityCondition>
     let negated = StaticCondition::Not {
         condition: Box::new(inner),
     };
-    static_condition_to_ability_condition(&negated)
+    static_condition_to_ability_condition(&negated, ctx)
 }
 
 pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCondition>, String) {
@@ -1027,7 +1035,10 @@ fn find_last_top_level_if(text: &str) -> Option<usize> {
     last_pos
 }
 
-pub(super) fn strip_suffix_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(super) fn strip_suffix_conditional(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let Some(if_pos) = find_last_top_level_if(&lower) else {
         return (None, text.to_string());
@@ -1060,7 +1071,7 @@ pub(super) fn strip_suffix_conditional(text: &str) -> (Option<AbilityCondition>,
         return (Some(cond), effect_text);
     }
 
-    if let Some(condition) = try_nom_condition_as_ability_condition(condition_text)
+    if let Some(condition) = try_nom_condition_as_ability_condition(condition_text, ctx)
         .or_else(|| parse_condition_text(condition_text))
         .or_else(|| parse_control_count_as_ability_condition(condition_text))
     {
@@ -1267,6 +1278,7 @@ fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
 pub(super) fn try_parse_generic_instead_clause(
     text: &str,
     kind: AbilityKind,
+    ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
     let (condition_fragment, raw_body) = split_leading_conditional(text)?;
     let condition_lower = condition_fragment.to_lowercase();
@@ -1289,7 +1301,7 @@ pub(super) fn try_parse_generic_instead_clause(
         return None;
     };
 
-    let condition = try_nom_condition_as_ability_condition(cond_text)
+    let condition = try_nom_condition_as_ability_condition(cond_text, ctx)
         .or_else(|| parse_condition_text(cond_text))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
 
@@ -1319,6 +1331,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     text: &str,
     previous: Option<&AbilityDefinition>,
     kind: AbilityKind,
+    ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
     use super::sequence::parse_dig_from_among;
     use crate::parser::oracle_ir::ast::ContinuationAst;
@@ -1373,7 +1386,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         return None;
     };
 
-    let condition = try_nom_condition_as_ability_condition(cond_text)
+    let condition = try_nom_condition_as_ability_condition(cond_text, ctx)
         .or_else(|| parse_condition_text(cond_text))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
 
@@ -1483,7 +1496,10 @@ fn counter_threshold_to_condition(
     }
 }
 
-fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<AbilityCondition> {
+fn static_condition_to_ability_condition(
+    sc: &StaticCondition,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(AbilityCondition::IsYourTurn),
         StaticCondition::QuantityComparison {
@@ -1503,14 +1519,17 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         }
         StaticCondition::SourceEnteredThisTurn => None,
         StaticCondition::IsPresent { filter } => {
-            let filter = filter.clone().unwrap_or_else(|| {
-                push_diagnostic(OracleDiagnostic::TargetFallback {
-                    context: "IsPresent condition has no filter".into(),
-                    text: String::new(),
-                    line_index: 0,
-                });
-                TargetFilter::Any
-            });
+            let filter = match filter {
+                Some(f) => f.clone(),
+                None => {
+                    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                        context: "IsPresent condition has no filter".into(),
+                        text: String::new(),
+                        line_index: 0,
+                    });
+                    TargetFilter::Any
+                }
+            };
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount { filter },
@@ -1536,14 +1555,17 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                 rhs: rhs.clone(),
             }),
             StaticCondition::IsPresent { filter } => {
-                let filter = filter.clone().unwrap_or_else(|| {
-                    push_diagnostic(OracleDiagnostic::TargetFallback {
-                        context: "NegatedIsPresent has no filter".into(),
-                        text: String::new(),
-                        line_index: 0,
-                    });
-                    TargetFilter::Any
-                });
+                let filter = match filter {
+                    Some(f) => f.clone(),
+                    None => {
+                        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                            context: "NegatedIsPresent has no filter".into(),
+                            text: String::new(),
+                            line_index: 0,
+                        });
+                        TargetFilter::Any
+                    }
+                };
                 Some(AbilityCondition::QuantityCheck {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount { filter },
@@ -1578,7 +1600,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         StaticCondition::And { conditions } => {
             let mapped: Option<Vec<_>> = conditions
                 .iter()
-                .map(static_condition_to_ability_condition)
+                .map(|c| static_condition_to_ability_condition(c, ctx))
                 .collect();
             Some(AbilityCondition::And {
                 conditions: mapped?,
@@ -1587,7 +1609,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         StaticCondition::Or { conditions } => {
             let mapped: Option<Vec<_>> = conditions
                 .iter()
-                .map(static_condition_to_ability_condition)
+                .map(|c| static_condition_to_ability_condition(c, ctx))
                 .collect();
             Some(AbilityCondition::Or {
                 conditions: mapped?,
@@ -1644,7 +1666,10 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
     }
 }
 
-pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<AbilityCondition> {
+pub(super) fn try_nom_condition_as_ability_condition(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let lower = text.to_lowercase();
@@ -1693,7 +1718,7 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
             return Some(AbilityCondition::Or {
                 conditions: vec![
                     AbilityCondition::IfYouDo,
-                    static_condition_to_ability_condition(&condition)?,
+                    static_condition_to_ability_condition(&condition, ctx)?,
                 ],
             });
         }
@@ -1853,7 +1878,7 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
     if !rest.trim().is_empty() {
         return None;
     }
-    static_condition_to_ability_condition(&condition)
+    static_condition_to_ability_condition(&condition, ctx)
 }
 
 fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCondition> {
@@ -2139,6 +2164,7 @@ mod tests {
     fn leading_that_enchantment_is_aura_checks_zone_change_object() {
         let (condition, body) = strip_leading_general_conditional(
             "If that enchantment is an Aura, you may attach it to the token.",
+            &mut ParseContext::default(),
         );
         assert_eq!(body, "you may attach it to the token.");
 
@@ -2196,8 +2222,10 @@ mod tests {
 
     #[test]
     fn leading_its_legendary_checks_parent_target_supertype() {
-        let (condition, body) =
-            strip_leading_general_conditional("If it's legendary, gain 3 life.");
+        let (condition, body) = strip_leading_general_conditional(
+            "If it's legendary, gain 3 life.",
+            &mut ParseContext::default(),
+        );
         assert_eq!(body, "gain 3 life.");
         let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
             panic!("expected TargetMatchesFilter, got {condition:?}");
@@ -2220,8 +2248,10 @@ mod tests {
 
     #[test]
     fn leading_its_color_checks_parent_target_color() {
-        let (condition, body) =
-            strip_leading_general_conditional("If it's red, you may cast it this turn.");
+        let (condition, body) = strip_leading_general_conditional(
+            "If it's red, you may cast it this turn.",
+            &mut ParseContext::default(),
+        );
         assert_eq!(body, "you may cast it this turn.");
         let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
             panic!("expected TargetMatchesFilter, got {condition:?}");
@@ -2241,7 +2271,10 @@ mod tests {
 
     #[test]
     fn suffix_its_color_checks_parent_target_color() {
-        let (condition, body) = strip_suffix_conditional("Counter target spell if it's blue.");
+        let (condition, body) = strip_suffix_conditional(
+            "Counter target spell if it's blue.",
+            &mut ParseContext::default(),
+        );
         assert_eq!(body, "Counter target spell");
         let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
             panic!("expected TargetMatchesFilter, got {condition:?}");
@@ -2263,6 +2296,7 @@ mod tests {
     fn leading_this_enchantment_isnt_creature_checks_source_type() {
         let (condition, body) = strip_leading_general_conditional(
             "If this enchantment isn't a creature, it becomes a 3/3 Angel creature with flying.",
+            &mut ParseContext::default(),
         );
         assert_eq!(body, "it becomes a 3/3 Angel creature with flying.");
         assert!(matches!(
@@ -2274,8 +2308,10 @@ mod tests {
 
     #[test]
     fn leading_you_win_maps_to_if_you_do_for_clash() {
-        let (condition, body) =
-            strip_leading_general_conditional("If you win, put a +1/+1 counter on this creature.");
+        let (condition, body) = strip_leading_general_conditional(
+            "If you win, put a +1/+1 counter on this creature.",
+            &mut ParseContext::default(),
+        );
         assert_eq!(body, "put a +1/+1 counter on this creature.");
         assert_eq!(condition, Some(AbilityCondition::IfYouDo));
     }
@@ -2284,6 +2320,7 @@ mod tests {
     fn leading_you_dont_maps_to_not_if_you_do() {
         let (condition, body) = strip_leading_general_conditional(
             "If you didn't put a card into your hand this way, draw a card.",
+            &mut ParseContext::default(),
         );
         assert_eq!(body, "draw a card.");
         assert_eq!(
@@ -2330,6 +2367,7 @@ mod tests {
     fn suffix_symbolic_mana_spent_condition_parses_single_color() {
         let (condition, body) = strip_suffix_conditional(
             "Each player loses 1 life for each attacking creature they control if {B} was spent to cast this spell.",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             body,
@@ -2365,6 +2403,7 @@ mod tests {
     fn suffix_another_filtered_spell_condition_uses_spell_history_quantity() {
         let (condition, body) = strip_suffix_conditional(
             "Target creature you control gets +1/+0 until end of turn if you've cast another instant or sorcery spell this turn.",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             body,
@@ -2401,6 +2440,7 @@ mod tests {
     fn suffix_night_condition_uses_day_night_designation() {
         let (condition, body) = strip_suffix_conditional(
             "Target creature you control gets +2/+0 until end of turn if it's night.",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             body,
@@ -2418,6 +2458,7 @@ mod tests {
     fn leading_word_mana_spent_condition_parses_adamant() {
         let (condition, body) = strip_leading_general_conditional(
             "If at least three red mana was spent to cast this spell, it deals 4 damage instead.",
+            &mut ParseContext::default(),
         );
         assert_eq!(body, "it deals 4 damage instead.");
         assert_eq!(
@@ -2446,9 +2487,10 @@ mod tests {
                 maximum: Some(0),
             }
         );
-        let bridged = static_condition_to_ability_condition(&sc).expect(
-            "CounterMatch::Any must round-trip — None here is the silent-failure regression",
-        );
+        let bridged = static_condition_to_ability_condition(&sc, &mut ParseContext::default())
+            .expect(
+                "CounterMatch::Any must round-trip — None here is the silent-failure regression",
+            );
         match bridged {
             AbilityCondition::QuantityCheck {
                 lhs:
@@ -2472,7 +2514,8 @@ mod tests {
     fn bridge_has_counters_any_at_least_one_yields_any_counters_on_self_ge_one() {
         let (rest, sc) = parse_inner_condition("~ has a counter on it").unwrap();
         assert_eq!(rest, "");
-        let bridged = static_condition_to_ability_condition(&sc).expect("must bridge");
+        let bridged = static_condition_to_ability_condition(&sc, &mut ParseContext::default())
+            .expect("must bridge");
         match bridged {
             AbilityCondition::QuantityCheck {
                 lhs:
@@ -2500,7 +2543,8 @@ mod tests {
             minimum: 2,
             maximum: None,
         };
-        let bridged = static_condition_to_ability_condition(&sc).expect("must bridge");
+        let bridged = static_condition_to_ability_condition(&sc, &mut ParseContext::default())
+            .expect("must bridge");
         match bridged {
             AbilityCondition::QuantityCheck {
                 lhs:
