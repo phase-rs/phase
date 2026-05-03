@@ -28,7 +28,9 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
     parse_cda_quantity, parse_for_each_clause, parse_for_each_clause_expr,
 };
-use super::oracle_target::{parse_event_context_ref, parse_target, parse_type_phrase};
+use super::oracle_target::{
+    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_type_phrase,
+};
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_mana_symbols, split_around,
     starts_with_possessive, strip_after, TextPair,
@@ -3181,7 +3183,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // CR 111.11: "create [token description] for each X" → Token with dynamic count.
     // Delegates to try_parse_token, which handles token description parsing (name, P/T,
     // types, colors, keywords). Replace the embedded count with the for-each quantity.
-    if let Some(effect) = token::try_parse_token(base_tp.lower, base_tp.original) {
+    if let Some(effect) = token::try_parse_token(base_tp.lower, base_tp.original, ctx) {
         let effect = match effect {
             Effect::Token {
                 name,
@@ -3899,24 +3901,24 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
         value((), alt((tag("tap all "), tag("tap each ")))).parse(i)
     }) {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((TargetedImperativeAst::TapAll { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
         value((), alt((tag("untap all "), tag("untap each ")))).parse(i)
     }) {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((TargetedImperativeAst::UntapAll { target }, rem));
     }
     // Simple targeted verbs: parse_target on text after the verb prefix
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("tap ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Tap { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("untap ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Untap { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("sacrifice ")).parse(i)) {
@@ -3925,19 +3927,19 @@ fn try_parse_verb_and_target<'a>(
             rest,
         ));
         let (target_text, _) = strip_optional_target_prefix(after_count.trim_start());
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Sacrifice { target, count }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("fight ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Fight { target }, rem));
     }
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |i| value((), tag("gain control of ")).parse(i))
     {
         let (target_text, _) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         let rem_lower = rem.to_ascii_lowercase();
         if tag::<_, _, VerboseError<&str>>(" during that player's next turn")
             .parse(rem_lower.as_str())
@@ -3984,7 +3986,7 @@ fn try_parse_verb_and_target<'a>(
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("airbend ").parse(lower) {
         let original_rest = &text[text.len() - rest.len()..];
         let (target_text, _) = strip_optional_target_prefix(original_rest);
-        let (target, after_target) = parse_target(target_text);
+        let (target, after_target) = parse_target_with_ctx(target_text, ctx);
         let (cost, rem) = parse_mana_symbols(after_target.trim_start()).unwrap_or((
             crate::types::mana::ManaCost::Cost {
                 generic: 2,
@@ -3999,7 +4001,7 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
         value((), alt((tag("destroy all "), tag("destroy each ")))).parse(i)
     }) {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Destroy {
                 target,
@@ -4009,7 +4011,7 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("destroy ")).parse(i)) {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Destroy {
                 target,
@@ -4025,7 +4027,7 @@ fn try_parse_verb_and_target<'a>(
         value((), alt((tag("exile all "), tag("exile each ")))).parse(i)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, rem) = parse_target(rest);
+        let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         // CR 701.5a: "exile all spells" must constrain to the stack.
         let target = if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
@@ -4044,7 +4046,7 @@ fn try_parse_verb_and_target<'a>(
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("exile ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, rem) = parse_target(rest);
+        let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         // CR 701.5a: "exile target spell" must constrain targeting to the stack,
         // mirroring the counter-spell parser at line 1036-1037.
         let target = if scan_contains_phrase(rest_lower, "spell") {
@@ -4072,7 +4074,7 @@ fn try_parse_verb_and_target<'a>(
         value((), alt((tag("counter all "), tag("counter each ")))).parse(i)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, rem) = parse_target(rest);
+        let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         // CR 113.3: Bare "abilities" (no intervening type phrase) ⇒ stack-
         // ability filter. Mass mode is loose enough to accept this form
         // because the mass keyword has already disambiguated the verb sense.
@@ -4105,7 +4107,7 @@ fn try_parse_verb_and_target<'a>(
     // CR 701.6: Counter a spell or ability on the stack.
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("counter ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, rem) = parse_target(rest);
+        let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         let target = if scan_contains_phrase(rest_lower, "activated or triggered ability") {
             // CR 701.6: "activated or triggered ability" is a special-case target
             // that maps to StackAbility. We still use parse_target's remainder to
@@ -4133,7 +4135,7 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("return ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (_, dest) = strip_return_destination_ext(rest);
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         let origin = infer_origin_zone(rest_lower);
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => Some((
@@ -7192,6 +7194,10 @@ pub(crate) fn parse_effect_chain_ir(
             // is per-chunk (re-derived from each chunk's stripped prefix above).
             current_trigger_index: ctx.current_trigger_index,
             actor: chunk_actor,
+            // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope
+            // from the trigger condition so "that player controls" inside any
+            // chunk resolves to TargetPlayer rather than defaulting to You.
+            relative_player_scope: ctx.relative_player_scope.clone(),
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;

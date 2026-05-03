@@ -16,11 +16,12 @@ use super::token::{
     map_token_keyword, push_unique_string, split_token_keyword_list, title_case_word,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::QuantityExpr;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
-pub(super) fn parse_animation_spec(text: &str) -> Option<AnimationSpec> {
+pub(super) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Option<AnimationSpec> {
     let lower = text.to_lowercase();
     if lower.contains(" copy of ")
         || lower.contains(" of your choice")
@@ -210,41 +211,14 @@ fn strip_prefix_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
 }
 
 pub(super) fn parse_fixed_become_pt_prefix(text: &str) -> Option<(i32, i32, &str)> {
-    let (power, toughness, rest) = parse_token_pt_prefix(text)?;
+    let (rest, (power, toughness)) = nom_primitives::parse_pt_value.parse(text).ok()?;
     match (power, toughness) {
         (
             crate::types::ability::PtValue::Fixed(power),
             crate::types::ability::PtValue::Fixed(toughness),
-        ) => Some((power, toughness, rest)),
+        ) => Some((power, toughness, rest.trim_start())),
         _ => None,
     }
-}
-
-fn parse_token_pt_prefix(
-    text: &str,
-) -> Option<(
-    crate::types::ability::PtValue,
-    crate::types::ability::PtValue,
-    &str,
-)> {
-    let text = text.trim_start();
-    let word_end = text.find(char::is_whitespace).unwrap_or(text.len());
-    let token = &text[..word_end];
-    let slash = token.find('/')?;
-    let power = token[..slash].trim();
-    let toughness = token[slash + 1..].trim();
-    let power = parse_token_pt_component(power)?;
-    let toughness = parse_token_pt_component(toughness)?;
-    Some((power, toughness, text[word_end..].trim_start()))
-}
-
-fn parse_token_pt_component(text: &str) -> Option<crate::types::ability::PtValue> {
-    if text.eq_ignore_ascii_case("x") {
-        return Some(crate::types::ability::PtValue::Variable("X".to_string()));
-    }
-    text.parse::<i32>()
-        .ok()
-        .map(crate::types::ability::PtValue::Fixed)
 }
 
 fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32)> {
@@ -635,7 +609,7 @@ mod test_den_bugbear {
     #[test]
     fn test_animation_with_quoted_trigger() {
         let text = r#"a 3/2 red Goblin creature with "Whenever this creature attacks, create a 1/1 red Goblin creature token that's tapped and attacking." It's still a land"#;
-        let spec = parse_animation_spec(text);
+        let spec = parse_animation_spec(text, &mut ParseContext::default());
         eprintln!("spec = {:?}", spec);
         assert!(spec.is_some(), "animation spec should be Some");
         let spec = spec.unwrap();
@@ -691,6 +665,7 @@ mod test_den_bugbear {
     fn animation_dynamic_pt_equal_to_recipient_mana_value() {
         let spec = parse_animation_spec(
             "an artifact creature with power and toughness each equal to its mana value",
+            &mut ParseContext::default(),
         )
         .expect("Karn/Sydri animation phrase should parse");
         assert_eq!(spec.types, vec!["Artifact", "Creature"]);

@@ -19,7 +19,6 @@ pub(crate) mod oracle_spacecraft;
 pub(crate) mod oracle_special;
 pub mod oracle_static;
 pub(crate) mod oracle_target;
-pub(crate) mod oracle_target_scope;
 pub(crate) mod oracle_trigger;
 pub mod oracle_util;
 pub(crate) mod oracle_vote;

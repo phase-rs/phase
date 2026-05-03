@@ -33,11 +33,29 @@ pub(crate) struct ParseContext {
     /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
     /// Replaces thread-local oracle_warnings accumulator.
     pub diagnostics: Vec<OracleDiagnostic>,
+    /// CR 109.4 + CR 115.1: Relative-player scope for "that player controls"
+    /// resolution inside trigger effects. Replaces thread-local oracle_target_scope.
+    pub relative_player_scope: Option<ControllerRef>,
 }
 
 impl ParseContext {
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
         self.diagnostics.push(d);
+    }
+
+    /// Execute `f` with a temporary relative-player scope, restoring the prior
+    /// value on return. Replaces thread-local ScopeGuard RAII pattern.
+    #[allow(dead_code)] // Available for nested-scope uses (e.g., nested triggers).
+    pub fn with_player_scope<R>(
+        &mut self,
+        scope: ControllerRef,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev = self.relative_player_scope.take();
+        self.relative_player_scope = Some(scope);
+        let result = f(self);
+        self.relative_player_scope = prev;
+        result
     }
 }

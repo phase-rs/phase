@@ -9,6 +9,7 @@ use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
 use super::error::OracleResult;
+use crate::types::ability::PtValue;
 use crate::types::counter::CounterType;
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -327,6 +328,56 @@ fn parse_signed_number(input: &str) -> OracleResult<'_, i32> {
         preceded(char('-'), map(parse_digit_number, |n| -(n as i32))),
     ))
     .parse(input)
+}
+
+/// Parse a P/T value pair from a token like "3/3", "X/X", "0/0", or "*/*".
+///
+/// Each component is either a fixed integer, `X` (variable, resolves later), or
+/// `*` (CDA-defined). Returns the pair as `(PtValue, PtValue)`.
+///
+/// This is the shared building block for token description and animation spec
+/// parsing — both need the same P/T tokenization.
+pub fn parse_pt_value(input: &str) -> OracleResult<'_, (PtValue, PtValue)> {
+    let input = input.trim_start();
+    let word_end = input.find(char::is_whitespace).unwrap_or(input.len());
+    let token = &input[..word_end];
+    let Some(slash) = token.find('/') else {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("P/T value"),
+            )],
+        }));
+    };
+    let power_str = token[..slash].trim();
+    let toughness_str = token[slash + 1..].trim();
+    let power = parse_pt_component(power_str).ok_or_else(|| {
+        nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("P/T power component"),
+            )],
+        })
+    })?;
+    let toughness = parse_pt_component(toughness_str).ok_or_else(|| {
+        nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("P/T toughness component"),
+            )],
+        })
+    })?;
+    Ok((&input[word_end..], (power, toughness)))
+}
+
+fn parse_pt_component(text: &str) -> Option<PtValue> {
+    if text.eq_ignore_ascii_case("x") {
+        return Some(PtValue::Variable("X".to_string()));
+    }
+    if text == "*" {
+        return Some(PtValue::Variable("*".to_string()));
+    }
+    text.parse::<i32>().ok().map(PtValue::Fixed)
 }
 
 /// Parse a roman numeral (I through XX) from Oracle text.

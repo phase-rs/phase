@@ -16,7 +16,6 @@ use super::oracle_nom::primitives::{
 };
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_target::{parse_type_phrase, starts_with_type_word};
-use super::oracle_target_scope;
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
     normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
@@ -513,11 +512,12 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         ..Default::default()
     };
 
-    // CR 109.4 + CR 115.1 + CR 506.2: Scope guard for TargetPlayer resolution.
-    // CRITICAL: guard must be alive when parse_effect_chain_ir is called.
+    // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
+    // TargetPlayer resolution inside the trigger effect body.
     let cond_lower = condition_text.to_lowercase();
-    let _scope_guard = condition_introduces_target_player(&cond_lower)
-        .then(|| oracle_target_scope::ScopeGuard::new(ControllerRef::TargetPlayer));
+    if condition_introduces_target_player(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
+    }
 
     // Parse the effect body
     let has_up_to = scan_contains(&effect_for_parse, "up to one");

@@ -1263,11 +1263,8 @@ fn build_become_clause(
         // emitting `SetName { name: "" }` would silently set `obj.name = ""`
         // at Layer 1, strictly worse than dropping the override entirely.
         let card_name = ctx.card_name.as_deref().unwrap_or("");
-        let except_ctx = super::become_copy_except::ExceptClauseContext {
-            current_trigger_index: ctx.current_trigger_index,
-        };
         let additional_modifications =
-            super::become_copy_except::parse_except_clause(remainder, card_name, except_ctx)
+            super::become_copy_except::parse_except_clause(remainder, card_name, ctx)
                 .map(|(_, mods)| mods)
                 .unwrap_or_default();
         return Some(ParsedEffectClause {
@@ -1286,11 +1283,11 @@ fn build_become_clause(
         });
     }
 
-    if let Some(clause) = try_parse_become_and_attack_if_able(&application, become_text) {
+    if let Some(clause) = try_parse_become_and_attack_if_able(&application, become_text, ctx) {
         return Some(clause);
     }
 
-    let animation = parse_animation_spec(become_text)?;
+    let animation = parse_animation_spec(become_text, ctx)?;
     let modifications = animation_modifications(&animation);
     if modifications.is_empty() {
         return None;
@@ -1318,6 +1315,7 @@ fn build_become_clause(
 fn try_parse_become_and_attack_if_able(
     application: &SubjectApplication,
     become_text: &str,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
     let (before_attack, attack_duration, rest) = nom_primitives::scan_preceded(&lower, |i| {
@@ -1334,7 +1332,7 @@ fn try_parse_become_and_attack_if_able(
     let animation_text = become_text[..before_attack.trim_end().len()].trim();
     let (animation_text, animation_duration) = super::strip_trailing_duration(animation_text);
     let animation_duration = animation_duration?;
-    let animation = parse_animation_spec(animation_text)?;
+    let animation = parse_animation_spec(animation_text, ctx)?;
     let modifications = animation_modifications(&animation);
     if modifications.is_empty() {
         return None;

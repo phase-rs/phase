@@ -23,7 +23,6 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_target_scope;
 use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
     SELF_REF_TYPE_PHRASES,
@@ -282,7 +281,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(lower.as_str())
     {
         let original_rest = &text[lower.len() - rest_subject.len()..];
-        let (filter, rem) = parse_type_phrase(original_rest);
+        let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
             return (TargetFilter::ParentTarget, rem);
         }
@@ -327,7 +326,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("all ").parse(lower.as_str())
     {
-        let (filter, rest) = parse_type_phrase(&text[lower.len() - rest.len()..]);
+        let (filter, rest) = parse_type_phrase_with_ctx(&text[lower.len() - rest.len()..], ctx);
         return (filter, rest);
     }
 
@@ -397,7 +396,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             return (TargetFilter::Player, &text[lower.len() - rest.len()..]);
         }
         // "target" + type phrase (generic)
-        let (filter, rest) = parse_type_phrase(&text[target_offset..]);
+        let (filter, rest) = parse_type_phrase_with_ctx(&text[target_offset..], ctx);
         let consumed_end = lower.len() - rest.len();
         return (
             scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
@@ -822,7 +821,19 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
 
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
 /// "creature you control", "creature an opponent controls".
+///
+/// Prefer `parse_type_phrase_with_ctx` when a `ParseContext` is available —
+/// it enables relative-player scope resolution for "that player controls".
 pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
+    parse_type_phrase_with_ctx(text, &mut ParseContext::default())
+}
+
+/// Context-aware variant of `parse_type_phrase`. Enables relative-player scope
+/// resolution via `ctx.relative_player_scope`.
+pub fn parse_type_phrase_with_ctx<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
@@ -1210,7 +1221,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
             let after_trimmed = after_sep.trim_start();
             if starts_with_type_word(after_trimmed) {
                 let sep_text = &text[pos + rest_offset + separator.len()..];
-                let (other_filter, final_rest) = parse_type_phrase(sep_text);
+                let (other_filter, final_rest) = parse_type_phrase_with_ctx(sep_text, ctx);
                 let left = typed(
                     card_type.unwrap_or(TypeFilter::Any),
                     subtype,
@@ -1227,7 +1238,8 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     // CR 108.3 + CR 110.2: Ownership and control are distinct; "you own and control" satisfies both.
     let mut controller = None;
-    pos += parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller);
+    pos +=
+        parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..]) {
@@ -1260,8 +1272,12 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
             .iter()
             .any(|prop| matches!(prop, FilterProp::Owned { .. }))
     {
-        pos +=
-            parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller);
+        pos += parse_ownership_or_controller_suffix(
+            &lower[pos..],
+            &mut properties,
+            &mut controller,
+            ctx,
+        );
     }
 
     // CR 205.3 + CR 205.4b: "that isn't a <Subtype>" relative-clause negation.
@@ -1815,7 +1831,7 @@ fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
 /// Delegates to `nom_target::parse_controller_suffix` for the common patterns
 /// ("you control", "an opponent controls", "your opponents control"), then
 /// handles additional patterns not in the shared combinator.
-fn parse_controller_suffix(text: &str) -> Option<(ControllerRef, usize)> {
+fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(ControllerRef, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
@@ -1834,13 +1850,16 @@ fn parse_controller_suffix(text: &str) -> Option<(ControllerRef, usize)> {
         // CR 109.4 + CR 115.1: "that player controls" is a relative reference
         // back to a player introduced earlier in the ability (e.g. the attacked
         // player in a "whenever you attack a player, ... that player controls"
-        // trigger). When the surrounding parser pushed a relative-player scope
-        // (see `oracle_target_scope`), emit `ControllerRef::TargetPlayer` so the
-        // runtime auto-surfaces a companion `TargetFilter::Player` slot via
-        // `effect_references_target_player` (game/ability_utils.rs). Without a
-        // scope, fall back to the legacy `ControllerRef::You` behaviour relied
-        // on by per-player iteration contexts (`resolve_quantity_scoped`).
-        let ctrl = oracle_target_scope::current().unwrap_or(ControllerRef::You);
+        // trigger). When the surrounding parser set `ctx.relative_player_scope`,
+        // emit `ControllerRef::TargetPlayer` so the runtime auto-surfaces a
+        // companion `TargetFilter::Player` slot via `effect_references_target_player`
+        // (game/ability_utils.rs). Without a scope, fall back to the legacy
+        // `ControllerRef::You` behaviour relied on by per-player iteration
+        // contexts (`resolve_quantity_scoped`).
+        let ctrl = ctx
+            .relative_player_scope
+            .clone()
+            .unwrap_or(ControllerRef::You);
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
     if let Ok((rest, _)) =
@@ -2583,6 +2602,7 @@ fn parse_ownership_or_controller_suffix(
     text: &str,
     properties: &mut Vec<FilterProp>,
     controller: &mut Option<ControllerRef>,
+    ctx: &ParseContext,
 ) -> usize {
     let own_ctrl = text.trim_start();
     let own_ctrl_offset = text.len() - own_ctrl.len();
@@ -2622,7 +2642,7 @@ fn parse_ownership_or_controller_suffix(
     }
 
     let (ctrl, ctrl_len) =
-        parse_controller_suffix(text).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
+        parse_controller_suffix(text, ctx).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
     if ctrl.is_some() {
         *controller = ctrl;
     }

@@ -6,6 +6,7 @@ use nom::combinator::{rest, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
@@ -33,7 +34,7 @@ where
     Some((result, &text[consumed..]))
 }
 
-pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
+pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
 
@@ -62,7 +63,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         // `SetName` arms in the except clause decline gracefully when
         // `card_name` is empty (see `become_copy_except.rs::parse_name_override`).
         let (target_text, extra_keywords, additional_modifications) =
-            split_token_except_clause(target_text);
+            split_token_except_clause(target_text, ctx);
         let (mut target, _) = parse_target(target_text);
         if has_another {
             if let TargetFilter::Typed(ref mut typed) = target {
@@ -122,7 +123,10 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
 ///
 /// Example: `"it, except the token isn't legendary"` →
 ///   (`"it"`, `vec![]`, `vec![RemoveSupertype { Legendary }]`)
-fn split_token_except_clause(text: &str) -> (&str, Vec<Keyword>, Vec<ContinuousModification>) {
+fn split_token_except_clause<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> (&'a str, Vec<Keyword>, Vec<ContinuousModification>) {
     let lower = text.to_lowercase();
     // structural: not dispatch — locate the `, except ` boundary on the
     // lower-cased copy to compute the cut byte index in the original-case text.
@@ -137,14 +141,11 @@ fn split_token_except_clause(text: &str) -> (&str, Vec<Keyword>, Vec<ContinuousM
     // removals, conditional counter placement, etc.
     let except_input = &lower[pos..];
     let card_name = ""; // SetName cannot apply to token-copy (source unknown at parse time).
-    let (_, modifications) = match super::become_copy_except::parse_except_clause(
-        except_input,
-        card_name,
-        super::become_copy_except::ExceptClauseContext::default(),
-    ) {
-        Some(parts) => parts,
-        None => return (head, Vec::new(), Vec::new()),
-    };
+    let (_, modifications) =
+        match super::become_copy_except::parse_except_clause(except_input, card_name, ctx) {
+            Some(parts) => parts,
+            None => return (head, Vec::new(), Vec::new()),
+        };
 
     let mut extra_keywords = Vec::new();
     let mut additional_modifications = Vec::new();
@@ -249,8 +250,8 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     rest = strip_token_supertypes(rest);
 
     let (mut power, mut toughness, rest) =
-        if let Some((power, toughness, rest)) = parse_token_pt_prefix(rest) {
-            (Some(power), Some(toughness), rest)
+        if let Ok((rest, (power, toughness))) = nom_primitives::parse_pt_value.parse(rest) {
+            (Some(power), Some(toughness), rest.trim_start())
         } else {
             (None, None, rest)
         };
@@ -417,25 +418,6 @@ fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
     let after_lower = after_comma.to_lowercase();
     let (_, rest) = nom_on_lower(after_comma, &after_lower, nom_primitives::parse_article)?;
     Some((name.to_string(), rest))
-}
-
-fn parse_token_pt_prefix(text: &str) -> Option<(PtValue, PtValue, &str)> {
-    let text = text.trim_start();
-    let word_end = text.find(char::is_whitespace).unwrap_or(text.len());
-    let token = &text[..word_end];
-    let slash = token.find('/')?;
-    let power = token[..slash].trim();
-    let toughness = token[slash + 1..].trim();
-    let power = parse_token_pt_component(power)?;
-    let toughness = parse_token_pt_component(toughness)?;
-    Some((power, toughness, text[word_end..].trim_start()))
-}
-
-fn parse_token_pt_component(text: &str) -> Option<PtValue> {
-    if text.eq_ignore_ascii_case("x") {
-        return Some(PtValue::Variable("X".to_string()));
-    }
-    text.parse::<i32>().ok().map(PtValue::Fixed)
 }
 
 fn strip_token_supertypes(mut text: &str) -> &str {
@@ -890,6 +872,7 @@ mod tests {
             &"create two 1/1 white cat creature tokens that are tapped and attacking"
                 .to_lowercase(),
             "create two 1/1 white Cat creature tokens that are tapped and attacking",
+            &mut ParseContext::default(),
         );
         match effect {
             Some(Effect::Token {
@@ -917,6 +900,7 @@ mod tests {
             &"create two 4/4 white angel creature tokens with flying and vigilance that are attacking"
                 .to_lowercase(),
             "create two 4/4 white Angel creature tokens with flying and vigilance that are attacking",
+            &mut ParseContext::default(),
         );
         match effect {
             Some(Effect::Token {
@@ -943,6 +927,7 @@ mod tests {
         let effect = try_parse_token(
             &"create a 1/1 colorless phyrexian mite artifact creature token with toxic 1 and \"this token can't block.\"".to_lowercase(),
             "create a 1/1 colorless Phyrexian Mite artifact creature token with toxic 1 and \"This token can't block.\"",
+            &mut ParseContext::default(),
         );
         if let Some(Effect::Token {
             static_abilities, ..

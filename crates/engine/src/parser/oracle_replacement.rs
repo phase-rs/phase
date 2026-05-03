@@ -8,8 +8,9 @@ use nom::sequence::{pair, preceded};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
-use super::oracle_effect::become_copy_except::{parse_except_clause, ExceptClauseContext};
+use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
+use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
@@ -1005,7 +1006,7 @@ fn parse_clone_suffix<'a>(
     // ability` arms inside an except clause decline gracefully when the
     // context's `current_trigger_index` is `None`.
     let (post_except, modifications) =
-        parse_except_clause(remaining, card_name, ExceptClauseContext::default())
+        parse_except_clause(remaining, card_name, &ParseContext::default())
             .unwrap_or((remaining, Vec::new()));
 
     (mana_value_limit, duration, modifications, post_except)

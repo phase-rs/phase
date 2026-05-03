@@ -72,24 +72,9 @@ use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::split_keyword_list;
 use super::super::oracle_util::canonicalize_subtype_name;
+use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::{ContinuousModification, QuantityExpr};
 use crate::types::card_type::{CoreType, Supertype};
-
-/// Optional context used by [`parse_except_body`] arms that need to know
-/// which printed trigger of the source object we're currently parsing.
-///
-/// Currently the only consumer is the `<subject pronoun> has this ability`
-/// arm, which emits [`ContinuousModification::RetainPrintedTriggerFromSource`]
-/// referencing the trigger index. When the field is `None`, that arm declines
-/// gracefully so non-trigger contexts (replacements, instants, sorceries) can
-/// still use the same parser without spuriously emitting a retain modification.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ExceptClauseContext {
-    /// Index of the trigger whose body is being parsed, in the source object's
-    /// printed trigger list. Set by the trigger parser before invoking the
-    /// effect chain. CR 707.9a + CR 603.1.
-    pub(crate) current_trigger_index: Option<usize>,
-}
 
 /// CR 707.9a: ", except {except_body} [and {except_body}]*[.]"
 ///
@@ -110,7 +95,7 @@ pub(crate) struct ExceptClauseContext {
 pub(crate) fn parse_except_clause<'a>(
     input: &'a str,
     card_name: &str,
-    ctx: ExceptClauseContext,
+    ctx: &ParseContext,
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
     // ", except " — if missing, there are no modifications to extract.
     let (mut rest, _) = tag::<_, _, VerboseError<&str>>(", except ")
@@ -169,7 +154,7 @@ pub(crate) fn parse_except_clause<'a>(
 pub(crate) fn parse_except_body<'a>(
     input: &'a str,
     card_name: &str,
-    ctx: ExceptClauseContext,
+    ctx: &ParseContext,
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
     if let Some((rest, name_mod)) = parse_name_override(input, card_name) {
         return Some((rest, vec![name_mod]));
@@ -311,10 +296,10 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
 /// Subject pronouns accepted: `he`, `she`, `it` (and `they` for plural). All
 /// are treated identically — this clause is a self-reference to the trigger
 /// containing it.
-fn parse_has_this_ability(
-    input: &str,
-    ctx: ExceptClauseContext,
-) -> Option<(&str, ContinuousModification)> {
+fn parse_has_this_ability<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, ContinuousModification)> {
     let (rest, _) = alt((
         tag::<_, _, VerboseError<&str>>("he has this ability"),
         tag("she has this ability"),
@@ -672,7 +657,7 @@ mod tests {
         let (rest, mods) = parse_except_clause(
             ", except her name is ~",
             "Irma, Part-Time Mutant",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert_eq!(rest, "");
@@ -689,7 +674,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except his name is ~",
             "Test Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert_eq!(
@@ -708,8 +693,7 @@ mod tests {
     #[test]
     fn empty_card_name_skips_set_name() {
         let (_, mods) =
-            parse_except_clause(", except her name is ~", "", ExceptClauseContext::default())
-                .unwrap();
+            parse_except_clause(", except her name is ~", "", &ParseContext::default()).unwrap();
         assert!(
             mods.is_empty(),
             "empty card_name must not emit SetName; got {mods:?}"
@@ -722,11 +706,12 @@ mod tests {
     // continues to flow.
     #[test]
     fn empty_card_name_skips_set_name_but_keeps_other_mods() {
-        let ctx = ExceptClauseContext {
+        let ctx = ParseContext {
             current_trigger_index: Some(0),
+            ..Default::default()
         };
         let (_, mods) =
-            parse_except_clause(", except her name is ~ and she has this ability", "", ctx)
+            parse_except_clause(", except her name is ~ and she has this ability", "", &ctx)
                 .unwrap();
         assert!(
             !mods
@@ -747,11 +732,12 @@ mod tests {
 
     #[test]
     fn it_has_this_ability_with_index_emits_retain() {
-        let ctx = ExceptClauseContext {
+        let ctx = ParseContext {
             current_trigger_index: Some(0),
+            ..Default::default()
         };
         let (rest, mods) =
-            parse_except_clause(", except it has this ability", "Card", ctx).unwrap();
+            parse_except_clause(", except it has this ability", "Card", &ctx).unwrap();
         assert_eq!(rest, "");
         assert_eq!(
             mods,
@@ -763,10 +749,11 @@ mod tests {
 
     #[test]
     fn she_has_this_ability_with_index_emits_retain() {
-        let ctx = ExceptClauseContext {
+        let ctx = ParseContext {
             current_trigger_index: Some(2),
+            ..Default::default()
         };
-        let (_, mods) = parse_except_clause(", except she has this ability", "Card", ctx).unwrap();
+        let (_, mods) = parse_except_clause(", except she has this ability", "Card", &ctx).unwrap();
         assert_eq!(
             mods,
             vec![ContinuousModification::RetainPrintedTriggerFromSource {
@@ -777,10 +764,11 @@ mod tests {
 
     #[test]
     fn he_has_this_ability_with_index_emits_retain() {
-        let ctx = ExceptClauseContext {
+        let ctx = ParseContext {
             current_trigger_index: Some(1),
+            ..Default::default()
         };
-        let (_, mods) = parse_except_clause(", except he has this ability", "Card", ctx).unwrap();
+        let (_, mods) = parse_except_clause(", except he has this ability", "Card", &ctx).unwrap();
         assert_eq!(
             mods,
             vec![ContinuousModification::RetainPrintedTriggerFromSource {
@@ -791,11 +779,12 @@ mod tests {
 
     #[test]
     fn they_have_this_ability_with_index_emits_retain() {
-        let ctx = ExceptClauseContext {
+        let ctx = ParseContext {
             current_trigger_index: Some(3),
+            ..Default::default()
         };
         let (_, mods) =
-            parse_except_clause(", except they have this ability", "Card", ctx).unwrap();
+            parse_except_clause(", except they have this ability", "Card", &ctx).unwrap();
         assert_eq!(
             mods,
             vec![ContinuousModification::RetainPrintedTriggerFromSource {
@@ -813,7 +802,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except she has this ability",
             "Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert!(mods.is_empty());
@@ -821,13 +810,14 @@ mod tests {
 
     #[test]
     fn name_and_has_this_ability_compose() {
-        let ctx = ExceptClauseContext {
+        let ctx = ParseContext {
             current_trigger_index: Some(0),
+            ..Default::default()
         };
         let (_, mods) = parse_except_clause(
             ", except her name is ~ and she has this ability",
             "Irma, Part-Time Mutant",
-            ctx,
+            &ctx,
         )
         .unwrap();
         // SetName first (parsed first), then RetainPrintedTriggerFromSource.
@@ -849,7 +839,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except it has flying, vigilance, and trample",
             "Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert!(mods.iter().any(|m| matches!(
@@ -877,7 +867,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except it's a Spider in addition to its other types",
             "Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert!(mods.iter().any(|m| matches!(
@@ -888,7 +878,7 @@ mod tests {
 
     #[test]
     fn missing_leading_comma_except_returns_none() {
-        let result = parse_except_clause("her name is ~", "Card", ExceptClauseContext::default());
+        let result = parse_except_clause("her name is ~", "Card", &ParseContext::default());
         assert!(result.is_none());
     }
 
@@ -916,7 +906,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except its color is blue and her name is ~",
             "Test",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         // Unrecognised body skipped; name override still extracted.
@@ -934,7 +924,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except the token isn't legendary",
             "Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert_eq!(
@@ -950,7 +940,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except it isn't legendary",
             "Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert_eq!(
@@ -969,7 +959,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except it's legendary in addition to its other types",
             "Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert_eq!(
@@ -988,7 +978,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except it enters with an additional +1/+1 counter on it if it's a creature",
             "Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert_eq!(mods.len(), 1);
@@ -1013,7 +1003,7 @@ mod tests {
         let (_, mods) = parse_except_clause(
             ", except it enters with an additional +1/+1 counter on it if it's a creature, it enters with an additional loyalty counter on it if it's a planeswalker, and it isn't legendary",
             "Card",
-            ExceptClauseContext::default(),
+            &ParseContext::default(),
         )
         .unwrap();
         assert_eq!(mods.len(), 3);

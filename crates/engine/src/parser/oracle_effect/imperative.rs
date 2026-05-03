@@ -1319,7 +1319,7 @@ pub(super) fn parse_search_and_creation_ast(
     }
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("create ")).parse(input))
     {
-        return match try_parse_token(lower, text) {
+        return match try_parse_token(lower, text, ctx) {
             Some(Effect::CopyTokenOf {
                 target,
                 extra_keywords,
