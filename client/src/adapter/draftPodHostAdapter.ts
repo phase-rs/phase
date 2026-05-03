@@ -14,10 +14,7 @@ import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
-import {
-  loadDraftHostSession,
-  type PersistedDraftHostSession,
-} from "../services/draftPersistence";
+import { loadDraftHostSession } from "../services/draftPersistence";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
