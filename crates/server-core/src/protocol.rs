@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -216,6 +216,30 @@ pub enum ClientMessage {
     UnregisterLobby {
         game_code: String,
     },
+    CreateDraftWithSettings {
+        display_name: String,
+        set_code: String,
+        kind: draft_core::types::DraftKind,
+        public: bool,
+        password: Option<String>,
+        timer_seconds: Option<u32>,
+        tournament_format: draft_core::types::TournamentFormat,
+        pod_policy: draft_core::types::PodPolicy,
+        pod_size: u8,
+    },
+    JoinDraftWithPassword {
+        draft_code: String,
+        display_name: String,
+        password: Option<String>,
+    },
+    DraftAction {
+        draft_code: String,
+        action: draft_core::types::DraftAction,
+    },
+    ReconnectDraft {
+        draft_code: String,
+        player_token: String,
+    },
 }
 
 fn default_player_count() -> u8 {
@@ -375,6 +399,37 @@ pub enum ServerMessage {
         match_config: MatchConfig,
         player_count: u8,
         filled_seats: u8,
+    },
+    DraftCreated {
+        draft_code: String,
+        player_token: String,
+        seat_index: u8,
+    },
+    DraftJoined {
+        draft_code: String,
+        player_token: String,
+        seat_index: u8,
+        view: draft_core::view::DraftPlayerView,
+    },
+    DraftStateUpdate {
+        view: draft_core::view::DraftPlayerView,
+    },
+    DraftMatchStart {
+        match_id: String,
+        round: u8,
+        game_code: String,
+        player_token: String,
+        your_player: PlayerId,
+        opponent_name: String,
+    },
+    DraftTimerSync {
+        remaining_ms: u32,
+    },
+    DraftActionRejected {
+        reason: String,
+    },
+    DraftOver {
+        standings: Vec<draft_core::view::StandingEntry>,
     },
 }
 
@@ -1270,6 +1325,263 @@ mod tests {
                 assert_eq!(legal_actions, vec![GameAction::PassPriority]);
             }
             other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_message_create_draft_with_settings_roundtrips() {
+        let msg = ClientMessage::CreateDraftWithSettings {
+            display_name: "Alice".to_string(),
+            set_code: "MKM".to_string(),
+            kind: draft_core::types::DraftKind::Premier,
+            public: true,
+            password: Some("secret".to_string()),
+            timer_seconds: Some(75),
+            tournament_format: draft_core::types::TournamentFormat::Swiss,
+            pod_policy: draft_core::types::PodPolicy::Competitive,
+            pod_size: 8,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::CreateDraftWithSettings {
+                display_name,
+                set_code,
+                kind,
+                public,
+                password,
+                timer_seconds,
+                pod_size,
+                ..
+            } => {
+                assert_eq!(display_name, "Alice");
+                assert_eq!(set_code, "MKM");
+                assert_eq!(kind, draft_core::types::DraftKind::Premier);
+                assert!(public);
+                assert_eq!(password, Some("secret".to_string()));
+                assert_eq!(timer_seconds, Some(75));
+                assert_eq!(pod_size, 8);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_join_draft_with_password_roundtrips() {
+        let msg = ClientMessage::JoinDraftWithPassword {
+            draft_code: "ABCD12".to_string(),
+            display_name: "Bob".to_string(),
+            password: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::JoinDraftWithPassword {
+                draft_code,
+                display_name,
+                password,
+            } => {
+                assert_eq!(draft_code, "ABCD12");
+                assert_eq!(display_name, "Bob");
+                assert_eq!(password, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_draft_action_roundtrips() {
+        let msg = ClientMessage::DraftAction {
+            draft_code: "ABCD12".to_string(),
+            action: draft_core::types::DraftAction::Pick {
+                seat: 3,
+                card_instance_id: "card-001".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::DraftAction {
+                draft_code,
+                action,
+            } => {
+                assert_eq!(draft_code, "ABCD12");
+                assert_eq!(
+                    action,
+                    draft_core::types::DraftAction::Pick {
+                        seat: 3,
+                        card_instance_id: "card-001".to_string(),
+                    }
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_reconnect_draft_roundtrips() {
+        let msg = ClientMessage::ReconnectDraft {
+            draft_code: "ABCD12".to_string(),
+            player_token: "tok123".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::ReconnectDraft {
+                draft_code,
+                player_token,
+            } => {
+                assert_eq!(draft_code, "ABCD12");
+                assert_eq!(player_token, "tok123");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_draft_created_roundtrips() {
+        let msg = ServerMessage::DraftCreated {
+            draft_code: "ABCD12".to_string(),
+            player_token: "tok123".to_string(),
+            seat_index: 0,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DraftCreated {
+                draft_code,
+                player_token,
+                seat_index,
+            } => {
+                assert_eq!(draft_code, "ABCD12");
+                assert_eq!(player_token, "tok123");
+                assert_eq!(seat_index, 0);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_draft_state_update_roundtrips() {
+        use draft_core::types::*;
+        use draft_core::view::DraftPlayerView;
+
+        let view = DraftPlayerView {
+            status: DraftStatus::Drafting,
+            kind: DraftKind::Premier,
+            current_pack_number: 0,
+            pick_number: 2,
+            pass_direction: PassDirection::Left,
+            current_pack: None,
+            pool: Vec::new(),
+            seats: Vec::new(),
+            cards_per_pack: 14,
+            pack_count: 3,
+            timer_remaining_ms: Some(5000),
+            standings: Vec::new(),
+            current_round: 0,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            pairings: Vec::new(),
+        };
+        let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DraftStateUpdate { view: v } => {
+                assert_eq!(v.status, DraftStatus::Drafting);
+                assert_eq!(v.pick_number, 2);
+                assert_eq!(v.timer_remaining_ms, Some(5000));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_draft_match_start_roundtrips() {
+        let msg = ServerMessage::DraftMatchStart {
+            match_id: "r1-t0".to_string(),
+            round: 1,
+            game_code: "GAME01".to_string(),
+            player_token: "tok456".to_string(),
+            your_player: PlayerId(0),
+            opponent_name: "Bob".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DraftMatchStart {
+                match_id,
+                round,
+                game_code,
+                player_token,
+                your_player,
+                opponent_name,
+            } => {
+                assert_eq!(match_id, "r1-t0");
+                assert_eq!(round, 1);
+                assert_eq!(game_code, "GAME01");
+                assert_eq!(player_token, "tok456");
+                assert_eq!(your_player, PlayerId(0));
+                assert_eq!(opponent_name, "Bob");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_draft_timer_sync_roundtrips() {
+        let msg = ServerMessage::DraftTimerSync {
+            remaining_ms: 12345,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DraftTimerSync { remaining_ms } => {
+                assert_eq!(remaining_ms, 12345);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_draft_action_rejected_roundtrips() {
+        let msg = ServerMessage::DraftActionRejected {
+            reason: "Not your turn".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DraftActionRejected { reason } => {
+                assert_eq!(reason, "Not your turn");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_draft_over_roundtrips() {
+        use draft_core::view::StandingEntry;
+
+        let msg = ServerMessage::DraftOver {
+            standings: vec![StandingEntry {
+                seat_index: 0,
+                display_name: "Alice".to_string(),
+                match_wins: 3,
+                match_losses: 0,
+                game_wins: 6,
+                game_losses: 1,
+            }],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DraftOver { standings } => {
+                assert_eq!(standings.len(), 1);
+                assert_eq!(standings[0].display_name, "Alice");
+                assert_eq!(standings[0].match_wins, 3);
+            }
+            _ => panic!("wrong variant"),
         }
     }
 }
