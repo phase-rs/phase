@@ -11,5 +11,10 @@ rand = "0.9"
 rand_chacha = "0.9"
 thiserror = "2"
 
-[dev-dependencies]
 serde_json = "1"
+
+[[bin]]
+name = "draft-pool-gen"
+path = "src/bin/draft_pool_gen.rs"
+
+[dev-dependencies]
