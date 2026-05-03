@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
+import { CardPreview } from "../components/card/CardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
 import { DraftProgress } from "../components/draft/DraftProgress";
@@ -477,6 +478,25 @@ function BetweenGamesView() {
   );
 }
 
+function DraftingPhaseContent() {
+  const [hoveredCardName, setHoveredCardName] = useState<string | null>(null);
+
+  return (
+    <>
+      <div className="flex gap-4">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <SeatStatusRing />
+          <PickTimer />
+          <DraftProgress />
+          <PackDisplay onCardHover={setHoveredCardName} />
+        </div>
+        <PoolPanel onCardHover={setHoveredCardName} />
+      </div>
+      <CardPreview cardName={hoveredCardName} />
+    </>
+  );
+}
+
 // ── Phase-based Content ───────────────────────────────────────────────
 
 function phaseContent(
@@ -490,17 +510,7 @@ function phaseContent(
     case "lobby":
       return <DraftPodLobby onLeave={onLeave} />;
     case "drafting":
-      return (
-        <div className="flex gap-4">
-          <div className="flex min-w-0 flex-1 flex-col">
-            <SeatStatusRing />
-            <PickTimer />
-            <DraftProgress />
-            <PackDisplay />
-          </div>
-          <PoolPanel />
-        </div>
-      );
+      return <DraftingPhaseContent />;
     case "deckbuilding":
       return <LimitedDeckBuilder />;
     case "betweenGames":

@@ -129,8 +129,12 @@ const SORT_MODES: Array<{ mode: PoolSortMode; label: string }> = [
 
 // ── Component ───────────────────────────────────────────────────────────
 
+interface PoolPanelProps {
+  onCardHover?: (name: string | null) => void;
+}
+
 /** Collapsible side panel showing drafted pool. Per D-07: sortable by color/type/CMC. */
-export function PoolPanel() {
+export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
   const view = useDraftStore((s) => s.view);
   const poolSortMode = useDraftStore((s) => s.poolSortMode);
   const poolPanelOpen = useDraftStore((s) => s.poolPanelOpen);
@@ -191,6 +195,8 @@ export function PoolPanel() {
                   {group.cards.map((card) => (
                     <div
                       key={card.instance_id}
+                      onMouseEnter={onCardHover ? () => onCardHover(card.name) : undefined}
+                      onMouseLeave={onCardHover ? () => onCardHover(null) : undefined}
                       className="flex items-center gap-2 px-2 py-1 rounded text-xs hover:bg-gray-700/50 transition-colors"
                     >
                       <span className={`w-2 h-2 rounded-full shrink-0 ${rarityDotClass(card.rarity)}`} />

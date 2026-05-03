@@ -8,14 +8,17 @@ interface PackCardProps {
   card: DraftCardInstance;
   isSelected: boolean;
   onSelect: (instanceId: string) => void;
+  onHover: (name: string | null) => void;
 }
 
-function PackCard({ card, isSelected, onSelect }: PackCardProps) {
+function PackCard({ card, isSelected, onSelect, onHover }: PackCardProps) {
   const { src, isLoading } = useCardImage(card.name, { size: "normal" });
 
   return (
     <button
       onClick={() => onSelect(card.instance_id)}
+      onMouseEnter={() => onHover(card.name)}
+      onMouseLeave={() => onHover(null)}
       className={`relative rounded-lg overflow-hidden transition-all duration-150 cursor-pointer ${
         isSelected
           ? "ring-2 ring-amber-400 scale-105 z-10 shadow-lg shadow-amber-400/20"
@@ -45,8 +48,12 @@ function PackCard({ card, isSelected, onSelect }: PackCardProps) {
 
 // ── Main component ──────────────────────────────────────────────────────
 
+interface PackDisplayProps {
+  onCardHover: (name: string | null) => void;
+}
+
 /** Card image grid for pack picks. Per D-05: click to select, confirm to pick. */
-export function PackDisplay() {
+export function PackDisplay({ onCardHover }: PackDisplayProps) {
   const view = useDraftStore((s) => s.view);
   const selectedCard = useDraftStore((s) => s.selectedCard);
   const selectCard = useDraftStore((s) => s.selectCard);
@@ -73,6 +80,7 @@ export function PackDisplay() {
             card={card}
             isSelected={selectedCard === card.instance_id}
             onSelect={selectCard}
+            onHover={onCardHover}
           />
         ))}
       </div>

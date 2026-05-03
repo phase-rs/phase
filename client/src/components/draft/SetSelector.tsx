@@ -10,6 +10,12 @@ interface SetPoolEntry {
   [key: string]: unknown;
 }
 
+interface ScryfallSetEntry {
+  name: string;
+  icon_svg_uri: string;
+  released_at: string;
+}
+
 interface SetSelectorProps {
   onStartDraft: (setCode: string) => void;
 }
@@ -38,7 +44,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
   const difficulty = useDraftStore((s) => s.difficulty);
   const setDifficulty = useDraftStore((s) => s.setDifficulty);
 
-  const [sets, setSets] = useState<Array<{ code: string; name: string }>>([]);
+  const [sets, setSets] = useState<Array<{ code: string; name: string; icon?: string; releasedAt: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,19 +53,27 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
 
     async function loadSets() {
       try {
-        const resp = await fetch("/draft-pools.json");
-        if (!resp.ok) throw new Error(`Failed to load draft pools: ${resp.status}`);
-        const data: Record<string, SetPoolEntry> = await resp.json();
+        const [poolsResp, setsResp] = await Promise.all([
+          fetch("/draft-pools.json"),
+          fetch("/scryfall-sets.json"),
+        ]);
+        if (!poolsResp.ok) throw new Error(`Failed to load draft pools: ${poolsResp.status}`);
+
+        const pools: Record<string, SetPoolEntry> = await poolsResp.json();
+        const scryfallSets: Record<string, ScryfallSetEntry> = setsResp.ok
+          ? await setsResp.json()
+          : {};
 
         if (cancelled) return;
 
-        const entries = Object.entries(data).map(([code, entry]) => ({
+        const entries = Object.entries(pools).map(([code, entry]) => ({
           code: code.toUpperCase(),
           name: (entry.name as string) ?? code.toUpperCase(),
+          icon: scryfallSets[code]?.icon_svg_uri,
+          releasedAt: scryfallSets[code]?.released_at ?? "",
         }));
 
-        // Sort alphabetically by name
-        entries.sort((a, b) => a.name.localeCompare(b.name));
+        entries.sort((a, b) => b.releasedAt.localeCompare(a.releasedAt));
         setSets(entries);
       } catch (err) {
         if (!cancelled) {
@@ -126,15 +140,23 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
         )}
 
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-          {sets.map(({ code, name }) => (
+          {sets.map(({ code, name, icon }) => (
             <button
               key={code}
               onClick={() => handleSetClick(code)}
               className="flex flex-col items-center gap-2 p-4 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-500 transition-colors cursor-pointer"
             >
-              <span className="text-2xl font-bold text-white tracking-wider">
-                {code}
-              </span>
+              {icon ? (
+                <img
+                  src={icon}
+                  alt={`${name} set icon`}
+                  className="h-10 w-10 invert opacity-80"
+                />
+              ) : (
+                <span className="text-2xl font-bold text-white tracking-wider">
+                  {code}
+                </span>
+              )}
               <span className="text-xs text-gray-400 text-center leading-tight">
                 {name}
               </span>

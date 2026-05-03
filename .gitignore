@@ -26,7 +26,7 @@ client/src/wasm/*.wasm.d.ts
 # Build output
 client/dist/
 
-# Generated data files (built by gen-card-data.sh / gen-scryfall-images.sh)
+# Generated data files (built by gen-card-data.sh / gen-scryfall-images.sh / gen-scryfall-sets.sh)
 client/public/card-data.json
 client/public/card-data-*.json
 client/public/card-data-meta.json
@@ -34,6 +34,7 @@ client/public/card-names.json
 client/public/coverage-data.json
 client/public/coverage-summary.json
 client/public/scryfall-data.json
+client/public/scryfall-sets.json
 client/public/set-list.json
 client/public/decks.json
 client/public/decks-skipped.json
