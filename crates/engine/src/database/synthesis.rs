@@ -1815,7 +1815,11 @@ fn build_oracle_face_inner(
         casting_restrictions: parsed.casting_restrictions,
         casting_options: parsed.casting_options,
         solve_condition: parsed.solve_condition,
-        parse_warnings: parsed.parse_warnings,
+        parse_warnings: parsed
+            .parse_warnings
+            .iter()
+            .map(|d| d.to_string())
+            .collect(),
         brawl_commander: false,
         metadata: Default::default(),
     };

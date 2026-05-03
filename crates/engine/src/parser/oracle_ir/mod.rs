@@ -6,6 +6,7 @@
 
 pub(crate) mod ast;
 pub(crate) mod context;
+pub mod diagnostic;
 pub(crate) mod doc;
 pub(crate) mod effect_chain;
 pub(crate) mod replacement;
@@ -17,6 +18,9 @@ pub(crate) mod trigger;
 pub(crate) use self::ast::*;
 #[allow(unused_imports)] // Re-export for future consumers using oracle_ir::ParseContext path.
 pub(crate) use self::context::*;
+#[allow(unused_imports)]
+// Re-export for future consumers using oracle_ir::OracleDiagnostic path.
+pub(crate) use self::diagnostic::*;
 pub(crate) use self::doc::*;
 #[allow(unused_imports)] // Re-export for future consumers; wired into parser in Plan 02.
 pub(crate) use self::effect_chain::*;

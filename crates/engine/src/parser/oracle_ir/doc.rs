@@ -6,6 +6,7 @@
 //! variants carry already-assembled engine types from pre-processors and
 //! dispatch paths that construct definitions directly.
 
+use super::diagnostic::OracleDiagnostic;
 use super::effect_chain::EffectChainIr;
 use super::replacement::ReplacementIr;
 use super::static_ir::StaticIr;
@@ -28,6 +29,9 @@ pub(crate) struct OracleDocIr {
     pub(crate) source_text: String,
     /// Card name for self-reference context.
     pub(crate) card_name: String,
+    /// Typed diagnostics accumulated during parsing (D-07).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) diagnostics: Vec<OracleDiagnostic>,
 }
 
 /// Individual parsed item from Oracle text.
@@ -86,10 +90,12 @@ mod tests {
             items: vec![],
             source_text: "Flying".to_string(),
             card_name: "Serra Angel".to_string(),
+            diagnostics: vec![],
         };
         assert!(doc.items.is_empty());
         assert_eq!(doc.source_text, "Flying");
         assert_eq!(doc.card_name, "Serra Angel");
+        assert!(doc.diagnostics.is_empty());
     }
 
     #[test]
@@ -107,6 +113,7 @@ mod tests {
             ],
             source_text: "Flying\nVigilance".to_string(),
             card_name: "Test Angel".to_string(),
+            diagnostics: vec![],
         };
         assert_eq!(doc.items.len(), 2);
     }

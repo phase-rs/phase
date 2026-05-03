@@ -7,7 +7,7 @@ pub mod oracle_condition;
 pub mod oracle_cost;
 pub(crate) mod oracle_dispatch;
 pub mod oracle_effect;
-pub(crate) mod oracle_ir;
+pub mod oracle_ir;
 pub(crate) mod oracle_keyword;
 pub(crate) mod oracle_level;
 pub(crate) mod oracle_modal;

@@ -39,6 +39,7 @@ use super::oracle_effect::{
     lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
 };
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::{OracleDocIr, OracleItemIr};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
@@ -97,9 +98,9 @@ pub struct ParsedAbilities {
     /// "This spell costs {X} more to cast for each target beyond the first."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strive_cost: Option<ManaCost>,
-    /// Diagnostic warnings from silent fallback patterns during parsing.
+    /// Typed diagnostic warnings from silent fallback patterns during parsing (D-12).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parse_warnings: Vec<String>,
+    pub parse_warnings: Vec<OracleDiagnostic>,
 }
 
 fn merge_kicker_additional_cost(slot: &mut Option<AdditionalCost>, incoming: AdditionalCost) {
@@ -2219,6 +2220,7 @@ fn parsed_abilities_to_doc_ir(
         items,
         source_text: oracle_text.to_string(),
         card_name: card_name.to_string(),
+        diagnostics: vec![],
     }
 }
 
@@ -2248,7 +2250,16 @@ pub fn parse_oracle_text(
         subtypes,
     );
     let mut result = lower_oracle_ir(&ir);
-    result.parse_warnings = take_warnings();
+    // Dual-emit transition (D-11): thread-local warnings converted to Legacy diagnostics.
+    // Plan 3 will delete the thread-local path once all sites emit typed diagnostics.
+    let thread_local_warnings = take_warnings();
+    result.parse_warnings = thread_local_warnings
+        .into_iter()
+        .map(|msg| OracleDiagnostic::Legacy {
+            message: msg,
+            line_index: 0,
+        })
+        .collect();
     result
 }
 
@@ -3398,9 +3409,11 @@ mod tests {
             assert_eq!(r.triggers.len(), 1);
             assert_eq!(r.triggers[0].mode, TriggerMode::BecomesBlocked);
             assert!(
-                r.parse_warnings
-                    .iter()
-                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                r.parse_warnings.iter().all(|warning| warning
+                    .to_string()
+                    .split_whitespace()
+                    .next()
+                    != Some("Swallow:DynamicQty")),
                 "unexpected DynamicQty warning for {name}: {:?}",
                 r.parse_warnings
             );
@@ -3443,9 +3456,11 @@ mod tests {
 
             assert_eq!(r.statics.len(), 1, "{name}: {r:#?}");
             assert!(
-                r.parse_warnings
-                    .iter()
-                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                r.parse_warnings.iter().all(|warning| warning
+                    .to_string()
+                    .split_whitespace()
+                    .next()
+                    != Some("Swallow:DynamicQty")),
                 "unexpected DynamicQty warning for {name}: {:?}",
                 r.parse_warnings
             );
@@ -4259,7 +4274,7 @@ mod tests {
             }
             effect => panic!("expected optional CastFromZone, got {effect:?}"),
         }
-        assert_eq!(r.parse_warnings, Vec::<String>::new());
+        assert!(r.parse_warnings.is_empty());
     }
 
     #[test]
@@ -4505,7 +4520,7 @@ mod tests {
                 })
             }
         )));
-        assert_eq!(r.parse_warnings, Vec::<String>::new());
+        assert!(r.parse_warnings.is_empty());
     }
 
     #[test]
@@ -4528,10 +4543,11 @@ mod tests {
                 })
             }
         )));
-        assert!(r
-            .parse_warnings
-            .iter()
-            .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")));
+        assert!(r.parse_warnings.iter().all(|warning| warning
+            .to_string()
+            .split_whitespace()
+            .next()
+            != Some("Swallow:Condition_If")));
     }
 
     #[test]
@@ -4551,10 +4567,11 @@ mod tests {
                 condition: Some(ParsedCondition::HandSizeOneOf { counts })
             } if counts == &vec![0, 1]
         )));
-        assert!(r
-            .parse_warnings
-            .iter()
-            .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")));
+        assert!(r.parse_warnings.iter().all(|warning| warning
+            .to_string()
+            .split_whitespace()
+            .next()
+            != Some("Swallow:Condition_If")));
     }
 
     #[test]
@@ -4771,7 +4788,7 @@ mod tests {
                 otherwise_max_choices: 1,
             }]
         );
-        assert_eq!(r.parse_warnings, Vec::<String>::new());
+        assert!(r.parse_warnings.is_empty());
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {
@@ -5746,10 +5763,11 @@ mod tests {
             }
         ));
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
             "unexpected dynamic quantity warning: {:?}",
             parsed.parse_warnings
         );
@@ -7339,7 +7357,8 @@ mod tests {
         assert!(
             r.parse_warnings
                 .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                .all(|warning| warning.to_string().split_whitespace().next()
+                    != Some("Swallow:DynamicQty")),
             "unexpected DynamicQty warning: {:?}",
             r.parse_warnings
         );
@@ -7583,7 +7602,7 @@ mod tests {
             assert!(
                 r.parse_warnings
                     .iter()
-                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                    .all(|warning| warning.to_string().split_whitespace().next() != Some("Swallow:DynamicQty")),
                 "unexpected DynamicQty warning for {name}: {:?}",
                 r.parse_warnings
             );
@@ -8331,10 +8350,9 @@ mod tests {
             &["Instant".to_string()],
             &[],
         );
-        assert!(r
-            .parse_warnings
-            .iter()
-            .all(|warning| { warning.split_whitespace().next() != Some("Swallow:Condition_If") }));
+        assert!(r.parse_warnings.iter().all(|warning| {
+            warning.to_string().split_whitespace().next() != Some("Swallow:Condition_If")
+        }));
         let base = r
             .abilities
             .first()
@@ -8765,10 +8783,11 @@ mod tests {
         let parsed = parse(oracle, "Acolyte's Reward", &[], &["Instant"], &[]);
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Condition_If")),
             "unexpected condition warning: {:?}",
             parsed.parse_warnings
         );
@@ -8797,7 +8816,8 @@ mod tests {
 
         assert!(
             parsed.parse_warnings.iter().all(|warning| {
-                let label = warning.split_whitespace().next();
+                let label = warning.to_string();
+                let label = label.split_whitespace().next();
                 label != Some("Swallow:Condition_If") && label != Some("Swallow:Optional_YouMay")
             }),
             "unexpected replacement choice warning: {:?}",
@@ -8818,10 +8838,11 @@ mod tests {
         );
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Optional_YouMay")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Optional_YouMay")),
             "unexpected optional warning: {:?}",
             parsed.parse_warnings
         );
@@ -8853,10 +8874,11 @@ mod tests {
         );
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Optional_YouMay")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Optional_YouMay")),
             "unexpected optional warning: {:?}",
             parsed.parse_warnings
         );
@@ -8885,10 +8907,11 @@ mod tests {
         );
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Condition_If")),
             "unexpected condition warning: {:?}",
             parsed.parse_warnings
         );
@@ -8904,10 +8927,11 @@ mod tests {
         let parsed = parse(oracle, "Math is for Blockers", &[], &["Sorcery"], &[]);
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Condition_If")),
             "unexpected condition warning: {:?}",
             parsed.parse_warnings
         );
@@ -8928,10 +8952,11 @@ mod tests {
         let parsed = parse(oracle, "Arch of Orazca", &[], &["Land"], &[]);
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Condition_If")),
             "unexpected condition warning: {:?}",
             parsed.parse_warnings
         );
@@ -8962,7 +8987,7 @@ mod tests {
             &["Goblin", "Warrior"],
         );
 
-        assert_eq!(parsed.parse_warnings, Vec::<String>::new());
+        assert!(parsed.parse_warnings.is_empty());
         let damage_ability = parsed
             .abilities
             .iter()
@@ -8984,7 +9009,7 @@ mod tests {
         let oracle = "{T}: You gain 2 life. Activate only if you've cast an instant or sorcery spell this turn.";
         let parsed = parse(oracle, "Potioner's Trove", &[], &["Artifact"], &[]);
 
-        assert_eq!(parsed.parse_warnings, Vec::<String>::new());
+        assert!(parsed.parse_warnings.is_empty());
         let gain_life_ability = parsed
             .abilities
             .iter()
@@ -9018,10 +9043,11 @@ mod tests {
         let parsed = parse(oracle, "Bloom Tender", &[], &["Creature"], &[]);
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
             "unexpected dynamic quantity warning: {:?}",
             parsed.parse_warnings
         );
@@ -9081,10 +9107,11 @@ mod tests {
             static_def.modifications
         );
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
             "unexpected DynamicQty warning: {:?}",
             parsed.parse_warnings
         );
@@ -9111,7 +9138,7 @@ mod tests {
                 parsed
                     .parse_warnings
                     .iter()
-                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                    .all(|warning| warning.to_string().split_whitespace().next() != Some("Swallow:DynamicQty")),
                 "unexpected DynamicQty warning for {name}: {:?}",
                 parsed.parse_warnings
             );
@@ -9186,10 +9213,13 @@ mod tests {
                 parsed
                     .parse_warnings
                     .iter()
-                    .all(|warning| !matches!(
-                        warning.split_whitespace().next(),
-                        Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
-                    )),
+                    .all(|warning| {
+                        let s = warning.to_string();
+                        !matches!(
+                            s.split_whitespace().next(),
+                            Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
+                        )
+                    }),
                 "unexpected toughness-damage warning for {name}: {:?}",
                 parsed.parse_warnings
             );
@@ -9241,10 +9271,13 @@ mod tests {
                 parsed
                     .parse_warnings
                     .iter()
-                    .all(|warning| !matches!(
-                        warning.split_whitespace().next(),
-                        Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
-                    )),
+                    .all(|warning| {
+                        let s = warning.to_string();
+                        !matches!(
+                            s.split_whitespace().next(),
+                            Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
+                        )
+                    }),
                 "unexpected toughness-damage warning for {name}: {:?}",
                 parsed.parse_warnings
             );
@@ -9651,10 +9684,11 @@ mod tests {
             static_def.modifications
         );
         assert!(
-            result
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            result.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
             "unexpected DynamicQty warning: {:?}",
             result.parse_warnings
         );
@@ -9749,7 +9783,8 @@ mod tests {
         }
         assert!(
             r.parse_warnings.iter().all(|warning| {
-                let tag = warning.split_whitespace().next();
+                let tag = warning.to_string();
+                let tag = tag.split_whitespace().next();
                 tag != Some("Swallow:Optional_YouMay") && tag != Some("Swallow:Condition_If")
             }),
             "unexpected Defiler warnings: {:?}",
