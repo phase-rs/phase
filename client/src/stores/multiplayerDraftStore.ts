@@ -40,6 +40,7 @@ export type MultiplayerDraftPhase =
   | "deckbuilding"
   | "pairing"
   | "matchInProgress"
+  | "betweenGames"
   | "roundComplete"
   | "complete"
   | "error"
@@ -85,6 +86,13 @@ interface MultiplayerDraftState {
     isMatchHost: boolean;
   } | null;
   matchAdapter: unknown | null;
+  /** Bo3: sideboard prompt state between games. */
+  sideboardPrompt: {
+    matchId: string;
+    gameNumber: number;
+    yourWins: number;
+    opponentWins: number;
+  } | null;
 }
 
 interface MultiplayerDraftActions {
@@ -171,6 +179,7 @@ const initialState: MultiplayerDraftState = {
   submittedDeck: [],
   matchPairing: null,
   matchAdapter: null,
+  sideboardPrompt: null,
 };
 
 // ── Store ──────────────────────────────────────────────────────────────

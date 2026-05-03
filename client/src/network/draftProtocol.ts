@@ -28,8 +28,9 @@ import type {
  * Bumps to date:
  *   1 — initial P2P draft tournament protocol
  *   2 — add timer sync, match start, round advance messages (Phase 57)
+ *   3 — add Bo3 sideboard and game-level result messages (Phase 58)
  */
-export const DRAFT_PROTOCOL_VERSION = 2 as const;
+export const DRAFT_PROTOCOL_VERSION = 3 as const;
 
 // ── Message Types ──────────────────────────────────────────────────────
 
@@ -156,6 +157,56 @@ export type DraftP2PMessage =
       matchHostPeerId: string;
       /** Whether this recipient is the match host (lower seat# hosts). */
       isMatchHost: boolean;
+    }
+  // ── Bo3 (Traditional Draft) Messages ─────────────────────────────────
+  | {
+      /** Host → Guest: prompt player to sideboard between games in a Bo3 match. */
+      type: "draft_bo3_sideboard_prompt";
+      matchId: string;
+      gameNumber: number;
+      /** Current score: wins for the receiving player. */
+      yourWins: number;
+      /** Current score: wins for the opponent. */
+      opponentWins: number;
+    }
+  | {
+      /** Guest → Host: player submits their sideboarded deck for the next game. */
+      type: "draft_bo3_sideboard_submit";
+      matchId: string;
+      gameNumber: number;
+      mainDeck: string[];
+    }
+  | {
+      /** Host → Guest: acknowledge sideboard submission, game will start shortly. */
+      type: "draft_bo3_sideboard_ack";
+      matchId: string;
+      gameNumber: number;
+    }
+  | {
+      /** Host → Guest: report the result of a single game within a Bo3 match. */
+      type: "draft_bo3_game_result";
+      matchId: string;
+      gameNumber: number;
+      winnerSeat: number | null;
+      /** Updated score for seat A after this game. */
+      scoreA: number;
+      /** Updated score for seat B after this game. */
+      scoreB: number;
+    }
+  | {
+      /** Host → Guest: the Bo3 match is complete (one player reached 2 wins). */
+      type: "draft_bo3_match_complete";
+      matchId: string;
+      winnerSeat: number;
+      finalScoreA: number;
+      finalScoreB: number;
+    }
+  | {
+      /** Guest → Host: report a single game result from within a Bo3 match. */
+      type: "draft_bo3_game_report";
+      matchId: string;
+      gameNumber: number;
+      winnerSeat: number | null;
     };
 
 // ── Validation ─────────────────────────────────────────────────────────
@@ -181,6 +232,12 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_timer_sync",
   "draft_request_advance",
   "draft_match_start",
+  "draft_bo3_sideboard_prompt",
+  "draft_bo3_sideboard_submit",
+  "draft_bo3_sideboard_ack",
+  "draft_bo3_game_result",
+  "draft_bo3_match_complete",
+  "draft_bo3_game_report",
 ]);
 
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */

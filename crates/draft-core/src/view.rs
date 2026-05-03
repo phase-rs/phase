@@ -26,6 +26,10 @@ pub struct PairingView {
     pub match_id: String,
     pub status: PairingStatus,
     pub winner_seat: Option<u8>,
+    /// Game wins for seat A in the current match (Bo3 tracking).
+    pub score_a: Option<u8>,
+    /// Game wins for seat B in the current match (Bo3 tracking).
+    pub score_b: Option<u8>,
 }
 
 /// Public seat info visible to all players.
@@ -266,6 +270,8 @@ fn compute_pairing_views(session: &DraftSession) -> Vec<PairingView> {
                 match_id: p.match_id.clone(),
                 status: p.status,
                 winner_seat,
+                score_a: None,
+                score_b: None,
             }
         })
         .collect()
