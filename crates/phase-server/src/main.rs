@@ -1737,6 +1737,7 @@ async fn handle_client_message(
             format_config,
             room_name,
             host_peer_id,
+            draft_metadata,
         } => {
             info!(
                 display_name = %display_name,
@@ -1856,6 +1857,7 @@ async fn handle_client_message(
                                 .filter(|s| !s.is_empty())
                                 .map(str::to_string),
                             host_peer_id: peer_id,
+                            draft_metadata,
                         },
                     );
                 }
@@ -2163,6 +2165,9 @@ async fn handle_client_message(
                         // Full-mode server runs the engine itself — no
                         // PeerJS peer is involved, so this stays empty.
                         host_peer_id: String::new(),
+                        // Draft metadata is P2P-only for now; Full-mode
+                        // servers don't host draft pods.
+                        draft_metadata: None,
                     },
                 );
 

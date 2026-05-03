@@ -5,7 +5,7 @@ use engine::types::format::FormatConfig;
 use engine::types::match_config::MatchConfig;
 use tracing::{debug, warn};
 
-use crate::protocol::LobbyGame;
+use crate::protocol::{DraftLobbyMetadata, LobbyGame};
 
 /// Fields a caller supplies when registering a lobby entry. Using a struct
 /// here rather than a long positional argument list means adding a new field
@@ -32,6 +32,9 @@ pub struct RegisterGameRequest {
     /// on `Full`-mode servers (the server runs the engine and P2P is not
     /// used). Guests on a lobby-only server use this to dial the host.
     pub host_peer_id: String,
+    /// Draft-specific metadata for lobby display. `None` for constructed-play
+    /// rooms.
+    pub draft_metadata: Option<DraftLobbyMetadata>,
 }
 
 /// Fields returned by `join_target_info` — everything the server needs to
@@ -62,6 +65,7 @@ struct LobbyGameMeta {
     match_config: MatchConfig,
     room_name: Option<String>,
     host_peer_id: String,
+    draft_metadata: Option<DraftLobbyMetadata>,
 }
 
 pub struct LobbyManager {
@@ -107,6 +111,7 @@ impl LobbyManager {
                 match_config: req.match_config,
                 room_name: req.room_name,
                 host_peer_id: req.host_peer_id,
+                draft_metadata: req.draft_metadata,
             },
         );
     }
@@ -171,7 +176,22 @@ impl LobbyManager {
         if !meta.public {
             return None;
         }
-        Some(LobbyGame {
+        Some(Self::meta_to_lobby_game(game_code, meta))
+    }
+
+    pub fn public_games(&self) -> Vec<LobbyGame> {
+        self.games
+            .iter()
+            .filter(|(_, meta)| meta.public)
+            .map(|(code, meta)| Self::meta_to_lobby_game(code, meta))
+            .collect()
+    }
+
+    /// Converts internal `LobbyGameMeta` to the wire-level `LobbyGame`.
+    /// Single construction site prevents field drift when new metadata
+    /// fields are added.
+    fn meta_to_lobby_game(game_code: &str, meta: &LobbyGameMeta) -> LobbyGame {
+        LobbyGame {
             game_code: game_code.to_string(),
             host_name: meta.host_name.clone(),
             created_at: meta.created_at,
@@ -183,27 +203,8 @@ impl LobbyManager {
             format: meta.format_config.as_ref().map(|fc| fc.format),
             room_name: meta.room_name.clone(),
             is_p2p: !meta.host_peer_id.is_empty(),
-        })
-    }
-
-    pub fn public_games(&self) -> Vec<LobbyGame> {
-        self.games
-            .iter()
-            .filter(|(_, meta)| meta.public)
-            .map(|(code, meta)| LobbyGame {
-                game_code: code.clone(),
-                host_name: meta.host_name.clone(),
-                created_at: meta.created_at,
-                has_password: meta.has_password,
-                host_version: meta.host_version.clone(),
-                host_build_commit: meta.host_build_commit.clone(),
-                current_players: meta.current_players,
-                max_players: meta.max_players,
-                format: meta.format_config.as_ref().map(|fc| fc.format),
-                room_name: meta.room_name.clone(),
-                is_p2p: !meta.host_peer_id.is_empty(),
-            })
-            .collect()
+            draft_metadata: meta.draft_metadata.clone(),
+        }
     }
 
     pub fn has_game(&self, game_code: &str) -> bool {

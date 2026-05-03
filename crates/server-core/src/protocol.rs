@@ -87,6 +87,23 @@ pub struct LobbyGame {
     /// time. This field is populated by the server, never by clients.
     #[serde(default)]
     pub is_p2p: bool,
+    /// When present, this lobby entry is a draft pod rather than a
+    /// constructed-play room. Contains set code and draft kind so the
+    /// lobby UI can badge the row appropriately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_metadata: Option<DraftLobbyMetadata>,
+}
+
+/// Metadata attached to a lobby entry when the room is a draft pod.
+/// Lightweight — only the fields the lobby listing needs to render a
+/// meaningful row. The full draft state lives in the host's WASM engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftLobbyMetadata {
+    /// Three-letter set code (e.g. "MKM", "OTJ").
+    pub set_code: String,
+    /// Draft kind label: "Quick", "Premier", or "Traditional".
+    pub draft_kind: String,
 }
 
 pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatView};
@@ -151,6 +168,10 @@ pub enum ClientMessage {
         /// is not used). `Some("")` is treated identically to `None`.
         #[serde(default)]
         host_peer_id: Option<String>,
+        /// Draft-specific metadata. When present, the lobby entry is badged
+        /// as a draft pod instead of a constructed-play room.
+        #[serde(default)]
+        draft_metadata: Option<DraftLobbyMetadata>,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -498,6 +519,7 @@ mod tests {
             format_config: None,
             room_name: Some("Friday Night Commander".to_string()),
             host_peer_id: None,
+            draft_metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -697,6 +719,7 @@ mod tests {
                 format: None,
                 room_name: None,
                 is_p2p: false,
+                draft_metadata: None,
             }],
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -727,6 +750,7 @@ mod tests {
                 format: None,
                 room_name: None,
                 is_p2p: true,
+                draft_metadata: None,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -755,6 +779,7 @@ mod tests {
                 format: Some(GameFormat::Commander),
                 room_name: Some("Board-wipe special".to_string()),
                 is_p2p: false,
+                draft_metadata: None,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -913,6 +938,7 @@ mod tests {
             format_config: None,
             room_name: None,
             host_peer_id: None,
+            draft_metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1037,6 +1063,7 @@ mod tests {
             format: Some(GameFormat::Commander),
             room_name: Some("Spellslingers".to_string()),
             is_p2p: true,
+            draft_metadata: None,
         };
         let json = serde_json::to_string(&game).unwrap();
         let parsed: LobbyGame = serde_json::from_str(&json).unwrap();
@@ -1047,6 +1074,7 @@ mod tests {
         assert_eq!(parsed.format, Some(GameFormat::Commander));
         assert_eq!(parsed.room_name, Some("Spellslingers".to_string()));
         assert!(parsed.is_p2p);
+        assert!(parsed.draft_metadata.is_none());
     }
 
     #[test]
@@ -1169,6 +1197,7 @@ mod tests {
             format_config: None,
             room_name: None,
             host_peer_id: Some("peer-host-abc".to_string()),
+            draft_metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();

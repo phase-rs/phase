@@ -97,6 +97,16 @@ export interface LobbyGame {
    * the field entirely, so treating `undefined` as falsy is what we want.
    */
   is_p2p?: boolean;
+  /** Draft-specific metadata. Present when the room is a draft pod. */
+  draft_metadata?: DraftLobbyMetadata | null;
+}
+
+/** Metadata for draft pod lobby entries. */
+export interface DraftLobbyMetadata {
+  /** Three-letter set code (e.g. "MKM", "OTJ"). */
+  setCode: string;
+  /** Draft kind: "Quick", "Premier", or "Traditional". */
+  draftKind: string;
 }
 
 /**
