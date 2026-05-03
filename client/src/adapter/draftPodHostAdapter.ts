@@ -10,7 +10,7 @@
  * draft pod instead of a 2-4 player game.
  */
 
-import type { DraftPlayerView, PairingView, SeatPublicView } from "./draft-adapter";
+import type { DraftPlayerView, PairingView, PodPolicy, SeatPublicView, TournamentFormat } from "./draft-adapter";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
@@ -59,6 +59,10 @@ export interface DraftPodHostConfig {
   kind: "Premier" | "Traditional";
   podSize: number;
   hostDisplayName: string;
+  /** Swiss (3 rounds) or Single Elimination bracket. */
+  tournamentFormat: TournamentFormat;
+  /** Competitive (timed) or Casual (untimed, host-controlled). */
+  podPolicy: PodPolicy;
   /** Broker client for lobby registration. Optional: P2P works without broker. */
   broker?: BrokerClient;
   /** Broker request for lobby registration. Required if broker is set. */

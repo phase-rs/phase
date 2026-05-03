@@ -16,6 +16,7 @@
 
 import { create } from "zustand";
 
+import type { TournamentFormat, PodPolicy } from "../adapter/draft-adapter";
 import type { DraftPodHostConfig } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
 import { useMultiplayerDraftStore } from "./multiplayerDraftStore";
@@ -29,6 +30,8 @@ export interface PodConfig {
   setName: string;
   kind: DraftKind;
   podSize: number;
+  tournamentFormat: TournamentFormat;
+  podPolicy: PodPolicy;
 }
 
 interface DraftPodState {
@@ -79,6 +82,8 @@ const initialState: DraftPodState = {
     setName: "",
     kind: "Premier",
     podSize: 8,
+    tournamentFormat: "Swiss",
+    podPolicy: "Competitive",
   },
   botFillEnabled: true,
   hostDisplayName: "",
@@ -155,6 +160,8 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           kind: config.kind,
           podSize: config.podSize,
           hostDisplayName: hostDisplayName.trim(),
+          tournamentFormat: config.tournamentFormat,
+          podPolicy: config.podPolicy,
         };
 
         await useMultiplayerDraftStore.getState().hostDraft(hostConfig);

@@ -154,6 +154,8 @@ describe("DraftPodHostAdapter", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
     });
 
     expect(adapter.status).toBe("lobby");
@@ -175,6 +177,8 @@ describe("DraftPodHostAdapter", () => {
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
       }),
     ).rejects.toThrow("signaling down");
 
@@ -188,6 +192,8 @@ describe("DraftPodHostAdapter", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
     });
 
     await adapter.startDraft();
@@ -200,6 +206,8 @@ describe("DraftPodHostAdapter", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
     });
 
     const view = await adapter.submitPick("card-123");
@@ -213,6 +221,8 @@ describe("DraftPodHostAdapter", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
     });
 
     const view = await adapter.submitDeck(["Plains", "Island"]);
@@ -226,6 +236,8 @@ describe("DraftPodHostAdapter", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
     });
 
     adapter.kickPlayer(3, "AFK");
@@ -250,6 +262,8 @@ describe("DraftPodHostAdapter", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
     });
 
     // Extract the event handler registered on P2PDraftHost
@@ -281,6 +295,8 @@ describe("DraftPodHostAdapter", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
     });
 
     await adapter.dispose();
@@ -298,6 +314,8 @@ describe("DraftPodHostAdapter", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
     });
 
     unsub();

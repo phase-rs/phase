@@ -121,6 +121,71 @@ function PodSetup() {
           </label>
         </div>
 
+        {/* Tournament Format (D-04) */}
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium text-white/60">
+            Tournament Format
+          </label>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="tournamentFormat"
+                checked={config.tournamentFormat === "Swiss"}
+                onChange={() => setConfig({ tournamentFormat: "Swiss" })}
+                className="accent-emerald-400"
+              />
+              Swiss (3 rounds)
+            </label>
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="tournamentFormat"
+                checked={config.tournamentFormat === "SingleElimination"}
+                onChange={() =>
+                  setConfig({ tournamentFormat: "SingleElimination" })
+                }
+                className="accent-emerald-400"
+              />
+              Single Elimination
+            </label>
+          </div>
+        </div>
+
+        {/* Pod Policy (D-07) */}
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium text-white/60">
+            Pod Policy
+          </label>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="podPolicy"
+                checked={config.podPolicy === "Competitive"}
+                onChange={() => setConfig({ podPolicy: "Competitive" })}
+                className="accent-emerald-400"
+              />
+              Competitive
+            </label>
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="podPolicy"
+                checked={config.podPolicy === "Casual"}
+                onChange={() => setConfig({ podPolicy: "Casual" })}
+                className="accent-emerald-400"
+              />
+              Casual
+            </label>
+          </div>
+          <p className="text-xs text-white/40">
+            {config.podPolicy === "Competitive"
+              ? "Timed picks, auto-pick on timeout, auto-advance rounds"
+              : "Untimed picks, host controls round advancement"}
+          </p>
+        </div>
+
         {/* Pod size */}
         <div className="flex flex-col gap-1">
           <label className="text-sm font-medium text-white/60">Pod Size</label>

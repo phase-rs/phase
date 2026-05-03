@@ -114,6 +114,8 @@ describe("multiplayerDraftStore", () => {
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
       });
 
       const state = useMultiplayerDraftStore.getState();
@@ -127,6 +129,8 @@ describe("multiplayerDraftStore", () => {
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
       });
 
       // Simulate roomCreated event
@@ -140,6 +144,8 @@ describe("multiplayerDraftStore", () => {
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
       });
 
       const view = mockView("Drafting");
@@ -156,6 +162,8 @@ describe("multiplayerDraftStore", () => {
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
       });
 
       capturedHostEventHandler!({
@@ -268,6 +276,8 @@ describe("multiplayerDraftStore", () => {
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
       });
 
       useMultiplayerDraftStore.getState().selectCard("card-123");
@@ -313,6 +323,8 @@ describe("multiplayerDraftStore", () => {
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
       });
 
       capturedHostEventHandler!({ type: "roomCreated", roomCode: "XYZAB" });
