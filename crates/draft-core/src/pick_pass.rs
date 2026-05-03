@@ -108,6 +108,7 @@ mod tests {
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
         };
         let seats: Vec<DraftSeat> = (0..pod_size)
             .map(|i| DraftSeat::Human {

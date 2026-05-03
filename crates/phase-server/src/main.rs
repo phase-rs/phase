@@ -3093,6 +3093,7 @@ async fn handle_client_message(
                 rng_seed: rand::random(),
                 tournament_format,
                 pod_policy,
+                spectator_visibility: draft_core::types::SpectatorVisibility::default(),
             };
 
             let (draft_code, player_token, seat_index) = {

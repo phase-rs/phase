@@ -544,6 +544,7 @@ mod tests {
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
         };
         let seats: Vec<DraftSeat> = (0..pod_size)
             .map(|i| DraftSeat::Human {
@@ -673,6 +674,7 @@ mod tests {
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
         };
         let seats = vec![
             DraftSeat::Human {
@@ -898,6 +900,7 @@ mod tests {
             rng_seed: 42,
             tournament_format: TournamentFormat::SingleElimination,
             pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
         };
         let seats: Vec<DraftSeat> = (0..8)
             .map(|i| DraftSeat::Human {

@@ -82,6 +82,119 @@ pub struct DraftPlayerView {
     pub pairings: Vec<PairingView>,
 }
 
+/// Re-export SpectatorVisibility from types for convenience.
+pub use crate::types::SpectatorVisibility;
+
+/// Filtered view for spectators watching a draft.
+///
+/// Public mode hides all private information (pools, packs).
+/// Omniscient mode exposes all pools and current packs for all seats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpectatorDraftView {
+    pub status: DraftStatus,
+    pub kind: DraftKind,
+    pub current_pack_number: u8,
+    pub pick_number: u8,
+    pub pass_direction: PassDirection,
+    pub seats: Vec<SeatPublicView>,
+    pub cards_per_pack: u8,
+    pub pack_count: u8,
+    pub standings: Vec<StandingEntry>,
+    pub current_round: u8,
+    pub tournament_format: TournamentFormat,
+    pub pod_policy: PodPolicy,
+    pub pairings: Vec<PairingView>,
+    /// Populated only in `Omniscient` mode. Each inner Vec is a seat's pool.
+    pub pools: Option<Vec<Vec<DraftCardInstance>>>,
+    /// Populated only in `Omniscient` mode. Each entry is a seat's current pack.
+    pub current_packs: Option<Vec<Option<Vec<DraftCardInstance>>>>,
+}
+
+/// Generate a spectator view of the draft session.
+///
+/// Visibility is read from session.config.spectator_visibility (set by host at creation).
+/// Public mode hides all private information (pools, packs).
+/// Omniscient mode exposes all pools and current packs for all seats.
+pub fn filter_for_spectator(
+    session: &DraftSession,
+    visibility: SpectatorVisibility,
+) -> SpectatorDraftView {
+    let is_drafting = session.status == DraftStatus::Drafting;
+
+    let seats = session
+        .seats
+        .iter()
+        .enumerate()
+        .map(|(i, seat)| {
+            let player_id_for_seat = match seat {
+                DraftSeat::Human { player_id, .. } => Some(*player_id),
+                DraftSeat::Bot { .. } => None,
+            };
+
+            let pick_status = if !is_drafting {
+                PickStatus::NotDrafting
+            } else if session.current_pack[i].is_some() {
+                PickStatus::Pending
+            } else {
+                PickStatus::Picked
+            };
+
+            SeatPublicView {
+                seat_index: i as u8,
+                display_name: match seat {
+                    DraftSeat::Human { display_name, .. } => display_name.clone(),
+                    DraftSeat::Bot { name, .. } => name.clone(),
+                },
+                is_bot: matches!(seat, DraftSeat::Bot { .. }),
+                connected: match seat {
+                    DraftSeat::Human { connected, .. } => *connected,
+                    DraftSeat::Bot { .. } => true,
+                },
+                has_submitted_deck: player_id_for_seat
+                    .map(|pid| session.submitted_decks.contains_key(&pid))
+                    .unwrap_or(false),
+                pick_status,
+            }
+        })
+        .collect();
+
+    let standings = compute_standings(session);
+    let pairings = compute_pairing_views(session);
+
+    let (pools, current_packs) = match visibility {
+        SpectatorVisibility::Public => (None, None),
+        SpectatorVisibility::Omniscient => {
+            let pools = Some(session.pools.clone());
+            let packs = Some(
+                session
+                    .current_pack
+                    .iter()
+                    .map(|p| p.as_ref().map(|pack| pack.0.clone()))
+                    .collect(),
+            );
+            (pools, packs)
+        }
+    };
+
+    SpectatorDraftView {
+        status: session.status,
+        kind: session.kind,
+        current_pack_number: session.current_pack_number,
+        pick_number: session.pick_number,
+        pass_direction: session.pass_direction,
+        seats,
+        cards_per_pack: session.config.cards_per_pack,
+        pack_count: session.config.pack_count,
+        standings,
+        current_round: session.current_round,
+        tournament_format: session.config.tournament_format,
+        pod_policy: session.config.pod_policy,
+        pairings,
+        pools,
+        current_packs,
+    }
+}
+
 /// Produce a filtered view of the draft session for a specific seat.
 ///
 /// The viewer sees:
@@ -294,6 +407,7 @@ mod tests {
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
         };
         let seats: Vec<DraftSeat> = (0..pod_size)
             .map(|i| DraftSeat::Human {
@@ -528,6 +642,7 @@ mod tests {
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
         };
         let mut seats = vec![DraftSeat::Human {
             player_id: PlayerId(0),
@@ -688,5 +803,51 @@ mod tests {
         };
         assert_eq!(view.score_a, None);
         assert_eq!(view.score_b, None);
+    }
+
+    #[test]
+    fn spectator_public_view_hides_pools_and_packs() {
+        let (mut session, source) = test_session(8);
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        let view = filter_for_spectator(&session, SpectatorVisibility::Public);
+        assert!(view.pools.is_none());
+        assert!(view.current_packs.is_none());
+        assert_eq!(view.seats.len(), 8);
+        assert_eq!(view.status, DraftStatus::Drafting);
+        assert_eq!(view.kind, DraftKind::Premier);
+    }
+
+    #[test]
+    fn spectator_omniscient_view_exposes_all_pools() {
+        let (mut session, source) = test_session(8);
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        let view = filter_for_spectator(&session, SpectatorVisibility::Omniscient);
+        assert!(view.pools.is_some());
+        assert_eq!(view.pools.as_ref().unwrap().len(), 8);
+        assert!(view.current_packs.is_some());
+        assert_eq!(view.current_packs.as_ref().unwrap().len(), 8);
+        // All seats should have a current pack during drafting
+        for pack in view.current_packs.as_ref().unwrap() {
+            assert!(pack.is_some());
+        }
+    }
+
+    #[test]
+    fn spectator_public_view_has_standings_and_pairings() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        session::apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let view = filter_for_spectator(&session, SpectatorVisibility::Public);
+        assert_eq!(view.pairings.len(), 4);
+        assert!(view.pools.is_none());
     }
 }

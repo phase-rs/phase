@@ -27,6 +27,17 @@ pub enum PodPolicy {
     Casual,
 }
 
+/// Controls what spectators can see during a draft. Defaults to Public.
+/// Competitive pods MUST use Public. Casual pods allow host to set Omniscient at creation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpectatorVisibility {
+    /// Battlefield, standings, pairings visible. Pools and packs hidden.
+    #[default]
+    Public,
+    /// All pools and current packs visible. Host must explicitly enable for Casual pods.
+    Omniscient,
+}
+
 /// Per-seat pick status during the draft phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PickStatus {
@@ -249,6 +260,8 @@ pub struct DraftConfig {
     pub tournament_format: TournamentFormat,
     #[serde(default)]
     pub pod_policy: PodPolicy,
+    #[serde(default)]
+    pub spectator_visibility: SpectatorVisibility,
 }
 
 /// A player's submitted deck for limited play.
@@ -429,5 +442,34 @@ mod tests {
             let back: PickStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(status, back);
         }
+    }
+
+    #[test]
+    fn serde_roundtrip_spectator_visibility() {
+        for vis in [SpectatorVisibility::Public, SpectatorVisibility::Omniscient] {
+            let json = serde_json::to_string(&vis).unwrap();
+            let back: SpectatorVisibility = serde_json::from_str(&json).unwrap();
+            assert_eq!(vis, back);
+        }
+    }
+
+    #[test]
+    fn spectator_visibility_default_is_public() {
+        assert_eq!(SpectatorVisibility::default(), SpectatorVisibility::Public);
+    }
+
+    #[test]
+    fn draft_config_missing_spectator_visibility_defaults_to_public() {
+        // Backward compatibility: configs serialized before this field was added
+        // should deserialize with Public visibility.
+        let json = r#"{
+            "set_code": "TST",
+            "kind": "Premier",
+            "cards_per_pack": 14,
+            "pack_count": 3,
+            "rng_seed": 42
+        }"#;
+        let config: DraftConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.spectator_visibility, SpectatorVisibility::Public);
     }
 }

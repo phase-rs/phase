@@ -412,7 +412,7 @@ pub fn draft_grace_period(status: &DraftStatus) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use draft_core::types::{DraftKind, PodPolicy, TournamentFormat};
+    use draft_core::types::{DraftKind, PodPolicy, SpectatorVisibility, TournamentFormat};
 
     fn test_config() -> DraftConfig {
         DraftConfig {
@@ -423,6 +423,7 @@ mod tests {
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
         }
     }
 
