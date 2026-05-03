@@ -1,0 +1,31 @@
+---
+source: crates/engine/src/parser/oracle_static.rs
+expression: def
+---
+{
+  "mode": "Continuous",
+  "affected": {
+    "type": "Typed",
+    "type_filters": [
+      "Creature"
+    ],
+    "controller": "You",
+    "properties": []
+  },
+  "modifications": [
+    {
+      "type": "AddPower",
+      "value": 1
+    },
+    {
+      "type": "AddToughness",
+      "value": 1
+    }
+  ],
+  "condition": null,
+  "affected_zone": null,
+  "effect_zone": null,
+  "active_zones": [],
+  "characteristic_defining": false,
+  "description": "Creatures you control get +1/+1."
+}

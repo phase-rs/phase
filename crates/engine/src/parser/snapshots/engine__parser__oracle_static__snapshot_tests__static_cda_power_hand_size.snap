@@ -1,0 +1,30 @@
+---
+source: crates/engine/src/parser/oracle_static.rs
+expression: def
+---
+{
+  "mode": "Continuous",
+  "affected": {
+    "type": "SelfRef"
+  },
+  "modifications": [
+    {
+      "type": "SetDynamicPower",
+      "value": {
+        "type": "Ref",
+        "qty": {
+          "type": "HandSize",
+          "player": {
+            "type": "Controller"
+          }
+        }
+      }
+    }
+  ],
+  "condition": null,
+  "affected_zone": null,
+  "effect_zone": null,
+  "active_zones": [],
+  "characteristic_defining": true,
+  "description": "~'s power is equal to the number of cards in your hand."
+}

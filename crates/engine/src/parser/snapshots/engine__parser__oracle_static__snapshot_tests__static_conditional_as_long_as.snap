@@ -1,0 +1,40 @@
+---
+source: crates/engine/src/parser/oracle_static.rs
+expression: def
+---
+{
+  "mode": "Continuous",
+  "affected": {
+    "type": "SelfRef"
+  },
+  "modifications": [
+    {
+      "type": "AddPower",
+      "value": 2
+    },
+    {
+      "type": "AddToughness",
+      "value": 2
+    }
+  ],
+  "condition": {
+    "type": "IsPresent",
+    "filter": {
+      "type": "Typed",
+      "type_filters": [
+        "Creature"
+      ],
+      "controller": "You",
+      "properties": [
+        {
+          "type": "Another"
+        }
+      ]
+    }
+  },
+  "affected_zone": null,
+  "effect_zone": null,
+  "active_zones": [],
+  "characteristic_defining": false,
+  "description": "~ gets +2/+2 as long as you control another creature."
+}

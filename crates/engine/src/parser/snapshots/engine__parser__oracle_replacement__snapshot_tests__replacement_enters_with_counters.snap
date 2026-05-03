@@ -1,0 +1,39 @@
+---
+source: crates/engine/src/parser/oracle_replacement.rs
+expression: def
+---
+{
+  "event": "Moved",
+  "execute": {
+    "kind": "Spell",
+    "effect": {
+      "type": "PutCounter",
+      "counter_type": "P1P1",
+      "count": {
+        "type": "Fixed",
+        "value": 2
+      },
+      "target": {
+        "type": "SelfRef"
+      }
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "sorcery_speed": false,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "mode": {
+    "type": "Mandatory"
+  },
+  "valid_card": {
+    "type": "SelfRef"
+  },
+  "description": "~ enters the battlefield with two +1/+1 counters on it.",
+  "condition": null
+}

@@ -1,0 +1,27 @@
+---
+source: crates/engine/src/parser/oracle_static.rs
+expression: def
+---
+{
+  "mode": "Continuous",
+  "affected": {
+    "type": "Typed",
+    "type_filters": [
+      "Creature"
+    ],
+    "controller": "You",
+    "properties": []
+  },
+  "modifications": [
+    {
+      "type": "AddKeyword",
+      "keyword": "Flying"
+    }
+  ],
+  "condition": null,
+  "affected_zone": null,
+  "effect_zone": null,
+  "active_zones": [],
+  "characteristic_defining": false,
+  "description": "Creatures you control have flying."
+}

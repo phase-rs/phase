@@ -10,6 +10,7 @@ use nom_language::error::VerboseError;
 
 use super::oracle_effect::become_copy_except::{parse_except_clause, ExceptClauseContext};
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
+use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::duration::parse_duration;
@@ -40,6 +41,29 @@ use crate::types::zones::Zone;
 /// text is already normalized and the internal call is an idempotent no-op.
 #[tracing::instrument(level = "debug", skip(card_name))]
 pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<ReplacementDefinition> {
+    let ir = parse_replacement_line_ir(text, card_name)?;
+    Some(lower_replacement_ir(&ir))
+}
+
+/// IR production: parse a replacement line into `ReplacementIr` (pre-lowering).
+pub(crate) fn parse_replacement_line_ir(text: &str, card_name: &str) -> Option<ReplacementIr> {
+    let definition = parse_replacement_line_inner(text, card_name)?;
+    Some(ReplacementIr {
+        definition,
+        source_text: text.to_string(),
+        execute_ir: None,
+    })
+}
+
+/// Lowering: produce the final `ReplacementDefinition` from IR.
+///
+/// Currently identity — replacement definitions are fully assembled during parsing.
+pub(crate) fn lower_replacement_ir(ir: &ReplacementIr) -> ReplacementDefinition {
+    ir.definition.clone()
+}
+
+/// Internal dispatch body for replacement line parsing.
+fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<ReplacementDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let normalized = replace_self_refs(&text, card_name);
@@ -6975,5 +6999,45 @@ mod tests {
         assert!(!super::has_except_first_draw_in_draw_step_clause(
             "except the first one you draw in each of your upkeeps"
         ));
+    }
+}
+
+/// Snapshot tests locking current replacement parser output before/after the IR split.
+/// These verify behavioral parity: identical snapshots before and after the
+/// `parse_replacement_line_ir` / `lower_replacement_ir` refactor.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_enters_tapped() {
+        let def = parse_replacement_line("~ enters the battlefield tapped.", "Test Card").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_prevent_all_combat_damage() {
+        let def = parse_replacement_line(
+            "Prevent all combat damage that would be dealt to you.",
+            "Test Card",
+        )
+        .unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_would_die_exile() {
+        let def = parse_replacement_line("If ~ would die, exile it instead.", "Test Card").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_enters_with_counters() {
+        let def = parse_replacement_line(
+            "~ enters the battlefield with two +1/+1 counters on it.",
+            "Test Card",
+        )
+        .unwrap();
+        insta::assert_json_snapshot!(def);
     }
 }

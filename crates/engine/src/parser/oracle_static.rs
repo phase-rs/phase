@@ -12,6 +12,7 @@ use nom_language::error::VerboseError;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::error::OracleResult;
@@ -363,9 +364,28 @@ enum InvertedAsLongAs {
 /// "Creatures you control get +N/+M", etc.
 #[tracing::instrument(level = "debug")]
 pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
-    let mut def = parse_static_line_inner(text, InvertedAsLongAs::Allow)?;
+    let ir = parse_static_line_ir(text)?;
+    Some(lower_static_ir(&ir))
+}
+
+/// IR production: parse a static line into `StaticIr` (pre-lowering).
+///
+/// The definition is parsed but `populate_active_zones_from_condition` is NOT
+/// applied — that is a lowering step performed by `lower_static_ir`.
+pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
+    let definition = parse_static_line_inner(text, InvertedAsLongAs::Allow)?;
+    Some(StaticIr {
+        definition,
+        source_text: text.to_string(),
+        body_ir: None,
+    })
+}
+
+/// Lowering: apply post-parse transforms to produce the final `StaticDefinition`.
+pub(crate) fn lower_static_ir(ir: &StaticIr) -> StaticDefinition {
+    let mut def = ir.definition.clone();
     populate_active_zones_from_condition(&mut def);
-    Some(def)
+    def
 }
 
 /// CR 113.6 + CR 113.6b: When a static ability's condition asserts the source
@@ -1855,11 +1875,23 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 /// (one `MustAttack`, one `MustBlock`). Callers that push into a `Vec`
 /// should prefer this over `parse_static_line` to avoid silently dropping modes.
 pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
-    let mut defs = parse_static_line_multi_inner(text);
-    for def in defs.iter_mut() {
-        populate_active_zones_from_condition(def);
-    }
-    defs
+    parse_static_line_multi_ir(text)
+        .into_iter()
+        .map(|ir| lower_static_ir(&ir))
+        .collect()
+}
+
+/// IR production: like `parse_static_line_ir` but returns all `StaticIr`s
+/// produced by a compound line.
+pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
+    let defs = parse_static_line_multi_inner(text);
+    defs.into_iter()
+        .map(|definition| StaticIr {
+            definition,
+            source_text: text.to_string(),
+            body_ir: None,
+        })
+        .collect()
 }
 
 fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
@@ -15393,5 +15425,39 @@ mod tests {
         .expect("should parse Lovisa Coldeyes line");
         assert!(matches!(def.mode, StaticMode::Continuous));
         assert_eq!(def.modifications.len(), 3);
+    }
+}
+
+/// Snapshot tests locking current static parser output before/after the IR split.
+/// These verify behavioral parity: identical snapshots before and after the
+/// `parse_static_line_ir` / `lower_static_ir` refactor.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn static_continuous_buff() {
+        let def = parse_static_line("Creatures you control get +1/+1.").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn static_cda_power_hand_size() {
+        let def =
+            parse_static_line("~'s power is equal to the number of cards in your hand.").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn static_conditional_as_long_as() {
+        let def =
+            parse_static_line("~ gets +2/+2 as long as you control another creature.").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn static_granted_keyword() {
+        let def = parse_static_line("Creatures you control have flying.").unwrap();
+        insta::assert_json_snapshot!(def);
     }
 }

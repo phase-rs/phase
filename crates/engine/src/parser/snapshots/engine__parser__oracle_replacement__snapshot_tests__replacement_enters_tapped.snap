@@ -1,0 +1,34 @@
+---
+source: crates/engine/src/parser/oracle_replacement.rs
+expression: def
+---
+{
+  "event": "Moved",
+  "execute": {
+    "kind": "Spell",
+    "effect": {
+      "type": "Tap",
+      "target": {
+        "type": "SelfRef"
+      }
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "sorcery_speed": false,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "mode": {
+    "type": "Mandatory"
+  },
+  "valid_card": {
+    "type": "SelfRef"
+  },
+  "description": "~ enters the battlefield tapped.",
+  "condition": null
+}

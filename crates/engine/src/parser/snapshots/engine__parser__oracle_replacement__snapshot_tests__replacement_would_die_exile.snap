@@ -1,0 +1,41 @@
+---
+source: crates/engine/src/parser/oracle_replacement.rs
+expression: def
+---
+{
+  "event": "Destroy",
+  "execute": {
+    "kind": "Spell",
+    "effect": {
+      "type": "ChangeZone",
+      "origin": null,
+      "destination": "Exile",
+      "target": {
+        "type": "SelfRef"
+      },
+      "owner_library": false,
+      "enter_transformed": false,
+      "under_your_control": false,
+      "enter_tapped": false,
+      "enters_attacking": false
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "sorcery_speed": false,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "mode": {
+    "type": "Mandatory"
+  },
+  "valid_card": {
+    "type": "SelfRef"
+  },
+  "description": "If ~ would die, exile it instead.",
+  "condition": null
+}

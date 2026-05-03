@@ -7,6 +7,8 @@
 pub(crate) mod ast;
 pub(crate) mod doc;
 pub(crate) mod effect_chain;
+pub(crate) mod replacement;
+pub(crate) mod static_ir;
 pub(crate) mod trigger;
 
 #[allow(unused_imports)]
@@ -16,5 +18,9 @@ pub(crate) use self::ast::*;
 pub(crate) use self::doc::*;
 #[allow(unused_imports)] // Re-export for future consumers; wired into parser in Plan 02.
 pub(crate) use self::effect_chain::*;
+#[allow(unused_imports)] // Re-export for future consumers; wired into parser in Plan 02.
+pub(crate) use self::replacement::*;
+#[allow(unused_imports)] // Re-export for future consumers; wired into parser in Plan 02.
+pub(crate) use self::static_ir::*;
 #[allow(unused_imports)] // Re-export for future consumers; wired into parser in Plan 01.
 pub(crate) use self::trigger::*;

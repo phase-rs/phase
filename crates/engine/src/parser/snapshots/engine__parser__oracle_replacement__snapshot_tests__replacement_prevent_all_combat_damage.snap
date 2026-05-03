@@ -1,0 +1,27 @@
+---
+source: crates/engine/src/parser/oracle_replacement.rs
+expression: def
+---
+{
+  "event": "DamageDone",
+  "execute": null,
+  "mode": {
+    "type": "Mandatory"
+  },
+  "valid_card": null,
+  "description": "Prevent all combat damage that would be dealt to you.",
+  "condition": null,
+  "damage_target_filter": {
+    "Player": {
+      "player": {
+        "type": "Any"
+      }
+    }
+  },
+  "combat_scope": "CombatOnly",
+  "shield_kind": {
+    "Prevention": {
+      "amount": "All"
+    }
+  }
+}

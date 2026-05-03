@@ -5,16 +5,18 @@
 //! existing engine types directly (per D-05). Phases 48-49 swap in proper IR
 //! types as each parser branch gets its lowering split.
 
+use super::effect_chain::EffectChainIr;
+use super::replacement::ReplacementIr;
+use super::static_ir::StaticIr;
 use super::trigger::TriggerIr;
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition,
+    AdditionalCost, CastingRestriction, ModalChoice, SolveCondition, SpellCastingOption,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 
 /// Document-level IR: the complete parsed representation of a card's Oracle text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[allow(dead_code)] // Constructed in tests now; wired into parser in Phase 48.
 pub(crate) struct OracleDocIr {
     /// Parsed items in source order.
@@ -29,18 +31,18 @@ pub(crate) struct OracleDocIr {
 ///
 /// Each variant carries existing engine types directly — these will be replaced
 /// by proper IR types (EffectChainIr, TriggerIr, etc.) in Phases 48-49.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[allow(dead_code)] // Used in tests now; wired into parser in Phase 48.
 #[allow(clippy::large_enum_variant)] // Intentional: variants carry existing engine types directly per D-05.
 pub(crate) enum OracleItemIr {
-    /// Spell or activated ability effect chain.
-    Spell(AbilityDefinition),
+    /// Spell or activated ability effect chain (carries EffectChainIr since Phase 49).
+    Spell(EffectChainIr),
     /// Triggered ability (carries TriggerIr since Phase 49).
     Trigger(TriggerIr),
-    /// Static ability.
-    Static(StaticDefinition),
-    /// Replacement effect.
-    Replacement(ReplacementDefinition),
+    /// Static ability (carries StaticIr since Phase 49).
+    Static(StaticIr),
+    /// Replacement effect (carries ReplacementIr since Phase 49).
+    Replacement(ReplacementIr),
     /// Keyword ability from keyword-only line.
     Keyword(Keyword),
     /// Modal spell block (Choose one/two/etc.).
