@@ -54,6 +54,7 @@ data/mtgjson/AtomicCards.json
 data/mtgjson/Meta.json
 data/mtgjson/SetList.json
 data/mtgjson/decks/
+data/mtgjson/sets/
 !data/abilities/
 !data/precons/
 !data/learned-weights.json
