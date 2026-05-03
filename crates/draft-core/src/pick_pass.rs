@@ -108,6 +108,8 @@ mod tests {
             cards_per_pack: 14,
             pack_count: 3,
             rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
         };
         let seats: Vec<DraftSeat> = (0..pod_size)
             .map(|i| DraftSeat::Human {

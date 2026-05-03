@@ -7,6 +7,39 @@ use engine::types::player::PlayerId;
 
 use crate::validation::LimitedDeckError;
 
+/// Tournament pairing format for the draft event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TournamentFormat {
+    /// Swiss: 3 rounds, pair within win-bracket, all players play every round.
+    #[default]
+    Swiss,
+    /// Single-elimination: 3 rounds (8-player bracket), losers eliminated.
+    SingleElimination,
+}
+
+/// Controls timer, disconnect handling, and round-advancement behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PodPolicy {
+    /// Timed picks, auto-pick on timeout, 10s disconnect grace period, auto-advance rounds.
+    #[default]
+    Competitive,
+    /// No timer, no auto-pick, host controls round advancement, host notified on disconnect.
+    Casual,
+}
+
+/// Per-seat pick status during the draft phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PickStatus {
+    /// Seat has a pack and hasn't picked yet.
+    Pending,
+    /// Seat has picked and pack has passed.
+    Picked,
+    /// Seat timed out (set by P2P host, not derivable from session state).
+    TimedOut,
+    /// Not in drafting phase (deckbuilding, match play, etc.).
+    NotDrafting,
+}
+
 /// The kind of draft event, modeled after Arena's three draft modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DraftKind {
@@ -138,6 +171,19 @@ pub enum DraftAction {
         seat: u8,
         main_deck: Vec<String>,
     },
+    GeneratePairings {
+        round: u8,
+    },
+    ReportMatchResult {
+        match_id: String,
+        /// None = draw.
+        winner_seat: Option<u8>,
+    },
+    AdvanceRound,
+    /// Casual mode: host replaces a human seat with a bot.
+    ReplaceSeatWithBot {
+        seat: u8,
+    },
 }
 
 /// State changes produced by applying a DraftAction.
@@ -159,6 +205,19 @@ pub enum DraftDelta {
     TransitionedTo {
         status: DraftStatus,
     },
+    PairingsGenerated {
+        round: u8,
+    },
+    MatchResultRecorded {
+        match_id: String,
+        winner_seat: Option<u8>,
+    },
+    RoundAdvanced {
+        new_round: u8,
+    },
+    SeatReplacedWithBot {
+        seat: u8,
+    },
 }
 
 /// Errors that can occur during draft operations.
@@ -174,6 +233,8 @@ pub enum DraftError {
     NoPendingPack { seat: u8 },
     #[error("deck validation failed")]
     ValidationFailed { errors: Vec<LimitedDeckError> },
+    #[error("pairing not found: {match_id}")]
+    PairingNotFound { match_id: String },
 }
 
 /// Configuration for a draft session.
@@ -184,6 +245,10 @@ pub struct DraftConfig {
     pub cards_per_pack: u8,
     pub pack_count: u8,
     pub rng_seed: u64,
+    #[serde(default)]
+    pub tournament_format: TournamentFormat,
+    #[serde(default)]
+    pub pod_policy: PodPolicy,
 }
 
 /// A player's submitted deck for limited play.
@@ -241,6 +306,7 @@ pub struct DraftSession {
     pub submitted_decks: HashMap<PlayerId, DraftDeckSubmission>,
     pub match_records: HashMap<PlayerId, DraftMatchRecord>,
     pub pairings: Vec<DraftPairing>,
+    pub current_round: u8,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -336,6 +402,38 @@ mod tests {
             let json = serde_json::to_string(&dir).unwrap();
             let back: PassDirection = serde_json::from_str(&json).unwrap();
             assert_eq!(dir, back);
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_tournament_format() {
+        for fmt in [TournamentFormat::Swiss, TournamentFormat::SingleElimination] {
+            let json = serde_json::to_string(&fmt).unwrap();
+            let back: TournamentFormat = serde_json::from_str(&json).unwrap();
+            assert_eq!(fmt, back);
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_pod_policy() {
+        for policy in [PodPolicy::Competitive, PodPolicy::Casual] {
+            let json = serde_json::to_string(&policy).unwrap();
+            let back: PodPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(policy, back);
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_pick_status() {
+        for status in [
+            PickStatus::Pending,
+            PickStatus::Picked,
+            PickStatus::TimedOut,
+            PickStatus::NotDrafting,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: PickStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
         }
     }
 }

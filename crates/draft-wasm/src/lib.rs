@@ -119,6 +119,8 @@ pub fn start_quick_draft(
         cards_per_pack: 14,
         pack_count: 3,
         rng_seed: seed as u64,
+        tournament_format: TournamentFormat::Swiss,
+        pod_policy: PodPolicy::Competitive,
     };
 
     let mut seats = vec![DraftSeat::Human {
@@ -329,6 +331,8 @@ pub fn start_multiplayer_draft(
         cards_per_pack: 14,
         pack_count: 3,
         rng_seed: seed as u64,
+        tournament_format: TournamentFormat::default(),
+        pod_policy: PodPolicy::default(),
     };
 
     let seats: Vec<DraftSeat> = seat_names
@@ -548,6 +552,8 @@ pub fn create_multiplayer_draft(
         cards_per_pack: 14,
         pack_count: 3,
         rng_seed: seed as u64,
+        tournament_format: TournamentFormat::default(),
+        pod_policy: PodPolicy::default(),
     };
 
     let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());

@@ -31,6 +31,7 @@ impl DraftSession {
             submitted_decks: HashMap::new(),
             match_records: HashMap::new(),
             pairings: Vec::new(),
+            current_round: 0,
             config,
             seats,
             draft_code,
@@ -58,7 +59,50 @@ pub fn apply(
         DraftAction::SubmitDeck { seat, main_deck } => {
             apply_submit_deck(session, seat, main_deck)
         }
+        DraftAction::GeneratePairings { round } => {
+            apply_generate_pairings(session, round)
+        }
+        DraftAction::ReportMatchResult {
+            match_id,
+            winner_seat,
+        } => apply_report_match_result(session, match_id, winner_seat),
+        DraftAction::AdvanceRound => apply_advance_round(session),
+        DraftAction::ReplaceSeatWithBot { seat } => {
+            apply_replace_seat_with_bot(session, seat)
+        }
     }
+}
+
+fn apply_generate_pairings(
+    _session: &mut DraftSession,
+    _round: u8,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    // Implemented in Task 2
+    todo!("apply_generate_pairings")
+}
+
+fn apply_report_match_result(
+    _session: &mut DraftSession,
+    _match_id: String,
+    _winner_seat: Option<u8>,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    // Implemented in Task 2
+    todo!("apply_report_match_result")
+}
+
+fn apply_advance_round(
+    _session: &mut DraftSession,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    // Implemented in Task 2
+    todo!("apply_advance_round")
+}
+
+fn apply_replace_seat_with_bot(
+    _session: &mut DraftSession,
+    _seat: u8,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    // Implemented in Task 2
+    todo!("apply_replace_seat_with_bot")
 }
 
 fn apply_start_draft(
@@ -183,6 +227,8 @@ mod tests {
             cards_per_pack: 14,
             pack_count: 3,
             rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
         };
         let seats: Vec<DraftSeat> = (0..pod_size)
             .map(|i| DraftSeat::Human {
