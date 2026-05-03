@@ -3485,6 +3485,36 @@ pub fn pay_ability_cost(
         }
         // Waterbend cost was already paid via ManaPayment before reaching pay_ability_cost.
         AbilityCost::Waterbend { .. } => {}
+        // CR 118.3: An effect performed as a cost. Resolve the effect on the
+        // source before the ability's own effect fires. Currently handles
+        // PutCounter on self (Devoted Druid, Chainbreaker, etc.).
+        AbilityCost::EffectCost { effect } => {
+            use crate::types::ability::Effect;
+            match effect.as_ref() {
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target: TargetFilter::SelfRef,
+                } => {
+                    let count = super::quantity::resolve_quantity(state, count, player, source_id);
+                    let counter_kind = crate::types::counter::parse_counter_type(counter_type);
+                    super::effects::counters::add_counter_with_replacement(
+                        state,
+                        player,
+                        source_id,
+                        counter_kind,
+                        count.unsigned_abs(),
+                        events,
+                    );
+                }
+                _ => {
+                    return Err(EngineError::ActionNotAllowed(format!(
+                        "Effect-as-cost not yet resolvable: {:?}",
+                        effect
+                    )));
+                }
+            }
+        }
         AbilityCost::Unimplemented { description } => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cost not implemented: {description}",

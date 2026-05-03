@@ -3149,6 +3149,12 @@ pub enum AbilityCost {
         variant: NinjutsuVariant,
         mana_cost: ManaCost,
     },
+    /// CR 118.3: An effect performed as an activation cost. The parser reuses
+    /// the existing effect pipeline to parse the cost text; the runtime resolves
+    /// the effect on the source before the ability's own effect fires.
+    EffectCost {
+        effect: Box<Effect>,
+    },
     Unimplemented {
         description: String,
     },
@@ -3222,6 +3228,12 @@ impl AbilityCost {
             }
             AbilityCost::Waterbend { .. } => vec![CostCategory::KeywordCost],
             AbilityCost::NinjutsuFamily { .. } => vec![CostCategory::KeywordCost],
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::PutCounter { .. } | Effect::PutCounterAll { .. } => {
+                    vec![CostCategory::PutsCounters]
+                }
+                _ => Vec::new(),
+            },
             AbilityCost::Unimplemented { .. } => Vec::new(),
         }
     }

@@ -288,6 +288,9 @@ impl AbilityCost {
                 !super::keywords::returnable_creatures_for_variant(state, player, variant)
                     .is_empty()
             }
+            // CR 118.3: Effect-as-cost is conservatively treated as payable.
+            // Runtime resolution determines actual outcome.
+            AbilityCost::EffectCost { .. } => true,
             // CR 601.2b: Unimplemented costs are conservatively treated as payable
             // so the existing `Unimplemented` fallback paths are not further gated.
             AbilityCost::Unimplemented { .. } => true,

@@ -503,6 +503,17 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
+    // CR 118.3: Fallback — try parsing the cost text as an effect. Many
+    // activation costs are structurally identical to effects ("Put a -1/-1
+    // counter on ~", "Return a land you control to its owner's hand") and
+    // the effect parser already handles them.
+    let def = super::oracle_effect::parse_effect_chain(text, crate::types::ability::AbilityKind::Activated);
+    if !matches!(def.effect.as_ref(), crate::types::ability::Effect::Unimplemented { .. }) {
+        return AbilityCost::EffectCost {
+            effect: def.effect,
+        };
+    }
+
     AbilityCost::Unimplemented {
         description: text.to_string(),
     }
