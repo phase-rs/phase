@@ -2156,8 +2156,11 @@ mod tests {
     #[test]
     fn put_rest_bottom_of_library_without_any_order() {
         let dig = make_dig_effect();
-        let result =
-            parse_followup_continuation_ast("Put the rest on the bottom of your library.", &dig, &mut ParseContext::default());
+        let result = parse_followup_continuation_ast(
+            "Put the rest on the bottom of your library.",
+            &dig,
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -2170,7 +2173,11 @@ mod tests {
     #[test]
     fn put_rest_into_graveyard() {
         let dig = make_dig_effect();
-        let result = parse_followup_continuation_ast("Put the rest into your graveyard.", &dig, &mut ParseContext::default());
+        let result = parse_followup_continuation_ast(
+            "Put the rest into your graveyard.",
+            &dig,
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -2200,7 +2207,11 @@ mod tests {
     #[test]
     fn put_them_back_any_order() {
         let dig = make_dig_effect();
-        let result = parse_followup_continuation_ast("Put them back in any order.", &dig, &mut ParseContext::default());
+        let result = parse_followup_continuation_ast(
+            "Put them back in any order.",
+            &dig,
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -2213,7 +2224,11 @@ mod tests {
     #[test]
     fn put_rest_into_hand() {
         let dig = make_dig_effect();
-        let result = parse_followup_continuation_ast("Put the rest into your hand.", &dig, &mut ParseContext::default());
+        let result = parse_followup_continuation_ast(
+            "Put the rest into your hand.",
+            &dig,
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {

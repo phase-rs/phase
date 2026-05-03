@@ -25,7 +25,10 @@ use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 
-pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &mut ParseContext) -> Option<ClauseAst> {
+pub(super) fn try_parse_subject_predicate_ast(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
     if try_parse_targeted_controller_gain_life(text).is_some() {
         return None;
     }
@@ -165,7 +168,10 @@ fn try_parse_subject_continuous_clause(
     build_continuous_clause(application, predicate)
 }
 
-fn try_parse_subject_become_clause(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_subject_become_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let verb_start = find_predicate_start(text)?;
     let subject = text[..verb_start].trim();
     let predicate = deconjugate_verb(text[verb_start..].trim());
@@ -2318,7 +2324,8 @@ mod tests {
     #[test]
     fn parse_subject_any_number_of_target_creatures_you_control() {
         let mut ctx = ParseContext::default();
-        let result = parse_subject_application("any number of target creatures you control", &mut ctx);
+        let result =
+            parse_subject_application("any number of target creatures you control", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert!(

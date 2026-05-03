@@ -810,8 +810,10 @@ mod tests {
     #[test]
     fn remove_counter_untyped_all() {
         // Vampire Hexmage: "remove all counters from target permanent"
-        let result =
-            try_parse_remove_counter("remove all counters from target permanent", &mut default_ctx());
+        let result = try_parse_remove_counter(
+            "remove all counters from target permanent",
+            &mut default_ctx(),
+        );
         let Some(Effect::RemoveCounter {
             counter_type,
             count,
