@@ -5,9 +5,10 @@
 //! existing engine types directly (per D-05). Phases 48-49 swap in proper IR
 //! types as each parser branch gets its lowering split.
 
+use super::trigger::TriggerIr;
 use crate::types::ability::{
     AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    SolveCondition, SpellCastingOption, StaticDefinition,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
@@ -34,8 +35,8 @@ pub(crate) struct OracleDocIr {
 pub(crate) enum OracleItemIr {
     /// Spell or activated ability effect chain.
     Spell(AbilityDefinition),
-    /// Triggered ability.
-    Trigger(TriggerDefinition),
+    /// Triggered ability (carries TriggerIr since Phase 49).
+    Trigger(TriggerIr),
     /// Static ability.
     Static(StaticDefinition),
     /// Replacement effect.

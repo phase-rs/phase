@@ -6,7 +6,8 @@ use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
-use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
+use super::oracle_effect::{lower_effect_chain_ir, parse_effect_chain_ir, ParseContext};
+use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives::{
@@ -230,6 +231,19 @@ pub(crate) fn parse_trigger_lines_at_index(
     card_name: &str,
     base_trigger_index: Option<usize>,
 ) -> Vec<TriggerDefinition> {
+    parse_trigger_lines_at_index_ir(text, card_name, base_trigger_index)
+        .iter()
+        .map(lower_trigger_ir)
+        .collect()
+}
+
+/// IR production for compound trigger splitting. Each compound half produces
+/// its own `TriggerIr`.
+pub(crate) fn parse_trigger_lines_at_index_ir(
+    text: &str,
+    card_name: &str,
+    base_trigger_index: Option<usize>,
+) -> Vec<TriggerIr> {
     let stripped = strip_reminder_text(text);
     let normalized = normalize_self_refs(&stripped, card_name);
     let lower = normalized.to_lowercase();
@@ -241,7 +255,6 @@ pub(crate) fn parse_trigger_lines_at_index(
     let cond_lower = condition.to_lowercase();
 
     // Pattern 1: "when/whenever X and when Y" or "when X and whenever Y"
-    // The conjunction " and when " or " and whenever " separates two independent conditions.
     if let Some(halves) = split_and_when_compound(&cond_lower, &condition) {
         return halves
             .into_iter()
@@ -252,7 +265,7 @@ pub(crate) fn parse_trigger_lines_at_index(
                 } else {
                     format!("{cond}, {effect}")
                 };
-                parse_trigger_line_with_index(
+                parse_trigger_line_with_index_ir(
                     &trigger_text,
                     card_name,
                     base_trigger_index.map(|b| b + i),
@@ -262,8 +275,6 @@ pub(crate) fn parse_trigger_lines_at_index(
     }
 
     // Pattern 2: "whenever ~ [event1] or [event2]" — compound events sharing a subject.
-    // The "or" joins two event verbs, not two subjects. Detect by checking if the
-    // text after "or" starts with a known trigger event verb.
     if let Some(halves) = split_or_event_compound(&cond_lower, &condition) {
         return halves
             .into_iter()
@@ -274,7 +285,7 @@ pub(crate) fn parse_trigger_lines_at_index(
                 } else {
                     format!("{cond}, {effect}")
                 };
-                parse_trigger_line_with_index(
+                parse_trigger_line_with_index_ir(
                     &trigger_text,
                     card_name,
                     base_trigger_index.map(|b| b + i),
@@ -284,7 +295,7 @@ pub(crate) fn parse_trigger_lines_at_index(
     }
 
     // No compound — single trigger.
-    vec![parse_trigger_line_with_index(
+    vec![parse_trigger_line_with_index_ir(
         text,
         card_name,
         base_trigger_index,
@@ -438,12 +449,17 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     parse_trigger_line_with_index(text, card_name, None)
 }
 
+/// IR production: extract all trigger fields into a `TriggerIr` without
+/// performing final assembly into `TriggerDefinition`.
+///
+/// The scope guard for `ControllerRef::TargetPlayer` (D-04) is alive during
+/// `parse_effect_chain_ir` — the guard must not be dropped before body parsing.
 #[tracing::instrument(level = "debug", skip(card_name))]
-pub(crate) fn parse_trigger_line_with_index(
+pub(crate) fn parse_trigger_line_with_index_ir(
     text: &str,
     card_name: &str,
     current_trigger_index: Option<usize>,
-) -> TriggerDefinition {
+) -> TriggerIr {
     let text = strip_reminder_text(text);
     // Replace self-references: "this creature", "this enchantment", card name → ~
     let normalized = normalize_self_refs(&text, card_name);
@@ -464,29 +480,11 @@ pub(crate) fn parse_trigger_line_with_index(
 
     let effect_lower = effect_text.to_lowercase();
     // Extract intervening-if condition from effect text first — a leading
-    // "if X, " can hide the "you may " optional marker behind the if-clause
-    // ("At the beginning of your upkeep, if you have more cards in hand
-    // than each opponent, you may return this card from your graveyard to
-    // your hand"). Without stripping the if first, the optional check
-    // below would see "if …" at position 0 and miss the "you may " that
-    // sits between the comma and the verb.
+    // "if X, " can hide the "you may " optional marker behind the if-clause.
     let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
 
     // CR 609.3: "You may" at the start of the effect text makes the triggered
-    // effect optional at resolution — the player chooses whether to perform it.
-    // Mid-chain "you may" is per-sentence optional, handled by
-    // parse_effect_chain → strip_optional_effect_prefix().
-    //
-    // Three cases route here:
-    //   1. Bare "you may verb …"                     → optional=true at pos 0
-    //   2. "if X, you may verb …" with X recognized  → extract_if_condition
-    //      strips "if X, " and post-strip starts with "you may"
-    //   3. "if X, you may verb …" with X unrecognized → extract_if_condition
-    //      returns the text unchanged. We still want optional detection, so
-    //      fall back to a structural "if [phrase], " skip — find the FIRST
-    //      ", " that closes the if-clause and re-check after the comma.
-    //      The condition itself remains uncaptured (Condition_If swallow
-    //      will fire), but the optional flag is preserved.
+    // effect optional at resolution.
     let starts_with_you_may =
         |s: &str| tag::<_, _, VerboseError<&str>>("you may ").parse(s).is_ok();
     let after_structural_if = effect_lower
@@ -501,104 +499,127 @@ pub(crate) fn parse_trigger_line_with_index(
     let effect_final = strip_constraint_sentences(&effect_without_if);
 
     // CR 118.12: Detect "unless [player] pays {cost}" in effect text.
-    // Strip it before effect parsing and capture as UnlessPayModifier.
     let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final);
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
-    // "it"/"its"/"itself" in the effect refer to the trigger subject, not the source permanent.
     let trigger_subject = extract_trigger_subject_for_context(condition_text);
-    // CR 707.9a + CR 603.1: Forward the trigger's index into the parse context
-    // so the BecomeCopy except-clause parser ("she has this ability") can emit
-    // `RetainPrintedTriggerFromSource { source_trigger_index }` referencing
-    // this very trigger. Also forward `card_name` so the SetName override in
-    // "except her name is ~" carries the original-case card name.
     let effect_ctx = ParseContext {
-        subject: Some(trigger_subject),
+        subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
         current_trigger_index,
         ..Default::default()
     };
 
-    // CR 109.4 + CR 115.1 + CR 506.2: When the trigger condition introduces a
-    // player target (e.g. "whenever you attack a player"), follow-on possessive
-    // phrases inside the effect — "that player controls", "that player owns" —
-    // refer to that player, not to the trigger controller. Push a typed
-    // relative-player scope so the controller-suffix parser emits
-    // `ControllerRef::TargetPlayer` instead of the default `ControllerRef::You`;
-    // the runtime auto-surfaces a companion `TargetFilter::Player` slot via
-    // `effect_references_target_player` (game/ability_utils.rs).
+    // CR 109.4 + CR 115.1 + CR 506.2: Scope guard for TargetPlayer resolution.
+    // CRITICAL: guard must be alive when parse_effect_chain_ir is called.
     let cond_lower = condition_text.to_lowercase();
     let _scope_guard = condition_introduces_target_player(&cond_lower)
         .then(|| oracle_target_scope::ScopeGuard::new(ControllerRef::TargetPlayer));
 
-    // Parse the effect
+    // Parse the effect body
     let has_up_to = scan_contains(&effect_for_parse, "up to one");
-    let execute = if !effect_for_parse.is_empty() {
-        // CR 701.38 + CR 207.2c: Council's-dilemma / Will-of-the-Council vote
-        // blocks have a fixed three-sentence shape ("starting with you, each
-        // player votes for X or Y. For each X vote, A. For each Y vote, B.")
-        // that can't be cleanly split by `parse_effect_chain` because the per-
-        // choice tally clauses are semantically welded to the vote prompt.
-        // Try the dedicated detector first; fall back to the chain parser if
-        // the input isn't a vote block.
-        let mut ability = if let Some(vote_def) =
+    let body = if !effect_for_parse.is_empty() {
+        // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
+        if let Some(vote_def) =
             crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
         {
-            vote_def
+            let mut ability = vote_def;
+            if has_up_to {
+                ability.optional_targeting = true;
+            }
+            if effect_adds_mana_to_triggering_player(&effect_lower)
+                && matches!(
+                    ability.effect.as_ref(),
+                    crate::types::ability::Effect::Mana { .. }
+                )
+            {
+                ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+            }
+            if optional {
+                ability.optional = true;
+            }
+            Some(TriggerBody::PreLowered(Box::new(ability)))
         } else {
-            parse_effect_chain_with_context(&effect_for_parse, AbilityKind::Spell, &effect_ctx)
-        };
-        if has_up_to {
-            ability.optional_targeting = true;
+            let ir = parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &effect_ctx);
+            Some(TriggerBody::EffectChain(ir))
         }
-        if effect_adds_mana_to_triggering_player(&effect_lower)
-            && matches!(
-                ability.effect.as_ref(),
-                crate::types::ability::Effect::Mana { .. }
-            )
-        {
-            ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
-        }
-        // CR 609.3: "You may" applies to the effect during resolution, not to whether
-        // the trigger fires. Propagate to the execute ability so the resolver prompts
-        // the controller via WaitingFor::OptionalEffectChoice.
-        if optional {
-            ability.optional = true;
-        }
-        Some(Box::new(ability))
     } else {
         None
     };
 
-    // Parse the condition
-    let (_, mut def) = parse_trigger_condition(condition_text);
+    // Parse the condition to get TriggerMode + partial TriggerDefinition
+    let (condition, partial_def) = parse_trigger_condition(condition_text);
+
+    // Constraint from full text (parsed during IR production so lowering has it)
+    let constraint = parse_trigger_constraint(&lower);
+
+    TriggerIr {
+        condition,
+        partial_def,
+        body,
+        modifiers: TriggerModifiers {
+            optional,
+            unless_pay,
+            intervening_if: if_condition,
+            trigger_subject,
+            first_time_each_turn: first_time_each_turn_in_condition,
+            constraint,
+            has_up_to,
+            effect_lower: effect_lower.to_string(),
+        },
+        source_text: text.to_string(),
+    }
+}
+
+/// Lowering: assemble a `TriggerDefinition` from a `TriggerIr`.
+///
+/// Applies all post-extraction transforms: condition composition, target-player
+/// surfacing, constraint merging, trigger zone derivation, cost-X rewriting.
+pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
+    let mut def = ir.partial_def.clone();
+    let modifiers = &ir.modifiers;
+
+    // Lower the body
+    let execute = match &ir.body {
+        Some(TriggerBody::EffectChain(chain_ir)) => {
+            let mut ability = lower_effect_chain_ir(chain_ir);
+            if modifiers.has_up_to {
+                ability.optional_targeting = true;
+            }
+            if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
+                && matches!(
+                    ability.effect.as_ref(),
+                    crate::types::ability::Effect::Mana { .. }
+                )
+            {
+                ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+            }
+            // CR 609.3: Propagate optional to execute ability.
+            if modifiers.optional {
+                ability.optional = true;
+            }
+            Some(Box::new(ability))
+        }
+        Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
+        None => None,
+    };
+
     def.execute = execute;
-    def.optional = optional;
-    def.unless_pay = unless_pay;
-    // CR 603.4: When the trigger-condition parser has already attached a condition
-    // (e.g. `AttackersDeclaredMin` from "attacks with N or more creatures") AND the
-    // effect text carries an intervening-if (e.g. "if none of those creatures
-    // attacked you"), both must hold simultaneously — compose with And rather than
-    // letting the intervening-if replace the event-batch predicate.
-    def.condition = match (if_condition, def.condition.take()) {
+    def.optional = modifiers.optional;
+    def.unless_pay = modifiers.unless_pay.clone();
+
+    // CR 603.4: Compose intervening-if with existing condition via And.
+    def.condition = match (&modifiers.intervening_if, def.condition.take()) {
         (Some(if_cond), Some(existing)) => Some(TriggerCondition::And {
-            conditions: vec![existing, if_cond],
+            conditions: vec![existing, if_cond.clone()],
         }),
-        (Some(c), None) | (None, Some(c)) => Some(c),
+        (Some(c), None) => Some(c.clone()),
+        (None, Some(c)) => Some(c),
         (None, None) => None,
     };
 
-    // CR 109.4 + CR 603.7c: When the execute ability references
-    // `ControllerRef::TargetPlayer` in a filter (e.g. Ruthless Winnower's
-    // "that player sacrifices a non-Elf creature" → `Sacrifice { target:
-    // Typed { controller: TargetPlayer } }`) and the trigger has no
-    // `valid_target`, surface `TargetFilter::Player` on the trigger so the
-    // triggering player (upkeep's active player, damaged player, etc.) is
-    // auto-bound to the first `TargetRef::Player` slot from the trigger
-    // event. Without this, `collect_target_slots` would surface a
-    // companion player-choice slot and the controller would be prompted to
-    // pick — which is wrong for phase and damage triggers whose acting
-    // player is implicit.
+    // CR 109.4 + CR 603.7c: Surface TargetFilter::Player when execute
+    // references ControllerRef::TargetPlayer.
     if def.valid_target.is_none() {
         if let Some(execute) = def.execute.as_deref() {
             if execute_references_target_player(&execute.effect) {
@@ -607,27 +628,18 @@ pub(crate) fn parse_trigger_line_with_index(
         }
     }
 
-    // Check for constraint phrases in the full text.
-    // Text-based constraints take precedence; fall back to any constraint already set
-    // by the trigger condition parser (e.g. NthSpellThisTurn from try_parse_nth_spell_trigger).
-    def.constraint = parse_trigger_constraint(&lower).or(def.constraint.take());
+    // Text-based constraints take precedence; fall back to condition-parser constraint.
+    def.constraint = modifiers.constraint.clone().or(def.constraint.take());
 
-    // CR-uniform: apply OncePerTurn as a fallback ONLY if no stronger constraint
-    // was already set. An explicit "during your main phase" (OnlyDuringYourMainPhase)
-    // or "triggers only once each turn" (OncePerTurn) takes precedence. If both
-    // "for the first time each turn" and "during your main phase" appeared on the
-    // same trigger, the timing restriction is strictly stronger, so we prefer it
-    // (no current card hits this case).
-    if first_time_each_turn_in_condition && def.constraint.is_none() {
+    // CR-uniform: apply OncePerTurn as fallback.
+    if modifiers.first_time_each_turn && def.constraint.is_none() {
         def.constraint = Some(TriggerConstraint::OncePerTurn);
     }
 
-    // Preserve the original oracle text for coverage/UI annotation
-    def.description = Some(text.to_string());
+    // Preserve original oracle text for coverage/UI annotation.
+    def.description = Some(ir.source_text.clone());
 
-    // CR 113.6k: A trigger condition that can't trigger from the battlefield
-    // functions in all zones it can trigger from. Derive the active source zone
-    // from typed trigger/effect data instead of leaving it battlefield-only.
+    // CR 113.6k: Derive trigger source zone from typed trigger/effect data.
     if let Some(zone) = def
         .condition
         .as_ref()
@@ -642,14 +654,7 @@ pub(crate) fn parse_trigger_line_with_index(
         def.trigger_zones = vec![zone];
     }
 
-    // CR 107.3a + CR 107.3i + CR 601.2f: For ETB-self triggers on a spell
-    // with `{X}` in its cost, bare `X` in the trigger body refers to the
-    // value paid for `{X}` at cast time. Rewrite the execute ability tree so
-    // `Variable{name:"X"}` and `PtValue::Variable("X"/"-X")` both read the
-    // entering permanent's `cost_x_paid` via `QuantityRef::CostXPaid`.
-    // Applies to Wan Shi Tong (PutCounter count + Draw HalfRounded), The
-    // Meathook Massacre (PumpAll -X/-X), Hangarback Walker, Walking Ballista
-    // ETB, Primordial Hydra, and all future X-cost ETB-self triggers.
+    // CR 107.3a + CR 107.3i + CR 601.2f: Rewrite X in ETB-self triggers.
     if trigger_should_rewrite_cost_x(&def) {
         if let Some(execute) = def.execute.as_deref_mut() {
             rewrite_cost_x_in_ability(execute);
@@ -657,6 +662,17 @@ pub(crate) fn parse_trigger_line_with_index(
     }
 
     def
+}
+
+/// Thin wrapper: parse trigger line through IR production + lowering.
+#[tracing::instrument(level = "debug", skip(card_name))]
+pub(crate) fn parse_trigger_line_with_index(
+    text: &str,
+    card_name: &str,
+    current_trigger_index: Option<usize>,
+) -> TriggerDefinition {
+    let ir = parse_trigger_line_with_index_ir(text, card_name, current_trigger_index);
+    lower_trigger_ir(&ir)
 }
 
 /// Parse trigger constraint from the full trigger text.

@@ -19,7 +19,6 @@ use crate::types::triggers::TriggerMode;
 /// Output of `parse_trigger_line_with_index_ir`. Consumed by `lower_trigger_ir`
 /// to produce a `TriggerDefinition`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(dead_code)] // Constructed in Task 2; defined here for type completeness.
 pub(crate) struct TriggerIr {
     /// The parsed trigger condition (ETB, dies, phase trigger, etc.).
     pub(crate) condition: TriggerMode,
@@ -38,7 +37,6 @@ pub(crate) struct TriggerIr {
 /// The body of a trigger: either an effect chain IR (normal path) or a
 /// pre-lowered `AbilityDefinition` (vote block fallback).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(dead_code)] // Constructed in Task 2; defined here for type completeness.
 pub(crate) enum TriggerBody {
     /// Normal effect chain — lowering calls `lower_effect_chain_ir`.
     EffectChain(EffectChainIr),
@@ -51,7 +49,6 @@ pub(crate) enum TriggerBody {
 /// These are consumed during lowering to set fields on the final
 /// `TriggerDefinition` or compose with the body ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(dead_code)] // Constructed in Task 2; defined here for type completeness.
 pub(crate) struct TriggerModifiers {
     /// CR 609.3: "You may" optional effect.
     pub(crate) optional: bool,
@@ -67,6 +64,6 @@ pub(crate) struct TriggerModifiers {
     pub(crate) constraint: Option<TriggerConstraint>,
     /// Whether effect text contains "up to one".
     pub(crate) has_up_to: bool,
-    /// The full normalized+lowered trigger text (for constraint parsing in lowering).
-    pub(crate) full_lower: String,
+    /// Lowered effect text (after comma split), for `effect_adds_mana_to_triggering_player`.
+    pub(crate) effect_lower: String,
 }
