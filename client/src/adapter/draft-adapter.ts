@@ -61,6 +61,10 @@ export interface PairingView {
   match_id: string;
   status: PairingStatus;
   winner_seat: number | null;
+  /** Game wins for seat A in the current match (Bo3 tracking). */
+  score_a: number | null;
+  /** Game wins for seat B in the current match (Bo3 tracking). */
+  score_b: number | null;
 }
 
 // @sync-with: crates/draft-core/src/view.rs
