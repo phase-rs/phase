@@ -661,4 +661,26 @@ mod tests {
             assert!(pv.winner_seat.is_none());
         }
     }
+
+    #[test]
+    fn pairing_view_score_fields_default_to_none() {
+        // BO3-06: PairingView score_a/score_b are None when match not started.
+        // This test deliberately references score_a/score_b to create a compile
+        // error until Plan 01 adds these fields to PairingView.
+        let view = PairingView {
+            round: 1,
+            table: 1,
+            seat_a: 0,
+            name_a: "Alice".to_string(),
+            seat_b: 1,
+            name_b: "Bob".to_string(),
+            match_id: "m1".to_string(),
+            status: PairingStatus::Pending,
+            winner_seat: None,
+            score_a: None, // Compile-fails until Plan 01 adds this field
+            score_b: None, // Compile-fails until Plan 01 adds this field
+        };
+        assert_eq!(view.score_a, None);
+        assert_eq!(view.score_b, None);
+    }
 }
