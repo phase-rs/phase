@@ -20,14 +20,13 @@ use crate::types::ability::{
 /// Output of `parse_effect_chain_ir` (Plan 02). Consumed by `lower_effect_chain_ir`
 /// to produce an `AbilityDefinition`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(dead_code)] // Constructed in tests now; wired into parser in Plan 02.
 pub(crate) struct EffectChainIr {
-    /// Parsed clauses in source order — per-chunk metadata for future consumers.
+    /// Parsed clauses in source order — each `ClauseIr` captures one parsed
+    /// chunk's effect plus all stripped context (conditions, optionality,
+    /// continuations, temporal markers). Lowering converts this flat list into
+    /// `AbilityDefinition`s via def assembly, continuation patching, and
+    /// sub_ability chaining.
     pub(crate) clauses: Vec<ClauseIr>,
-    /// Pre-assembled defs from the chunk loop, before post-loop assembly.
-    /// Lowering converts this flat list into a linked-list `AbilityDefinition`
-    /// via sub_ability chaining and post-loop transforms.
-    pub(crate) pre_assembled_defs: Vec<AbilityDefinition>,
     /// The ability kind (Spell, Activated, etc.).
     pub(crate) kind: AbilityKind,
     /// CR 107.1a: Chain-level rounding annotation ("Round down/up each time").
@@ -42,7 +41,6 @@ pub(crate) struct EffectChainIr {
 /// currently modify `defs: Vec<AbilityDefinition>` inline. In the IR split, these
 /// become markers that lowering processes when building the def list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(dead_code)] // Variants defined for Plan 03 IR production; not yet constructed.
 pub(crate) enum SpecialClause {
     /// CR 118.9 + CR 119.4: Alternative-cost rider — fold cost onto previous CastFromZone.
     AltCostRider(AbilityCost),
@@ -70,7 +68,6 @@ pub(crate) enum SpecialClause {
 /// "strip cascade" in `parse_effect_chain_ir`. All assembly logic (continuation
 /// patching, condition lifting, sub_ability wiring) is deferred to lowering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(dead_code)] // Constructed in tests now; wired into parser in Plan 02.
 pub(crate) struct ClauseIr {
     /// The parsed effect clause (effect, duration, sub_ability from parse_effect_clause).
     pub(crate) parsed: ParsedEffectClause,
@@ -118,7 +115,6 @@ mod tests {
     fn effect_chain_ir_empty_construction() {
         let ir = EffectChainIr {
             clauses: vec![],
-            pre_assembled_defs: vec![],
             kind: AbilityKind::Spell,
             chain_rounding: None,
             actor: None,
@@ -159,7 +155,6 @@ mod tests {
     #[test]
     fn effect_chain_ir_with_single_clause() {
         let ir = EffectChainIr {
-            pre_assembled_defs: vec![],
             clauses: vec![ClauseIr {
                 parsed: parsed_clause(Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },

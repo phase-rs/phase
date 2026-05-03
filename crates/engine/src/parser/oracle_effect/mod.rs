@@ -73,7 +73,7 @@ use self::sequence::{
 };
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
 use crate::parser::oracle_ir::ast::*;
-use crate::parser::oracle_ir::effect_chain::EffectChainIr;
+use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 
 /// Context threaded through the effect parsing pipeline.
 /// Enables pronoun resolution relative to the current subject.
@@ -6638,7 +6638,7 @@ pub(crate) fn parse_effect_chain_ir(
     // sibling clauses in the same sentence ("Target player loses X life")
     // substitute X with the same expression. Delimited by ClauseBoundary::Sentence.
     let sentence_where_x = compute_sentence_where_x(&chunks);
-    let mut defs: Vec<AbilityDefinition> = Vec::new();
+    let mut clauses: Vec<ClauseIr> = Vec::new();
 
     // CR 608.2c + CR 117.3a: "Anchor subject" for chain-level anaphoric
     // inheritance. When a clause in the chain declares an explicit player-scope
@@ -6675,9 +6675,29 @@ pub(crate) fn parse_effect_chain_ir(
         // Sage's Scion: the granted card is cast by paying life equal to its
         // mana value instead of paying its mana cost.
         if let Some(cost) = try_parse_alt_cost_rider(normalized_text) {
-            if attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost) {
-                continue;
-            }
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(Effect::Unimplemented {
+                    name: "alt_cost_rider_placeholder".to_string(),
+                    description: None,
+                }),
+                boundary: chunk.boundary_after,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                special: Some(SpecialClause::AltCostRider(cost)),
+                source_text: normalized_text.to_string(),
+            });
+            continue;
         }
 
         // CR 608.2c: "Otherwise, [effect]" — attach as else_ability on the
@@ -6701,26 +6721,35 @@ pub(crate) fn parse_effect_chain_ir(
                 let ir = parse_effect_chain_ir(else_text, kind, ctx);
                 lower_effect_chain_ir(&ir)
             };
-            // Walk defs backward to find the most recent conditional
-            let has_condition = defs.iter().any(|d| d.condition.is_some());
-            if has_condition {
-                for d in defs.iter_mut().rev() {
-                    if d.condition.is_some() {
-                        d.else_ability = Some(Box::new(else_def));
-                        break;
-                    }
-                }
+            // Check whether a prior clause has a condition — lowering will attach as else_ability
+            let has_condition = clauses.iter().any(|c| c.condition.is_some());
+            let special = if has_condition {
+                SpecialClause::Otherwise(Box::new(else_def))
             } else {
-                // Fallback: no IfYouDo found — emit as Unimplemented to preserve coverage
-                defs.push(AbilityDefinition::new(
-                    kind,
-                    Effect::Unimplemented {
-                        name: "otherwise".to_string(),
-                        description: Some("Otherwise".to_string()),
-                    },
-                ));
-                defs.push(else_def);
-            }
+                SpecialClause::OtherwiseFallback(Box::new(else_def))
+            };
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(Effect::Unimplemented {
+                    name: "otherwise_placeholder".to_string(),
+                    description: None,
+                }),
+                boundary: chunk.boundary_after,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: true,
+                special: Some(special),
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
@@ -6756,8 +6785,29 @@ pub(crate) fn parse_effect_chain_ir(
         if let Some(rider_def) =
             try_parse_die_exile_rider(rider_lower.trim_end_matches('.').trim(), kind)
         {
-            if let Some(last_def) = defs.last_mut() {
-                last_def.sub_ability = Some(Box::new(rider_def));
+            if !clauses.is_empty() {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "die_exile_rider_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    special: Some(SpecialClause::DieExileRider(Box::new(rider_def))),
+                    source_text: normalized_text.to_string(),
+                });
                 continue;
             }
         }
@@ -6768,13 +6818,45 @@ pub(crate) fn parse_effect_chain_ir(
         // Checked before the generic "instead" clause because the body starts with
         // "you may instead ..." rather than a bare "instead ..." prefix/suffix and
         // carries no standalone effect — it patches the preceding Dig.
-        if let Some(alt_def) = try_parse_dig_instead_alternative(normalized_text, defs.last(), kind)
         {
-            if let Some(last_def) = defs.pop() {
-                let mut new_def = alt_def;
-                new_def.else_ability = Some(Box::new(last_def));
-                defs.push(new_def);
-                continue;
+            // Build a temporary AbilityDefinition from the last non-absorbed clause's
+            // effect to pass to try_parse_dig_instead_alternative (which inspects the
+            // previous effect to check it's a Dig). Must skip absorbed clauses — in the
+            // old code, absorbed chunks are not in `defs`, so `defs.last()` is the Dig.
+            let prev_temp = clauses
+                .iter()
+                .rev()
+                .find(|c| !c.absorbed_by_followup)
+                .map(|c| AbilityDefinition::new(kind, c.parsed.effect.clone()));
+            if let Some(alt_def) =
+                try_parse_dig_instead_alternative(normalized_text, prev_temp.as_ref(), kind)
+            {
+                if !clauses.is_empty() {
+                    // Store the alt_def's effect as `parsed.effect` so followup continuation
+                    // matching (e.g., PutRest for "put the rest on the bottom") can see that
+                    // the effective last clause is a Dig. In the old code, `defs.last()` was
+                    // the alt_def (a Dig) after the DigInsteadAlt was processed.
+                    clauses.push(ClauseIr {
+                        parsed: parsed_clause((*alt_def.effect).clone()),
+                        boundary: chunk.boundary_after,
+                        condition: None,
+                        is_optional: false,
+                        opponent_may_scope: None,
+                        repeat_for: None,
+                        player_scope: None,
+                        delayed_condition: None,
+                        prefix_delayed_condition: None,
+                        intrinsic_continuation: None,
+                        followup_continuation: None,
+                        absorbed_by_followup: false,
+                        multi_target: None,
+                        where_x_expression: None,
+                        is_otherwise: false,
+                        special: Some(SpecialClause::DigInsteadAlt(Box::new(alt_def))),
+                        source_text: normalized_text.to_string(),
+                    });
+                    continue;
+                }
             }
         }
 
@@ -6784,42 +6866,91 @@ pub(crate) fn parse_effect_chain_ir(
                 let ir = parse_effect_chain_ir(effect_text, kind, ctx);
                 lower_effect_chain_ir(&ir)
             };
-            defs.push(AbilityDefinition::new(
-                kind,
-                if is_win {
-                    Effect::FlipCoin {
-                        win_effect: Some(Box::new(branch_def)),
-                        lose_effect: None,
-                    }
-                } else {
-                    Effect::FlipCoin {
-                        win_effect: None,
-                        lose_effect: Some(Box::new(branch_def)),
-                    }
-                },
-            ));
+            let flip_effect = if is_win {
+                Effect::FlipCoin {
+                    win_effect: Some(Box::new(branch_def)),
+                    lose_effect: None,
+                }
+            } else {
+                Effect::FlipCoin {
+                    win_effect: None,
+                    lose_effect: Some(Box::new(branch_def)),
+                }
+            };
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(flip_effect),
+                boundary: chunk.boundary_after,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                special: None,
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
         if let Some(effect) =
             try_parse_next_time_source_damage_replacement(&normalized_text.to_lowercase())
         {
-            defs.push(AbilityDefinition::new(kind, effect));
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(effect),
+                boundary: chunk.boundary_after,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                special: None,
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
         // CR 608.2e: "if [condition], [effect] instead" — the preceding ability's effect
         // is replaced when the condition holds. Keep the base effect as the root so
         // target collection stays anchored on the printed target-bearing clause.
-        if let Some(mut instead_def) = try_parse_generic_instead_clause(normalized_text, kind) {
-            if let Some(mut last_def) = defs.pop() {
-                // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
-                // against the fallback (else_ability) effect before composition, since
-                // the instead clause was parsed in isolation by the nested chain call
-                // and could not see its antecedent.
-                rewrite_those_tokens_from_antecedent(&mut instead_def.effect, &last_def.effect);
-                last_def.sub_ability = Some(Box::new(instead_def));
-                defs.push(last_def);
+        if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind) {
+            if !clauses.is_empty() {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "instead_clause_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    special: Some(SpecialClause::InsteadClause(Box::new(instead_def))),
+                    source_text: normalized_text.to_string(),
+                });
                 continue;
             }
         }
@@ -6958,86 +7089,42 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 508.4 / CR 614.1: "If [condition], they/those tokens/it enter(s) tapped and
         // attacking" — conditional modifier on preceding Token/CopyTokenOf/ChangeZone.
         // Model as an "instead" swap: the modified Token (with tapped+attacking set)
-        // replaces the original when the condition holds.
+        // replaces the original when the condition holds. Lowering handles the patching.
         {
             let enters_lower = text.to_lowercase();
             if condition.is_some()
                 && nom_primitives::scan_contains(&enters_lower, "enter tapped and attacking")
             {
-                if let Some(prev) = defs.last() {
-                    // These are the only effects with `enters_attacking` + `tapped`/`enter_tapped` fields.
+                if let Some(prev) = clauses.last() {
                     let can_patch = matches!(
-                        &*prev.effect,
+                        prev.parsed.effect,
                         Effect::CopyTokenOf { .. }
                             | Effect::Token { .. }
                             | Effect::ChangeZone { .. }
                     );
                     if can_patch {
-                        let mut patched = defs.pop().unwrap();
-                        match &mut *patched.effect {
-                            Effect::CopyTokenOf {
-                                enters_attacking,
-                                tapped,
-                                ..
-                            } => {
-                                *enters_attacking = true;
-                                *tapped = true;
-                            }
-                            Effect::Token {
-                                enters_attacking,
-                                tapped,
-                                ..
-                            } => {
-                                *enters_attacking = true;
-                                *tapped = true;
-                            }
-                            Effect::ChangeZone {
-                                enters_attacking,
-                                enter_tapped,
-                                ..
-                            } => {
-                                *enters_attacking = true;
-                                *enter_tapped = true;
-                            }
-                            _ => {}
-                        }
-                        // Convert to "instead" swap: patched Token becomes the sub_ability
-                        // that fires when the condition holds; the original becomes else_ability
-                        // (the fallback when condition is false).
-                        let original = {
-                            let mut orig = patched.clone();
-                            match &mut *orig.effect {
-                                Effect::CopyTokenOf {
-                                    enters_attacking,
-                                    tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = false;
-                                    *tapped = false;
-                                }
-                                Effect::Token {
-                                    enters_attacking,
-                                    tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = false;
-                                    *tapped = false;
-                                }
-                                Effect::ChangeZone {
-                                    enters_attacking,
-                                    enter_tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = false;
-                                    *enter_tapped = false;
-                                }
-                                _ => {}
-                            }
-                            orig
-                        };
-                        patched.condition = condition;
-                        patched.else_ability = Some(Box::new(original));
-                        defs.push(patched);
+                        clauses.push(ClauseIr {
+                            parsed: parsed_clause(Effect::Unimplemented {
+                                name: "enters_tapped_attacking_placeholder".to_string(),
+                                description: None,
+                            }),
+                            boundary: chunk.boundary_after,
+                            condition,
+                            is_optional: false,
+                            opponent_may_scope: None,
+                            repeat_for: None,
+                            player_scope: None,
+                            delayed_condition: None,
+                            prefix_delayed_condition: None,
+                            intrinsic_continuation: None,
+                            followup_continuation: None,
+                            absorbed_by_followup: false,
+                            multi_target: None,
+                            where_x_expression: None,
+                            is_otherwise: false,
+                            special: Some(SpecialClause::EntersTappedAttacking),
+                            source_text: normalized_text.to_string(),
+                        });
                         continue;
                     }
                 }
@@ -7133,7 +7220,7 @@ pub(crate) fn parse_effect_chain_ir(
             }
             apply_where_x_ability_expression(&mut inner_def, where_x_expression.as_deref());
             let delayed_effect = Effect::CreateDelayedTrigger {
-                condition: prefix_condition,
+                condition: prefix_condition.clone(),
                 effect: Box::new(inner_def),
                 uses_tracked_set: false,
             };
@@ -7145,7 +7232,7 @@ pub(crate) fn parse_effect_chain_ir(
                 player_scope: player_scope.as_ref(),
                 clause_duration: None,
             };
-            let mut def = AbilityDefinition::new(kind, delayed_effect);
+            let mut def = AbilityDefinition::new(kind, delayed_effect.clone());
             if is_optional {
                 def.optional = true;
                 def.optional_for = opponent_may_scope;
@@ -7154,7 +7241,25 @@ pub(crate) fn parse_effect_chain_ir(
                 def = def.condition(condition.clone());
             }
             super::swallow_check::check_cascade_diff(&cascade_snap, std::slice::from_ref(&def));
-            defs.push(def);
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(delayed_effect),
+                boundary: chunk.boundary_after,
+                condition: condition.clone(),
+                is_optional,
+                opponent_may_scope,
+                repeat_for: repeat_for.clone(),
+                player_scope,
+                delayed_condition: None,
+                prefix_delayed_condition: Some(prefix_condition),
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: where_x_expression.clone(),
+                is_otherwise: false,
+                special: None,
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
@@ -7169,12 +7274,38 @@ pub(crate) fn parse_effect_chain_ir(
                 player_scope: player_scope.as_ref(),
                 clause_duration: None,
             };
-            let mut def = animate_def;
+            let mut def = animate_def.clone();
             if let Some(ref condition) = condition {
                 def = def.condition(condition.clone());
             }
             super::swallow_check::check_cascade_diff(&cascade_snap, std::slice::from_ref(&def));
-            defs.push(def);
+            clauses.push(ClauseIr {
+                parsed: ParsedEffectClause {
+                    effect: (*animate_def.effect).clone(),
+                    duration: animate_def.duration.clone(),
+                    sub_ability: animate_def.sub_ability.clone(),
+                    distribute: animate_def.distribute,
+                    multi_target: animate_def.multi_target.clone(),
+                    condition: animate_def.condition.clone(),
+                    optional: animate_def.optional,
+                },
+                boundary: chunk.boundary_after,
+                condition: condition.clone(),
+                is_optional,
+                opponent_may_scope,
+                repeat_for: repeat_for.clone(),
+                player_scope,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                special: None,
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
@@ -7200,9 +7331,9 @@ pub(crate) fn parse_effect_chain_ir(
                 .parse(text_no_qty_lower.as_str())
                 .is_ok()
         {
-            if let Some(verb) = defs
+            if let Some(verb) = clauses
                 .last()
-                .and_then(|prev| extract_effect_verb(&prev.effect))
+                .and_then(|prev| extract_effect_verb(&prev.parsed.effect))
             {
                 let reparsed_text = format!("{verb} {text_no_qty}");
                 let reparsed = parse_effect_clause(&reparsed_text, ctx);
@@ -7219,166 +7350,638 @@ pub(crate) fn parse_effect_chain_ir(
         };
 
         // CR 608.2c + CR 117.3a: Anchor-subject inheritance. Before this chunk is
-        // lowered into an AbilityDefinition, check whether a caster-defaulted
-        // player-scope effect should inherit a previously-declared subject
-        // (e.g., "then shuffle" after "its controller may search their library"
-        // → Shuffle inherits the ParentTargetController anchor). Only
-        // overrides when the effect still carries the caster default (Controller).
+        // stored in the IR, check whether a caster-defaulted player-scope effect
+        // should inherit a previously-declared subject (e.g., "then shuffle" after
+        // "its controller may search their library" → Shuffle inherits the
+        // ParentTargetController anchor). Only overrides when the effect still
+        // carries the caster default (Controller). Per D-04, this is parse-time
+        // pronoun resolution that belongs in IR production.
         let mut clause = clause;
         if let Some(ref anchor) = anchor_subject {
             apply_anchor_subject(&mut clause.effect, anchor);
         }
 
-        // CR 608.2c: TargetOnly is a structural wrapper — its sub_ability is the action
-        // to perform on the target. Preserve this relationship rather than flattening.
-        let is_target_only = matches!(clause.effect, Effect::TargetOnly { .. });
         // Update anchor from this clause's subject (e.g., SearchLibrary.target_player
         // set to a non-caster player-scope filter).
         if let Some(extracted) = extract_player_anchor(&clause.effect) {
             anchor_subject = Some(extracted);
         }
-        let mut def = AbilityDefinition::new(kind, clause.effect);
-        let clause_sub = if is_target_only {
-            def.sub_ability = clause.sub_ability;
-            None
-        } else {
-            clause.sub_ability
-        };
-        if is_optional {
-            def.optional = true;
-            def.optional_for = opponent_may_scope;
-        }
-        // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal from the
-        // parsed clause (e.g., "its controller may search their library").
-        if clause.optional {
-            def.optional = true;
-        }
-        if let Some(qty) = repeat_for.clone() {
-            if matches!(*def.effect, Effect::TargetOnly { .. }) {
-                if let Some(sub) = def.sub_ability.as_mut() {
-                    sub.repeat_for = Some(qty);
-                } else {
-                    def.repeat_for = Some(qty);
-                }
-            } else {
-                def.repeat_for = Some(qty);
-            }
-        }
-        if let Some(scope) = player_scope {
-            def.player_scope = Some(scope);
-        }
-        if let Some(duration) = clause.duration.clone() {
-            def = def.duration(duration);
-        }
-        // CR 608.2c: Apply condition — chain-level takes priority over clause-level.
-        let effective_condition = condition.as_ref().or(clause.condition.as_ref());
-        if let Some(cond) = effective_condition {
-            def = def.condition(cond.clone());
-        }
-        // CR 115.1d: Apply multi-target spec — prefer strip_any_number_quantifier result,
-        // fall back to clause-level spec (distribute parsers return early before the strip runs).
-        if let Some(ref spec) = multi_target {
-            def = def.multi_target(spec.clone());
-        } else if let Some(spec) = clause.multi_target {
-            def = def.multi_target(spec);
-        }
-        // CR 601.2d: Propagate distribute flag from parsed clause to definition.
-        if let Some(unit) = clause.distribute {
-            def = def.distribute(unit);
-        }
 
-        // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
-        // Scoped to conditional sub-abilities only — "it"/"its" appears in possessive
-        // forms on many cards and would incorrectly replace targets if applied generally.
+        // Anaphoric resolution: parse-time pronoun→parent-target rewrites.
+        // These modify the parsed effect based on text analysis and previous
+        // clause context — parse-time work that belongs in IR production.
         let text_lower = text.to_lowercase();
+        // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
         if condition.is_some()
             && !condition.as_ref().is_some_and(condition_refs_source_object)
-            && !defs.is_empty()
+            && !clauses.is_empty()
             && has_anaphoric_reference(&text_lower)
-            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(
+                &text_lower,
+                &mut clause.effect,
+            )
         {
-            replace_target_with_parent(&mut def.effect);
+            replace_target_with_parent(&mut clause.effect);
         }
         // CR 608.2c: Pronoun clause following a conditional targeted effect.
-        // "It gains trample" after "[condition] put a +1/+1 counter on target creature"
-        // — the "it" refers to the same target creature, not the ability source.
         if condition.is_none()
-            && defs
-                .last()
-                .is_some_and(|prev| prev.condition.is_some() && has_typed_target(&prev.effect))
+            && clauses.last().is_some_and(|prev| {
+                prev.condition.is_some() && has_typed_target(&prev.parsed.effect)
+            })
             && has_anaphoric_reference(&text_lower)
-            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(
+                &text_lower,
+                &mut clause.effect,
+            )
         {
-            replace_target_with_parent(&mut def.effect);
+            replace_target_with_parent(&mut clause.effect);
         }
         // CR 608.2c: Pronoun clause following an unconditional targeted effect.
-        // "Tap target creature. Put two stun counters on it." — "it" refers to the
-        // tapped creature from the previous sentence, not the ability source.
         if condition.is_none()
-            && defs
-                .last()
-                .is_some_and(|prev| prev.condition.is_none() && has_typed_target(&prev.effect))
+            && clauses.last().is_some_and(|prev| {
+                prev.condition.is_none() && has_typed_target(&prev.parsed.effect)
+            })
             && has_anaphoric_reference(&text_lower)
-            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(
+                &text_lower,
+                &mut clause.effect,
+            )
         {
-            replace_target_with_parent(&mut def.effect);
+            replace_target_with_parent(&mut clause.effect);
         }
 
-        // CR 608.2e: "Instead" overrides — attach as sub_ability on the previous def,
-        // not as a standalone def. The Cow swap in effects/mod.rs handles the resolution.
+        // CR 608.2e: "Instead" overrides — marker for lowering to attach as
+        // sub_ability on the previous def.
         if matches!(
             condition,
             Some(AbilityCondition::TargetHasKeywordInstead { .. })
         ) {
-            if let Some(prev) = defs.last_mut() {
-                prev.sub_ability = Some(Box::new(def));
+            // Build the def that lowering will attach — apply condition + effect
+            let mut instead_def = AbilityDefinition::new(kind, clause.effect.clone());
+            if let Some(ref cond) = condition {
+                instead_def = instead_def.condition(cond.clone());
+            }
+            clauses.push(ClauseIr {
+                parsed: clause,
+                boundary: chunk.boundary_after,
+                condition,
+                is_optional,
+                opponent_may_scope,
+                repeat_for,
+                player_scope,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target,
+                where_x_expression,
+                is_otherwise: false,
+                special: Some(SpecialClause::KeywordInsteadOverride),
+                source_text: normalized_text.to_string(),
+            });
+            continue;
+        }
+
+        // CR 608.2e: AdditionalCostPaidInstead + SearchLibrary pattern.
+        // In the old code, the trailing ChangeZone was an explicit def produced by the
+        // SearchDestination intrinsic continuation. In the IR, the ChangeZone is implicit
+        // in the SearchLibrary clause's intrinsic_continuation field. We check for either:
+        // (a) a separate ChangeZone clause (shouldn't happen in new code), or
+        // (b) a SearchLibrary clause with a SearchDestination { destination: Hand } continuation.
+        let effective_condition = condition.as_ref().or(clause.condition.as_ref());
+        if matches!(
+            effective_condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        ) && matches!(clause.effect, Effect::SearchLibrary { .. })
+            && !clauses.is_empty()
+        {
+            // Find the last non-absorbed clause — it should be a SearchLibrary with
+            // a SearchDestination(Hand) intrinsic continuation.
+            let prev_non_absorbed = clauses.iter().rev().find(|c| !c.absorbed_by_followup);
+            let previous_is_search_with_hand_dest = prev_non_absorbed.is_some_and(|c| {
+                matches!(c.parsed.effect, Effect::SearchLibrary { .. })
+                    && matches!(
+                        c.intrinsic_continuation,
+                        Some(ContinuationAst::SearchDestination {
+                            destination: Zone::Hand,
+                            ..
+                        })
+                    )
+            });
+            if previous_is_search_with_hand_dest {
+                // Compute intrinsic continuation for this SearchLibrary too —
+                // it needs its own SearchDestination.
+                let temp_def = AbilityDefinition::new(kind, clause.effect.clone());
+                let ic = parse_intrinsic_continuation_ast(
+                    normalized_text,
+                    intrinsic_continuation_effect(&temp_def),
+                    full_text,
+                );
+                clauses.push(ClauseIr {
+                    parsed: clause,
+                    boundary: chunk.boundary_after,
+                    condition,
+                    is_optional,
+                    opponent_may_scope,
+                    repeat_for,
+                    player_scope,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: ic,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target,
+                    where_x_expression,
+                    is_otherwise: false,
+                    special: Some(SpecialClause::AdditionalCostInsteadSearch),
+                    source_text: normalized_text.to_string(),
+                });
+                continue;
+            }
+        }
+
+        // CR 603.7: Cross-clause pronoun → mark uses_tracked_set flag.
+        // This needs to check the PREVIOUS clause's effect for exile/token-creating.
+        let needs_tracked_set = clauses
+            .iter()
+            .rev()
+            .find(|c| !c.absorbed_by_followup)
+            .is_some_and(|previous| {
+                (is_exile_effect(&previous.parsed.effect)
+                    || is_token_creating_effect(&previous.parsed.effect))
+                    && (contains_explicit_tracked_set_pronoun(&lower_check)
+                        || contains_implicit_tracked_set_pronoun(&lower_check))
+            });
+
+        // Continuation recognition — store on ClauseIr, application moves to lowering.
+        //
+        // The followup continuation check needs the "effective last effect" — i.e., what
+        // `defs.last()` would look like in the old code after intrinsic/followup continuation
+        // application. Two adjustments are needed vs. simply using `clauses.last().parsed.effect`:
+        //
+        // 1. Skip absorbed clauses: in the old code, absorbed chunks are not pushed to `defs`,
+        //    so `defs.last()` remains the clause that absorbed them. In our IR, absorbed clauses
+        //    ARE stored (for lowering), so we must skip them when finding the "effective previous."
+        //
+        // 2. Simulate intrinsic continuation: when the previous clause has an intrinsic
+        //    continuation (e.g., SearchDestination), the continuation adds new defs (e.g.,
+        //    ChangeZone) that become `defs.last()`. We must simulate this to match followup
+        //    patterns that absorb paraphrase chunks (e.g., "put it onto the battlefield"
+        //    after SearchLibrary).
+        let effective_prev = clauses.iter().rev().find(|c| !c.absorbed_by_followup);
+        let effective_prev_effect = effective_prev.map(|previous| {
+            if let Some(ref ic) = previous.intrinsic_continuation {
+                // Build a temporary defs list, apply the continuation, and use the last effect.
+                let mut temp_defs =
+                    vec![AbilityDefinition::new(kind, previous.parsed.effect.clone())];
+                apply_clause_continuation(&mut temp_defs, ic.clone(), kind);
+                (*temp_defs.last().unwrap().effect).clone()
+            } else if let Some(ref _fc) = previous.followup_continuation {
+                // A non-absorbed clause with a followup continuation means the continuation
+                // was applied to the clause BEFORE it. Simulate to get patched effect.
+                // Find the clause before `previous` (skip absorbed), apply the followup.
+                // However, the simple case: the continuation patches the previous in place
+                // (e.g., DigFromAmong patches the Dig), so the effective last is still the
+                // previous effect type. For now, just return the raw effect.
+                previous.parsed.effect.clone()
+            } else {
+                previous.parsed.effect.clone()
+            }
+        });
+        let followup_continuation = effective_prev_effect
+            .as_ref()
+            .and_then(|eff| parse_followup_continuation_ast(normalized_text, eff));
+        let absorb_followup = followup_continuation
+            .as_ref()
+            .is_some_and(|continuation| continuation_absorbs_current(continuation, &clause.effect));
+
+        // Build a temporary def for intrinsic continuation detection and cascade check.
+        // The intrinsic continuation parser needs the assembled effect to determine
+        // what continuation pattern applies.
+        let mut temp_def = AbilityDefinition::new(kind, clause.effect.clone());
+        // Wire sub_ability for TargetOnly unwrapping in intrinsic_continuation_effect.
+        if matches!(clause.effect, Effect::TargetOnly { .. }) {
+            temp_def.sub_ability = clause.sub_ability.clone();
+        }
+        let intrinsic_continuation = parse_intrinsic_continuation_ast(
+            normalized_text,
+            intrinsic_continuation_effect(&temp_def),
+            full_text,
+        );
+
+        // Phase 1.5: cascade-vs-AST structural diff.
+        {
+            let cascade_snap = super::swallow_check::CascadeSnapshot {
+                is_optional,
+                opponent_may_scope: opponent_may_scope.as_ref(),
+                condition: condition.as_ref().or(clause.condition.as_ref()),
+                repeat_for: repeat_for.as_ref(),
+                player_scope: player_scope.as_ref(),
+                clause_duration: clause.duration.as_ref(),
+            };
+            // Build temporary defs for the cascade check
+            let mut check_def = AbilityDefinition::new(kind, clause.effect.clone());
+            if is_optional {
+                check_def.optional = true;
+                check_def.optional_for = opponent_may_scope;
+            }
+            if clause.optional {
+                check_def.optional = true;
+            }
+            if let Some(ref qty) = repeat_for {
+                check_def.repeat_for = Some(qty.clone());
+            }
+            if let Some(ref scope) = player_scope {
+                check_def.player_scope = Some(*scope);
+            }
+            if let Some(ref duration) = clause.duration {
+                check_def = check_def.duration(duration.clone());
+            }
+            if let Some(cond) = condition.as_ref().or(clause.condition.as_ref()) {
+                check_def = check_def.condition(cond.clone());
+            }
+            if let Some(ref spec) = multi_target {
+                check_def = check_def.multi_target(spec.clone());
+            } else if let Some(ref spec) = clause.multi_target {
+                check_def = check_def.multi_target(spec.clone());
+            }
+            if let Some(ref unit) = clause.distribute {
+                check_def = check_def.distribute(unit.clone());
+            }
+            // Include delayed_condition wrapping for accurate cascade check
+            if let Some(ref delayed_cond) = delayed_condition {
+                let inner = check_def;
+                let lifted_condition = inner.condition.clone();
+                let lifted_optional = inner.optional;
+                let lifted_optional_for = inner.optional_for;
+                let lifted_repeat_for = inner.repeat_for.clone();
+                let lifted_player_scope = inner.player_scope;
+                check_def = AbilityDefinition::new(
+                    kind,
+                    Effect::CreateDelayedTrigger {
+                        condition: delayed_cond.clone(),
+                        effect: Box::new(inner),
+                        uses_tracked_set: needs_tracked_set,
+                    },
+                );
+                check_def.condition = lifted_condition;
+                check_def.optional = lifted_optional;
+                check_def.optional_for = lifted_optional_for;
+                check_def.repeat_for = lifted_repeat_for;
+                check_def.player_scope = lifted_player_scope;
+            }
+            let mut check_defs = vec![check_def];
+            let is_target_only = matches!(clause.effect, Effect::TargetOnly { .. });
+            if !is_target_only {
+                if let Some(ref sub) = clause.sub_ability {
+                    check_defs.push(*sub.clone());
+                }
+            }
+            super::swallow_check::check_cascade_diff(&cascade_snap, &check_defs);
+        }
+
+        // If this clause is absorbed by a followup continuation from the previous
+        // clause, mark it and store the continuation on the PREVIOUS clause.
+        if absorb_followup {
+            // Store the followup continuation — it applies to the previous clause.
+            // We handle this by pushing an absorbed marker clause.
+            if let Some(continuation) = followup_continuation {
+                clauses.push(ClauseIr {
+                    parsed: clause,
+                    boundary: chunk.boundary_after,
+                    condition,
+                    is_optional,
+                    opponent_may_scope,
+                    repeat_for,
+                    player_scope,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: Some(continuation),
+                    absorbed_by_followup: true,
+                    multi_target,
+                    where_x_expression,
+                    is_otherwise: false,
+                    special: None,
+                    source_text: normalized_text.to_string(),
+                });
             }
             continue;
         }
 
-        if matches!(
-            def.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        ) && matches!(&*def.effect, Effect::SearchLibrary { .. })
-            && defs.len() >= 2
-        {
-            let previous_is_search =
-                matches!(&*defs[defs.len() - 2].effect, Effect::SearchLibrary { .. });
-            let trailing_is_search_destination = matches!(
-                &*defs[defs.len() - 1].effect,
-                Effect::ChangeZone {
-                    origin: Some(Zone::Library),
-                    destination: Zone::Hand,
-                    ..
+        // Non-absorbed followup continuation — store on the current clause
+        // (it applies to the PREVIOUS clause in lowering).
+        let followup_for_this = if followup_continuation.is_some() && !absorb_followup {
+            followup_continuation
+        } else {
+            None
+        };
+
+        clauses.push(ClauseIr {
+            parsed: clause,
+            boundary: chunk.boundary_after,
+            condition,
+            is_optional,
+            opponent_may_scope,
+            repeat_for,
+            player_scope,
+            delayed_condition,
+            prefix_delayed_condition: None,
+            intrinsic_continuation,
+            followup_continuation: followup_for_this,
+            absorbed_by_followup: false,
+            multi_target,
+            where_x_expression,
+            is_otherwise: false,
+            special: None,
+            source_text: normalized_text.to_string(),
+        });
+    }
+
+    EffectChainIr {
+        clauses,
+        kind,
+        chain_rounding,
+        actor: ctx.actor.clone(),
+    }
+}
+
+/// Lower an effect chain IR into a fully-assembled `AbilityDefinition`.
+///
+/// This is the assembly half of the parse/lower split (Phase 48).
+/// Phase 1 converts the flat `Vec<ClauseIr>` into `Vec<AbilityDefinition>`,
+/// applying per-clause assembly (condition lifting, delayed-trigger wrapping,
+/// continuation patching, special-clause attachment). Phase 2 performs post-loop
+/// transforms: Dig demotion, conditional peek marking, anaphor resolution,
+/// die/coin consolidation, sub_ability chain assembly, player_scope rewriting,
+/// chain-level rounding, and forward_result wiring.
+///
+/// Pure function of `&EffectChainIr` — no `ParseContext` dependency (D-08).
+pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
+    let kind = ir.kind;
+
+    // ── Phase 1: ClauseIr → AbilityDefinition ──────────────────────────
+    let mut defs: Vec<AbilityDefinition> = Vec::new();
+    for clause_ir in &ir.clauses {
+        // Skip absorbed clauses — their followup continuation is applied below.
+        if clause_ir.absorbed_by_followup {
+            // Apply the followup continuation to the defs built so far.
+            if let Some(ref continuation) = clause_ir.followup_continuation {
+                apply_clause_continuation(&mut defs, continuation.clone(), kind);
+            }
+            continue;
+        }
+
+        // Handle special clauses that modify previous defs rather than emitting new ones.
+        if let Some(ref special) = clause_ir.special {
+            match special {
+                SpecialClause::AltCostRider(cost) => {
+                    attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
+                    continue;
                 }
-            );
-            if previous_is_search && trailing_is_search_destination {
-                def.else_ability = Some(Box::new(defs.pop().unwrap()));
+                SpecialClause::Otherwise(else_def) => {
+                    // Walk defs backward to find the most recent conditional
+                    for d in defs.iter_mut().rev() {
+                        if d.condition.is_some() {
+                            d.else_ability = Some(else_def.clone());
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                SpecialClause::OtherwiseFallback(else_def) => {
+                    defs.push(AbilityDefinition::new(
+                        kind,
+                        Effect::Unimplemented {
+                            name: "otherwise".to_string(),
+                            description: Some("Otherwise".to_string()),
+                        },
+                    ));
+                    defs.push(*else_def.clone());
+                    continue;
+                }
+                SpecialClause::DieExileRider(rider_def) => {
+                    if let Some(last_def) = defs.last_mut() {
+                        last_def.sub_ability = Some(rider_def.clone());
+                    }
+                    continue;
+                }
+                SpecialClause::DigInsteadAlt(alt_def) => {
+                    if let Some(last_def) = defs.pop() {
+                        let mut new_def = *alt_def.clone();
+                        new_def.else_ability = Some(Box::new(last_def));
+                        defs.push(new_def);
+                    }
+                    continue;
+                }
+                SpecialClause::InsteadClause(instead_def) => {
+                    if let Some(mut last_def) = defs.pop() {
+                        let mut instead = *instead_def.clone();
+                        // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
+                        rewrite_those_tokens_from_antecedent(&mut instead.effect, &last_def.effect);
+                        last_def.sub_ability = Some(Box::new(instead));
+                        defs.push(last_def);
+                    }
+                    continue;
+                }
+                SpecialClause::EntersTappedAttacking => {
+                    // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier
+                    if let Some(prev) = defs.last() {
+                        let can_patch = matches!(
+                            &*prev.effect,
+                            Effect::CopyTokenOf { .. }
+                                | Effect::Token { .. }
+                                | Effect::ChangeZone { .. }
+                        );
+                        if can_patch {
+                            let mut patched = defs.pop().unwrap();
+                            match &mut *patched.effect {
+                                Effect::CopyTokenOf {
+                                    enters_attacking,
+                                    tapped,
+                                    ..
+                                } => {
+                                    *enters_attacking = true;
+                                    *tapped = true;
+                                }
+                                Effect::Token {
+                                    enters_attacking,
+                                    tapped,
+                                    ..
+                                } => {
+                                    *enters_attacking = true;
+                                    *tapped = true;
+                                }
+                                Effect::ChangeZone {
+                                    enters_attacking,
+                                    enter_tapped,
+                                    ..
+                                } => {
+                                    *enters_attacking = true;
+                                    *enter_tapped = true;
+                                }
+                                _ => {}
+                            }
+                            let original = {
+                                let mut orig = patched.clone();
+                                match &mut *orig.effect {
+                                    Effect::CopyTokenOf {
+                                        enters_attacking,
+                                        tapped,
+                                        ..
+                                    } => {
+                                        *enters_attacking = false;
+                                        *tapped = false;
+                                    }
+                                    Effect::Token {
+                                        enters_attacking,
+                                        tapped,
+                                        ..
+                                    } => {
+                                        *enters_attacking = false;
+                                        *tapped = false;
+                                    }
+                                    Effect::ChangeZone {
+                                        enters_attacking,
+                                        enter_tapped,
+                                        ..
+                                    } => {
+                                        *enters_attacking = false;
+                                        *enter_tapped = false;
+                                    }
+                                    _ => {}
+                                }
+                                orig
+                            };
+                            patched.condition = clause_ir.condition.clone();
+                            patched.else_ability = Some(Box::new(original));
+                            defs.push(patched);
+                        }
+                    }
+                    continue;
+                }
+                SpecialClause::KeywordInsteadOverride => {
+                    // Build the def for this clause and attach to previous as sub_ability
+                    let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                    let effective_cond = clause_ir
+                        .condition
+                        .as_ref()
+                        .or(clause_ir.parsed.condition.as_ref());
+                    if let Some(cond) = effective_cond {
+                        def = def.condition(cond.clone());
+                    }
+                    if let Some(prev) = defs.last_mut() {
+                        prev.sub_ability = Some(Box::new(def));
+                    }
+                    continue;
+                }
+                SpecialClause::AdditionalCostInsteadSearch => {
+                    // Build this clause's def and fold else_ability from the trailing clause.
+                    // The trailing ChangeZone was produced by the previous SearchLibrary's
+                    // intrinsic continuation (SearchDestination).
+                    let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                    let effective_cond = clause_ir
+                        .condition
+                        .as_ref()
+                        .or(clause_ir.parsed.condition.as_ref());
+                    if let Some(cond) = effective_cond {
+                        def = def.condition(cond.clone());
+                    }
+                    // Pop trailing search-destination ChangeZone and attach as else_ability
+                    if defs.len() >= 2 {
+                        let trailing_is_search_destination = matches!(
+                            &*defs.last().unwrap().effect,
+                            Effect::ChangeZone {
+                                origin: Some(Zone::Library),
+                                destination: Zone::Hand,
+                                ..
+                            }
+                        );
+                        if trailing_is_search_destination {
+                            def.else_ability = Some(Box::new(defs.pop().unwrap()));
+                        }
+                    }
+                    defs.push(def);
+                    // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
+                    if let Some(ref continuation) = clause_ir.intrinsic_continuation {
+                        apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                    }
+                    continue;
+                }
             }
         }
 
+        // Non-absorbed, non-special followup continuation — apply it to the
+        // previous defs before building this clause's def.
+        if let Some(ref continuation) = clause_ir.followup_continuation {
+            apply_clause_continuation(&mut defs, continuation.clone(), kind);
+        }
+
+        // ── Build AbilityDefinition from ClauseIr ──
+        let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
+        let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        let clause_sub = if is_target_only {
+            def.sub_ability = clause_ir.parsed.sub_ability.clone();
+            None
+        } else {
+            clause_ir.parsed.sub_ability.clone()
+        };
+
+        if clause_ir.is_optional {
+            def.optional = true;
+            def.optional_for = clause_ir.opponent_may_scope;
+        }
+        // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal.
+        if clause_ir.parsed.optional {
+            def.optional = true;
+        }
+        if let Some(ref qty) = clause_ir.repeat_for {
+            if matches!(*def.effect, Effect::TargetOnly { .. }) {
+                if let Some(sub) = def.sub_ability.as_mut() {
+                    sub.repeat_for = Some(qty.clone());
+                } else {
+                    def.repeat_for = Some(qty.clone());
+                }
+            } else {
+                def.repeat_for = Some(qty.clone());
+            }
+        }
+        if let Some(scope) = clause_ir.player_scope {
+            def.player_scope = Some(scope);
+        }
+        if let Some(ref duration) = clause_ir.parsed.duration {
+            def = def.duration(duration.clone());
+        }
+        // CR 608.2c: Apply condition — chain-level takes priority over clause-level.
+        let effective_condition = clause_ir
+            .condition
+            .as_ref()
+            .or(clause_ir.parsed.condition.as_ref());
+        if let Some(cond) = effective_condition {
+            def = def.condition(cond.clone());
+        }
+        // CR 115.1d: Apply multi-target spec — prefer strip result, fall back to clause-level.
+        if let Some(ref spec) = clause_ir.multi_target {
+            def = def.multi_target(spec.clone());
+        } else if let Some(ref spec) = clause_ir.parsed.multi_target {
+            def = def.multi_target(spec.clone());
+        }
+        // CR 601.2d: Propagate distribute flag.
+        if let Some(ref unit) = clause_ir.parsed.distribute {
+            def = def.distribute(unit.clone());
+        }
+
         let mut current_defs = vec![def];
-        if let Some(sub) = clause_sub {
-            current_defs.push(*sub);
+        if let Some(ref sub) = clause_sub {
+            current_defs.push(*sub.clone());
         }
         for current in &mut current_defs {
-            apply_where_x_ability_expression(current, where_x_expression.as_deref());
+            apply_where_x_ability_expression(current, clause_ir.where_x_expression.as_deref());
         }
 
         // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found.
-        //
-        // CR 608.2c: Lift the inner ability's `condition` onto the new outer
-        // wrapper. A conditional like "If you control a Wizard, [effect at
-        // next main phase]" scopes to the whole clause but is evaluated at
-        // SPELL RESOLUTION time, not at delayed-trigger firing. The condition
-        // must gate whether the delayed trigger is even created — not what
-        // runs when it fires. Without this lift the inner `condition` would
-        // be stranded dead metadata (the `effects::delayed_trigger::resolve`
-        // path builds a fresh `ResolvedAbility` and does not read
-        // `effect_def.condition`), silently dropping the gate. Mana Sculpt is
-        // the first card exposed to this architecture; the lift closes the
-        // latent gap for any future delayed-trigger with an inner condition.
-        if let Some(delayed_cond) = delayed_condition {
+        if let Some(ref delayed_cond) = clause_ir.delayed_condition {
             for current in &mut current_defs {
                 let inner = std::mem::replace(
                     current,
@@ -7390,14 +7993,7 @@ pub(crate) fn parse_effect_chain_ir(
                         },
                     ),
                 );
-                // CR 608.2c: Slots that gate trigger CREATION (not firing) must
-                // live on the outer wrapper. The delayed_trigger::resolve path
-                // builds a fresh ResolvedAbility from inner.effect alone and
-                // discards every other field on the inner def. For one-shot
-                // delayed triggers, "may create" and "may execute on fire" are
-                // observably equivalent — the controller still chooses whether
-                // the effect happens. Surfaced by the cascade-vs-AST swallow
-                // detector (Tiana CascadeOptional, Shambling Swarm CascadeRepeat).
+                // CR 608.2c: Lift condition/optional/repeat/player_scope to outer wrapper.
                 let lifted_condition = inner.condition.clone();
                 let lifted_optional = inner.optional;
                 let lifted_optional_for = inner.optional_for;
@@ -7419,82 +8015,35 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
-        // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger
-        if let Some(previous) = defs.last() {
-            if is_exile_effect(&previous.effect) || is_token_creating_effect(&previous.effect) {
-                let has_tracked_ref = contains_explicit_tracked_set_pronoun(&lower_check)
-                    || contains_implicit_tracked_set_pronoun(&lower_check);
-                if has_tracked_ref {
-                    for current in &mut current_defs {
-                        mark_uses_tracked_set(current);
+        // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger.
+        // Check whether the previous clause had an exile/token effect and this clause
+        // has a tracked-set pronoun reference.
+        if !current_defs.is_empty() {
+            let source_text_lower = clause_ir.source_text.to_lowercase();
+            // Find the previous non-special, non-absorbed clause
+            let prev_effect = defs.last().map(|d| &*d.effect);
+            if let Some(prev_eff) = prev_effect {
+                if is_exile_effect(prev_eff) || is_token_creating_effect(prev_eff) {
+                    let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
+                        || contains_implicit_tracked_set_pronoun(&source_text_lower);
+                    if has_tracked_ref {
+                        for current in &mut current_defs {
+                            mark_uses_tracked_set(current);
+                        }
                     }
                 }
             }
         }
 
-        let followup_continuation = defs.last().and_then(|previous| {
-            parse_followup_continuation_ast(normalized_text, &previous.effect)
-        });
-        let absorb_followup = followup_continuation.as_ref().is_some_and(|continuation| {
-            current_defs
-                .first()
-                .is_some_and(|current| continuation_absorbs_current(continuation, &current.effect))
-        });
-        if let Some(continuation) = followup_continuation {
-            apply_clause_continuation(&mut defs, continuation, kind);
-        }
-        if absorb_followup {
-            continue;
-        }
-
-        let intrinsic_continuation = parse_intrinsic_continuation_ast(
-            normalized_text,
-            intrinsic_continuation_effect(&current_defs[0]),
-            full_text,
-        );
-
-        // Phase 1.5: cascade-vs-AST structural diff. Captures cases where
-        // the chunk loop's linear strippers populated a slot but
-        // def-assembly silently dropped it. Complementary to the
-        // text-scanning detectors at the top of `swallow_check.rs`. See
-        // `data/parser-swallow-progress.md` for the architecture.
-        let cascade_snap = super::swallow_check::CascadeSnapshot {
-            is_optional,
-            opponent_may_scope: opponent_may_scope.as_ref(),
-            condition: condition.as_ref().or(clause.condition.as_ref()),
-            repeat_for: repeat_for.as_ref(),
-            player_scope: player_scope.as_ref(),
-            clause_duration: clause.duration.as_ref(),
-        };
-        super::swallow_check::check_cascade_diff(&cascade_snap, &current_defs);
-
         defs.extend(current_defs);
 
-        if let Some(continuation) = intrinsic_continuation {
-            apply_clause_continuation(&mut defs, continuation, kind);
+        // Apply intrinsic continuation after extending defs with current clause's defs.
+        if let Some(ref continuation) = clause_ir.intrinsic_continuation {
+            apply_clause_continuation(&mut defs, continuation.clone(), kind);
         }
     }
 
-    EffectChainIr {
-        clauses: vec![],
-        pre_assembled_defs: defs,
-        kind,
-        chain_rounding,
-        actor: ctx.actor.clone(),
-    }
-}
-
-/// Lower an effect chain IR into a fully-assembled `AbilityDefinition`.
-///
-/// This is the assembly half of the parse/lower split (Phase 48).
-/// It takes the flat `pre_assembled_defs` produced by [`parse_effect_chain_ir`]
-/// and performs all post-loop transforms: Dig demotion, conditional peek marking,
-/// anaphor resolution, die/coin consolidation, sub_ability chain assembly,
-/// player_scope rewriting, chain-level rounding, and forward_result wiring.
-///
-/// Pure function of `&EffectChainIr` — no `ParseContext` dependency (D-08).
-pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
-    let mut defs = ir.pre_assembled_defs.clone();
+    // ── Phase 2: Post-loop assembly (unchanged) ────────────────────────
     let kind = ir.kind;
     let chain_rounding = ir.chain_rounding;
 
