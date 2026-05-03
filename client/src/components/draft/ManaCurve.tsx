@@ -17,11 +17,12 @@ const MAX_BAR_HEIGHT = 100;
 // ── Component ───────────────────────────────────────────────────────────
 
 /** Simple div-based mana curve bar chart. Per RESEARCH: no chart library needed. */
+const EMPTY_POOL: never[] = [];
+
 export function ManaCurve({ cards }: ManaCurveProps) {
-  const pool = useDraftStore((s) => s.view?.pool) ?? [];
+  const pool = useDraftStore((s) => s.view?.pool) ?? EMPTY_POOL;
 
   const counts = useMemo(() => {
-    // Build name -> cmc lookup from the pool's enriched DraftCardInstance data
     const cmcByName = new Map<string, number>();
     for (const card of pool) {
       cmcByName.set(card.name, card.cmc);
