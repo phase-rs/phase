@@ -61,7 +61,6 @@ pub enum OracleDiagnostic {
         effect_name: String,
         line_index: usize,
     },
-
 }
 
 impl OracleDiagnostic {
@@ -178,7 +177,6 @@ mod tests {
             diag.to_string(),
             "ignored-remainder(must-block): 'extra stuff'"
         );
-
     }
 
     #[test]
