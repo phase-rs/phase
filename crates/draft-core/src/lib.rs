@@ -1,4 +1,5 @@
 pub mod extraction;
+pub mod pack_generator;
 pub mod pack_source;
 pub mod pick_pass;
 pub mod session;
