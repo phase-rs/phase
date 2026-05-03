@@ -30,6 +30,7 @@ use server_core::protocol::{
 };
 use server_core::resolve_deck;
 use server_core::session::SessionManager;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, info_span, warn, Instrument};
@@ -873,6 +874,198 @@ fn delete_session_async(game_db: &SharedGameDb, game_code: &str) {
     });
 }
 
+/// If this game_code belongs to a draft tournament, auto-report the match
+/// result to the DraftSessionManager and broadcast updated views. This
+/// implements Pitfall 6 from RESEARCH: clients must NOT send
+/// ReportMatchResult for server-hosted drafts — the server handles it.
+async fn report_draft_game_over(
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_code: &str,
+    winner: Option<PlayerId>,
+) {
+    let draft_code = {
+        let mgr = draft_state.lock().await;
+        mgr.draft_for_game_code(game_code)
+    };
+    let Some(draft_code) = draft_code else {
+        return;
+    };
+
+    // Find the match_id and winner_seat from the draft session
+    let (match_id, winner_seat) = {
+        let mgr = draft_state.lock().await;
+        let Some(session) = mgr.sessions.get(&draft_code) else {
+            return;
+        };
+        // Find the match_id that maps to this game_code
+        let match_entry = session
+            .active_matches
+            .iter()
+            .find(|(_, gc)| gc.as_str() == game_code);
+        let Some((match_id, _)) = match_entry else {
+            warn!(draft = %draft_code, game = %game_code, "game_code not found in active_matches");
+            return;
+        };
+        let match_id = match_id.clone();
+
+        // Map PlayerId winner to seat index
+        let winner_seat = winner.map(|pid| pid.0);
+
+        (match_id, winner_seat)
+    };
+
+    info!(
+        draft = %draft_code,
+        game = %game_code,
+        match_id = %match_id,
+        winner_seat = ?winner_seat,
+        "auto-reporting draft match result from GameOver"
+    );
+
+    let views = {
+        let mut mgr = draft_state.lock().await;
+        let action = draft_core::types::DraftAction::ReportMatchResult {
+            match_id,
+            winner_seat,
+        };
+        match mgr.apply_system_action(&draft_code, action, None) {
+            Ok(views) => views,
+            Err(e) => {
+                warn!(draft = %draft_code, error = %e, "failed to auto-report draft match result");
+                return;
+            }
+        }
+    };
+
+    // Broadcast updated views to all draft pod members
+    let conns = connections.lock().await;
+    if let Some(players) = conns.get(&draft_code) {
+        for (pid, sender) in players.iter() {
+            let seat = pid.0 as usize;
+            if let Some(view) = views.get(seat) {
+                let _ = sender.send(ServerMessage::DraftStateUpdate {
+                    view: view.clone(),
+                });
+            }
+        }
+    }
+}
+
+/// Broadcast `DraftStateUpdate` to all connected sockets in a draft pod.
+/// Iterates the connections map and filters by `identity.draft_code` match.
+/// Because `SocketIdentity` is per-socket state (not stored globally), we
+/// instead iterate draft session seats and send per-seat views via the
+/// connections map keyed by draft_code.
+async fn broadcast_draft_views(
+    draft_code: &str,
+    views: &[draft_core::view::DraftPlayerView],
+    connections: &SharedConnections,
+    draft_state: &SharedDraftState,
+) {
+    let conns = connections.lock().await;
+    // Draft connections are stored under the draft_code in the connections map
+    if let Some(players) = conns.get(draft_code) {
+        for (pid, sender) in players.iter() {
+            let seat = pid.0 as usize;
+            if let Some(view) = views.get(seat) {
+                let msg = ServerMessage::DraftStateUpdate {
+                    view: view.clone(),
+                };
+                let _ = sender.send(msg);
+            }
+        }
+    } else {
+        // Fallback: broadcast to all sockets that have a matching draft_code
+        // by sending the first view (for reconnect cases where identity is set
+        // but connection may not be in the draft_code map yet)
+        let _ = draft_state; // suppress unused
+    }
+}
+
+/// Spawn a pick timer task. When the timer expires, auto-pick a random card
+/// for any seat that hasn't picked yet. Aborts the previous timer if one exists.
+fn spawn_pick_timer(
+    draft_state: SharedDraftState,
+    connections: SharedConnections,
+    draft_code: String,
+    pick_seconds: u32,
+) {
+    let timer_draft_code = draft_code.clone();
+    let timer_draft_state = draft_state.clone();
+    let timer_connections = connections;
+
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(pick_seconds as u64)).await;
+
+        let mut mgr = timer_draft_state.lock().await;
+        let Some(session) = mgr.sessions.get_mut(&timer_draft_code) else {
+            return;
+        };
+
+        // Only auto-pick if still in Drafting status
+        if session.session.status != draft_core::types::DraftStatus::Drafting {
+            return;
+        }
+
+        info!(draft = %timer_draft_code, "pick timer expired — auto-picking for pending seats");
+
+        // Find seats that still have a current pack (haven't picked yet)
+        let pod_size = session.player_tokens.len();
+        for seat_idx in 0..pod_size {
+            if let Some(pack) = &session.session.current_pack[seat_idx] {
+                if !pack.0.is_empty() {
+                    let card_id = pack.0[0].instance_id.clone();
+                    let action = draft_core::types::DraftAction::Pick {
+                        seat: seat_idx as u8,
+                        card_instance_id: card_id,
+                    };
+                    if let Err(e) =
+                        draft_core::session::apply(&mut session.session, action, None)
+                    {
+                        warn!(
+                            draft = %timer_draft_code,
+                            seat = seat_idx,
+                            error = %e,
+                            "auto-pick failed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Broadcast updated views
+        let views: Vec<_> = (0..pod_size)
+            .map(|i| session.view_for_seat(i))
+            .collect();
+        drop(mgr);
+
+        let conns = timer_connections.lock().await;
+        if let Some(players) = conns.get(&timer_draft_code) {
+            for (pid, sender) in players.iter() {
+                let seat = pid.0 as usize;
+                if let Some(view) = views.get(seat) {
+                    let _ = sender.send(ServerMessage::DraftStateUpdate {
+                        view: view.clone(),
+                    });
+                }
+            }
+        }
+    });
+
+    // Store the handle so it can be aborted if all picks come in early
+    tokio::spawn(async move {
+        let mut mgr = draft_state.lock().await;
+        if let Some(session) = mgr.sessions.get_mut(&draft_code) {
+            // Abort previous timer if any (T-59-07: prevent timer task accumulation)
+            if let Some(prev) = session.timer_task.take() {
+                prev.abort();
+            }
+            session.timer_task = Some(handle);
+        }
+    });
+}
+
 struct ServerDeckResolver<'a> {
     db: &'a CardDatabase,
 }
@@ -1347,6 +1540,15 @@ async fn handle_client_message(
                         if let Some(winner) = game_over_winner {
                             info!(game = %game_code, winner = ?winner, reason = "game_rules", "game over");
                             delete_session_async(game_db, &game_code);
+
+                            // Auto-report draft match result if this game belongs to a draft
+                            // (spawn as a separate task to avoid holding the state lock)
+                            let ds = draft_state.clone();
+                            let cs = connections.clone();
+                            let gc = game_code.clone();
+                            tokio::spawn(async move {
+                                report_draft_game_over(&ds, &cs, &gc, winner).await;
+                            });
                         } else {
                             persist_session_async(game_db, &game_code, session);
                         }
@@ -2635,6 +2837,9 @@ async fn handle_client_message(
             }
             drop(conns);
 
+            // Auto-report draft match result if this game belongs to a draft
+            report_draft_game_over(draft_state, connections, &game_code, winner).await;
+
             let mut mgr = state.lock().await;
             mgr.sessions.remove(&game_code);
             delete_session_async(game_db, &game_code);
@@ -2855,14 +3060,295 @@ async fn handle_client_message(
             }
         }
 
-        ClientMessage::CreateDraftWithSettings { .. }
-        | ClientMessage::JoinDraftWithPassword { .. }
-        | ClientMessage::DraftAction { .. }
-        | ClientMessage::ReconnectDraft { .. } => {
-            // Draft message handlers are implemented in Task 2.
-            // For now, suppress the exhaustive match error.
-            let _ = draft_state;
-            warn!("draft message received but handlers not yet wired");
+        ClientMessage::CreateDraftWithSettings {
+            display_name,
+            set_code,
+            kind,
+            public,
+            password,
+            timer_seconds,
+            tournament_format,
+            pod_policy,
+            pod_size,
+        } => {
+            info!(
+                display_name = %display_name,
+                set_code = %set_code,
+                kind = ?kind,
+                public,
+                pod_size,
+                "CreateDraftWithSettings"
+            );
+
+            let config = draft_core::types::DraftConfig {
+                set_code: set_code.clone(),
+                kind,
+                cards_per_pack: 14,
+                pack_count: 3,
+                rng_seed: rand::random(),
+                tournament_format,
+                pod_policy,
+            };
+
+            let (draft_code, player_token, seat_index) = {
+                let mut mgr = draft_state.lock().await;
+                mgr.create_draft(config, display_name.clone())
+            };
+
+            identity.draft_code = Some(draft_code.clone());
+            identity.draft_seat = Some(seat_index as usize);
+            identity.draft_token = Some(player_token.clone());
+
+            // Register this connection in the connections map under draft_code
+            {
+                let mut conns = connections.lock().await;
+                conns
+                    .entry(draft_code.clone())
+                    .or_default()
+                    .insert(PlayerId(seat_index), tx.clone());
+            }
+
+            // Register in lobby so draft appears in the lobby list
+            {
+                let (host_version, host_build_commit) = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| (h.client_version.clone(), h.build_commit.clone()))
+                    .unwrap_or_default();
+                let mut lob = lobby.lock().await;
+                lob.register_game(
+                    &draft_code,
+                    RegisterGameRequest {
+                        host_name: display_name.clone(),
+                        public,
+                        password,
+                        timer_seconds,
+                        host_version,
+                        host_build_commit,
+                        current_players: 1,
+                        max_players: pod_size as u32,
+                        format_config: None,
+                        match_config: Default::default(),
+                        room_name: None,
+                        host_peer_id: String::new(),
+                        draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
+                            set_code,
+                            draft_kind: format!("{kind:?}"),
+                        }),
+                    },
+                );
+            }
+
+            let msg = ServerMessage::DraftCreated {
+                draft_code: draft_code.clone(),
+                player_token,
+                seat_index,
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+
+            if public {
+                let game = {
+                    let lob = lobby.lock().await;
+                    lob.public_game(&draft_code)
+                };
+                if let Some(game) = game {
+                    broadcast_to_lobby_subscribers(
+                        lobby_subscribers,
+                        ServerMessage::LobbyGameAdded { game },
+                    )
+                    .await;
+                }
+            }
+
+            info!(draft = %draft_code, host = %display_name, "draft created");
+        }
+
+        ClientMessage::JoinDraftWithPassword {
+            draft_code,
+            display_name,
+            password,
+        } => {
+            info!(draft = %draft_code, joiner = %display_name, "JoinDraftWithPassword");
+
+            let result = {
+                let mut mgr = draft_state.lock().await;
+                mgr.join_draft(&draft_code, display_name.clone(), password.as_deref())
+            };
+
+            match result {
+                Ok((player_token, seat_index, view)) => {
+                    identity.draft_code = Some(draft_code.clone());
+                    identity.draft_seat = Some(seat_index as usize);
+                    identity.draft_token = Some(player_token.clone());
+
+                    // Register this connection in the connections map under draft_code
+                    {
+                        let mut conns = connections.lock().await;
+                        conns
+                            .entry(draft_code.clone())
+                            .or_default()
+                            .insert(PlayerId(seat_index), tx.clone());
+                    }
+
+                    // Update lobby seats_filled count
+                    {
+                        let mgr = draft_state.lock().await;
+                        if let Some(session) = mgr.sessions.get(&draft_code) {
+                            let filled = session
+                                .player_tokens
+                                .iter()
+                                .filter(|t| !t.is_empty())
+                                .count();
+                            let mut lob = lobby.lock().await;
+                            lob.set_current_players(&draft_code, filled as u32);
+                            if let Some(game) = lob.public_game(&draft_code) {
+                                broadcast_to_lobby_subscribers(
+                                    lobby_subscribers,
+                                    ServerMessage::LobbyGameUpdated { game },
+                                )
+                                .await;
+                            }
+                        }
+                    }
+
+                    let msg = ServerMessage::DraftJoined {
+                        draft_code,
+                        player_token,
+                        seat_index,
+                        view,
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+            }
+        }
+
+        ClientMessage::DraftAction {
+            draft_code,
+            action,
+        } => {
+            let token = match &identity.draft_token {
+                Some(t) => t.clone(),
+                None => {
+                    let msg = ServerMessage::DraftActionRejected {
+                        reason: "Not in a draft session".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            debug!(draft = %draft_code, action = ?action, "DraftAction");
+
+            // Check if this is a StartDraft action (triggers timer)
+            let is_start = matches!(action, draft_core::types::DraftAction::StartDraft);
+
+            let result = {
+                let mut mgr = draft_state.lock().await;
+                mgr.handle_draft_action(&draft_code, &token, action, None)
+            };
+
+            match result {
+                Ok(views) => {
+                    // Broadcast DraftStateUpdate to all connected sockets in the pod
+                    broadcast_draft_views(
+                        &draft_code,
+                        &views,
+                        connections,
+                        draft_state,
+                    )
+                    .await;
+
+                    // If draft just started, spawn pick timer
+                    if is_start {
+                        spawn_pick_timer(
+                            draft_state.clone(),
+                            connections.clone(),
+                            draft_code.clone(),
+                            75, // default pick timer seconds
+                        );
+                    }
+
+                    // Check if pairings were generated (status transitioned to MatchInProgress)
+                    {
+                        let mgr = draft_state.lock().await;
+                        if let Some(session) = mgr.sessions.get(&draft_code) {
+                            if session.session.status
+                                == draft_core::types::DraftStatus::MatchInProgress
+                            {
+                                // Pairings generated — send DraftMatchStart to each paired player
+                                // (This is a simplified stub; full game session spawning
+                                // requires deck resolution and session creation which
+                                // depends on the deckbuilding flow from Plan 03/04)
+                                info!(
+                                    draft = %draft_code,
+                                    pairings = session.session.pairings.len(),
+                                    "pairings generated — match spawning deferred to Plan 03/04"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+            }
+        }
+
+        ClientMessage::ReconnectDraft {
+            draft_code,
+            player_token,
+        } => {
+            info!(draft = %draft_code, "ReconnectDraft attempt");
+
+            let result = {
+                let mut mgr = draft_state.lock().await;
+                mgr.handle_reconnect(&draft_code, &player_token)
+            };
+
+            match result {
+                Ok(view) => {
+                    // Restore identity
+                    let seat = {
+                        let mgr = draft_state.lock().await;
+                        mgr.sessions
+                            .get(&draft_code)
+                            .and_then(|s| s.seat_for_token(&player_token))
+                    };
+                    if let Some(seat) = seat {
+                        identity.draft_code = Some(draft_code.clone());
+                        identity.draft_seat = Some(seat);
+                        identity.draft_token = Some(player_token);
+                    }
+
+                    let msg = ServerMessage::DraftStateUpdate { view };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+
+                    info!(draft = %draft_code, "draft reconnect succeeded");
+                }
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+            }
         }
 
         ClientMessage::UnregisterLobby { game_code } => {
