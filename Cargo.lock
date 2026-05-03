@@ -2328,6 +2328,7 @@ dependencies = [
 name = "server-core"
 version = "0.1.21"
 dependencies = [
+ "draft-core",
  "engine",
  "phase-ai",
  "proptest",
