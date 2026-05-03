@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -240,6 +240,9 @@ pub enum ClientMessage {
         draft_code: String,
         player_token: String,
     },
+    SpectateDraft {
+        draft_code: String,
+    },
 }
 
 fn default_player_count() -> u8 {
@@ -430,6 +433,9 @@ pub enum ServerMessage {
     },
     DraftOver {
         standings: Vec<draft_core::view::StandingEntry>,
+    },
+    DraftSpectatorView {
+        view: draft_core::view::SpectatorDraftView,
     },
 }
 
@@ -1583,5 +1589,60 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn client_message_spectate_draft_roundtrips() {
+        let msg = ClientMessage::SpectateDraft {
+            draft_code: "ABCD12".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::SpectateDraft { draft_code } => {
+                assert_eq!(draft_code, "ABCD12");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_draft_spectator_view_roundtrips() {
+        use draft_core::types::*;
+        use draft_core::view::SpectatorDraftView;
+
+        let view = SpectatorDraftView {
+            status: DraftStatus::Drafting,
+            kind: DraftKind::Premier,
+            current_pack_number: 1,
+            pick_number: 5,
+            pass_direction: PassDirection::Right,
+            seats: Vec::new(),
+            cards_per_pack: 14,
+            pack_count: 3,
+            standings: Vec::new(),
+            current_round: 0,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            pairings: Vec::new(),
+            pools: None,
+            current_packs: None,
+        };
+        let msg = ServerMessage::DraftSpectatorView { view };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::DraftSpectatorView { view: v } => {
+                assert_eq!(v.status, DraftStatus::Drafting);
+                assert_eq!(v.pick_number, 5);
+                assert!(v.pools.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn protocol_version_is_6() {
+        assert_eq!(PROTOCOL_VERSION, 6);
     }
 }

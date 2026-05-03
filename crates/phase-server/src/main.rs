@@ -278,7 +278,8 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         ClientMessage::CreateDraftWithSettings { .. }
         | ClientMessage::JoinDraftWithPassword { .. }
         | ClientMessage::DraftAction { .. }
-        | ClientMessage::ReconnectDraft { .. } => match mode {
+        | ClientMessage::ReconnectDraft { .. }
+        | ClientMessage::SpectateDraft { .. } => match mode {
             ServerMode::Full => None,
             ServerMode::LobbyOnly => Some(LOBBY_ONLY_REJECTION),
         },
@@ -3354,6 +3355,18 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
+            }
+        }
+
+        ClientMessage::SpectateDraft { draft_code } => {
+            // Spectator connection wiring is implemented in Plan 04.
+            // For now, acknowledge the message type exists in the protocol.
+            info!(draft = %draft_code, "SpectateDraft — spectator wiring pending Plan 04");
+            let msg = ServerMessage::Error {
+                message: "Spectator mode not yet available".to_string(),
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
             }
         }
 
