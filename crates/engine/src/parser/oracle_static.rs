@@ -28,8 +28,6 @@ use super::oracle_util::{
     parse_mana_symbols, parse_number, parse_subtype, strip_after, strip_reminder_text, TextPair,
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
-use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::push_diagnostic;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind,
     Comparator, ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr,
@@ -1554,11 +1552,6 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if nom_primitives::scan_contains(tp.lower, "can't cast spells from") {
         let zones = parse_zone_names_from_tp(&tp);
         let affected = if zones.is_empty() {
-            push_diagnostic(OracleDiagnostic::TargetFallback {
-                context: "no zones parsed for casting prohibition".into(),
-                text: String::new(),
-                line_index: 0,
-            });
             TargetFilter::Any
         } else {
             TargetFilter::Typed(TypedFilter {
@@ -7246,19 +7239,12 @@ fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefin
     };
 
     let (filter, remainder) = parse_type_phrase(&cleaned);
-    if !remainder.trim().is_empty() {
-        if !zone_qualified {
-            // Unqualified branch is strict: an unconsumed remainder signals a
-            // complex filter we don't yet model (e.g. Fires of Invention's
-            // dynamic mana-value bound). Decline rather than emit a partial
-            // `Any` filter that would be wrong in a different way.
-            return None;
-        }
-        push_diagnostic(OracleDiagnostic::IgnoredRemainder {
-            text: remainder.trim().into(),
-            parser: "cast-free-permission".into(),
-            line_index: 0,
-        });
+    if !remainder.trim().is_empty() && !zone_qualified {
+        // Unqualified branch is strict: an unconsumed remainder signals a
+        // complex filter we don't yet model (e.g. Fires of Invention's
+        // dynamic mana-value bound). Decline rather than emit a partial
+        // `Any` filter that would be wrong in a different way.
+        return None;
     }
 
     Some(

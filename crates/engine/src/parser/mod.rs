@@ -23,7 +23,6 @@ pub(crate) mod oracle_target_scope;
 pub(crate) mod oracle_trigger;
 pub mod oracle_util;
 pub(crate) mod oracle_vote;
-pub(crate) mod oracle_warnings;
 pub(crate) mod swallow_check;
 
 pub use oracle::parse_oracle_text;

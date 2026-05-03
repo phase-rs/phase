@@ -15,6 +15,7 @@ use super::oracle_classifier::{
 };
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::context::ParseContext;
 use super::oracle_keyword::extract_keyword_line;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
@@ -148,8 +149,12 @@ pub(crate) fn parse_class_oracle_text(
                 // trigger slot. Without this, level-gated triggers using
                 // `RetainPrintedTriggerFromSource` would point at the wrong
                 // (or non-existent) source trigger index.
-                let mut triggers =
-                    parse_trigger_lines_at_index(line, card_name, Some(result.triggers.len()));
+                let mut triggers = parse_trigger_lines_at_index(
+                    line,
+                    card_name,
+                    Some(result.triggers.len()),
+                    &mut ParseContext::default(),
+                );
                 // CR 716.2a: Gate continuous triggers at levels > 1.
                 if section.level > 1 {
                     for trigger in &mut triggers {
@@ -208,6 +213,7 @@ pub(crate) fn parse_class_oracle_text(
                         &effect_text,
                         card_name,
                         Some(result.triggers.len()),
+                        &mut ParseContext::default(),
                     );
                     if section.level > 1 {
                         for trigger in &mut triggers {

@@ -16,6 +16,7 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
@@ -27,7 +28,6 @@ use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
     SELF_REF_TYPE_PHRASES,
 };
-use super::oracle_warnings::push_diagnostic;
 
 /// Run a nom combinator on lowercased text, returning the result and
 /// remainder from the original (mixed-case) text.
@@ -117,7 +117,17 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
 ///
 /// Uses first-character dispatch to group `starts_with` checks, reducing average
 /// comparisons from ~12 to ~3-4 per call.
+///
+/// Prefer `parse_target_with_ctx` when a `ParseContext` is available — diagnostics
+/// from the fallback path (TargetFallback) are accumulated there. This wrapper
+/// creates a temporary context whose diagnostics are discarded.
 pub fn parse_target(text: &str) -> (TargetFilter, &str) {
+    parse_target_with_ctx(text, &mut ParseContext::default())
+}
+
+/// Context-aware variant of `parse_target`. TargetFallback diagnostics are
+/// accumulated on `ctx.diagnostics` instead of being silently lost.
+pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
     let text = text.trim_start();
     let lower = text.to_lowercase();
 
@@ -801,7 +811,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
             rest,
         )
     } else {
-        push_diagnostic(OracleDiagnostic::TargetFallback {
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "parse_target could not classify".into(),
             text: text.trim().into(),
             line_index: 0,
@@ -3598,8 +3608,8 @@ fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-    use crate::parser::oracle_warnings::{clear_diagnostics, take_diagnostics};
     use crate::types::counter::CounterType;
 
     #[test]
@@ -3626,11 +3636,11 @@ mod tests {
 
     #[test]
     fn parse_target_warns_on_any_fallback() {
-        clear_diagnostics();
-        let (filter, rest) = parse_target("foobar");
+        let mut ctx = ParseContext::default();
+        let (filter, rest) = parse_target_with_ctx("foobar", &mut ctx);
         assert_eq!(filter, TargetFilter::Any);
         assert_eq!(rest, "foobar");
-        assert!(take_diagnostics().iter().any(
+        assert!(ctx.diagnostics.iter().any(
             |d| matches!(d, OracleDiagnostic::TargetFallback { context, text, .. }
                 if context == "parse_target could not classify" && text == "foobar")
         ));

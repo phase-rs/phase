@@ -32,13 +32,11 @@ pub(crate) struct ParseContext {
     pub in_replacement: bool,
     /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
     /// Replaces thread-local oracle_warnings accumulator.
-    #[allow(dead_code)] // Wired in Plan 02 when call sites migrate from thread-local.
     pub diagnostics: Vec<OracleDiagnostic>,
 }
 
 impl ParseContext {
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
-    #[allow(dead_code)] // Wired in Plan 02 when call sites migrate from thread-local.
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
         self.diagnostics.push(d);
     }

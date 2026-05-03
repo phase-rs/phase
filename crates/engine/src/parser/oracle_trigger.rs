@@ -23,7 +23,6 @@ use super::oracle_util::{
     strip_reminder_text, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::{push_diagnostic, take_diagnostics};
 use crate::types::ability::{
     AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef, DamageKindFilter,
     FilterProp, PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
@@ -225,15 +224,16 @@ fn trigger_should_rewrite_cost_x(def: &TriggerDefinition) -> bool {
 /// `result.triggers.len()` so each compound-split trigger receives a unique
 /// index in the source object's `base_trigger_definitions` list (CR 707.9a).
 pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition> {
-    parse_trigger_lines_at_index(text, card_name, None)
+    parse_trigger_lines_at_index(text, card_name, None, &mut ParseContext::default())
 }
 
 pub(crate) fn parse_trigger_lines_at_index(
     text: &str,
     card_name: &str,
     base_trigger_index: Option<usize>,
+    ctx: &mut ParseContext,
 ) -> Vec<TriggerDefinition> {
-    parse_trigger_lines_at_index_ir(text, card_name, base_trigger_index)
+    parse_trigger_lines_at_index_ir(text, card_name, base_trigger_index, ctx)
         .iter()
         .map(lower_trigger_ir)
         .collect()
@@ -245,6 +245,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
     text: &str,
     card_name: &str,
     base_trigger_index: Option<usize>,
+    ctx: &mut ParseContext,
 ) -> Vec<TriggerIr> {
     let stripped = strip_reminder_text(text);
     let normalized = normalize_self_refs(&stripped, card_name);
@@ -258,42 +259,40 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
 
     // Pattern 1: "when/whenever X and when Y" or "when X and whenever Y"
     if let Some(halves) = split_and_when_compound(&cond_lower, &condition) {
-        return halves
-            .into_iter()
-            .enumerate()
-            .map(|(i, cond)| {
-                let trigger_text = if effect.is_empty() {
-                    cond
-                } else {
-                    format!("{cond}, {effect}")
-                };
-                parse_trigger_line_with_index_ir(
-                    &trigger_text,
-                    card_name,
-                    base_trigger_index.map(|b| b + i),
-                )
-            })
-            .collect();
+        let mut results = Vec::with_capacity(halves.len());
+        for (i, cond) in halves.into_iter().enumerate() {
+            let trigger_text = if effect.is_empty() {
+                cond
+            } else {
+                format!("{cond}, {effect}")
+            };
+            results.push(parse_trigger_line_with_index_ir(
+                &trigger_text,
+                card_name,
+                base_trigger_index.map(|b| b + i),
+                ctx,
+            ));
+        }
+        return results;
     }
 
     // Pattern 2: "whenever ~ [event1] or [event2]" — compound events sharing a subject.
     if let Some(halves) = split_or_event_compound(&cond_lower, &condition) {
-        return halves
-            .into_iter()
-            .enumerate()
-            .map(|(i, cond)| {
-                let trigger_text = if effect.is_empty() {
-                    cond
-                } else {
-                    format!("{cond}, {effect}")
-                };
-                parse_trigger_line_with_index_ir(
-                    &trigger_text,
-                    card_name,
-                    base_trigger_index.map(|b| b + i),
-                )
-            })
-            .collect();
+        let mut results = Vec::with_capacity(halves.len());
+        for (i, cond) in halves.into_iter().enumerate() {
+            let trigger_text = if effect.is_empty() {
+                cond
+            } else {
+                format!("{cond}, {effect}")
+            };
+            results.push(parse_trigger_line_with_index_ir(
+                &trigger_text,
+                card_name,
+                base_trigger_index.map(|b| b + i),
+                ctx,
+            ));
+        }
+        return results;
     }
 
     // No compound — single trigger.
@@ -301,6 +300,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
         text,
         card_name,
         base_trigger_index,
+        ctx,
     )]
 }
 
@@ -448,7 +448,7 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
 /// pass `None`, in which case any "has this ability" clause inside the trigger
 /// body declines gracefully.
 pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
-    parse_trigger_line_with_index(text, card_name, None)
+    parse_trigger_line_with_index(text, card_name, None, &mut ParseContext::default())
 }
 
 /// IR production: extract all trigger fields into a `TriggerIr` without
@@ -461,6 +461,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     text: &str,
     card_name: &str,
     current_trigger_index: Option<usize>,
+    ctx: &mut ParseContext,
 ) -> TriggerIr {
     let text = strip_reminder_text(text);
     // Replace self-references: "this creature", "this enchantment", card name → ~
@@ -504,7 +505,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final);
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
-    let trigger_subject = extract_trigger_subject_for_context(condition_text);
+    let trigger_subject = extract_trigger_subject_for_context(condition_text, ctx);
     let mut effect_ctx = ParseContext {
         subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
@@ -548,9 +549,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     } else {
         None
     };
+    // Transfer diagnostics from the per-trigger effect context to the outer ctx.
+    ctx.diagnostics.append(&mut effect_ctx.diagnostics);
 
     // Parse the condition to get TriggerMode + partial TriggerDefinition
-    let (condition, partial_def) = parse_trigger_condition(condition_text);
+    let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
 
     // Constraint from full text (parsed during IR production so lowering has it)
     let constraint = parse_trigger_constraint(&lower);
@@ -672,8 +675,9 @@ pub(crate) fn parse_trigger_line_with_index(
     text: &str,
     card_name: &str,
     current_trigger_index: Option<usize>,
+    ctx: &mut ParseContext,
 ) -> TriggerDefinition {
-    let ir = parse_trigger_line_with_index_ir(text, card_name, current_trigger_index);
+    let ir = parse_trigger_line_with_index_ir(text, card_name, current_trigger_index, ctx);
     lower_trigger_ir(&ir)
 }
 
@@ -1212,14 +1216,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             }),
             // Negate an IsPresent → ObjectCount == 0
             StaticCondition::IsPresent { filter } => {
-                let f = filter.clone().unwrap_or_else(|| {
-                    push_diagnostic(OracleDiagnostic::TargetFallback {
-                        context: "NegatedIsPresent has no filter".into(),
-                        text: String::new(),
-                        line_index: 0,
-                    });
-                    TargetFilter::Any
-                });
+                let f = filter.clone().unwrap_or(TargetFilter::Any);
                 Some(TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount { filter: f },
@@ -2345,7 +2342,10 @@ fn make_base() -> TriggerDefinition {
         .trigger_zones(vec![Zone::Battlefield])
 }
 
-pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerDefinition) {
+pub(crate) fn parse_trigger_condition(
+    condition: &str,
+    ctx: &mut ParseContext,
+) -> (TriggerMode, TriggerDefinition) {
     let lower = condition.to_lowercase();
 
     if let Some(result) = try_parse_named_trigger_mode(&lower) {
@@ -2382,27 +2382,20 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     // "~ and/or one or more other creatures" place "one or more" after the first branch.
     let is_batched = scan_contains(after_keyword, "one or more ");
 
-    // Drain diagnostics before subject parsing — if the trigger ends up as Unknown,
+    // Snapshot diagnostics before subject parsing — if the trigger ends up as Unknown,
     // the subject diagnostic is redundant (the coverage system already tracks Unknown triggers).
-    // Only re-emit diagnostics when the event verb parses successfully (meaning the trigger
+    // Only keep subject diagnostics when the event verb parses successfully (meaning the trigger
     // works but has a degraded subject filter).
-    let pre_diagnostics = take_diagnostics();
-    let (subject, rest) = parse_trigger_subject(after_keyword);
-    let subject_diagnostics = take_diagnostics();
-    // Restore pre-existing diagnostics
-    for d in pre_diagnostics {
-        push_diagnostic(d);
-    }
+    let pre_snapshot = ctx.diagnostics.len();
+    let (subject, rest) = parse_trigger_subject(after_keyword, ctx);
+    let subject_diagnostics: Vec<OracleDiagnostic> =
+        ctx.diagnostics.drain(pre_snapshot..).collect();
+    // ctx.diagnostics now contains only pre-existing diagnostics (restored to snapshot)
 
     // Parse event verb from the remaining text.
-    // Note: try_parse_event may emit its own diagnostics into the thread-local accumulator
-    // during this call; subject_diagnostics are re-emitted after, so the final ordering is:
-    // pre_diagnostics → try_parse_event diagnostics → subject_diagnostics.
     if let Some((mode, mut def)) = try_parse_event(&subject, rest, &lower) {
         // Re-emit subject diagnostics — the trigger parsed but the subject degraded to Any.
-        for d in subject_diagnostics {
-            push_diagnostic(d);
-        }
+        ctx.diagnostics.extend(subject_diagnostics);
         if is_batched {
             def.batched = true;
         }
@@ -2452,7 +2445,10 @@ fn execute_references_target_player(effect: &crate::types::ability::Effect) -> b
 /// Warnings from `parse_trigger_subject` are discarded — this function is a best-effort
 /// subject extraction for pronoun resolution, not a diagnostic site. Warnings for
 /// degraded subjects are emitted by the main trigger condition path instead.
-fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
+fn extract_trigger_subject_for_context(
+    condition_text: &str,
+    ctx: &mut ParseContext,
+) -> TargetFilter {
     let lower = condition_text.to_lowercase();
     let after_keyword = alt((
         value((), tag::<_, _, VerboseError<&str>>("whenever ")),
@@ -2477,15 +2473,12 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
         return TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
     }
 
-    // Drain pre-existing diagnostics, call parse_trigger_subject, discard any
-    // diagnostics it emits, then restore the originals. This avoids maintaining
-    // a parallel list of "subjectless" trigger patterns.
-    let pre = take_diagnostics();
-    let (subject, _) = parse_trigger_subject(after_keyword);
-    let _discarded = take_diagnostics();
-    for d in pre {
-        push_diagnostic(d);
-    }
+    // Snapshot diagnostics, call parse_trigger_subject, discard any diagnostics
+    // it emits (truncate back to snapshot). This avoids maintaining a parallel
+    // list of "subjectless" trigger patterns.
+    let pre_snapshot = ctx.diagnostics.len();
+    let (subject, _) = parse_trigger_subject(after_keyword, ctx);
+    ctx.diagnostics.truncate(pre_snapshot);
     subject
 }
 
@@ -2500,8 +2493,8 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
 ///   "~ or another creature or artifact you control enters"
 ///   → Or { SelfRef, Typed{Creature, You, [Another]}, Typed{Artifact, You, [Another]} }
 ///   with remaining text "enters"
-fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
-    let (first, rest) = parse_single_subject(text);
+fn parse_trigger_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
+    let (first, rest) = parse_single_subject(text, ctx);
 
     // Check for "and/or " or "or " combinator to build compound subjects.
     // CR 603.2c: "~ and/or one or more other creatures" means the trigger fires
@@ -2513,7 +2506,7 @@ fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
     ))
     .parse(rest_trimmed)
     {
-        let (second, final_rest) = parse_trigger_subject(after_sep);
+        let (second, final_rest) = parse_trigger_subject(after_sep, ctx);
         return (merge_or_filters(first, second), final_rest);
     }
 
@@ -2521,7 +2514,7 @@ fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
 }
 
 /// Parse a single (non-compound) trigger subject.
-fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
+fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
     // Self-reference: "~"
     if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>("~ ")).parse(text) {
         return (TargetFilter::SelfRef, rest);
@@ -2599,13 +2592,13 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         if let Ok((_, (_, subject_text))) =
             nom_primitives::split_once_on(after_quantifier, " are put on ")
         {
-            let (filter, rest) = parse_single_subject(subject_text);
+            let (filter, rest) = parse_single_subject(subject_text, ctx);
             return (filter, rest);
         }
         if let Ok((_, (_, subject_text))) =
             nom_primitives::split_once_on(after_quantifier, " are placed on ")
         {
-            let (filter, rest) = parse_single_subject(subject_text);
+            let (filter, rest) = parse_single_subject(subject_text, ctx);
             return (filter, rest);
         }
 
@@ -2621,7 +2614,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         value((), tag::<_, _, VerboseError<&str>>("you put one or more ")).parse(text)
     {
         if let Ok((_, (_, subject_text))) = nom_primitives::split_once_on(after_put, " on ") {
-            let (filter, rest) = parse_single_subject(subject_text);
+            let (filter, rest) = parse_single_subject(subject_text, ctx);
             return (filter, rest);
         }
     }
@@ -2667,7 +2660,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         return (filter, rest);
     }
 
-    push_diagnostic(OracleDiagnostic::TargetFallback {
+    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
         context: "trigger subject parse fell back to Any".into(),
         text: text.trim().into(),
         line_index: 0,
@@ -4533,7 +4526,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         let Some(subject_text) = rest.strip_suffix(" for mana") else {
             continue;
         };
-        let (filter, remainder) = parse_trigger_subject(subject_text);
+        let (filter, remainder) = parse_trigger_subject(subject_text, &mut ParseContext::default());
         if !remainder.trim().is_empty() {
             continue;
         }
@@ -4565,7 +4558,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
     if let Ok((rem, (actor_controller, subject_text))) = parse_taps_for_mana_line(lower) {
         if rem.trim().is_empty() {
-            let (mut filter, sub_rem) = parse_trigger_subject(subject_text);
+            let (mut filter, sub_rem) =
+                parse_trigger_subject(subject_text, &mut ParseContext::default());
             if sub_rem.trim().is_empty() {
                 if actor_controller.is_some() {
                     // Constrain subject to opponent-controlled permanents.
@@ -5260,7 +5254,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     {
         def.valid_card = Some(TargetFilter::SelfRef);
     } else {
-        let (filter, _) = parse_single_subject(subject_text);
+        let (filter, _) = parse_single_subject(subject_text, &mut ParseContext::default());
         def.valid_card = Some(filter);
     }
 
@@ -5300,7 +5294,7 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     if subject_text == "~" || SELF_REF_PARSE_ONLY_PHRASES.contains(&subject_text) {
         def.valid_card = Some(TargetFilter::SelfRef);
     } else {
-        let (filter, _) = parse_single_subject(subject_text);
+        let (filter, _) = parse_single_subject(subject_text, &mut ParseContext::default());
         def.valid_card = Some(filter);
     }
 
@@ -5825,7 +5819,7 @@ fn try_parse_sacrifice_trigger(
     }
     let (after_verb, actor) = parse_sacrifice_actor.parse(event).ok()?;
 
-    let (filter, remainder) = parse_trigger_subject(after_verb);
+    let (filter, remainder) = parse_trigger_subject(after_verb, &mut ParseContext::default());
 
     // CR 603.2 + CR 603.7: Optional trailing turn constraint — "during your
     // turn", "during an opponent's turn", etc. Szarel, Genesis Shepherd and
@@ -6037,8 +6031,8 @@ pub fn try_parse_enters_prepared_rider(line: &str) -> Option<TriggerDefinition> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-    use crate::parser::oracle_warnings::{clear_diagnostics, take_diagnostics};
     use crate::types::ability::{
         AbilityCondition, Comparator, ControllerRef, DamageModification, Duration, Effect,
         FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TypeFilter,
@@ -6364,11 +6358,11 @@ mod tests {
 
     #[test]
     fn trigger_subject_warns_on_any_fallback() {
-        clear_diagnostics();
-        let (filter, rest) = parse_single_subject("xyzzy");
+        let mut ctx = ParseContext::default();
+        let (filter, rest) = parse_single_subject("xyzzy", &mut ctx);
         assert_eq!(filter, TargetFilter::Any);
         assert_eq!(rest, "xyzzy");
-        assert!(take_diagnostics().iter().any(
+        assert!(ctx.diagnostics.iter().any(
             |d| matches!(d, OracleDiagnostic::TargetFallback { context, text, .. }
                 if context == "trigger subject parse fell back to Any" && text == "xyzzy")
         ));
@@ -11815,7 +11809,8 @@ mod tests {
     fn trigger_subject_extracts_opponent_as_player() {
         // CR 608.2k: "an opponent" should be recognized as a player-type subject,
         // not fall through to parse_type_phrase returning Any.
-        let (filter, rest) = parse_single_subject("an opponent draws a card");
+        let (filter, rest) =
+            parse_single_subject("an opponent draws a card", &mut ParseContext::default());
         assert!(
             matches!(
                 &filter,
@@ -11832,7 +11827,8 @@ mod tests {
 
     #[test]
     fn trigger_subject_extracts_player() {
-        let (filter, rest) = parse_single_subject("a player casts a spell");
+        let (filter, rest) =
+            parse_single_subject("a player casts a spell", &mut ParseContext::default());
         assert_eq!(filter, TargetFilter::Player);
         assert!(
             rest.starts_with("casts"),
@@ -12486,6 +12482,7 @@ mod tests {
             "At the beginning of combat on your turn, ~ becomes a copy of up to one other target creature you control, except her name is ~ and she has this ability. Then put a +1/+1 counter on her.",
             "Irma, Part-Time Mutant",
             Some(0),
+            &mut ParseContext::default(),
         );
         // Phase + constraint: BoC on your turn.
         assert_eq!(def.mode, TriggerMode::Phase);
@@ -12568,6 +12565,7 @@ mod tests {
             "At the beginning of your upkeep, ~ becomes a copy of target creature you control, except his name is ~ and he has this ability.",
             "Test Mutant",
             Some(0),
+            &mut ParseContext::default(),
         );
         let execute = def.execute.as_deref().unwrap();
         match execute.effect.as_ref() {
@@ -12603,6 +12601,7 @@ mod tests {
             "At the beginning of your upkeep, ~ becomes a copy of another target creature, except it has this ability.",
             "Test Cloner",
             Some(0),
+            &mut ParseContext::default(),
         );
         let execute = def.execute.as_deref().unwrap();
         match execute.effect.as_ref() {
@@ -12659,7 +12658,7 @@ mod snapshot_tests {
     use super::*;
 
     fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
-        parse_trigger_line_with_index(text, card_name, None)
+        parse_trigger_line_with_index(text, card_name, None, &mut ParseContext::default())
     }
 
     #[test]
@@ -12686,6 +12685,7 @@ mod snapshot_tests {
             "When Test Card enters the battlefield and whenever a creature dies, draw a card.",
             "Test Card",
             None,
+            &mut ParseContext::default(),
         );
         assert_eq!(defs.len(), 2, "compound trigger should split into 2");
         insta::assert_json_snapshot!(defs[0]);
@@ -12697,6 +12697,7 @@ mod snapshot_tests {
             "When Test Card enters the battlefield and whenever a creature dies, draw a card.",
             "Test Card",
             None,
+            &mut ParseContext::default(),
         );
         assert_eq!(defs.len(), 2, "compound trigger should split into 2");
         insta::assert_json_snapshot!(defs[1]);

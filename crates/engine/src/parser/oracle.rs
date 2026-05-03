@@ -19,7 +19,6 @@ use crate::types::zones::Zone;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::primitives::scan_contains;
-use super::oracle_warnings::{clear_diagnostics, push_diagnostic, take_diagnostics};
 
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
@@ -35,9 +34,7 @@ use super::oracle_classifier::{
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
-use super::oracle_effect::{
-    lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
-};
+use super::oracle_effect::{lower_effect_chain_ir, parse_effect_chain_with_context};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{OracleDocIr, OracleItemIr};
@@ -448,6 +445,7 @@ fn is_spell_resolution_instruction_line(
     card_name: &str,
     mtgjson_keyword_names: &[String],
     parsed_so_far: &ParsedAbilities,
+    ctx: &mut ParseContext,
 ) -> bool {
     let line = &prepared.line;
     let lower = line.to_lowercase();
@@ -481,7 +479,10 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    if is_commander_permission_sentence(line) || try_parse_loyalty_line(line).is_some() {
+    let loyalty_snap = ctx.diagnostics.len();
+    let is_loyalty = try_parse_loyalty_line(line, ctx).is_some();
+    ctx.diagnostics.truncate(loyalty_snap);
+    if is_commander_permission_sentence(line) || is_loyalty {
         return false;
     }
 
@@ -582,21 +583,9 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    let saved_diagnostics = take_diagnostics();
-    let parsed = parse_effect_chain_with_context(
-        &prepared.effect_text,
-        AbilityKind::Spell,
-        &mut ParseContext {
-            subject: None,
-            card_name: Some(card_name.to_string()),
-            actor: None,
-            ..Default::default()
-        },
-    );
-    let _candidate_diagnostics = take_diagnostics();
-    for d in saved_diagnostics {
-        push_diagnostic(d);
-    }
+    let snapshot = ctx.diagnostics.len();
+    let parsed = parse_effect_chain_with_context(&prepared.effect_text, AbilityKind::Spell, ctx);
+    ctx.diagnostics.truncate(snapshot);
     !has_unimplemented(&parsed)
 }
 
@@ -907,6 +896,11 @@ pub(crate) fn parse_oracle_ir(
         parse_warnings: Vec::new(),
     };
 
+    let mut ctx = ParseContext {
+        card_name: Some(card_name.to_string()),
+        ..Default::default()
+    };
+
     // CR 201.4b: A card's Oracle text uses its name to refer to itself.
     // Normalize self-references to `~` once, at the single parser entry point,
     // so every downstream block parser (saga, class, leveler, modal, trigger,
@@ -932,7 +926,7 @@ pub(crate) fn parse_oracle_ir(
     if subtypes.iter().any(|s| s == "Class") {
         let class_result =
             parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
-        return parsed_abilities_to_doc_ir(class_result, oracle_text, card_name);
+        return parsed_abilities_to_doc_ir(class_result, oracle_text, card_name, &mut ctx);
     }
 
     // CR 711: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
@@ -959,11 +953,18 @@ pub(crate) fn parse_oracle_ir(
             let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
             let cost = parse_oracle_cost(&normalized_cost_text);
 
-            let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+            ctx.subject = None;
+            ctx.actor = None;
+            let mut def =
+                parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
             if has_unimplemented(&def) {
                 let normalized_effect = normalize_self_refs_for_static(&effect_text, card_name);
                 if normalized_effect != effect_text {
-                    let alt = parse_effect_chain(&normalized_effect, AbilityKind::Activated);
+                    let alt = parse_effect_chain_with_context(
+                        &normalized_effect,
+                        AbilityKind::Activated,
+                        &mut ctx,
+                    );
                     if !has_unimplemented(&alt) {
                         def = alt;
                     }
@@ -994,8 +995,12 @@ pub(crate) fn parse_oracle_ir(
         // CR 707.9a: Thread the running trigger count as the base index so
         // any "and it has this ability" except clause inside a leveler trigger
         // body resolves to the correct printed-trigger slot.
-        let mut triggers =
-            parse_trigger_lines_at_index(ability_text, card_name, Some(result.triggers.len()));
+        let mut triggers = parse_trigger_lines_at_index(
+            ability_text,
+            card_name,
+            Some(result.triggers.len()),
+            &mut ctx,
+        );
         for trigger in &mut triggers {
             trigger.condition = Some(trigger_condition.clone());
         }
@@ -1233,7 +1238,7 @@ pub(crate) fn parse_oracle_ir(
             }
         }
         // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
-        if let Some(ability) = try_parse_loyalty_line(&line) {
+        if let Some(ability) = try_parse_loyalty_line(&line, &mut ctx) {
             result.abilities.push(ability);
             i += 1;
             continue;
@@ -1285,7 +1290,10 @@ pub(crate) fn parse_oracle_ir(
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
 
-                let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
                 def.cost = Some(cost);
                 def.description = Some(line.to_string());
                 // CR 719.3c: Solved abilities only activate while Case is solved.
@@ -1317,7 +1325,10 @@ pub(crate) fn parse_oracle_ir(
                 let effect_text = line[prefix_len + colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
-                let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
                 def.cost = Some(cost);
                 // CR 207.2c: Channel is an ability word; the underlying ability activates from hand.
                 def.activation_zone = Some(Zone::Hand);
@@ -1349,7 +1360,7 @@ pub(crate) fn parse_oracle_ir(
             // Retry with `~` normalization if the first pass left an
             // Unimplemented node or emitted a `target-fallback` warning
             // (Metalhead class: PutCounter silently fell back to `Any`).
-            let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name);
+            let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, &mut ctx);
             def.cost = Some(cost);
             def.description = Some(line.to_string());
             if constraints.sorcery_speed() {
@@ -1393,8 +1404,12 @@ pub(crate) fn parse_oracle_ir(
             // CR 707.9a: Pass the running trigger count as the base index so
             // any "and it has this ability" except clause in this trigger's
             // body resolves to the correct printed-trigger slot.
-            let mut triggers =
-                parse_trigger_lines_at_index(&line, card_name, Some(result.triggers.len()));
+            let mut triggers = parse_trigger_lines_at_index(
+                &line,
+                card_name,
+                Some(result.triggers.len()),
+                &mut ctx,
+            );
             i += 1;
             // CR 706: If the trigger's effect ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
@@ -1421,6 +1436,7 @@ pub(crate) fn parse_oracle_ir(
                     &effect_text,
                     card_name,
                     Some(result.triggers.len()),
+                    &mut ctx,
                 );
                 // B7: Attach ability-word condition as fallback when extract_if_condition
                 // doesn't recognize the intervening-if pattern.
@@ -1464,7 +1480,13 @@ pub(crate) fn parse_oracle_ir(
             if let Some(((), effect_rest)) = nom_on_lower(rest_trimmed, &rest_lower, |i| {
                 value((), tag("when you do, ")).parse(i)
             }) {
-                let effect_def = parse_effect_chain(effect_rest.trim(), AbilityKind::Spell);
+                ctx.subject = None;
+                ctx.actor = None;
+                let effect_def = parse_effect_chain_with_context(
+                    effect_rest.trim(),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                );
                 let trigger = TriggerDefinition::new(TriggerMode::Exerted)
                     .valid_card(TargetFilter::SelfRef)
                     .trigger_zones(vec![Zone::Battlefield])
@@ -1481,7 +1503,13 @@ pub(crate) fn parse_oracle_ir(
             && scan_contains(&lower, "attacks")
         {
             if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
-                let effect_def = parse_effect_chain(effect_text.trim(), AbilityKind::Spell);
+                ctx.subject = None;
+                ctx.actor = None;
+                let effect_def = parse_effect_chain_with_context(
+                    effect_text.trim(),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                );
                 let trigger = TriggerDefinition::new(TriggerMode::Exerted)
                     .valid_card(TargetFilter::SelfRef)
                     .trigger_zones(vec![Zone::Battlefield])
@@ -1498,7 +1526,13 @@ pub(crate) fn parse_oracle_ir(
             && scan_contains(&lower, "attacks")
         {
             if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
-                let effect_def = parse_effect_chain(effect_text.trim(), AbilityKind::Spell);
+                ctx.subject = None;
+                ctx.actor = None;
+                let effect_def = parse_effect_chain_with_context(
+                    effect_text.trim(),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                );
                 let trigger = TriggerDefinition::new(TriggerMode::Exerted)
                     .valid_card(TargetFilter::SelfRef)
                     .trigger_zones(vec![Zone::Battlefield])
@@ -1662,16 +1696,9 @@ pub(crate) fn parse_oracle_ir(
         // preserve any preceding clauses ("You gain 1 life for each ...")
         // before the replacement classifier sees the prevention marker.
         if is_spell && scan_contains(&lower, "prevent") && scan_contains(&lower, "damage") {
-            let def = parse_effect_chain_with_context(
-                &line,
-                AbilityKind::Spell,
-                &mut ParseContext {
-                    subject: None,
-                    card_name: Some(card_name.to_string()),
-                    actor: None,
-                    ..Default::default()
-                },
-            );
+            ctx.subject = None;
+            ctx.actor = None;
+            let def = parse_effect_chain_with_context(&line, AbilityKind::Spell, &mut ctx);
             if !has_unimplemented(&def) {
                 result.abilities.push(def);
                 i += 1;
@@ -1889,6 +1916,7 @@ pub(crate) fn parse_oracle_ir(
                         card_name,
                         mtgjson_keyword_names,
                         &result,
+                        &mut ctx,
                     )
                 {
                     break;
@@ -1913,16 +1941,9 @@ pub(crate) fn parse_oracle_ir(
             } else {
                 effect_line.as_str()
             };
-            let mut def = parse_effect_chain_with_context(
-                parse_line,
-                AbilityKind::Spell,
-                &mut ParseContext {
-                    subject: None,
-                    card_name: Some(card_name.to_string()),
-                    actor: None,
-                    ..Default::default()
-                },
-            );
+            ctx.subject = None;
+            ctx.actor = None;
+            let mut def = parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx);
             def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
             // When both exist (e.g., Revolt + MV ≤ 4), compose through
@@ -2085,6 +2106,7 @@ pub(crate) fn parse_oracle_ir(
                     &effect_text,
                     card_name,
                     Some(result.triggers.len()),
+                    &mut ctx,
                 );
                 i += 1;
                 // CR 706: Consume subsequent d20 table lines for triggered die rolls.
@@ -2117,16 +2139,9 @@ pub(crate) fn parse_oracle_ir(
                 }
             }
             // Try as effect
-            let def = parse_effect_chain_with_context(
-                &effect_text,
-                AbilityKind::Spell,
-                &mut ParseContext {
-                    subject: None,
-                    card_name: Some(card_name.to_string()),
-                    actor: None,
-                    ..Default::default()
-                },
-            );
+            ctx.subject = None;
+            ctx.actor = None;
+            let def = parse_effect_chain_with_context(&effect_text, AbilityKind::Spell, &mut ctx);
             if !has_unimplemented(&def) {
                 result.abilities.push(def);
                 i += 1;
@@ -2171,10 +2186,10 @@ pub(crate) fn parse_oracle_ir(
     let mut swallow_diags = Vec::new();
     super::swallow_check::check_swallowed_clauses(oracle_text, &result, &mut swallow_diags);
     for d in swallow_diags {
-        push_diagnostic(d);
+        ctx.push_diagnostic(d);
     }
 
-    parsed_abilities_to_doc_ir(result, oracle_text, card_name)
+    parsed_abilities_to_doc_ir(result, oracle_text, card_name, &mut ctx)
 }
 
 /// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
@@ -2186,6 +2201,7 @@ fn parsed_abilities_to_doc_ir(
     result: ParsedAbilities,
     oracle_text: &str,
     card_name: &str,
+    ctx: &mut ParseContext,
 ) -> OracleDocIr {
     let mut items: Vec<OracleItemIr> = Vec::new();
     for def in result.abilities {
@@ -2225,16 +2241,16 @@ fn parsed_abilities_to_doc_ir(
         items,
         source_text: oracle_text.to_string(),
         card_name: card_name.to_string(),
-        diagnostics: take_diagnostics(),
+        diagnostics: std::mem::take(&mut ctx.diagnostics),
     }
 }
 
 /// Parse Oracle text into structured ability definitions.
 ///
 /// This is the public API entry point — a thin wrapper around [`parse_oracle_ir`]
-/// (IR production) and [`lower_oracle_ir`] (IR lowering). The thread-local
-/// diagnostic system is managed here: `clear_diagnostics()` before parsing;
-/// diagnostics flow through `OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`.
+/// (IR production) and [`lower_oracle_ir`] (IR lowering). `parse_oracle_ir`
+/// creates a fresh `ParseContext` internally so diagnostics start empty;
+/// they flow through `OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`.
 #[tracing::instrument(
     level = "info",
     skip(oracle_text, mtgjson_keyword_names, types, subtypes)
@@ -2246,7 +2262,6 @@ pub fn parse_oracle_text(
     types: &[String],
     subtypes: &[String],
 ) -> ParsedAbilities {
-    clear_diagnostics();
     let ir = parse_oracle_ir(
         oracle_text,
         card_name,
@@ -2358,7 +2373,7 @@ fn split_trailing_self_cost_reduction(
 }
 
 /// Try to parse a planeswalker loyalty line: "+N:", "−N:", "0:", "[+N]:", "[−N]:", "[0]:"
-fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
+fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityDefinition> {
     let trimmed = line.trim();
 
     // Try bracket format first: [+2]: ..., [−1]: ..., [0]: ...
@@ -2367,7 +2382,10 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
             if let Some(effect_text) = rest.trim().strip_prefix(':') {
                 if let Some(amount) = parse_loyalty_number(inner) {
                     let effect_text = effect_text.trim();
-                    let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
+                    ctx.subject = None;
+                    ctx.actor = None;
+                    let mut def =
+                        parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
                     def.cost = Some(AbilityCost::Loyalty { amount });
                     def.description = Some(trimmed.to_string());
                     apply_loyalty_restrictions(&mut def);
@@ -2389,7 +2407,10 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
                 || prefix.trim() == "0"
             {
                 let effect_text = effect_text.trim();
-                let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
                 def.cost = Some(AbilityCost::Loyalty { amount });
                 def.description = Some(trimmed.to_string());
                 apply_loyalty_restrictions(&mut def);
@@ -2984,62 +3005,52 @@ pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
 pub(super) fn parse_activated_with_self_ref_fallback(
     effect_text: &str,
     card_name: &str,
+    ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    let pre_diagnostics = take_diagnostics();
+    // Pre-diagnostics stay in ctx naturally — only manage trial-parse diagnostics.
+    let pre_snapshot = ctx.diagnostics.len();
 
-    let def = parse_effect_chain(effect_text, AbilityKind::Activated);
-    let first_diagnostics = take_diagnostics();
-    let first_has_target_fallback = first_diagnostics
+    ctx.subject = None;
+    ctx.actor = None;
+    let def = parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
+    let first_has_target_fallback = ctx.diagnostics[pre_snapshot..]
         .iter()
         .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
     let first_clean = !has_unimplemented(&def) && !first_has_target_fallback;
 
     if first_clean {
-        for d in pre_diagnostics {
-            push_diagnostic(d);
-        }
-        for d in first_diagnostics {
-            push_diagnostic(d);
-        }
+        // First parse is clean — keep its diagnostics.
         return def;
     }
 
     let normalized = normalize_self_refs_for_static(effect_text, card_name);
     if normalized == effect_text {
-        for d in pre_diagnostics {
-            push_diagnostic(d);
-        }
-        for d in first_diagnostics {
-            push_diagnostic(d);
-        }
+        // No normalization change — keep first-pass diagnostics.
         return def;
     }
 
-    let alt = parse_effect_chain(&normalized, AbilityKind::Activated);
-    let alt_diagnostics = take_diagnostics();
-    let alt_has_target_fallback = alt_diagnostics
+    // Save first-pass diagnostics for potential restoration.
+    let first_diagnostics: Vec<OracleDiagnostic> = ctx.diagnostics[pre_snapshot..].to_vec();
+    ctx.diagnostics.truncate(pre_snapshot);
+
+    ctx.subject = None;
+    ctx.actor = None;
+    let alt = parse_effect_chain_with_context(&normalized, AbilityKind::Activated, ctx);
+    let alt_has_target_fallback = ctx.diagnostics[pre_snapshot..]
         .iter()
         .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
     let alt_clean = !has_unimplemented(&alt) && !alt_has_target_fallback;
 
-    for d in pre_diagnostics {
-        push_diagnostic(d);
-    }
     if alt_clean {
-        // Normalized pass is strictly better — keep only its diagnostics.
-        for d in alt_diagnostics {
-            push_diagnostic(d);
-        }
+        // Normalized pass is strictly better — keep only its diagnostics (already in ctx).
         alt
     } else {
         // Neither pass was clean; prefer the original result and preserve
-        // first-pass diagnostics so the coverage dashboard reflects reality.
-        for d in first_diagnostics {
-            push_diagnostic(d);
-        }
-        for d in alt_diagnostics {
-            push_diagnostic(d);
-        }
+        // both passes' diagnostics so the coverage dashboard reflects reality.
+        let alt_diagnostics: Vec<OracleDiagnostic> = ctx.diagnostics[pre_snapshot..].to_vec();
+        ctx.diagnostics.truncate(pre_snapshot);
+        ctx.diagnostics.extend(first_diagnostics);
+        ctx.diagnostics.extend(alt_diagnostics);
         def
     }
 }
@@ -3047,6 +3058,7 @@ pub(super) fn parse_activated_with_self_ref_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,

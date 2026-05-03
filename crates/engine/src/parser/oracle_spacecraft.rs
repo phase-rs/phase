@@ -28,6 +28,7 @@ use nom_language::error::VerboseError;
 use super::oracle::{find_activated_colon, has_unimplemented, strip_activated_constraints};
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::context::ParseContext;
 use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_special::normalize_self_refs_for_static;
@@ -126,6 +127,7 @@ pub(crate) fn parse_spacecraft_threshold_lines(
                 body,
                 card_name,
                 Some(base_trigger_index + triggers.len()),
+                &mut ParseContext::default(),
             );
             for trig in &mut parsed {
                 trig.condition = Some(trigger_cond.clone());

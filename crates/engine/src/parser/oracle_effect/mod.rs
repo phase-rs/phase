@@ -36,7 +36,6 @@ use super::oracle_util::{
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::push_diagnostic as push_diagnostic_thread_local;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
@@ -292,8 +291,10 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     let effect_text = after.original;
 
     // Parse the condition as a trigger using the trigger parser
-    let (_, mut trigger_def) =
-        crate::parser::oracle_trigger::parse_trigger_condition(condition_text);
+    let (_, mut trigger_def) = crate::parser::oracle_trigger::parse_trigger_condition(
+        condition_text,
+        &mut ParseContext::default(),
+    );
     trigger_def.execute = None; // Effect lives in DelayedTrigger.ability, not here
 
     let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
@@ -6649,6 +6650,7 @@ pub(crate) fn parse_effect_chain_ir(
     // player performs the action. Only propagates within a single sentence /
     // chain; the anchor is reset at each top-level call.
     let mut anchor_subject: Option<TargetFilter> = None;
+    let mut chunk_diagnostics: Vec<OracleDiagnostic> = Vec::new();
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
@@ -7729,20 +7731,13 @@ pub(crate) fn parse_effect_chain_ir(
             source_text: normalized_text.to_string(),
         });
 
-        // Temporary bridge: drain chunk-ctx diagnostics into the thread-local
-        // oracle_warnings accumulator. Each chunk iteration creates a fresh
-        // `chunk_ctx` that shadows the outer `ctx`, so diagnostics must be
-        // flushed per-chunk. Plan 03 will remove this when the thread-local
-        // is fully eliminated.
-        for d in chunk_ctx.diagnostics.drain(..) {
-            push_diagnostic_thread_local(d);
-        }
+        // Drain chunk-ctx diagnostics into the accumulator (the outer `ctx` is
+        // shadowed inside the loop, so we collect here and extend after the loop).
+        chunk_diagnostics.append(&mut chunk_ctx.diagnostics);
     }
 
-    // Also flush any diagnostics on the outer ctx (e.g., from pre-loop parsing).
-    for d in ctx.diagnostics.drain(..) {
-        push_diagnostic_thread_local(d);
-    }
+    // Merge per-chunk diagnostics and any pre-loop diagnostics into the outer ctx.
+    ctx.diagnostics.extend(chunk_diagnostics);
 
     EffectChainIr {
         clauses,
