@@ -134,6 +134,33 @@ impl TournamentHarness {
     pub fn status(&self) -> DraftStatus {
         self.manager.sessions[&self.draft_code].session.status
     }
+
+    /// Simulate a server crash by serializing all sessions, creating a fresh manager,
+    /// and restoring from the serialized data. Returns a new harness with restored state.
+    pub fn simulate_crash_and_restore(&self) -> Self {
+        let session = &self.manager.sessions[&self.draft_code];
+        let persisted = session.to_persisted();
+        let json = serde_json::to_string(&persisted).unwrap();
+
+        // Create fresh manager (simulates server restart)
+        let mut new_manager = DraftSessionManager::new();
+        let restored: crate::persist::PersistedDraftSession =
+            serde_json::from_str(&json).unwrap();
+        new_manager.restore_session(restored);
+
+        // Reconstruct source (not serializable — test fixture only)
+        let source = FixturePackSource {
+            set_code: self.source.set_code.clone(),
+            cards_per_pack: self.source.cards_per_pack,
+        };
+
+        Self {
+            manager: new_manager,
+            draft_code: self.draft_code.clone(),
+            tokens: self.tokens.clone(),
+            source,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +233,105 @@ mod tests {
         // Reconnect seat 2
         let view = h.reconnect_seat(2).unwrap();
         assert_eq!(view.status, DraftStatus::Drafting);
+    }
+
+    #[test]
+    fn crash_and_restore_during_drafting_preserves_state() {
+        let mut h = TournamentHarness::new_premier_draft();
+        h.start();
+        // Pick 10 rounds
+        for _ in 0..10 {
+            h.pick_first_for_all_seats();
+        }
+
+        // Crash and restore
+        let mut restored = h.simulate_crash_and_restore();
+        assert_eq!(restored.status(), DraftStatus::Drafting);
+
+        // Verify pools were preserved (each seat should have 10 cards)
+        for seat in 0..8 {
+            let view = restored.manager.sessions[&restored.draft_code].view_for_seat(seat);
+            assert_eq!(view.pool.len(), 10, "seat {seat} pool preserved after crash");
+        }
+
+        // Continue drafting after restore
+        for _ in 10..42 {
+            restored.pick_first_for_all_seats();
+        }
+        assert_eq!(restored.status(), DraftStatus::Deckbuilding);
+    }
+
+    #[test]
+    fn crash_and_restore_during_deckbuilding_preserves_pools() {
+        let mut h = TournamentHarness::new_premier_draft();
+        h.start();
+        h.run_all_picks();
+        assert_eq!(h.status(), DraftStatus::Deckbuilding);
+
+        let mut restored = h.simulate_crash_and_restore();
+        assert_eq!(restored.status(), DraftStatus::Deckbuilding);
+
+        // Can still submit decks after restore
+        restored.submit_all_decks();
+        assert!(matches!(
+            restored.status(),
+            DraftStatus::Pairing | DraftStatus::MatchInProgress | DraftStatus::RoundComplete
+        ));
+    }
+
+    #[test]
+    fn simultaneous_disconnect_of_multiple_seats_during_drafting() {
+        let mut h = TournamentHarness::new_premier_draft();
+        h.start();
+        // Pick a few rounds
+        for _ in 0..3 {
+            h.pick_first_for_all_seats();
+        }
+
+        // Disconnect seats 2, 5, 7 simultaneously
+        h.disconnect_seat(2);
+        h.disconnect_seat(5);
+        h.disconnect_seat(7);
+
+        // Verify disconnected state
+        let session = &h.manager.sessions[&h.draft_code];
+        assert!(!session.connected[2]);
+        assert!(!session.connected[5]);
+        assert!(!session.connected[7]);
+
+        // Reconnect all
+        assert!(h.reconnect_seat(2).is_ok());
+        assert!(h.reconnect_seat(5).is_ok());
+        assert!(h.reconnect_seat(7).is_ok());
+    }
+
+    #[test]
+    fn restore_rebuilds_token_to_draft_index() {
+        let mut h = TournamentHarness::new_premier_draft();
+        h.start();
+
+        let restored = h.simulate_crash_and_restore();
+
+        // All tokens should resolve to the draft code
+        for token in &restored.tokens {
+            assert_eq!(
+                restored.manager.draft_for_token(token),
+                Some(restored.draft_code.as_str()),
+                "token_to_draft index rebuilt for {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_connected_false_after_restore() {
+        let mut h = TournamentHarness::new_premier_draft();
+        h.start();
+
+        let restored = h.simulate_crash_and_restore();
+        let session = &restored.manager.sessions[&restored.draft_code];
+        assert!(
+            session.connected.iter().all(|&c| !c),
+            "all seats disconnected after restore"
+        );
     }
 }
