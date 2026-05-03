@@ -7270,7 +7270,17 @@ pub(crate) fn parse_effect_chain_ir(
             if let Some(ref condition) = condition {
                 def = def.condition(condition.clone());
             }
-            super::swallow_check::check_cascade_diff(&cascade_snap, std::slice::from_ref(&def));
+            {
+                let mut cascade_diags = Vec::new();
+                super::swallow_check::check_cascade_diff(
+                    &cascade_snap,
+                    std::slice::from_ref(&def),
+                    &mut cascade_diags,
+                );
+                for d in cascade_diags {
+                    push_typed_diagnostic(d);
+                }
+            }
             clauses.push(ClauseIr {
                 parsed: parsed_clause(delayed_effect),
                 boundary: chunk.boundary_after,
@@ -7308,7 +7318,17 @@ pub(crate) fn parse_effect_chain_ir(
             if let Some(ref condition) = condition {
                 def = def.condition(condition.clone());
             }
-            super::swallow_check::check_cascade_diff(&cascade_snap, std::slice::from_ref(&def));
+            {
+                let mut cascade_diags = Vec::new();
+                super::swallow_check::check_cascade_diff(
+                    &cascade_snap,
+                    std::slice::from_ref(&def),
+                    &mut cascade_diags,
+                );
+                for d in cascade_diags {
+                    push_typed_diagnostic(d);
+                }
+            }
             clauses.push(ClauseIr {
                 parsed: ParsedEffectClause {
                     effect: (*animate_def.effect).clone(),
@@ -7668,7 +7688,17 @@ pub(crate) fn parse_effect_chain_ir(
                     check_defs.push(*sub.clone());
                 }
             }
-            super::swallow_check::check_cascade_diff(&cascade_snap, &check_defs);
+            {
+                let mut cascade_diags = Vec::new();
+                super::swallow_check::check_cascade_diff(
+                    &cascade_snap,
+                    &check_defs,
+                    &mut cascade_diags,
+                );
+                for d in cascade_diags {
+                    push_typed_diagnostic(d);
+                }
+            }
         }
 
         // If this clause is absorbed by a followup continuation from the previous

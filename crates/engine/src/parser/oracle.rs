@@ -2175,7 +2175,11 @@ pub(crate) fn parse_oracle_ir(
     // resented clause surfaces as a parse_warning instead of disappearing
     // (Phase 1: observability only — see swallow_check.rs for detector
     // catalog and Phase 2 demotion plan).
-    super::swallow_check::check_swallowed_clauses(oracle_text, &result);
+    let mut swallow_diags = Vec::new();
+    super::swallow_check::check_swallowed_clauses(oracle_text, &result, &mut swallow_diags);
+    for d in swallow_diags {
+        push_typed_diagnostic(d);
+    }
 
     parsed_abilities_to_doc_ir(result, oracle_text, card_name)
 }

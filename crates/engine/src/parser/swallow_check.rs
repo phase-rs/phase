@@ -22,7 +22,7 @@
 //!      representation.
 
 use super::oracle::ParsedAbilities;
-use super::oracle_warnings::push_warning;
+use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, Effect, ModalSelectionConstraint,
     OpponentMayScope, PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode,
@@ -63,8 +63,12 @@ fn truncate(s: &str, max: usize) -> &str {
 }
 
 /// Run all swallow detectors against the parsed result. Each finding is
-/// pushed to the thread-local parse_warnings buffer.
-pub fn check_swallowed_clauses(oracle_text: &str, parsed: &ParsedAbilities) {
+/// pushed onto the caller-provided diagnostics vec as a typed `OracleDiagnostic`.
+pub fn check_swallowed_clauses(
+    oracle_text: &str,
+    parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     if oracle_text.is_empty() {
         return;
     }
@@ -87,19 +91,19 @@ pub fn check_swallowed_clauses(oracle_text: &str, parsed: &ParsedAbilities) {
     // failure we skip those detectors rather than panicking.
     let ast_json = serde_json::to_string(parsed).unwrap_or_default();
 
-    detect_replacement_instead(&cleaned, oracle_text, parsed);
-    detect_activate_only_during(&cleaned, oracle_text, parsed);
-    detect_activate_limit(&cleaned, oracle_text, parsed);
-    detect_duration_until_eot(&cleaned, oracle_text, parsed);
-    detect_optional_you_may(&cleaned, oracle_text, parsed);
-    detect_dynamic_qty(&cleaned, oracle_text, &ast_json);
-    detect_condition_if(&cleaned, oracle_text, &ast_json, parsed);
-    detect_condition_unless(&cleaned, oracle_text, &ast_json);
-    detect_condition_as_long_as(&cleaned, oracle_text, &ast_json, parsed);
-    detect_duration_this_turn(&cleaned, oracle_text, &ast_json);
-    detect_duration_next_turn(&cleaned, oracle_text, &ast_json);
-    detect_optional_may_have(&cleaned, oracle_text, &ast_json);
-    detect_apnap(&cleaned, oracle_text, &ast_json);
+    detect_replacement_instead(&cleaned, oracle_text, parsed, diagnostics);
+    detect_activate_only_during(&cleaned, oracle_text, parsed, diagnostics);
+    detect_activate_limit(&cleaned, oracle_text, parsed, diagnostics);
+    detect_duration_until_eot(&cleaned, oracle_text, parsed, diagnostics);
+    detect_optional_you_may(&cleaned, oracle_text, parsed, diagnostics);
+    detect_dynamic_qty(&cleaned, oracle_text, &ast_json, diagnostics);
+    detect_condition_if(&cleaned, oracle_text, &ast_json, parsed, diagnostics);
+    detect_condition_unless(&cleaned, oracle_text, &ast_json, diagnostics);
+    detect_condition_as_long_as(&cleaned, oracle_text, &ast_json, parsed, diagnostics);
+    detect_duration_this_turn(&cleaned, oracle_text, &ast_json, diagnostics);
+    detect_duration_next_turn(&cleaned, oracle_text, &ast_json, diagnostics);
+    detect_optional_may_have(&cleaned, oracle_text, &ast_json, diagnostics);
+    detect_apnap(&cleaned, oracle_text, &ast_json, diagnostics);
 }
 
 // ── Detector A: Replacement_Instead ─────────────────────────────────────
@@ -108,7 +112,12 @@ pub fn check_swallowed_clauses(oracle_text: &str, parsed: &ParsedAbilities) {
 /// reminder text must yield a `ReplacementDefinition` somewhere in the parsed
 /// abilities. If Oracle has " instead" but `replacements` is empty AND no
 /// existing ability captures replacement semantics, the clause was swallowed.
-fn detect_replacement_instead(cleaned: &str, original: &str, parsed: &ParsedAbilities) {
+fn detect_replacement_instead(
+    cleaned: &str,
+    original: &str,
+    parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains(" instead") {
         return;
@@ -141,17 +150,23 @@ fn detect_replacement_instead(cleaned: &str, original: &str, parsed: &ParsedAbil
     if any_text_field_contains(parsed, "instead") {
         return;
     }
-    push_warning(format!(
-        "Swallow:Replacement_Instead — \"instead\" in Oracle text not captured as a replacement: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Replacement_Instead".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector B: ActivateOnlyDuring ──────────────────────────────────────
 
 /// CR 605.1c: "Activate only during X" — restricted activation timing.
 /// Must be represented as an activation constraint on the parsed ability.
-fn detect_activate_only_during(cleaned: &str, original: &str, parsed: &ParsedAbilities) {
+fn detect_activate_only_during(
+    cleaned: &str,
+    original: &str,
+    parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     let has_marker = cleaned.contains("activate only during") // allow-noncombinator: swallow detector marker scan on classified text
         || cleaned.contains("activate this ability only during"); // allow-noncombinator: swallow detector marker scan on classified text
     if !has_marker {
@@ -160,10 +175,11 @@ fn detect_activate_only_during(cleaned: &str, original: &str, parsed: &ParsedAbi
     if any_ability_has_constraint(parsed) {
         return;
     }
-    push_warning(format!(
-        "Swallow:ActivateOnlyDuring — \"activate only during\" not captured as constraint: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "ActivateOnlyDuring".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector C: ActivateLimit ───────────────────────────────────────────
@@ -171,7 +187,12 @@ fn detect_activate_only_during(cleaned: &str, original: &str, parsed: &ParsedAbi
 /// CR 605: "Activate this ability only once/twice/no more than N times each
 /// turn" — usage-limited activation. Must be represented as an activation
 /// limit on the parsed ability.
-fn detect_activate_limit(cleaned: &str, original: &str, parsed: &ParsedAbilities) {
+fn detect_activate_limit(
+    cleaned: &str,
+    original: &str,
+    parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     let has_marker = cleaned.contains("activate this ability only once each") // allow-noncombinator: swallow detector marker scan on classified text
         || cleaned.contains("activate this ability only twice each") // allow-noncombinator: swallow detector marker scan on classified text
         || cleaned.contains("activate this ability no more than") // allow-noncombinator: swallow detector marker scan on classified text
@@ -183,17 +204,23 @@ fn detect_activate_limit(cleaned: &str, original: &str, parsed: &ParsedAbilities
     if any_ability_has_limit(parsed) {
         return;
     }
-    push_warning(format!(
-        "Swallow:ActivateLimit — activation limit phrase not captured: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "ActivateLimit".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector D: Duration_UntilEndOfTurn ─────────────────────────────────
 
 /// CR 611.2a: "until end of turn" — temporal scope. Must be represented as a
 /// duration on the parsed ability.
-fn detect_duration_until_eot(cleaned: &str, original: &str, parsed: &ParsedAbilities) {
+fn detect_duration_until_eot(
+    cleaned: &str,
+    original: &str,
+    parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("until end of turn") {
         return;
@@ -201,17 +228,23 @@ fn detect_duration_until_eot(cleaned: &str, original: &str, parsed: &ParsedAbili
     if any_ability_has_duration(parsed) {
         return;
     }
-    push_warning(format!(
-        "Swallow:Duration_UntilEndOfTurn — \"until end of turn\" not captured as duration: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Duration_UntilEndOfTurn".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector E: Optional_YouMay ─────────────────────────────────────────
 
 /// CR 117.3a: "you may [verb]" — optional effect. The triggered/activated
 /// ability that contains this phrase must have its `optional` flag set.
-fn detect_optional_you_may(cleaned: &str, original: &str, parsed: &ParsedAbilities) {
+fn detect_optional_you_may(
+    cleaned: &str,
+    original: &str,
+    parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     // Only the bare "you may [verb]" optional-effect form. We exclude
     // "if you may" / "you may have" / "you may cast" patterns where the "may"
     // belongs to a different grammatical construction.
@@ -227,10 +260,11 @@ fn detect_optional_you_may(cleaned: &str, original: &str, parsed: &ParsedAbiliti
     if parsed_has_conditional_modal_max(parsed) {
         return;
     }
-    push_warning(format!(
-        "Swallow:Optional_YouMay — \"you may\" optional effect not captured as optional: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Optional_YouMay".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── AST predicates ──────────────────────────────────────────────────────
@@ -865,7 +899,12 @@ fn json_has_any(ast_json: &str, markers: &[&str]) -> bool {
 ///
 /// CR 107.1a + CR 107.3 + CR 119.1: dynamic quantities must produce typed
 /// `QuantityExpr` carriers — never silently substituted with `Fixed`.
-fn detect_dynamic_qty(cleaned: &str, original: &str, ast_json: &str) {
+fn detect_dynamic_qty(
+    cleaned: &str,
+    original: &str,
+    ast_json: &str,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     // CR 605.1g: "Activate ... twice each turn" is a fixed-count activation
     // limit (handled by ActivateLimit detector), not a dynamic quantity.
     // "twice that many" / "twice X" remain real dynamic-quantity markers.
@@ -950,10 +989,11 @@ fn detect_dynamic_qty(cleaned: &str, original: &str, ast_json: &str) {
     if json_has_any(ast_json, dynamic_markers) {
         return;
     }
-    push_warning(format!(
-        "Swallow:DynamicQty — dynamic-quantity grammar present but AST has only Fixed values: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "DynamicQty".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector G: Condition_If ────────────────────────────────────────────
@@ -961,7 +1001,13 @@ fn detect_dynamic_qty(cleaned: &str, original: &str, ast_json: &str) {
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
 /// represented as a `condition` / `constraint` field on the parsed ability,
 /// or as an `unless_pay` / `unless_filter` for the inverse form.
-fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &ParsedAbilities) {
+fn detect_condition_if(
+    cleaned: &str,
+    original: &str,
+    ast_json: &str,
+    parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     // CR 614.1a / CR 701.5: cast-then-exile and counter-then-exile riders
     // are encoded as a sub_ability `ChangeZone { destination: Exile,
     // target: ParentTarget }` chained off the primary effect. Snapcaster,
@@ -1073,10 +1119,11 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
     if json_has_any(ast_json, cond_markers) {
         return;
     }
-    push_warning(format!(
-        "Swallow:Condition_If — \"if <condition>\" not captured as condition/constraint: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Condition_If".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 /// Remove sentences containing CR-implicit "if" phrases. These do not
@@ -1112,7 +1159,12 @@ fn strip_cr_implicit_if_phrases(cleaned: &str) -> String {
 /// CR 608.2c + CR 118.12: "unless [X]" — inverse conditional or
 /// unless-pay-cost rider. Must produce an `unless_*` slot or a
 /// `condition` with negated semantics.
-fn detect_condition_unless(cleaned: &str, original: &str, ast_json: &str) {
+fn detect_condition_unless(
+    cleaned: &str,
+    original: &str,
+    ast_json: &str,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains(" unless ") {
         return;
@@ -1135,10 +1187,11 @@ fn detect_condition_unless(cleaned: &str, original: &str, ast_json: &str) {
     if json_has_any(ast_json, markers) {
         return;
     }
-    push_warning(format!(
-        "Swallow:Condition_Unless — \"unless\" not captured as unless_*: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Condition_Unless".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector I: Condition_AsLongAs ──────────────────────────────────────
@@ -1150,6 +1203,7 @@ fn detect_condition_as_long_as(
     original: &str,
     ast_json: &str,
     parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("as long as ") {
@@ -1173,10 +1227,11 @@ fn detect_condition_as_long_as(
     if any_static_has_per_object_as_long_as_gate(parsed) {
         return;
     }
-    push_warning(format!(
-        "Swallow:Condition_AsLongAs — \"as long as\" not captured as conditional static: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Condition_AsLongAs".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 fn any_static_has_per_object_as_long_as_gate(parsed: &ParsedAbilities) -> bool {
@@ -1216,7 +1271,12 @@ fn target_filter_has_per_object_condition_property(filter: &TargetFilter) -> boo
 
 /// CR 611.2a: "this turn" — temporal scope. Must produce a `Duration`
 /// slot on the parsed ability or a duration-bearing modification.
-fn detect_duration_this_turn(cleaned: &str, original: &str, ast_json: &str) {
+fn detect_duration_this_turn(
+    cleaned: &str,
+    original: &str,
+    ast_json: &str,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains(" this turn") {
         return;
@@ -1322,16 +1382,22 @@ fn detect_duration_this_turn(cleaned: &str, original: &str, ast_json: &str) {
     if json_has_any(ast_json, markers) {
         return;
     }
-    push_warning(format!(
-        "Swallow:Duration_ThisTurn — \"this turn\" not captured as duration: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Duration_ThisTurn".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector K: Duration_NextTurn ───────────────────────────────────────
 
 /// CR 611.2a: "until your next turn" — extended-duration scope.
-fn detect_duration_next_turn(cleaned: &str, original: &str, ast_json: &str) {
+fn detect_duration_next_turn(
+    cleaned: &str,
+    original: &str,
+    ast_json: &str,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("until your next turn")
         // allow-noncombinator: swallow detector marker scan on classified text
@@ -1343,10 +1409,11 @@ fn detect_duration_next_turn(cleaned: &str, original: &str, ast_json: &str) {
     if json_has_any(ast_json, markers) {
         return;
     }
-    push_warning(format!(
-        "Swallow:Duration_NextTurn — \"until your next turn\" not captured as duration: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Duration_NextTurn".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector L: Optional_MayHave ────────────────────────────────────────
@@ -1354,7 +1421,12 @@ fn detect_duration_next_turn(cleaned: &str, original: &str, ast_json: &str) {
 /// CR 608.2d: "have it [verb]" / "may have [it]" — causative optional from
 /// "any opponent may [verb], [if they do] have it [verb]" patterns.
 /// Distinct from the simple `you may` optional flag.
-fn detect_optional_may_have(cleaned: &str, original: &str, ast_json: &str) {
+fn detect_optional_may_have(
+    cleaned: &str,
+    original: &str,
+    ast_json: &str,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     let has_marker = cleaned.contains("may have ") || cleaned.contains("you may have "); // allow-noncombinator: swallow detector marker scan on classified text
     if !has_marker {
         return;
@@ -1380,10 +1452,11 @@ fn detect_optional_may_have(cleaned: &str, original: &str, ast_json: &str) {
     if json_has_any(ast_json, markers) {
         return;
     }
-    push_warning(format!(
-        "Swallow:Optional_MayHave — \"may have\" causative not captured: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "Optional_MayHave".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector M: APNAP ───────────────────────────────────────────────────
@@ -1392,7 +1465,12 @@ fn detect_optional_may_have(cleaned: &str, original: &str, ast_json: &str) {
 /// player → non-active player) iteration order. Must produce an explicit
 /// ordering marker on the parsed ability so multiplayer resolution honors
 /// the ordering rather than defaulting to engine-internal player order.
-fn detect_apnap(cleaned: &str, original: &str, ast_json: &str) {
+fn detect_apnap(
+    cleaned: &str,
+    original: &str,
+    ast_json: &str,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     let has_marker = cleaned.contains("starting with you") // allow-noncombinator: swallow detector marker scan on classified text
         || cleaned.contains("starting with the active player") // allow-noncombinator: swallow detector marker scan on classified text
         || cleaned.contains("starting with that player") // allow-noncombinator: swallow detector marker scan on classified text
@@ -1412,10 +1490,11 @@ fn detect_apnap(cleaned: &str, original: &str, ast_json: &str) {
     if json_has_any(ast_json, markers) {
         return;
     }
-    push_warning(format!(
-        "Swallow:APNAP — turn-order iteration not captured as ordering metadata: {}",
-        truncate(original, 140)
-    ));
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: "APNAP".into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Cascade-vs-AST structural diff (option 3) ──────────────────────────
@@ -1465,7 +1544,11 @@ pub(crate) struct CascadeSnapshot<'a> {
 /// Run the structural diff against the primary def of the just-finalized
 /// chunk and emit warnings for any populated cascade slot that did not
 /// land on the def.
-pub(crate) fn check_cascade_diff(snap: &CascadeSnapshot<'_>, defs: &[AbilityDefinition]) {
+pub(crate) fn check_cascade_diff(
+    snap: &CascadeSnapshot<'_>,
+    defs: &[AbilityDefinition],
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
     let Some(def) = defs.first() else {
         // Empty current_defs is itself a swallow but the iteration would
         // have produced an Unimplemented up-stack; nothing to compare.
@@ -1473,24 +1556,27 @@ pub(crate) fn check_cascade_diff(snap: &CascadeSnapshot<'_>, defs: &[AbilityDefi
     };
 
     if snap.is_optional && !def.optional {
-        push_warning(format!(
-            "Swallow:CascadeOptional — cascade is_optional=true, def.optional=false (effect={})",
-            effect_name(&def.effect)
-        ));
+        diagnostics.push(OracleDiagnostic::CascadeLoss {
+            slot: CascadeSlot::Optional,
+            effect_name: effect_name(&def.effect).to_string(),
+            line_index: 0,
+        });
     }
 
     if snap.opponent_may_scope.is_some() && def.optional_for.is_none() {
-        push_warning(format!(
-            "Swallow:CascadeOpponentMay — cascade captured opponent_may_scope, def.optional_for=None (effect={})",
-            effect_name(&def.effect)
-        ));
+        diagnostics.push(OracleDiagnostic::CascadeLoss {
+            slot: CascadeSlot::OpponentMay,
+            effect_name: effect_name(&def.effect).to_string(),
+            line_index: 0,
+        });
     }
 
     if snap.condition.is_some() && def.condition.is_none() {
-        push_warning(format!(
-            "Swallow:CascadeCondition — cascade captured condition, def.condition=None (effect={})",
-            effect_name(&def.effect)
-        ));
+        diagnostics.push(OracleDiagnostic::CascadeLoss {
+            slot: CascadeSlot::Condition,
+            effect_name: effect_name(&def.effect).to_string(),
+            line_index: 0,
+        });
     }
 
     if snap.repeat_for.is_some() && def.repeat_for.is_none() {
@@ -1499,28 +1585,31 @@ pub(crate) fn check_cascade_diff(snap: &CascadeSnapshot<'_>, defs: &[AbilityDefi
         // TargetOnly wrappers (line ~6411). Walk the sub_ability chain
         // before declaring loss.
         if !def_tree_has_repeat_for(def) {
-            push_warning(format!(
-                "Swallow:CascadeRepeat — cascade captured repeat_for, no def in tree carries it (effect={})",
-                effect_name(&def.effect)
-            ));
+            diagnostics.push(OracleDiagnostic::CascadeLoss {
+                slot: CascadeSlot::RepeatFor,
+                effect_name: effect_name(&def.effect).to_string(),
+                line_index: 0,
+            });
         }
     }
 
     if snap.player_scope.is_some() && def.player_scope.is_none() {
-        push_warning(format!(
-            "Swallow:CascadePlayerScope — cascade captured player_scope, def.player_scope=None (effect={})",
-            effect_name(&def.effect)
-        ));
+        diagnostics.push(OracleDiagnostic::CascadeLoss {
+            slot: CascadeSlot::PlayerScope,
+            effect_name: effect_name(&def.effect).to_string(),
+            line_index: 0,
+        });
     }
 
     if snap.clause_duration.is_some()
         && def.duration.is_none()
         && !effect_carries_duration(&def.effect)
     {
-        push_warning(format!(
-            "Swallow:CascadeDuration — clause.duration was Some, def.duration=None and effect carries no embedded duration (effect={})",
-            effect_name(&def.effect)
-        ));
+        diagnostics.push(OracleDiagnostic::CascadeLoss {
+            slot: CascadeSlot::Duration,
+            effect_name: effect_name(&def.effect).to_string(),
+            line_index: 0,
+        });
     }
 }
 
