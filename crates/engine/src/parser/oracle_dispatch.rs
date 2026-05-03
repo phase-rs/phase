@@ -10,7 +10,7 @@ use super::oracle_ir::context::ParseContext;
 
 pub(super) fn dispatch_line_nom(line: &str, card_name: &str) -> Effect {
     let lower = line.to_lowercase();
-    let ctx = ParseContext {
+    let mut ctx = ParseContext {
         subject: None,
         card_name: Some(card_name.to_string()),
         actor: None,
@@ -18,7 +18,7 @@ pub(super) fn dispatch_line_nom(line: &str, card_name: &str) -> Effect {
     };
 
     if is_effect_sentence_candidate(&lower) || is_damage_prevention_pattern(&lower) {
-        let def = parse_effect_chain_with_context(line, AbilityKind::Spell, &ctx);
+        let def = parse_effect_chain_with_context(line, AbilityKind::Spell, &mut ctx);
         if !has_unimplemented(&def) {
             return *def.effect;
         }

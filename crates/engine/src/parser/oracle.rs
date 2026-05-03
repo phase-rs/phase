@@ -586,7 +586,7 @@ fn is_spell_resolution_instruction_line(
     let parsed = parse_effect_chain_with_context(
         &prepared.effect_text,
         AbilityKind::Spell,
-        &ParseContext {
+        &mut ParseContext {
             subject: None,
             card_name: Some(card_name.to_string()),
             actor: None,
@@ -1665,7 +1665,7 @@ pub(crate) fn parse_oracle_ir(
             let def = parse_effect_chain_with_context(
                 &line,
                 AbilityKind::Spell,
-                &ParseContext {
+                &mut ParseContext {
                     subject: None,
                     card_name: Some(card_name.to_string()),
                     actor: None,
@@ -1916,7 +1916,7 @@ pub(crate) fn parse_oracle_ir(
             let mut def = parse_effect_chain_with_context(
                 parse_line,
                 AbilityKind::Spell,
-                &ParseContext {
+                &mut ParseContext {
                     subject: None,
                     card_name: Some(card_name.to_string()),
                     actor: None,
@@ -2120,7 +2120,7 @@ pub(crate) fn parse_oracle_ir(
             let def = parse_effect_chain_with_context(
                 &effect_text,
                 AbilityKind::Spell,
-                &ParseContext {
+                &mut ParseContext {
                     subject: None,
                     card_name: Some(card_name.to_string()),
                     actor: None,

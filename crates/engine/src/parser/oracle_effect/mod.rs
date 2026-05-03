@@ -36,7 +36,7 @@ use super::oracle_util::{
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::{push_diagnostic, snapshot_diagnostics, truncate_diagnostics};
+use crate::parser::oracle_warnings::push_diagnostic as push_diagnostic_thread_local;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
@@ -98,7 +98,7 @@ pub(crate) fn is_bare_object_pronoun(text: &str) -> bool {
 /// For self-triggers ("~ enters"), "it" stays SelfRef.
 /// For AttachedTo subjects ("equipped creature"), TriggeringSource is also correct
 /// because the triggering event's source IS the attached-to creature.
-pub(crate) fn resolve_it_pronoun(ctx: &ParseContext) -> TargetFilter {
+pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     match &ctx.subject {
         Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
             TargetFilter::TriggeringSource
@@ -130,7 +130,7 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
 /// For compound effects ("Gain 3 life. Draw a card."), call `parse_effect_chain`
 /// which splits on sentence boundaries and chains via AbilityDefinition::sub_ability.
 pub fn parse_effect(text: &str) -> Effect {
-    parse_effect_clause(text, &ParseContext::default()).effect
+    parse_effect_clause(text, &mut ParseContext::default()).effect
 }
 
 // ── Word-boundary scanners for delayed trigger dispatch ──────────────────
@@ -688,7 +688,7 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
-fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_inline_delayed_trigger(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     if tag::<_, _, VerboseError<&str>>("when ")
         .parse(tp.lower)
         .is_err()
@@ -704,11 +704,11 @@ fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> 
     let condition = match scan_delayed_condition_kind(condition_text) {
         Some(DelayedConditionKind::Dies | DelayedConditionKind::PutIntoGraveyard) => {
             DelayedTriggerCondition::WhenDies {
-                filter: parse_delayed_subject_filter(condition_text),
+                filter: parse_delayed_subject_filter(condition_text, ctx),
             }
         }
         Some(DelayedConditionKind::LeavesPlay) => DelayedTriggerCondition::WhenLeavesPlayFiltered {
-            filter: parse_delayed_subject_filter(condition_text),
+            filter: parse_delayed_subject_filter(condition_text, ctx),
         },
         Some(DelayedConditionKind::EntersBattlefield) => {
             if has_unconsumed_conditional(condition_text) {
@@ -718,7 +718,7 @@ fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> 
                 );
             }
             DelayedTriggerCondition::WhenEntersBattlefield {
-                filter: parse_delayed_subject_filter(condition_text),
+                filter: parse_delayed_subject_filter(condition_text, ctx),
             }
         }
         None => return None,
@@ -753,9 +753,9 @@ fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> 
 /// "the targeted creature" → ParentTarget.
 /// "it"/"this creature"/"this permanent"/"this artifact" → SelfRef (source object).
 /// "target creature" → ParentTarget (named target in the condition).
-fn parse_delayed_subject_filter(condition_text: &str) -> TargetFilter {
+fn parse_delayed_subject_filter(condition_text: &str, ctx: &mut ParseContext) -> TargetFilter {
     scan_delayed_subject(condition_text).unwrap_or_else(|| {
-        push_diagnostic(OracleDiagnostic::TargetFallback {
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized delayed subject".into(),
             text: condition_text.trim().into(),
             line_index: 0,
@@ -1091,7 +1091,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     })
 }
 
-fn try_parse_self_name_exile(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_self_name_exile(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let card_name = ctx.card_name.as_deref()?;
     let (_, rest_orig) =
         nom_on_lower(tp.original, tp.lower, |i| value((), tag("exile ")).parse(i))?;
@@ -1314,7 +1314,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 ///      with 3+ branches are rare and handled by bulleted modal text instead.
 fn try_parse_choose_one_of_inline(
     tp: TextPair<'_>,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     // CR 115.1: bail on target phrases — "target creature or player" is a
     // typed-target disjunction, not a choice between effects.
@@ -1396,7 +1396,7 @@ fn try_parse_choose_one_of_inline(
     // failed trial pollutes the committed warnings buffer with spurious
     // gaps from a malformed branch (e.g., "return a red" left half from
     // splitting "return a red or green creature" at the wrong " or ").
-    let diagnostics_snapshot = snapshot_diagnostics();
+    let diagnostics_snapshot = ctx.diagnostics.len();
     let left_clause = parse_effect_clause(left_orig, ctx);
     let right_clause = parse_effect_clause(right_orig, ctx);
 
@@ -1406,7 +1406,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::Unimplemented { .. })
         || matches!(right_clause.effect, Effect::Unimplemented { .. })
     {
-        truncate_diagnostics(diagnostics_snapshot);
+        ctx.diagnostics.truncate(diagnostics_snapshot);
         return None;
     }
 
@@ -1416,7 +1416,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::TargetOnly { .. })
         || matches!(right_clause.effect, Effect::TargetOnly { .. })
     {
-        truncate_diagnostics(diagnostics_snapshot);
+        ctx.diagnostics.truncate(diagnostics_snapshot);
         return None;
     }
 
@@ -1457,7 +1457,7 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
 /// CR 608.2d: Parse "have it [verb]" / "have you [verb]" causative constructions.
 /// Used by "any opponent may" effects where the opponent causes the source or controller
 /// to perform an action (e.g., "have it deal 4 damage to them").
-fn try_parse_have_causative(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_have_causative(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     // Pattern A: "have it deal N damage to them" / "have ~ deal N damage to them"
     let after_have = nom_on_lower(tp.original, tp.lower, |input| {
         value((), alt((tag("have it "), tag("have ~ ")))).parse(input)
@@ -1570,7 +1570,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
 }
 
 #[tracing::instrument(level = "debug")]
-fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     // Phase 2 PoC: peel structural slots off the head of the clause before
     // body parsing. The recursive shell strips slot-bearing prefixes
     // (currently just "you may " for the Optional slot) and accumulates them
@@ -1584,7 +1584,7 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     if peel_ctx.is_empty() {
         return parse_effect_clause_inner(text, ctx);
     }
-    if let Some(mut clause) = try_parse_for_each_effect(text) {
+    if let Some(mut clause) = try_parse_for_each_effect(text, ctx) {
         peel_ctx.apply_optional(&mut clause.optional);
         if clause.condition.is_none() {
             if let Some(cond) = peel_ctx.condition().cloned() {
@@ -1627,7 +1627,7 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
 }
 
 #[tracing::instrument(level = "debug")]
-fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
         .trim()
         .trim_end_matches('.');
@@ -1826,7 +1826,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     }
 
     // CR 603.7c: "When that creature dies, ..." — inline delayed trigger creation.
-    if let Some(clause) = try_parse_inline_delayed_trigger(tp) {
+    if let Some(clause) = try_parse_inline_delayed_trigger(tp, ctx) {
         return clause;
     }
 
@@ -1936,7 +1936,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     }
 
     // "for each" patterns: "draw a card for each [filter]", etc.
-    if let Some(clause) = try_parse_for_each_effect(text) {
+    if let Some(clause) = try_parse_for_each_effect(text, ctx) {
         return clause;
     }
 
@@ -2014,24 +2014,24 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     }
 
     // CR 401.4: "[target]'s owner puts it on their choice of the top or bottom of their library"
-    if let Some(clause) = try_parse_put_on_top_or_bottom(tp) {
+    if let Some(clause) = try_parse_put_on_top_or_bottom(tp, ctx) {
         return clause;
     }
 
     // CR 701.24a + CR 400.3: "the owner of target [filter] shuffles it into their library"
-    if let Some(clause) = try_parse_owner_of_target_shuffle(tp) {
+    if let Some(clause) = try_parse_owner_of_target_shuffle(tp, ctx) {
         return clause;
     }
 
     // CR 401.4 + CR 400.3: "the owner of target [filter] puts it into their library second from
     // the top or on the bottom"
-    if let Some(clause) = try_parse_owner_of_target_put_second(tp) {
+    if let Some(clause) = try_parse_owner_of_target_put_second(tp, ctx) {
         return clause;
     }
 
     // CR 509.1c: "All creatures able to block [target/~] [this turn] do so" — mass forced block.
     // Semantically equivalent to "[target/~] must be blocked this turn if able".
-    if let Some(clause) = try_parse_mass_forced_block(tp) {
+    if let Some(clause) = try_parse_mass_forced_block(tp, ctx) {
         return clause;
     }
 
@@ -2195,7 +2195,7 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, &str)> {
 ///
 /// Distinguished from static "have" (e.g., "creatures you control have flying") by position:
 /// imperative "have" starts the clause; static "have" follows a subject.
-fn try_parse_have_redirection(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let (after_have, _) = tag::<_, _, VerboseError<&str>>("have ")
         .parse(lower.as_str())
@@ -2267,7 +2267,7 @@ fn try_parse_have_redirection(text: &str, ctx: &ParseContext) -> Option<ParsedEf
 fn try_parse_have_its_controller(
     original: &str,
     after_have_lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     // Nom dispatch: must match "its controller " exactly.
     let (rest_lower, _) = tag::<_, _, VerboseError<&str>>("its controller ")
@@ -2346,7 +2346,7 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// - "all creatures able to block target creature this turn do so"
 /// - "all creatures able to block ~ do so"
 /// - "all creatures able to block ~ this turn do so"
-fn try_parse_mass_forced_block(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
         value((), tag("all creatures able to block ")).parse(i)
     })?;
@@ -2373,7 +2373,7 @@ fn try_parse_mass_forced_block(tp: TextPair) -> Option<ParsedEffectClause> {
     let (target, remainder) = parse_target(target_text);
     let (target, remainder) = refine_damage_target_remainder(target, remainder);
     if !remainder.trim().is_empty() {
-        push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+        ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
             text: remainder.trim().into(),
             parser: "must-block".into(),
             line_index: 0,
@@ -2598,7 +2598,7 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
 /// Two Oracle patterns:
 /// - "Target creature's owner puts it on their choice of the top or bottom of their library"
 /// - "The owner of target nonland permanent puts it on their choice of the top or bottom of their library"
-fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_put_on_top_or_bottom(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain the signature suffix
@@ -2617,7 +2617,7 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
         let target_text = &tp.original[..idx];
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
-            push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                 text: remainder.trim().into(),
                 parser: "owner-puts-it".into(),
                 line_index: 0,
@@ -2638,7 +2638,7 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
             let target_text = &rest.original[..idx];
             let (filter, remainder) = parse_target(target_text);
             if !remainder.trim().is_empty() {
-                push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                     text: remainder.trim().into(),
                     parser: "owner-puts-it".into(),
                     line_index: 0,
@@ -2658,7 +2658,7 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
 /// - "Target permanent's owner shuffles it into their library"
 ///
 /// Produces a `ChangeZone` to Library with `owner_library: true` + a `Shuffle` sub_ability.
-fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_owner_of_target_shuffle(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain both "shuffle" and "library" to be a shuffle-into-library pattern
@@ -2668,7 +2668,7 @@ fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause>
         return None;
     }
 
-    let target = extract_owner_of_target(tp)?;
+    let target = extract_owner_of_target(tp, ctx)?;
 
     Some(imperative::with_shuffle_sub_ability(Effect::ChangeZone {
         origin: None,
@@ -2693,7 +2693,7 @@ fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause>
 ///
 /// The "second from the top or on the bottom" pattern is semantically PutOnTopOrBottom (the
 /// player chooses). We map it to the same `PutOnTopOrBottom` effect.
-fn try_parse_owner_of_target_put_second(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_owner_of_target_put_second(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain the signature suffix
@@ -2701,7 +2701,7 @@ fn try_parse_owner_of_target_put_second(tp: TextPair) -> Option<ParsedEffectClau
         return None;
     }
 
-    let target = extract_owner_of_target(tp)?;
+    let target = extract_owner_of_target(tp, ctx)?;
 
     Some(parsed_clause(Effect::PutOnTopOrBottom { target }))
 }
@@ -2710,13 +2710,13 @@ fn try_parse_owner_of_target_put_second(tp: TextPair) -> Option<ParsedEffectClau
 /// or "target [filter]'s owner [verb]s it ..." subject patterns.
 ///
 /// Returns `Some(target_filter)` if the pattern matches, `None` otherwise.
-fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
+fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<TargetFilter> {
     // Pattern 1: "target [filter]'s owner [verb]s it ..."
     if let Some(idx) = tp.find("'s owner ") {
         let target_text = &tp.original[..idx];
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
-            push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                 text: remainder.trim().into(),
                 parser: "owner-of-target".into(),
                 line_index: 0,
@@ -2737,7 +2737,7 @@ fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
                 let target_text = &rest.original[..idx];
                 let (filter, remainder) = parse_target(target_text);
                 if !remainder.trim().is_empty() {
-                    push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                    ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                         text: remainder.trim().into(),
                         parser: "owner-of-target".into(),
                         line_index: 0,
@@ -3034,7 +3034,7 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
 /// - "draw a card for each creature you control"
 /// - "gain 1 life for each creature you control"
 /// - "mill a card for each [counter type] counter on ~"
-fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
+fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -3103,7 +3103,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     if let Some(ast) = imperative::parse_targeted_action_ast(
         targeted_base,
         &targeted_base_lower,
-        &ParseContext::default(),
+        &mut ParseContext::default(),
     ) {
         if matches!(
             ast,
@@ -3127,7 +3127,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     // CR 120.1: "[subject] deals N damage to [target] for each X" → DealDamage.
     // Delegates to try_parse_damage, which already handles amount extraction, target parsing,
     // and damage source variants. Replace the fixed amount with the for-each quantity.
-    if let Some(effect) = try_parse_damage(base_tp.lower, base_tp.original) {
+    if let Some(effect) = try_parse_damage(base_tp.lower, base_tp.original, ctx) {
         let effect = match effect {
             Effect::DealDamage {
                 amount,
@@ -3234,10 +3234,10 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
         } else {
             after_counter_on
         };
-        let target = parse_subject_application(counter_target_text, &ParseContext::default())
+        let target = parse_subject_application(counter_target_text, &mut ParseContext::default())
             .map(|app| app.affected)
             .unwrap_or_else(|| {
-                push_diagnostic(OracleDiagnostic::TargetFallback {
+                ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
                     context: "unrecognized counter target".into(),
                     text: after_counter_on.trim().into(),
                     line_index: 0,
@@ -3305,7 +3305,7 @@ fn parsed_for_each_quantity_effect(
     }
 }
 
-fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("you get "), tag("get ")))
         .parse(tp.lower)
         .ok()?;
@@ -3536,7 +3536,7 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
     }
 
     let (target, is_targeted) =
-        match parse_subject_application(subject_text, &ParseContext::default()) {
+        match parse_subject_application(subject_text, &mut ParseContext::default()) {
             Some(app) => (app.affected, app.target.is_some()),
             None => return effect,
         };
@@ -3605,7 +3605,7 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
 }
 
 #[tracing::instrument(level = "trace")]
-fn parse_clause_ast(text: &str, ctx: &ParseContext) -> ClauseAst {
+fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
     let text = text.trim();
 
     // Mirror the CubeArtisan grammar's high-level sentence shapes:
@@ -3689,7 +3689,7 @@ fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)
     Some((None, input))
 }
 
-fn lower_clause_ast(ast: ClauseAst, ctx: &ParseContext) -> ParsedEffectClause {
+fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClause {
     match ast {
         ClauseAst::Imperative { text } => {
             let mut clause = lower_imperative_clause(&text, ctx);
@@ -3769,7 +3769,7 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &ParseContext) -> ParsedEffectClause {
 }
 
 #[tracing::instrument(level = "debug")]
-fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     // CR 106.1 + CR 109.1: "For each color among [X], add one mana of that color"
     // (Faeburrow Elder). Must run before the generic for-each-prefix strip path,
     // because "that color" anaphors a per-iteration color rather than the
@@ -3874,7 +3874,7 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
 fn try_parse_verb_and_target<'a>(
     text: &'a str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<(TargetedImperativeAst, &'a str)> {
     // CR 701.26a/b: Tap/untap all — mass variants must be checked before single-target
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
@@ -4184,7 +4184,7 @@ fn try_parse_verb_and_target<'a>(
 /// When the remainder references "it"/"that creature"/"them" (via `contains_object_pronoun`),
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
 /// parent's resolved targets at resolution time.
-fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
     // Quick bail: no "and" means no compound connector possible
@@ -4220,7 +4220,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 
     let sub_lower = sub_text.to_lowercase();
     let uses_parent_target_reference = has_anaphoric_reference(&sub_lower);
-    let continuation_ctx = if uses_parent_target_reference {
+    let mut continuation_ctx = if uses_parent_target_reference {
         ParseContext {
             card_name: ctx.card_name.clone(),
             ..Default::default()
@@ -4230,7 +4230,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
     };
 
     // Parse the sub-effect
-    let mut sub_clause = parse_imperative_effect(sub_text, &continuation_ctx);
+    let mut sub_clause = parse_imperative_effect(sub_text, &mut continuation_ctx);
 
     // CR 608.2c: Verb carry-forward for bare "target X" clauses in compound actions.
     // When the sub-text starts with "target" and parsed as Unimplemented, prepend
@@ -4243,7 +4243,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
-            let reparsed = parse_imperative_effect(&reparsed_text, &continuation_ctx);
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
             }
@@ -4260,7 +4260,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
-            let reparsed = parse_imperative_effect(&reparsed_text, &continuation_ctx);
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
             }
@@ -4279,7 +4279,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
-            let reparsed = parse_imperative_effect(&reparsed_text, &continuation_ctx);
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
             }
@@ -4570,7 +4570,7 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
     })
 }
 
-fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     if !scan_contains_phrase(&lower, "and") {
         return None;
@@ -4590,7 +4590,7 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
         return Some(clause);
     }
 
-    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower)?;
+    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
 
     if remainder.is_empty() {
         return None;
@@ -4927,7 +4927,7 @@ fn has_typed_target(effect: &Effect) -> bool {
 fn lower_subject_predicate_ast(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> ParsedEffectClause {
     // CR 115.1d: Propagate multi_target from the subject phrase (e.g., "any number of
     // target creatures", "up to two target artifacts") into the lowered clause so the
@@ -5778,13 +5778,13 @@ fn attach_alt_cost_to_prior_cast_from_zone(
 }
 
 #[tracing::instrument(level = "debug")]
-fn parse_imperative_effect(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+fn parse_imperative_effect(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     parse_imperative_effect_inner(tp, ctx)
 }
 
-fn parse_imperative_effect_inner(tp: TextPair, ctx: &ParseContext) -> ParsedEffectClause {
+fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> ParsedEffectClause {
     if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
         return lower_imperative_family_ast(ast);
     }
@@ -6036,7 +6036,7 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
     (target, remainder)
 }
 
-fn parse_choose_filter(lower: &str) -> TargetFilter {
+fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
     // Extract type info between "choose" and "card from it"
     // Handle both "choose X" and "you choose X" forms
     let after_choose = alt((
@@ -6118,7 +6118,7 @@ fn parse_choose_filter(lower: &str) -> TargetFilter {
     if let Some(f) = type_str_to_target_filter(cleaned) {
         return f;
     }
-    push_diagnostic(OracleDiagnostic::TargetFallback {
+    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
         context: "unrecognized type string".into(),
         text: cleaned.into(),
         line_index: 0,
@@ -6228,14 +6228,14 @@ fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
 
 /// Extract card type filter from a sub-ability sentence containing "card from it/among".
 /// Handles forms like "exile a nonland card from it", "discard a creature card from it".
-fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
+fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
     let before_card = match take_until::<_, _, VerboseError<&str>>("card from")
         .parse(lower)
         .ok()
     {
         Some((_, before)) => before,
         None => {
-            push_diagnostic(OracleDiagnostic::TargetFallback {
+            ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
                 context: "choose-from-sentence missing 'card from'".into(),
                 text: lower.trim().into(),
                 line_index: 0,
@@ -6255,7 +6255,7 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
         }
     }
     type_str_to_target_filter(word).unwrap_or_else(|| {
-        push_diagnostic(OracleDiagnostic::TargetFallback {
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized choose-from-sentence type".into(),
             text: word.into(),
             line_index: 0,
@@ -6577,7 +6577,7 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
 /// that invoke `normalize_card_name_refs` internally. External test callers
 /// must pre-normalize via `normalize_card_name_refs` before invoking.
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    let ir = parse_effect_chain_ir(text, kind, &ParseContext::default());
+    let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     lower_effect_chain_ir(&ir)
 }
 
@@ -6587,7 +6587,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 pub(crate) fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> AbilityDefinition {
     let ir = parse_effect_chain_ir(text, kind, ctx);
     lower_effect_chain_ir(&ir)
@@ -6603,7 +6603,7 @@ pub(crate) fn parse_effect_chain_with_context(
 pub(crate) fn parse_effect_chain_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> EffectChainIr {
     // CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
     // sentence before chain splitting — it is a chain-level rounding annotation
@@ -7161,7 +7161,7 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             ctx.subject.clone()
         };
-        let chunk_ctx = ParseContext {
+        let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
@@ -7174,7 +7174,7 @@ pub(crate) fn parse_effect_chain_ir(
             actor: chunk_actor,
             ..Default::default()
         };
-        let ctx = &chunk_ctx;
+        let ctx = &mut chunk_ctx;
 
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
@@ -7231,7 +7231,7 @@ pub(crate) fn parse_effect_chain_ir(
                     &mut cascade_diags,
                 );
                 for d in cascade_diags {
-                    push_diagnostic(d);
+                    ctx.push_diagnostic(d);
                 }
             }
             clauses.push(ClauseIr {
@@ -7279,7 +7279,7 @@ pub(crate) fn parse_effect_chain_ir(
                     &mut cascade_diags,
                 );
                 for d in cascade_diags {
-                    push_diagnostic(d);
+                    ctx.push_diagnostic(d);
                 }
             }
             clauses.push(ClauseIr {
@@ -7554,7 +7554,7 @@ pub(crate) fn parse_effect_chain_ir(
         });
         let followup_continuation = effective_prev_effect
             .as_ref()
-            .and_then(|eff| parse_followup_continuation_ast(normalized_text, eff));
+            .and_then(|eff| parse_followup_continuation_ast(normalized_text, eff, ctx));
         let absorb_followup = followup_continuation
             .as_ref()
             .is_some_and(|continuation| continuation_absorbs_current(continuation, &clause.effect));
@@ -7649,7 +7649,7 @@ pub(crate) fn parse_effect_chain_ir(
                     &mut cascade_diags,
                 );
                 for d in cascade_diags {
-                    push_diagnostic(d);
+                    ctx.push_diagnostic(d);
                 }
             }
         }
@@ -7710,6 +7710,20 @@ pub(crate) fn parse_effect_chain_ir(
             special: None,
             source_text: normalized_text.to_string(),
         });
+
+        // Temporary bridge: drain chunk-ctx diagnostics into the thread-local
+        // oracle_warnings accumulator. Each chunk iteration creates a fresh
+        // `chunk_ctx` that shadows the outer `ctx`, so diagnostics must be
+        // flushed per-chunk. Plan 03 will remove this when the thread-local
+        // is fully eliminated.
+        for d in chunk_ctx.diagnostics.drain(..) {
+            push_diagnostic_thread_local(d);
+        }
+    }
+
+    // Also flush any diagnostics on the outer ctx (e.g., from pre-loop parsing).
+    for d in ctx.diagnostics.drain(..) {
+        push_diagnostic_thread_local(d);
     }
 
     EffectChainIr {
@@ -9697,8 +9711,8 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
 /// need the remainder (e.g., `parse_cost_resource_ast`). The remainder is only
 /// safely discardable when `try_split_damage_compound` has already run and found
 /// no compound connector.
-fn try_parse_damage(lower: &str, text: &str) -> Option<Effect> {
-    let (effect, _remainder) = try_parse_damage_with_remainder(text, lower)?;
+fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    let (effect, _remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
     Some(effect)
 }
 
@@ -9712,7 +9726,7 @@ fn try_parse_damage(lower: &str, text: &str) -> Option<Effect> {
 /// Safety: `pos` is computed from `lower.find(...)` and used to slice both `text`
 /// and `lower` at the same byte offset. This is sound because Oracle text is ASCII
 /// and `to_lowercase()` preserves byte length for ASCII characters.
-fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<(Effect, &'a str)> {
+fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str, ctx: &mut ParseContext) -> Option<(Effect, &'a str)> {
     // Match: "~ deals N damage to {target}" / "deal N damage to {target}"
     // and variable forms like "deal that much damage" or
     // "deal damage equal to its power".
@@ -9838,7 +9852,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                         remainder.trim()
                     };
                     if !leftover.is_empty() {
-                        push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                        ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                             text: leftover.into(),
                             parser: "damage-all".into(),
                             line_index: 0,
@@ -9868,7 +9882,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                     let (target, remainder) = parse_target(target_phrase);
                     let (target, remainder) = refine_damage_target_remainder(target, remainder);
                     if !remainder.trim().is_empty() {
-                        push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                        ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                             text: remainder.trim().into(),
                             parser: "deal-damage".into(),
                             line_index: 0,
@@ -11572,6 +11586,7 @@ mod tests {
         let e = try_parse_damage(
             "deal damage to itself equal to its power",
             "deal damage to itself equal to its power",
+            &mut ParseContext::default(),
         );
         let e = e.expect("should parse damage to itself");
         assert!(
@@ -11596,7 +11611,7 @@ mod tests {
         // Full pipeline: subject stripping + imperative → should produce DealDamage
         let clause = parse_effect_clause(
             "~ deals damage to itself equal to its power",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -11618,9 +11633,9 @@ mod tests {
 
     #[test]
     fn try_split_damage_compound_lightning_helix() {
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let clause =
-            try_split_damage_compound("~ deals 3 damage to any target and you gain 3 life", &ctx);
+            try_split_damage_compound("~ deals 3 damage to any target and you gain 3 life", &mut ctx);
         let clause = clause.expect("should split damage + life gain compound");
         assert!(
             matches!(
@@ -11652,8 +11667,8 @@ mod tests {
 
     #[test]
     fn try_split_damage_compound_no_compound() {
-        let ctx = ParseContext::default();
-        let result = try_split_damage_compound("~ deals 3 damage to target creature", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = try_split_damage_compound("~ deals 3 damage to target creature", &mut ctx);
         assert!(
             result.is_none(),
             "no compound connector — should return None"
@@ -11662,10 +11677,10 @@ mod tests {
 
     #[test]
     fn try_split_damage_compound_false_and_in_filter() {
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let result = try_split_damage_compound(
             "~ deals 3 damage to target creature you own and control",
-            &ctx,
+            &mut ctx,
         );
         // parse_target consumes "you own and control" as part of the filter,
         // leaving empty remainder — no false split.
@@ -11678,8 +11693,8 @@ mod tests {
     #[test]
     fn debug_that_creature_pump_only() {
         // Isolated test: parse sub-text directly through parse_effect_clause
-        let ctx = ParseContext::default();
-        let clause = parse_effect_clause("that creature gets -2/-2 until end of turn", &ctx);
+        let mut ctx = ParseContext::default();
+        let clause = parse_effect_clause("that creature gets -2/-2 until end of turn", &mut ctx);
         assert!(
             !matches!(clause.effect, Effect::Unimplemented { .. }),
             "should parse, got: {:?}",
@@ -11724,10 +11739,10 @@ mod tests {
         // resolver treats the full recipient set as one simultaneous damage event
         // from one source. Splitting into two effects would break replacement
         // effects like Awe Strike that watch damage from a single source.
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let result = try_split_damage_compound(
             "deal 1 damage to each opponent and each creature and planeswalker they control",
-            &ctx,
+            &mut ctx,
         );
         let clause = result.expect("compound player+object damage should parse");
         assert!(
@@ -11769,10 +11784,10 @@ mod tests {
     fn try_split_damage_compound_player_and_planeswalker() {
         // CR 120.3: Kumano Faces Kakkazan — "deals 1 damage to each opponent and
         // each planeswalker they control" — same class, single planeswalker type.
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let result = try_split_damage_compound(
             "deal 1 damage to each opponent and each planeswalker they control",
-            &ctx,
+            &mut ctx,
         );
         let clause = result.expect("compound player+object damage should parse");
         assert!(clause.sub_ability.is_none());
@@ -11798,9 +11813,9 @@ mod tests {
     #[test]
     fn try_split_damage_compound_deconjugated() {
         // Subject-stripped form: "deals" → "deal" after deconjugation
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let clause =
-            try_split_damage_compound("deal 3 damage to any target and you gain 3 life", &ctx);
+            try_split_damage_compound("deal 3 damage to any target and you gain 3 life", &mut ctx);
         let clause = clause.expect("deconjugated form should work");
         assert!(matches!(
             clause.effect,
@@ -11852,9 +11867,9 @@ mod tests {
     #[test]
     fn try_split_damage_compound_event_context_oath_of_kaya() {
         // CR 608.2k: "that player" event-context ref with compound remainder
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let clause =
-            try_split_damage_compound("~ deals 2 damage to that player and you gain 2 life", &ctx)
+            try_split_damage_compound("~ deals 2 damage to that player and you gain 2 life", &mut ctx)
                 .expect("should split event-context compound");
         assert!(
             matches!(
@@ -11888,9 +11903,9 @@ mod tests {
     #[test]
     fn try_split_damage_compound_event_context_torch_the_tower() {
         // CR 608.2k: "that permanent" event-context ref with compound remainder
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let clause =
-            try_split_damage_compound("~ deals 3 damage to that permanent and you scry 1", &ctx)
+            try_split_damage_compound("~ deals 3 damage to that permanent and you scry 1", &mut ctx)
                 .expect("should split event-context compound");
         assert!(
             matches!(
@@ -11924,8 +11939,8 @@ mod tests {
     #[test]
     fn try_split_damage_compound_event_context_no_compound() {
         // No compound — should return None and fall through to normal path
-        let ctx = ParseContext::default();
-        let result = try_split_damage_compound("~ deals 2 damage to that player", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = try_split_damage_compound("~ deals 2 damage to that player", &mut ctx);
         assert!(result.is_none(), "no compound should return None");
     }
 
@@ -12276,7 +12291,7 @@ mod tests {
     fn effect_compound_exile_creature_and_possessive_graveyard() {
         let clause = parse_effect_clause(
             "exile a creature they control and their graveyard",
-            &Default::default(),
+            &mut Default::default(),
         );
         assert!(
             matches!(clause.effect, Effect::ChangeZone { .. }),
@@ -12481,6 +12496,7 @@ mod tests {
     fn for_each_token_count_keeps_counter_history_this_turn_clause() {
         let clause = try_parse_for_each_effect(
             "create a 1/1 green Insect creature token for each +1/+1 counter you've put on creatures under your control this turn",
+            &mut ParseContext::default(),
         )
         .expect("for-each token parser should match");
         match clause.effect {
@@ -14205,7 +14221,7 @@ mod tests {
     fn compound_tap_and_put_counter() {
         let clause = parse_effect_clause(
             "tap target creature an opponent controls and put a stun counter on it",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(clause.effect, Effect::Tap { .. }),
@@ -14230,7 +14246,7 @@ mod tests {
     fn compound_tap_and_put_counter_ignores_trigger_subject_context() {
         let clause = parse_effect_clause(
             "tap target creature an opponent controls and put a stun counter on it",
-            &ParseContext {
+            &mut ParseContext {
                 subject: Some(TargetFilter::SelfRef),
                 card_name: None,
                 actor: None,
@@ -14256,7 +14272,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "tap target creature an opponent controls and put a stun counter on it.",
             AbilityKind::Spell,
-            &ParseContext {
+            &mut ParseContext {
                 subject: Some(TargetFilter::SelfRef),
                 card_name: None,
                 actor: None,
@@ -14281,7 +14297,7 @@ mod tests {
     fn compound_exile_own_and_control_not_split() {
         let clause = parse_effect_clause(
             "exile any number of other nonland permanents you own and control",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -14317,7 +14333,7 @@ mod tests {
         let (effect, _rem, multi) = counter::try_parse_put_counter(
             "put a +1/+1 counter on up to one target creature",
             "Put a +1/+1 counter on up to one target creature",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         )
         .expect("should parse");
         if let Effect::PutCounter { target, .. } = &effect {
@@ -14338,7 +14354,7 @@ mod tests {
         let (effect, _rem, multi) = counter::try_parse_put_counter(
             "put two +1/+1 counters on target creature",
             "Put two +1/+1 counters on target creature",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         )
         .expect("should parse");
         assert!(matches!(effect, Effect::PutCounter { .. }));
@@ -14349,7 +14365,7 @@ mod tests {
     fn put_counter_each_of_up_to_two_target_creatures_is_multi_targeted() {
         let clause = parse_effect_clause(
             "put a +1/+1 counter on each of up to two target creatures",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
         assert!(
@@ -14387,7 +14403,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "put X +1/+1 counters on target creature you control, where X is your speed",
             AbilityKind::Spell,
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
 
         assert!(matches!(
@@ -15021,7 +15037,7 @@ mod tests {
     fn any_number_of_target_creatures_pump_and_keyword() {
         let clause = parse_effect_clause(
             "any number of target creatures each get +1/+1 and gain flying until end of turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         // Combined pump + keyword becomes GenericEffect with continuous modifications
         assert!(
@@ -15040,7 +15056,7 @@ mod tests {
     fn any_number_of_target_creatures_phase_out() {
         let clause = parse_effect_clause(
             "any number of target creatures you control phase out",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(clause.effect, Effect::PhaseOut { .. }),
@@ -15054,7 +15070,7 @@ mod tests {
     fn any_number_of_target_players_mill() {
         let clause = parse_effect_clause(
             "any number of target players each mill two cards",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -15075,7 +15091,7 @@ mod tests {
     fn one_or_two_target_creatures_each_pump() {
         let clause = parse_effect_clause(
             "one or two target creatures each get +2/+2 until end of turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             !matches!(clause.effect, Effect::Unimplemented { .. }),
@@ -15089,7 +15105,7 @@ mod tests {
     fn one_two_or_three_target_creatures_each_pump() {
         let clause = parse_effect_clause(
             "one, two, or three target creatures each get +1/+1 until end of turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             !matches!(clause.effect, Effect::Unimplemented { .. }),
@@ -15389,7 +15405,7 @@ mod tests {
     fn parse_damage_cant_be_prevented_this_turn() {
         let clause = parse_effect_clause(
             "Damage can't be prevented this turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match clause.effect {
             Effect::AddRestriction { restriction } => {
@@ -15410,7 +15426,7 @@ mod tests {
     fn shuffle_compound_subject_into_owners_libraries() {
         let clause = parse_effect_clause(
             "shuffle ~ and target creature with a stun counter on it into their owners' libraries",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match &clause.effect {
             Effect::ChangeZone {
@@ -17661,7 +17677,7 @@ mod tests {
         // Test the imperative path directly (no subject)
         let clause = parse_imperative_effect(
             "take an extra turn after this one",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(matches!(
             clause.effect,
@@ -18230,22 +18246,22 @@ mod tests {
 
     #[test]
     fn resolve_it_pronoun_default_context() {
-        let ctx = ParseContext::default();
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+        let mut ctx = ParseContext::default();
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
     }
 
     #[test]
     fn resolve_it_pronoun_self_ref_subject() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
             ..Default::default()
         };
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
     }
 
     #[test]
     fn resolve_it_pronoun_typed_subject() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::Typed(crate::types::ability::TypedFilter {
                 type_filters: vec![TypeFilter::Creature],
                 controller: Some(ControllerRef::You),
@@ -18253,25 +18269,25 @@ mod tests {
             })),
             ..Default::default()
         };
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::TriggeringSource);
     }
 
     #[test]
     fn resolve_it_pronoun_attached_to_subject() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::AttachedTo),
             ..Default::default()
         };
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::TriggeringSource);
     }
 
     #[test]
     fn resolve_it_pronoun_any_subject() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::Any),
             ..Default::default()
         };
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
     }
 
     // --- Suffix condition extraction tests ---
@@ -18950,7 +18966,7 @@ mod tests {
     fn parse_airbend_up_to_one_other_target_creature_or_spell() {
         let clause = parse_effect_clause(
             "airbend up to one other target creature or spell",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
         match clause.effect {
@@ -19059,7 +19075,7 @@ mod tests {
 
     #[test]
     fn source_condition_rebinds_it_pronoun_to_source_in_trigger_context() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
             )),
@@ -19068,7 +19084,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "If this enchantment isn't a creature, it becomes a 3/3 Angel creature with flying.",
             AbilityKind::Spell,
-            &ctx,
+            &mut ctx,
         );
 
         assert!(matches!(
@@ -19099,7 +19115,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "creatures you control get +1/+1 until end of turn.",
             AbilityKind::Spell,
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(*def.effect, Effect::PumpAll { .. }),
@@ -19114,7 +19130,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "creatures you control get +1/+1 until end of turn.",
             AbilityKind::Spell,
-            &ParseContext {
+            &mut ParseContext {
                 subject: Some(TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Creature],
                     controller: Some(ControllerRef::You),
@@ -20390,7 +20406,7 @@ mod tests {
     #[test]
     fn leading_conditional_threads_condition_through_ast() {
         // "if it's your turn" is parseable by try_nom_condition_as_ability_condition.
-        let ast = parse_clause_ast("if it's your turn, draw a card", &ParseContext::default());
+        let ast = parse_clause_ast("if it's your turn, draw a card", &mut ParseContext::default());
         assert!(
             matches!(
                 ast,
@@ -20401,7 +20417,7 @@ mod tests {
             ),
             "expected Conditional with Some condition, got: {ast:?}"
         );
-        let clause = lower_clause_ast(ast, &ParseContext::default());
+        let clause = lower_clause_ast(ast, &mut ParseContext::default());
         assert!(
             matches!(clause.condition, Some(AbilityCondition::IsYourTurn)),
             "expected IsYourTurn condition, got: {:?}",
@@ -20419,7 +20435,7 @@ mod tests {
         // An unrecognized condition should produce condition: None (backward-compatible).
         let ast = parse_clause_ast(
             "if a random unrecognized condition, draw a card",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -20431,7 +20447,7 @@ mod tests {
             ),
             "expected Conditional with None condition for unrecognized text, got: {ast:?}"
         );
-        let clause = lower_clause_ast(ast, &ParseContext::default());
+        let clause = lower_clause_ast(ast, &mut ParseContext::default());
         assert!(
             clause.condition.is_none(),
             "expected None condition for unrecognized text, got: {:?}",
@@ -20483,7 +20499,7 @@ mod tests {
         // correctly when the for-each prefix is already stripped upstream.
         let clause = parse_effect_clause(
             "this creature gets +2/+0 until end of turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match &clause.effect {
             Effect::Pump { target, .. } => {
@@ -20522,7 +20538,7 @@ mod tests {
         // imperative Pump with TargetFilter::Any, then inject_subject_target should
         // replace Any with SelfRef from the subject.
         let clause =
-            parse_effect_clause("~ gets +2/+2 until end of turn", &ParseContext::default());
+            parse_effect_clause("~ gets +2/+2 until end of turn", &mut ParseContext::default());
         assert!(
             matches!(
                 clause.effect,
@@ -20545,7 +20561,7 @@ mod tests {
         // for one target and only that creature shrinks.
         let clause = parse_effect_clause(
             "All creatures get -1/-1 until end of turn for each Swamp you control.",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match &clause.effect {
             Effect::PumpAll { target, .. } => {
@@ -20565,7 +20581,7 @@ mod tests {
         // `Effect::Pump` with `SelfRef` — not `PumpAll`.
         let clause = parse_effect_clause(
             "~ gets +1/+0 until end of turn for each card in your graveyard.",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -20587,7 +20603,7 @@ mod tests {
         // class counts excluding the source object.
         let clause = parse_effect_clause(
             "other attacking creatures get +1/+1 until end of turn for each attacking creature other than ~.",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match &clause.effect {
             Effect::PumpAll {
@@ -20626,7 +20642,7 @@ mod tests {
 
         let clause = parse_effect_clause(
             "other blocking creatures get +1/+1 until end of turn for each blocking creature other than ~.",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(matches!(
             clause.effect,

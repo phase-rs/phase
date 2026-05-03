@@ -8,6 +8,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::contains_possessive;
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Chooser, Effect, QuantityExpr, QuantityRef, StaticDefinition,
@@ -1247,6 +1248,7 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<Zone> {
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
+    ctx: &mut ParseContext,
 ) -> Option<ContinuationAst> {
     let lower = text.to_lowercase();
 
@@ -1264,9 +1266,9 @@ pub(super) fn parse_followup_continuation_ast(
             .parse(lower.as_str())
             .is_ok()
             {
-                super::parse_choose_filter(&lower)
+                super::parse_choose_filter(&lower, ctx)
             } else {
-                super::parse_choose_filter_from_sentence(&lower)
+                super::parse_choose_filter_from_sentence(&lower, ctx)
             };
             let choice_optional = alt((
                 tag::<_, _, VerboseError<&str>>("you may choose "),
@@ -2140,6 +2142,7 @@ mod tests {
         let result = parse_followup_continuation_ast(
             "Put the rest on the bottom of your library in any order.",
             &dig,
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -2154,7 +2157,7 @@ mod tests {
     fn put_rest_bottom_of_library_without_any_order() {
         let dig = make_dig_effect();
         let result =
-            parse_followup_continuation_ast("Put the rest on the bottom of your library.", &dig);
+            parse_followup_continuation_ast("Put the rest on the bottom of your library.", &dig, &mut ParseContext::default());
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -2167,7 +2170,7 @@ mod tests {
     #[test]
     fn put_rest_into_graveyard() {
         let dig = make_dig_effect();
-        let result = parse_followup_continuation_ast("Put the rest into your graveyard.", &dig);
+        let result = parse_followup_continuation_ast("Put the rest into your graveyard.", &dig, &mut ParseContext::default());
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -2183,6 +2186,7 @@ mod tests {
         let result = parse_followup_continuation_ast(
             "Put the rest on the bottom of your library in a random order.",
             &dig,
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -2196,7 +2200,7 @@ mod tests {
     #[test]
     fn put_them_back_any_order() {
         let dig = make_dig_effect();
-        let result = parse_followup_continuation_ast("Put them back in any order.", &dig);
+        let result = parse_followup_continuation_ast("Put them back in any order.", &dig, &mut ParseContext::default());
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -2209,7 +2213,7 @@ mod tests {
     #[test]
     fn put_rest_into_hand() {
         let dig = make_dig_effect();
-        let result = parse_followup_continuation_ast("Put the rest into your hand.", &dig);
+        let result = parse_followup_continuation_ast("Put the rest into your hand.", &dig, &mut ParseContext::default());
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -2225,6 +2229,7 @@ mod tests {
         let result = parse_followup_continuation_ast(
             "Put those cards on the bottom of your library in any order.",
             &dig,
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -2244,6 +2249,7 @@ mod tests {
         let result = parse_followup_continuation_ast(
             "Put two of them into your hand and the rest on the bottom of your library in any order.",
             &dig,
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -2264,6 +2270,7 @@ mod tests {
         let result = parse_followup_continuation_ast(
             "Put one of them into your hand and the rest on the bottom of your library in any order.",
             &dig,
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -2289,6 +2296,7 @@ mod tests {
         let result = parse_followup_continuation_ast(
             "Put one of them into your hand and the other on the bottom of your library.",
             &dig,
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -2308,6 +2316,7 @@ mod tests {
         let result = parse_followup_continuation_ast(
             "Put two of them into your hand and the rest into your graveyard.",
             &dig,
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -2333,6 +2342,7 @@ mod tests {
         let result = parse_followup_continuation_ast(
             "You may put one of those cards onto the battlefield if it has the same name as a permanent.",
             &dig,
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,

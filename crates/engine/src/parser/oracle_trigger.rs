@@ -505,7 +505,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
     let trigger_subject = extract_trigger_subject_for_context(condition_text);
-    let effect_ctx = ParseContext {
+    let mut effect_ctx = ParseContext {
         subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
         current_trigger_index,
@@ -542,7 +542,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
         } else {
-            let ir = parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &effect_ctx);
+            let ir = parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
             Some(TriggerBody::EffectChain(ir))
         }
     } else {

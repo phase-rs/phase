@@ -632,7 +632,7 @@ fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
 /// treats `controller: None` as Any — letting the actor sacrifice / discard /
 /// return any object on the battlefield, violating CR 701.21a (sacrifice) and
 /// the analogous owner / controller restrictions on other actor-bound verbs.
-fn apply_actor_default(filter: &mut TargetFilter, ctx: &ParseContext) {
+fn apply_actor_default(filter: &mut TargetFilter, ctx: &mut ParseContext) {
     if let Some(actor) = ctx.actor.as_ref() {
         attach_controller_if_absent(filter, actor.clone());
     }
@@ -672,7 +672,7 @@ fn strip_sacrifice_choice_marker(target_text: &str) -> String {
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<TargetedImperativeAst> {
     // CR 701.26a/b: Tap/untap all — mass variants must be checked before single-target
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
@@ -1563,7 +1563,7 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
     }
 }
 
-pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperativeAst> {
+pub(super) fn parse_choose_ast(text: &str, lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))
     {
@@ -1611,7 +1611,7 @@ pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperati
         })
         .is_some();
         return Some(ChooseImperativeAst::RevealHandFilter {
-            card_filter: super::parse_choose_filter(lower),
+            card_filter: super::parse_choose_filter(lower, ctx),
             choice_optional,
         });
     }
@@ -2459,7 +2459,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
 /// Parse "put that many {type} counter(s) on {target}" — dynamic counter count from event context.
 /// CR 120.1: "that many" references the amount from the triggering event (e.g., damage dealt).
 /// Produces PutCounter with count=0 as a sentinel for event-context resolution.
-fn try_parse_that_many_counters(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let (rest, _) = tag::<_, _, VerboseError<&str>>("put that many ")
         .parse(lower)
         .ok()?;
@@ -3319,6 +3319,7 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
 pub(super) fn parse_cost_resource_ast(
     text: &str,
     lower: &str,
+    ctx: &mut ParseContext,
 ) -> Option<CostResourceImperativeAst> {
     if let Some(Effect::Unimplemented {
         name,
@@ -3429,7 +3430,7 @@ pub(super) fn parse_cost_resource_ast(
             _ => None,
         };
     }
-    if let Some(effect) = super::try_parse_damage(lower, text) {
+    if let Some(effect) = super::try_parse_damage(lower, text, ctx) {
         return match effect {
             Effect::DealDamage {
                 amount,
@@ -3505,7 +3506,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
@@ -3546,7 +3547,7 @@ pub(super) fn parse_imperative_family_ast(
 
         // Cost/resource verbs (CR 117-118)
         "pay" | "spend" => {
-            parse_cost_resource_ast(text, lower).map(ImperativeFamilyAst::CostResource)
+            parse_cost_resource_ast(text, lower, ctx).map(ImperativeFamilyAst::CostResource)
         }
 
         // CR 701.10: "double the power/toughness" or "double the number of counters"
@@ -3610,7 +3611,7 @@ pub(super) fn parse_imperative_family_ast(
             }),
 
         // Choose (CR 700.2)
-        "choose" | "secretly" => parse_choose_ast(text, lower)
+        "choose" | "secretly" => parse_choose_ast(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast))),
 
         // ── Exact-match keyword actions ──
@@ -3995,7 +3996,8 @@ pub(super) fn parse_imperative_family_ast(
         "move" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
 
         // "add" → mana/cost-resource (step 1)
-        "add" => parse_cost_resource_ast(text, lower).map(ImperativeFamilyAst::CostResource),
+        // allow-noncombinator: pre-existing match dispatch, only threading ctx through
+        "add" => parse_cost_resource_ast(text, lower, ctx).map(ImperativeFamilyAst::CostResource),
 
         // "gain" → "gain control of" (step 4) → "gain life" (step 3) → keyword (step 8)
         // The current if/else chain checks numeric first (step 3), but numeric guards with
@@ -4067,7 +4069,7 @@ pub(super) fn parse_imperative_family_ast(
 
         // "deals"/"deal" → damage (via cost_resource, which contains try_parse_damage)
         "deals" | "deal" => {
-            parse_cost_resource_ast(text, lower).map(ImperativeFamilyAst::CostResource)
+            parse_cost_resource_ast(text, lower, ctx).map(ImperativeFamilyAst::CostResource)
         }
 
         // "you may" → optional wrapper
@@ -4092,7 +4094,7 @@ pub(super) fn parse_imperative_family_ast(
         // "that player shuffles" where "that" precedes the verb).
         _ => {
             // Damage: try_parse_damage uses lower.find("deals ") — matches anywhere
-            if let Some(ast) = parse_cost_resource_ast(text, lower) {
+            if let Some(ast) = parse_cost_resource_ast(text, lower, ctx) {
                 return Some(ImperativeFamilyAst::CostResource(ast));
             }
             // Numeric: contains("gain")+contains("life"), contains("gets +"), etc.
@@ -4634,7 +4636,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
 pub(super) fn parse_zone_counter_ast(
     text: &str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ZoneCounterImperativeAst> {
     if let Some(ast) = parse_destroy_ast(text, lower) {
         return Some(ast);
@@ -5196,7 +5198,7 @@ mod tests {
     fn parse_earthbend_verb() {
         let text = "Earthbend 3 target land";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse 'earthbend' verb");
         let effect = lower_targeted_action_ast(result.unwrap());
         match effect {
@@ -5223,11 +5225,11 @@ mod tests {
     fn parse_sacrifice_defaults_controller_to_you_actor() {
         let text = "sacrifice a non-Demon creature";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             actor: Some(ControllerRef::You),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(
@@ -5247,11 +5249,11 @@ mod tests {
     fn parse_sacrifice_defaults_controller_to_opponent_actor() {
         let text = "sacrifice a creature";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             actor: Some(ControllerRef::Opponent),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(tf.controller, Some(ControllerRef::Opponent)),
@@ -5265,11 +5267,11 @@ mod tests {
     fn parse_sacrifice_preserves_choice_relative_clause() {
         let text = "sacrifice a permanent of their choice that shares a card type with it";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             actor: Some(ControllerRef::Opponent),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => {
@@ -5335,11 +5337,11 @@ mod tests {
     fn parse_sacrifice_preserves_explicit_controller() {
         let text = "sacrifice a creature an opponent controls";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             actor: Some(ControllerRef::You),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(
@@ -5361,8 +5363,8 @@ mod tests {
     fn parse_sacrifice_without_actor_leaves_controller_unset() {
         let text = "sacrifice a creature";
         let lower = text.to_lowercase();
-        let ctx = ParseContext::default();
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let mut ctx = ParseContext::default();
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert!(
@@ -5381,7 +5383,7 @@ mod tests {
     fn parse_mindslaver_control_next_turn() {
         let text = "You control target player during that player's next turn.";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(
             result.is_some(),
             "Should parse Mindslaver's 'you control ...' declarative"
@@ -5405,7 +5407,7 @@ mod tests {
         let text = "You control target player during that player's next turn. \
                     After that turn, that player takes an extra turn.";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some());
         let effect = lower_targeted_action_ast(result.unwrap());
         match effect {
@@ -5427,7 +5429,7 @@ mod tests {
         // stripped form "gain control of Mindslaver Toolkit".
         let stripped = "gain control of Mindslaver Toolkit";
         let stripped_lower = stripped.to_lowercase();
-        let result = parse_targeted_action_ast(stripped, &stripped_lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(stripped, &stripped_lower, &mut ParseContext::default());
         assert!(result.is_some());
         let effect = lower_targeted_action_ast(result.unwrap());
         assert!(
@@ -5441,7 +5443,7 @@ mod tests {
     fn parse_airbend_verb() {
         let text = "Airbend target creature {2}";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse 'airbend' verb");
         let effect = lower_targeted_action_ast(result.unwrap());
         match effect {
@@ -5463,7 +5465,7 @@ mod tests {
     fn parse_airbend_up_to_one_other_target_creature_or_spell() {
         let text = "Airbend up to one other target creature or spell {2}";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default())
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
             .expect("Should parse airbend");
         let effect = lower_targeted_action_ast(result);
         match effect {
@@ -5506,7 +5508,7 @@ mod tests {
     fn parse_earthbend_default_pt() {
         let text = "Earthbend target land";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some());
         let effect = lower_targeted_action_ast(result.unwrap());
         match effect {
@@ -5526,7 +5528,7 @@ mod tests {
         // Should default to "target land you control" per keyword definition.
         let text = "Earthbend 2.";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(
             result.is_some(),
             "Should parse 'earthbend' without explicit target"
@@ -5824,7 +5826,7 @@ mod tests {
     fn parse_additional_combat_phase() {
         let text = "there is an additional combat phase after this phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse additional combat phase");
         let effect = lower_imperative_family_effect(result.unwrap());
         assert!(
@@ -5843,7 +5845,7 @@ mod tests {
     fn parse_additional_combat_with_main_phase() {
         let text = "there is an additional combat phase followed by an additional main phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse additional combat + main");
         let effect = lower_imperative_family_effect(result.unwrap());
         assert!(
@@ -5862,7 +5864,7 @@ mod tests {
     fn parse_after_this_phase_additional_combat() {
         let text = "after this phase, there is an additional combat phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse 'after this phase' variant");
     }
 
@@ -5870,7 +5872,7 @@ mod tests {
     fn parse_discard_your_hand() {
         let text = "discard your hand";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard { count, .. }) => {
                 assert!(
@@ -5893,7 +5895,7 @@ mod tests {
     fn parse_discard_their_hand() {
         let text = "discard their hand";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard { count, .. }) => {
                 assert!(
@@ -5916,7 +5918,7 @@ mod tests {
     fn parse_discard_a_card_regression() {
         let text = "discard a card";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard { count, .. }) => {
                 assert!(
@@ -5932,7 +5934,7 @@ mod tests {
     fn parse_discard_two_cards_regression() {
         let text = "discard two cards";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard { count, .. }) => {
                 assert!(
@@ -5948,7 +5950,7 @@ mod tests {
     fn parse_discard_unless_creature() {
         let text = "discard two cards unless you discard a creature card";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard {
                 count,
@@ -5972,7 +5974,7 @@ mod tests {
     fn parse_discard_unless_pirate() {
         let text = "discard two cards unless you discard a Pirate card";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard {
                 count,
@@ -5997,8 +5999,8 @@ mod tests {
         // CR 701.41a: Support N on an instant/sorcery — "up to N target creatures"
         let text = "support 2";
         let lower = text.to_lowercase();
-        let ctx = ParseContext::default(); // No subject = spell context
-        let ast = parse_imperative_family_ast(text, &lower, &ctx);
+        let mut ctx = ParseContext::default(); // No subject = spell context
+        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
         assert!(
             matches!(
                 &ast,
@@ -6039,11 +6041,11 @@ mod tests {
         // CR 701.41a: Support N on a permanent — "up to N other target creatures"
         let text = "support 3";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
             ..Default::default()
         };
-        let ast = parse_imperative_family_ast(text, &lower, &ctx);
+        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
         assert!(
             matches!(
                 &ast,
@@ -6074,7 +6076,7 @@ mod tests {
     fn parse_choose_one_of_them() {
         let text = "choose one of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 1);
@@ -6088,7 +6090,7 @@ mod tests {
     fn parse_choose_two_of_those_cards() {
         let text = "choose two of those cards";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 2);
@@ -6102,7 +6104,7 @@ mod tests {
     fn parse_choose_anaphoric_opponent() {
         let text = "an opponent chooses one of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 1);
@@ -6116,7 +6118,7 @@ mod tests {
     fn parse_choose_anaphoric_you_choose() {
         let text = "you choose one of those cards";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 1);
@@ -6130,7 +6132,7 @@ mod tests {
     fn parse_choose_up_to_two_of_them() {
         let text = "choose up to two of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 2);
@@ -6145,7 +6147,7 @@ mod tests {
         // Imperial Edict pattern: "choose a creature they control"
         let text = "choose a creature they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::TargetOnly { target }) => {
                 // Should extract creature filter with controller
@@ -6167,7 +6169,7 @@ mod tests {
         let text =
             "choose from among the permanents they control an artifact, a creature, an enchantment, and a land";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
@@ -6196,7 +6198,7 @@ mod tests {
         // Cataclysmic Gearhulk: "choose an artifact, a creature, ... from among ..."
         let text = "choose an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
@@ -6228,7 +6230,7 @@ mod tests {
         use crate::types::ability::{FilterProp, TypeFilter};
         let text = "choose target artifact a player controls and target artifact card in that player's graveyard";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::TwoTargets { target_a, target_b }) => {
                 let tf_a = match &target_a {
@@ -6323,7 +6325,7 @@ mod tests {
     fn parse_choose_single_target_unchanged() {
         let text = "choose a creature they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::TargetOnly { .. })
             | Some(ChooseImperativeAst::Reparse { .. }) => {
@@ -6352,7 +6354,7 @@ mod tests {
         // refuse this and let single-target dispatch claim it.
         let text = "choose target creature and put a +1/+1 counter on it";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         // Any non-TwoTargets variant (TargetOnly with the creature filter, or
         // Reparse routing into the compound-action splitter) is fine — the
         // contract is just "no false positive on TwoTargets".

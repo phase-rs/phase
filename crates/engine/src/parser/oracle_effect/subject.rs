@@ -25,7 +25,7 @@ use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 
-pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &ParseContext) -> Option<ClauseAst> {
+pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &mut ParseContext) -> Option<ClauseAst> {
     if try_parse_targeted_controller_gain_life(text).is_some() {
         return None;
     }
@@ -106,7 +106,7 @@ fn subject_predicate_ast_from_clause<F>(
     text: &str,
     clause: ParsedEffectClause,
     build_predicate: F,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> ClauseAst
 where
     F: FnOnce(Effect, Option<Duration>, Option<Box<AbilityDefinition>>) -> PredicateAst,
@@ -148,7 +148,7 @@ fn extract_subject_text(text: &str) -> Option<String> {
 
 fn try_parse_subject_continuous_clause(
     text: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let verb_start = find_predicate_start(text)?;
     let subject = text[..verb_start].trim();
@@ -165,7 +165,7 @@ fn try_parse_subject_continuous_clause(
     build_continuous_clause(application, predicate)
 }
 
-fn try_parse_subject_become_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_subject_become_clause(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let verb_start = find_predicate_start(text)?;
     let subject = text[..verb_start].trim();
     let predicate = deconjugate_verb(text[verb_start..].trim());
@@ -179,7 +179,7 @@ fn try_parse_subject_become_clause(text: &str, ctx: &ParseContext) -> Option<Par
 
 fn try_parse_subject_restriction_clause(
     text: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
@@ -288,7 +288,7 @@ fn try_parse_subject_restriction_clause(
 /// Produces a GenericEffect with CanAttackWithDefender static mode.
 fn try_parse_can_attack_with_defender(
     text: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -324,7 +324,7 @@ fn try_parse_can_attack_with_defender(
 
 pub(super) fn parse_subject_application(
     subject: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<SubjectApplication> {
     if subject.trim().is_empty() {
         return None;
@@ -781,7 +781,7 @@ pub(super) fn parse_subject_application(
 /// ref (e.g., `controller: Opponent`). For object-type subjects, "they" refers
 /// to the triggering source. Without trigger context, "they" is an anaphoric
 /// reference to previously mentioned objects (`ParentTarget`).
-fn resolve_they_pronoun(ctx: &ParseContext) -> TargetFilter {
+fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     match &ctx.subject {
         // Player-type trigger subject: no type_filters, has controller ref
         Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {
@@ -1151,7 +1151,7 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
@@ -2055,14 +2055,14 @@ mod tests {
     /// is the seam that pulls the duration through.
     #[test]
     fn sarkhan_soul_aflame_have_become_copy() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             card_name: Some("Sarkhan, Soul Aflame".to_string()),
             ..Default::default()
         };
         let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
             "have ~ become a copy of it until end of turn, except its name is ~ and it's legendary in addition to its other types",
             AbilityKind::Spell,
-            &ctx,
+            &mut ctx,
         );
         match &*ability.effect {
             Effect::BecomeCopy {
@@ -2117,8 +2117,8 @@ mod tests {
 
     #[test]
     fn parse_subject_each_of_your_opponents() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("each of your opponents", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("each of your opponents", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(
@@ -2133,8 +2133,8 @@ mod tests {
 
     #[test]
     fn parse_subject_each_of_them() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("each of them", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("each of them", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.affected, TargetFilter::ParentTarget);
@@ -2142,8 +2142,8 @@ mod tests {
 
     #[test]
     fn parse_subject_each_of_those_creatures() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("each of those creatures", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("each of those creatures", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.affected, TargetFilter::ParentTarget);
@@ -2151,8 +2151,8 @@ mod tests {
 
     #[test]
     fn parse_subject_an_opponent() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("an opponent", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("an opponent", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(
@@ -2163,8 +2163,8 @@ mod tests {
 
     #[test]
     fn parse_subject_the_player() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("the player", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("the player", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.affected, TargetFilter::Player);
@@ -2173,8 +2173,8 @@ mod tests {
     // CR 608.2c + CR 117.3a: "its/their controller [may]" anaphoric player subject.
     #[test]
     fn parse_subject_its_controller_bare() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("its controller", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("its controller", &mut ctx);
         let app = result.expect("should recognize 'its controller'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(!app.is_optional, "no 'may' modal → not optional");
@@ -2182,8 +2182,8 @@ mod tests {
 
     #[test]
     fn parse_subject_their_controller_bare() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("their controller", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("their controller", &mut ctx);
         let app = result.expect("should recognize 'their controller'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(!app.is_optional);
@@ -2191,8 +2191,8 @@ mod tests {
 
     #[test]
     fn parse_subject_its_controller_may() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("its controller may", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("its controller may", &mut ctx);
         let app = result.expect("should recognize 'its controller may'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(
@@ -2237,8 +2237,8 @@ mod tests {
 
     #[test]
     fn parse_subject_their_controller_may() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("their controller may", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("their controller may", &mut ctx);
         let app = result.expect("should recognize 'their controller may'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(app.is_optional);
@@ -2247,8 +2247,8 @@ mod tests {
     // CR 608.2c: "that [type]" anaphoric back-references
     #[test]
     fn parse_subject_that_creature() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("That creature", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("That creature", &mut ctx);
         assert!(result.is_some(), "should recognize 'That creature'");
         let app = result.unwrap();
         assert!(
@@ -2261,8 +2261,8 @@ mod tests {
 
     #[test]
     fn parse_subject_that_land() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("that land", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("that land", &mut ctx);
         assert!(result.is_some(), "should recognize 'that land'");
         let app = result.unwrap();
         assert!(
@@ -2274,8 +2274,8 @@ mod tests {
 
     #[test]
     fn parse_subject_that_permanent() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("that permanent", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("that permanent", &mut ctx);
         assert!(result.is_some(), "should recognize 'that permanent'");
         let app = result.unwrap();
         assert!(
@@ -2289,8 +2289,8 @@ mod tests {
     fn parse_subject_that_player_unchanged() {
         // "that player" has its own handler at line 266 — ensure "that " prefix
         // doesn't shadow it (it shouldn't, since it's checked earlier)
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("that player", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("that player", &mut ctx);
         assert!(result.is_some());
         assert_eq!(result.unwrap().affected, TargetFilter::Player);
     }
@@ -2298,8 +2298,8 @@ mod tests {
     // CR 115.1d: "any number of target" subject prefix tests
     #[test]
     fn parse_subject_any_number_of_target_creatures() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("any number of target creatures", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("any number of target creatures", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert!(
@@ -2317,8 +2317,8 @@ mod tests {
 
     #[test]
     fn parse_subject_any_number_of_target_creatures_you_control() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("any number of target creatures you control", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("any number of target creatures you control", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert!(
@@ -2333,8 +2333,8 @@ mod tests {
 
     #[test]
     fn parse_subject_any_number_of_target_players() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("any number of target players", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("any number of target players", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(0)),);

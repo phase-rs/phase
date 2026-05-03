@@ -389,14 +389,14 @@ fn lower_mode_abilities_with_subject(
     kind: AbilityKind,
     subject: Option<TargetFilter>,
 ) -> Vec<AbilityDefinition> {
-    let ctx = ParseContext {
+    let mut ctx = ParseContext {
         subject,
         ..Default::default()
     };
     modes
         .iter()
         .map(|mode| {
-            let parsed = parse_effect_chain_with_context(&mode.body, kind, &ctx);
+            let parsed = parse_effect_chain_with_context(&mode.body, kind, &mut ctx);
             guard_unsupported_mode_qualifiers(&mode.body, parsed, kind)
         })
         .collect()

@@ -60,7 +60,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
             // Same choice referenced twice — shape we don't yet model.
             return None;
         }
-        let parsed = parse_effect_chain_with_context(effect_text, kind, &ParseContext::default());
+        let parsed = parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
         slots[idx] = Some(Box::new(parsed));
         walk = rest.trim_start();
     }

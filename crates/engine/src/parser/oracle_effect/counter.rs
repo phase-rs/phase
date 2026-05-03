@@ -76,7 +76,7 @@ pub(super) type PutCounterChain<'a> = (
 pub(super) fn try_parse_put_counter_chain<'a>(
     lower: &str,
     text: &'a str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<PutCounterChain<'a>> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let mut remaining = after_put.trim_start();
@@ -136,7 +136,7 @@ fn resolve_counter_placement_target<'a>(
     on_rest: &str,
     lower: &str,
     text: &'a str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str, Option<MultiTargetSpec>) {
     // The byte-offset math below (`lower.len() - on_rest.len()` → `&text[offset..]`)
     // requires that `text` and `lower` are byte-for-byte length-equal. That holds
@@ -223,7 +223,7 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
 pub(super) fn try_parse_put_counter<'a>(
     lower: &str,
     text: &'a str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<(Effect, &'a str, Option<MultiTargetSpec>)> {
     // "put N {type} counter(s) on {target}"
     // Use parse_count_expr to handle Variable("X") for kicker-X patterns.
@@ -328,7 +328,7 @@ fn try_strip_a_number_of(input: &str) -> Option<&str> {
         .ok()
 }
 
-pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     // "remove N {type} counter(s) from {target}" or "remove all counters from {target}"
     // CR 122.1: Counter type is optional — "remove all counters" removes every type.
     let ((), after_remove) = nom_on_lower(lower, lower, |i| value((), tag("remove ")).parse(i))?;
@@ -444,7 +444,7 @@ pub(crate) fn normalize_counter_type(raw: &str) -> String {
 
 /// Resolve a counter target from text: self-ref, pronoun, or parse_target.
 /// Shared by put/remove/multiply counter parsers.
-fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
+fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
     if is_self_ref(text) {
         TargetFilter::SelfRef
     } else if is_it_pronoun(text) {
@@ -469,7 +469,7 @@ fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
 /// gating: a trigger whose subject is `SelfRef`/`Any` (or no subject) keeps
 /// the legacy `ParentTarget` semantics — used for spells/abilities like
 /// Twinflame Strive where "that creature" refers back to the parent target.
-fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &ParseContext) -> Option<&'a str> {
+fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<&'a str> {
     let (rest, _): (&'a str, &'a str) = tag::<_, _, VerboseError<&'a str>>("that creature")
         .parse(text)
         .ok()?;
@@ -535,7 +535,7 @@ pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<
 
 /// CR 122.5: Parse "move [all/N] [type] counter(s) from [source] onto/to [target]".
 /// Handles Bioshift, Fate Transfer, Nesting Grounds, Simic Fluxmage, etc.
-pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let ((), after_move) = nom_on_lower(lower, lower, |i| value((), tag("move ")).parse(i))?;
     let after_move = after_move.trim();
 
@@ -604,7 +604,7 @@ pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &ParseContext) -> O
 }
 
 /// CR 701.10e: Parse "double the number of {type} counters on {target}".
-pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let ((), rest) = nom_on_lower(lower, lower, |i| {
         value((), tag("double the number of ")).parse(i)
     })?;
@@ -634,7 +634,7 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &ParseContext) -> Opt
 
 /// CR 701.10: Dispatch "double the ..." to counter-doubling, life-doubling,
 /// mana-doubling, or P/T-doubling.
-pub(super) fn try_parse_double_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     // CR 701.10e: "double the number of each kind of counter on ..." → all counter types
     if let Some(((), rest)) = nom_on_lower(lower, lower, |i| {
         value((), tag("double the number of each kind of counter on ")).parse(i)
@@ -811,7 +811,7 @@ mod tests {
     fn remove_counter_untyped_all() {
         // Vampire Hexmage: "remove all counters from target permanent"
         let result =
-            try_parse_remove_counter("remove all counters from target permanent", &default_ctx());
+            try_parse_remove_counter("remove all counters from target permanent", &mut default_ctx());
         let Some(Effect::RemoveCounter {
             counter_type,
             count,
@@ -830,7 +830,7 @@ mod tests {
         // Thrull Parasite: "remove a counter from target nonland permanent"
         let result = try_parse_remove_counter(
             "remove a counter from target nonland permanent",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::RemoveCounter {
             counter_type,
@@ -849,7 +849,7 @@ mod tests {
         // Heartless Act mode 2: "remove up to three counters from target creature"
         let result = try_parse_remove_counter(
             "remove up to three counters from target creature",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::RemoveCounter {
             counter_type,
@@ -881,7 +881,7 @@ mod tests {
             "remove all of them",
         ];
         for input in cases {
-            let result = try_parse_remove_counter(input, &default_ctx());
+            let result = try_parse_remove_counter(input, &mut default_ctx());
             let Some(Effect::RemoveCounter {
                 counter_type,
                 count,
@@ -902,7 +902,7 @@ mod tests {
     #[test]
     fn remove_counter_typed_still_works() {
         // Existing pattern: "remove a +1/+1 counter from ~"
-        let result = try_parse_remove_counter("remove a +1/+1 counter from ~", &default_ctx());
+        let result = try_parse_remove_counter("remove a +1/+1 counter from ~", &mut default_ctx());
         let Some(Effect::RemoveCounter {
             counter_type,
             count,
@@ -920,7 +920,7 @@ mod tests {
         // Simic Fluxmage: "move a +1/+1 counter from this creature onto target creature"
         let result = try_parse_move_counters_from(
             "move a +1/+1 counter from this creature onto target creature",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::MoveCounters {
             source,
@@ -940,7 +940,7 @@ mod tests {
         // Fate Transfer: "move all counters from target creature onto another target creature"
         let result = try_parse_move_counters_from(
             "move all counters from target creature onto another target creature",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::MoveCounters { counter_type, .. }) = result else {
             panic!("expected MoveCounters, got {result:?}");
@@ -953,7 +953,7 @@ mod tests {
         // Cytoplast Root-Kin: "move a +1/+1 counter from target creature you control onto this creature"
         let result = try_parse_move_counters_from(
             "move a +1/+1 counter from target creature you control onto this creature",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::MoveCounters {
             source,
@@ -980,7 +980,7 @@ mod tests {
         let (effect, _, _) = try_parse_put_counter(
             "put a number of +1/+1 counters equal to its power on each creature you control named Gruff Triplets",
             "put a number of +1/+1 counters equal to its power on each creature you control named Gruff Triplets",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1025,7 +1025,7 @@ mod tests {
         let (effect, _, multi) = try_parse_put_counter(
             "put a number of +1/+1 counters equal to that spell's mana value on up to one target creature",
             "put a number of +1/+1 counters equal to that spell's mana value on up to one target creature",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1061,7 +1061,7 @@ mod tests {
         let (_effect, _, multi) = try_parse_put_counter(
             "put a +1/+1 counter on each of up to x target creatures",
             "put a +1/+1 counter on each of up to x target creatures",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
 
@@ -1103,7 +1103,7 @@ mod tests {
         let (effect, _, _) = try_parse_put_counter(
             "put a number of +1/+1 counters equal to the number of cards in your hand on ~",
             "put a number of +1/+1 counters equal to the number of cards in your hand on ~",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1142,7 +1142,7 @@ mod tests {
         let (effect, rem, _) = try_parse_put_counter(
             "put a corpse counter on this creature for each creature that died this turn",
             "put a corpse counter on this creature for each creature that died this turn",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1182,7 +1182,7 @@ mod tests {
         let (effect, rem, _) = try_parse_put_counter(
             "put two charge counters on target artifact for each card in your hand",
             "put two charge counters on target artifact for each card in your hand",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
