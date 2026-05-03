@@ -13,6 +13,7 @@ server-core = { path = "../server-core" }
 engine = { path = "../engine" }
 phase-ai = { path = "../phase-ai" }
 seat-reducer = { path = "../seat-reducer" }
+draft-core = { path = "../draft-core" }
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive", "env"] }
 http = "1"

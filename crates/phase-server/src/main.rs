@@ -23,6 +23,7 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use http::HeaderValue;
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
+use server_core::draft_session::DraftSessionManager;
 use server_core::lobby::{LobbyManager, RegisterGameRequest};
 use server_core::protocol::{
     build_commit, ClientMessage, ServerMessage, ServerMode, PROTOCOL_VERSION,
@@ -41,6 +42,7 @@ type SharedLobby = Arc<Mutex<LobbyManager>>;
 type SharedLobbySubscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<ServerMessage>>>>;
 type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
+type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
 
 /// Server's advertised role, selected at startup via `--lobby-only`. Copied
 /// into every handler so the dispatch path can gate disabled messages in
@@ -143,6 +145,10 @@ struct SocketIdentity {
     /// 5-minute expiry. Empty in `Full` mode (handled via `game_code` +
     /// `SessionManager` cleanup).
     lobby_host_game: Option<String>,
+    /// Set when this socket is participating in a draft session.
+    draft_code: Option<String>,
+    draft_seat: Option<usize>,
+    draft_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +273,15 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGameWithPassword { .. }
         | ClientMessage::LookupJoinTarget { .. } => None,
 
+        // Draft messages — Full-only (draft sessions are server-hosted).
+        ClientMessage::CreateDraftWithSettings { .. }
+        | ClientMessage::JoinDraftWithPassword { .. }
+        | ClientMessage::DraftAction { .. }
+        | ClientMessage::ReconnectDraft { .. } => match mode {
+            ServerMode::Full => None,
+            ServerMode::LobbyOnly => Some(LOBBY_ONLY_REJECTION),
+        },
+
         // Lobby-only-exclusive.
         ClientMessage::UpdateLobbyMetadata { .. } | ClientMessage::UnregisterLobby { .. } => {
             match mode {
@@ -325,6 +340,7 @@ async fn main() {
     }
 
     let state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
+    let draft_sessions: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
     let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
     let lobby: SharedLobby = Arc::new(Mutex::new(LobbyManager::new()));
     let lobby_subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
@@ -489,8 +505,9 @@ async fn main() {
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
         .layer(cors)
-        .with_state((
-            state,
+        .with_state(AppState {
+            sessions: state,
+            draft_sessions,
             connections,
             db,
             lobby,
@@ -498,7 +515,7 @@ async fn main() {
             player_count,
             game_db,
             mode,
-        ));
+        });
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
         .await
@@ -557,24 +574,24 @@ async fn health() -> &'static str {
     "ok"
 }
 
-type AppState = (
-    SharedState,
-    SharedConnections,
-    SharedDb,
-    SharedLobby,
-    SharedLobbySubscribers,
-    SharedPlayerCount,
-    SharedGameDb,
-    Mode,
-);
+#[derive(Clone)]
+struct AppState {
+    sessions: SharedState,
+    draft_sessions: SharedDraftState,
+    connections: SharedConnections,
+    db: SharedDb,
+    lobby: SharedLobby,
+    lobby_subscribers: SharedLobbySubscribers,
+    player_count: SharedPlayerCount,
+    game_db: SharedGameDb,
+    mode: Mode,
+}
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State((state, connections, db, lobby, lobby_subscribers, player_count, game_db, mode)): State<
-        AppState,
-    >,
+    State(app_state): State<AppState>,
 ) -> impl IntoResponse {
-    let current = player_count.load(Ordering::Relaxed);
+    let current = app_state.player_count.load(Ordering::Relaxed);
     if current >= MAX_CONNECTIONS {
         warn!(
             online_count = current,
@@ -588,14 +605,15 @@ async fn ws_handler(
         .on_upgrade(move |socket| {
             handle_socket(
                 socket,
-                state,
-                connections,
-                db,
-                lobby,
-                lobby_subscribers,
-                player_count,
-                game_db,
-                mode,
+                app_state.sessions,
+                app_state.draft_sessions,
+                app_state.connections,
+                app_state.db,
+                app_state.lobby,
+                app_state.lobby_subscribers,
+                app_state.player_count,
+                app_state.game_db,
+                app_state.mode,
             )
         })
         .into_response()
@@ -605,6 +623,7 @@ async fn ws_handler(
 async fn handle_socket(
     mut socket: WebSocket,
     state: SharedState,
+    draft_state: SharedDraftState,
     connections: SharedConnections,
     db: SharedDb,
     lobby: SharedLobby,
@@ -627,6 +646,9 @@ async fn handle_socket(
         session_span: None,
         client_hello: None,
         lobby_host_game: None,
+        draft_code: None,
+        draft_seat: None,
+        draft_token: None,
     };
     let mut rate_limiter = RateLimiter::new();
 
@@ -693,6 +715,7 @@ async fn handle_socket(
                             client_msg,
                             &mut socket,
                             &state,
+                            &draft_state,
                             &connections,
                             &db,
                             &lobby,
@@ -718,6 +741,12 @@ async fn handle_socket(
         player = ?identity.player_id,
         "client disconnected"
     );
+    // Handle draft session disconnect
+    if let (Some(draft_code), Some(seat)) = (&identity.draft_code, identity.draft_seat) {
+        let mut mgr = draft_state.lock().await;
+        mgr.handle_disconnect(draft_code, seat);
+    }
+
     if let (Some(game_code), Some(player_id)) = (&identity.game_code, &identity.player_id) {
         let mut mgr = state.lock().await;
         mgr.handle_disconnect(game_code, *player_id);
@@ -1018,6 +1047,7 @@ async fn handle_client_message(
     client_msg: ClientMessage,
     socket: &mut WebSocket,
     state: &SharedState,
+    draft_state: &SharedDraftState,
     connections: &SharedConnections,
     db: &SharedDb,
     lobby: &SharedLobby,
@@ -2825,6 +2855,16 @@ async fn handle_client_message(
             }
         }
 
+        ClientMessage::CreateDraftWithSettings { .. }
+        | ClientMessage::JoinDraftWithPassword { .. }
+        | ClientMessage::DraftAction { .. }
+        | ClientMessage::ReconnectDraft { .. } => {
+            // Draft message handlers are implemented in Task 2.
+            // For now, suppress the exhaustive match error.
+            let _ = draft_state;
+            warn!("draft message received but handlers not yet wired");
+        }
+
         ClientMessage::UnregisterLobby { game_code } => {
             // Ownership check: only the socket that registered this entry
             // (stored in `identity.lobby_host_game`) may tear it down.
@@ -2902,6 +2942,30 @@ mod mode_gate_tests {
             ClientMessage::SpectatorJoin {
                 game_code: "X".into(),
             },
+            ClientMessage::CreateDraftWithSettings {
+                display_name: "A".into(),
+                set_code: "TST".into(),
+                kind: draft_core::types::DraftKind::Premier,
+                public: true,
+                password: None,
+                timer_seconds: None,
+                tournament_format: draft_core::types::TournamentFormat::Swiss,
+                pod_policy: draft_core::types::PodPolicy::Competitive,
+                pod_size: 8,
+            },
+            ClientMessage::JoinDraftWithPassword {
+                draft_code: "X".into(),
+                display_name: "B".into(),
+                password: None,
+            },
+            ClientMessage::DraftAction {
+                draft_code: "X".into(),
+                action: draft_core::types::DraftAction::StartDraft,
+            },
+            ClientMessage::ReconnectDraft {
+                draft_code: "X".into(),
+                player_token: "t".into(),
+            },
         ];
         for msg in disabled {
             assert!(
@@ -2968,6 +3032,21 @@ mod mode_gate_tests {
             },
             ClientMessage::Concede,
             ClientMessage::Ping { timestamp: 0 },
+            ClientMessage::CreateDraftWithSettings {
+                display_name: "A".into(),
+                set_code: "TST".into(),
+                kind: draft_core::types::DraftKind::Premier,
+                public: true,
+                password: None,
+                timer_seconds: None,
+                tournament_format: draft_core::types::TournamentFormat::Swiss,
+                pod_policy: draft_core::types::PodPolicy::Competitive,
+                pod_size: 8,
+            },
+            ClientMessage::DraftAction {
+                draft_code: "X".into(),
+                action: draft_core::types::DraftAction::StartDraft,
+            },
         ];
         for m in msgs {
             assert!(reject_if_disabled(&m, ServerMode::Full).is_none());
