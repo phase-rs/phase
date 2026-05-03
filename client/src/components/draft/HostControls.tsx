@@ -19,6 +19,10 @@ export function HostControls() {
   const overrideMatchResult = useMultiplayerDraftStore(
     (s) => s.overrideMatchResult,
   );
+  const replaceSeatWithBot = useMultiplayerDraftStore(
+    (s) => s.replaceSeatWithBot,
+  );
+  const seats = useMultiplayerDraftStore((s) => s.view?.seats ?? []);
 
   if (role !== "host") return null;
 
@@ -30,8 +34,18 @@ export function HostControls() {
     podPolicy === "Casual" &&
     phase === "matchInProgress" &&
     pairings.length > 0;
+  const humanSeats = seats.filter((s) => !s.is_bot);
+  const showKickReplace =
+    humanSeats.length > 0 &&
+    (phase === "matchInProgress" || phase === "roundComplete");
 
-  if (!showPauseResume && !showAdvanceRound && !showOverride) return null;
+  if (
+    !showPauseResume &&
+    !showAdvanceRound &&
+    !showOverride &&
+    !showKickReplace
+  )
+    return null;
 
   return (
     <div className="fixed bottom-4 right-4 z-50 rounded-xl border border-white/10 bg-gray-900/95 backdrop-blur-sm p-3 flex flex-col gap-2 min-w-[180px]">
@@ -90,6 +104,22 @@ export function HostControls() {
                 </button>
               </div>
             ))}
+        </div>
+      )}
+
+      {/* Kick + Replace with Bot — D-08 */}
+      {showKickReplace && (
+        <div className="flex flex-col gap-1">
+          <div className="text-xs text-white/40">Kick + Replace</div>
+          {humanSeats.map((s) => (
+            <button
+              key={s.seat_index}
+              onClick={() => replaceSeatWithBot(s.seat_index)}
+              className="text-left px-2 py-1 text-xs text-red-400/70 hover:text-red-300 hover:bg-white/5 rounded transition-colors"
+            >
+              Replace {s.display_name} with Bot
+            </button>
+          ))}
         </div>
       )}
     </div>
