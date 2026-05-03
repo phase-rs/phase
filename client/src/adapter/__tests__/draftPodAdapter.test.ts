@@ -30,7 +30,7 @@ vi.mock("../../services/draftPersistence", () => ({
 }));
 
 // Mock P2PDraftHost
-const mockHostOnEvent = vi.fn(() => vi.fn());
+const mockHostOnEvent = vi.fn((_handler: (event: Record<string, unknown>) => void) => vi.fn());
 const mockHostInitialize = vi.fn(async () => {});
 const mockHostStartDraft = vi.fn(async () => {});
 const mockHostSubmitHostPick = vi.fn(async () => mockView("Drafting"));
@@ -62,7 +62,7 @@ vi.mock("../p2p-draft-host", () => ({
 }));
 
 // Mock P2PDraftGuest
-const mockGuestOnEvent = vi.fn(() => vi.fn());
+const mockGuestOnEvent = vi.fn((_handler: (event: Record<string, unknown>) => void) => vi.fn());
 const mockGuestInitialize = vi.fn(async () => {});
 const mockGuestSubmitPick = vi.fn(async () => {});
 const mockGuestSubmitDeck = vi.fn(async () => {});
