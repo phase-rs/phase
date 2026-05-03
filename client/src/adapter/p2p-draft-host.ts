@@ -107,6 +107,11 @@ export class P2PDraftHost {
   private podPolicy: PodPolicy = "Competitive";
   private bo3State = new Map<string, Bo3MatchState>();
 
+  // Server backup upload state (D-08)
+  private backupEndpoint: string | null = null;
+  private picksSinceLastBackup = 0;
+  private static readonly BACKUP_INTERVAL_PICKS = 5;
+
   constructor(
     private readonly hostPeer: Peer,
     private readonly onGuestConnected: (
@@ -119,9 +124,11 @@ export class P2PDraftHost {
     private readonly gracePeriodMs: number = DRAFT_GRACE_PERIOD_MS,
     private readonly persistenceId?: string,
     private readonly roomCode?: string,
+    backupEndpoint?: string,
   ) {
     // Host is always seat 0
     this.seatNames.set(0, hostDisplayName);
+    this.backupEndpoint = backupEndpoint ?? null;
   }
 
   // ── Event emitter ──────────────────────────────────────────────────
@@ -715,6 +722,9 @@ export class P2PDraftHost {
       if (view.status === "RoundComplete" || view.status === "Complete") {
         const hostView = await this.adapter.getViewForSeat(0);
         this.emit({ type: "viewUpdated", view: hostView });
+        if (view.status === "Complete") {
+          void this.cleanupServerBackup();
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -982,10 +992,52 @@ export class P2PDraftHost {
         };
 
         await saveDraftHostSession(this.persistenceId!, snapshot);
+
+        // Server backup upload (D-08, T-60-11: rate-limited to every N picks)
+        this.picksSinceLastBackup++;
+        if (this.backupEndpoint && this.picksSinceLastBackup >= P2PDraftHost.BACKUP_INTERVAL_PICKS) {
+          this.picksSinceLastBackup = 0;
+          void this.uploadBackupSnapshot(snapshot);
+        }
       } catch (err) {
         console.warn("[P2PDraftHost] persist failed:", err);
       }
     })();
+  }
+
+  /**
+   * Upload a backup snapshot to the phase-server (best-effort, D-08).
+   * Failures are silently logged — P2P works without server backup.
+   */
+  private async uploadBackupSnapshot(snapshot: PersistedDraftHostSession): Promise<void> {
+    if (!this.backupEndpoint || !this.draftCode) return;
+    try {
+      await fetch(`${this.backupEndpoint}/p2p-draft-backup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          draft_code: this.draftCode,
+          host_peer_id: this.hostPeer.id,
+          snapshot_json: JSON.stringify(snapshot),
+        }),
+      });
+    } catch (err) {
+      console.warn("[P2PDraftHost] server backup upload failed:", err);
+    }
+  }
+
+  /**
+   * Delete the server backup on clean draft completion (best-effort).
+   */
+  private async cleanupServerBackup(): Promise<void> {
+    if (!this.backupEndpoint || !this.draftCode) return;
+    try {
+      await fetch(`${this.backupEndpoint}/p2p-draft-backup/${this.draftCode}`, {
+        method: "DELETE",
+      });
+    } catch {
+      // Best-effort cleanup
+    }
   }
 
   /**
@@ -1053,6 +1105,7 @@ export class P2PDraftHost {
     if (this.persistenceId) {
       void clearDraftHostSession(this.persistenceId);
     }
+    void this.cleanupServerBackup();
     this.dispose();
     try {
       this.hostPeer.destroy();
