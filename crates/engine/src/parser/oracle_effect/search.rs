@@ -16,7 +16,7 @@ use super::super::oracle_util::{
 use super::{capitalize, scan_contains_phrase};
 use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::{push_typed_diagnostic, push_warning};
+use crate::parser::oracle_warnings::push_diagnostic;
 use crate::types::ability::{
     ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,
     SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
@@ -683,11 +683,7 @@ fn parse_search_specialized_type_word(type_word: &str) -> TargetFilter {
         return filter;
     }
 
-    push_warning(format!(
-        "target-fallback: unrecognized search filter '{}'",
-        type_word
-    ));
-    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+    push_diagnostic(OracleDiagnostic::TargetFallback {
         context: "unrecognized search filter".into(),
         text: type_word.into(),
         line_index: 0,
@@ -1218,11 +1214,7 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
                 "enchantment" => TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
                 "artifact" => TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
                 _ => {
-                    push_warning(format!(
-                        "target-fallback: unrecognized inner type '{}' in different-name filter",
-                        inner_type
-                    ));
-                    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                    push_diagnostic(OracleDiagnostic::TargetFallback {
                         context: "unrecognized inner type in different-name filter".into(),
                         text: inner_type.into(),
                         line_index: 0,
@@ -1243,11 +1235,7 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         // Dispatch-loop diagnostic: unmatched trailing text indicates a parser gap
         // (e.g., novel "with …" suffix phrasing). Emit a warning so gaps surface
         // in coverage output instead of silently dropping filter constraints.
-        push_warning(format!(
-            "target-fallback: search-filter-suffix unmatched: '{}'",
-            remaining
-        ));
-        push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+        push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "search-filter-suffix unmatched".into(),
             text: remaining.into(),
             line_index: 0,
@@ -1370,7 +1358,7 @@ mod tests {
         // extracted by parse_type_phrase; what follows the filter clause
         // (", put it onto the battlefield, then shuffle") is handled by the
         // downstream sequence parser — not a filter-suffix gap.
-        use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
+        use crate::parser::oracle_warnings::{clear_diagnostics, take_diagnostics};
         for text in [
             "creature card, put it onto the battlefield, then shuffle",
             "land card, reveal it, put it into your hand, then shuffle",
@@ -1379,14 +1367,14 @@ mod tests {
             "creature card. exile it",
             "Vampire cards instead",
         ] {
-            clear_warnings();
+            clear_diagnostics();
             let _ = parse_search_filter(text);
-            let warnings = take_warnings();
+            let diagnostics = take_diagnostics();
             assert!(
-                !warnings
+                !diagnostics
                     .iter()
-                    .any(|w| w.contains("search-filter-suffix unmatched")),
-                "unexpected filter-suffix warning for {text:?}: {warnings:?}"
+                    .any(|d| d.to_string().contains("search-filter-suffix unmatched")), // allow-noncombinator: test assertion matching diagnostic content
+                "unexpected filter-suffix warning for {text:?}: {diagnostics:?}"
             );
         }
     }
@@ -1397,17 +1385,18 @@ mod tests {
         // doesn't match any known filter-suffix pattern AND doesn't look like an
         // action-chain continuation (no leading comma / period / "then"), a
         // warning must still fire so coverage reports surface parser gaps.
-        use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
-        clear_warnings();
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+        use crate::parser::oracle_warnings::{clear_diagnostics, take_diagnostics};
+        clear_diagnostics();
         let mut suffix = SearchSuffixConstraints::default();
         // Invented suffix that won't hit any existing filter-suffix pattern.
         parse_search_filter_suffixes(" with unrecognized flibbertigibbet suffix", &mut suffix);
-        let warnings = take_warnings();
+        let diagnostics = take_diagnostics();
         assert!(
-            warnings
+            diagnostics
                 .iter()
-                .any(|w| w.contains("search-filter-suffix unmatched")),
-            "expected filter-suffix warning for novel grammar, got {warnings:?}"
+                .any(|d| matches!(d, OracleDiagnostic::TargetFallback { context, .. } if context.contains("search-filter-suffix"))), // allow-noncombinator: test assertion matching diagnostic context field
+            "expected filter-suffix diagnostic for novel grammar, got {diagnostics:?}"
         );
     }
 

@@ -2652,15 +2652,19 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         let mut gap_details = extract_gap_details(&parse_details);
         // Append parse-warning gaps so they appear in per-card gap reporting.
         for warning in &face.parse_warnings {
-            if warning.starts_with("target-fallback") {
-                let handler = if warning.contains("trigger subject") {
+            if let crate::parser::oracle_ir::diagnostic::OracleDiagnostic::TargetFallback {
+                context,
+                ..
+            } = warning
+            {
+                let handler = if context.contains("trigger subject") {
                     "ParseWarning:trigger-subject".to_string()
                 } else {
                     "ParseWarning:target-fallback".to_string()
                 };
                 gap_details.push(GapDetail {
                     handler,
-                    source_text: Some(warning.clone()),
+                    source_text: Some(warning.to_string()),
                 });
             }
         }
@@ -3246,33 +3250,24 @@ fn check_resolver_features(face: &CardFace, missing: &mut Vec<String>) {
 
 /// Target-fallback warnings indicate degraded targeting (TargetFilter::Any instead of a
 /// specific filter). Cards with these have silently incorrect behavior at runtime.
-fn check_parse_warnings(warnings: &[String], missing: &mut Vec<String>) {
+fn check_parse_warnings(
+    warnings: &[crate::parser::oracle_ir::diagnostic::OracleDiagnostic],
+    missing: &mut Vec<String>,
+) {
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     for warning in warnings {
-        if warning.starts_with("target-fallback") {
-            // Extract the sub-category for groupable gap labels:
-            // "target-fallback: parse_target could not classify 'foo'" → "ParseWarning:parse_target"
-            // "target-fallback: trigger subject parse fell back..." → "ParseWarning:trigger-subject"
-            let label = if warning.contains("trigger subject") {
-                "ParseWarning:trigger-subject".to_string()
-            } else if warning.contains("parse_target could not classify") {
-                "ParseWarning:target-fallback".to_string()
-            } else {
-                format!(
-                    "ParseWarning:{}",
-                    warning
-                        .split(':')
-                        .nth(1)
-                        .unwrap_or("unknown")
-                        .trim()
-                        .split('\'')
-                        .next()
-                        .unwrap_or("unknown")
-                        .trim()
-                )
-            };
-            if !missing.contains(&label) {
-                missing.push(label);
+        let label = match warning {
+            OracleDiagnostic::TargetFallback { context, .. } => {
+                if context.contains("trigger subject") {
+                    "ParseWarning:trigger-subject".to_string()
+                } else {
+                    "ParseWarning:target-fallback".to_string()
+                }
             }
+            _ => continue,
+        };
+        if !missing.contains(&label) {
+            missing.push(label);
         }
     }
 }

@@ -27,7 +27,7 @@ use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
     SELF_REF_TYPE_PHRASES,
 };
-use super::oracle_warnings::{push_typed_diagnostic, push_warning};
+use super::oracle_warnings::push_diagnostic;
 
 /// Run a nom combinator on lowercased text, returning the result and
 /// remainder from the original (mixed-case) text.
@@ -801,11 +801,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
             rest,
         )
     } else {
-        push_warning(format!(
-            "target-fallback: parse_target could not classify '{}'",
-            text.trim()
-        ));
-        push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+        push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "parse_target could not classify".into(),
             text: text.trim().into(),
             line_index: 0,
@@ -3602,7 +3598,8 @@ fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::parser::oracle_warnings::{clear_diagnostics, take_diagnostics};
     use crate::types::counter::CounterType;
 
     #[test]
@@ -3629,13 +3626,14 @@ mod tests {
 
     #[test]
     fn parse_target_warns_on_any_fallback() {
-        clear_warnings();
+        clear_diagnostics();
         let (filter, rest) = parse_target("foobar");
         assert_eq!(filter, TargetFilter::Any);
         assert_eq!(rest, "foobar");
-        assert!(take_warnings()
-            .iter()
-            .any(|warning| warning == "target-fallback: parse_target could not classify 'foobar'"));
+        assert!(take_diagnostics().iter().any(
+            |d| matches!(d, OracleDiagnostic::TargetFallback { context, text, .. }
+                if context == "parse_target could not classify" && text == "foobar")
+        ));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use super::super::oracle_util::{parse_comparison_suffix, TextPair};
 use super::counter::normalize_counter_type;
 use super::{parse_effect_chain, scan_contains_phrase};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::{push_typed_diagnostic, push_warning};
+use crate::parser::oracle_warnings::push_diagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
     Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
@@ -1504,10 +1504,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         StaticCondition::SourceEnteredThisTurn => None,
         StaticCondition::IsPresent { filter } => {
             let filter = filter.clone().unwrap_or_else(|| {
-                push_warning(
-                    "bare-filter: IsPresent condition has no filter, defaulting to Any".to_string(),
-                );
-                push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                push_diagnostic(OracleDiagnostic::TargetFallback {
                     context: "IsPresent condition has no filter".into(),
                     text: String::new(),
                     line_index: 0,
@@ -1540,11 +1537,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
             }),
             StaticCondition::IsPresent { filter } => {
                 let filter = filter.clone().unwrap_or_else(|| {
-                    push_warning(
-                        "bare-filter: NegatedIsPresent has no filter, defaulting to Any"
-                            .to_string(),
-                    );
-                    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                    push_diagnostic(OracleDiagnostic::TargetFallback {
                         context: "NegatedIsPresent has no filter".into(),
                         text: String::new(),
                         line_index: 0,

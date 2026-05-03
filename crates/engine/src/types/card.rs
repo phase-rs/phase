@@ -7,6 +7,7 @@ use super::ability::{
 use super::card_type::CardType;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 
 /// Diagnostic metadata for a card face. Grouped here to keep debug/pipeline
 /// concerns separate from game-logic fields. Omitted from JSON when empty.
@@ -96,7 +97,7 @@ pub struct CardFace {
     /// Parser diagnostic warnings — silent fallbacks, ignored remainders, bare filters.
     /// Populated at build time by the Oracle parser warning accumulator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parse_warnings: Vec<String>,
+    pub parse_warnings: Vec<OracleDiagnostic>,
     /// Diagnostic metadata (forge source counts, etc.). Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "CardMetadata::is_empty")]
     pub metadata: CardMetadata,

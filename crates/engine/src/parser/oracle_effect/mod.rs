@@ -38,9 +38,7 @@ use super::oracle_util::{
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::{
-    push_typed_diagnostic, push_warning, snapshot_typed_diagnostics, truncate_typed_diagnostics,
-};
+use crate::parser::oracle_warnings::{push_diagnostic, snapshot_diagnostics, truncate_diagnostics};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
@@ -759,11 +757,7 @@ fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> 
 /// "target creature" → ParentTarget (named target in the condition).
 fn parse_delayed_subject_filter(condition_text: &str) -> TargetFilter {
     scan_delayed_subject(condition_text).unwrap_or_else(|| {
-        push_warning(format!(
-            "target-fallback: unrecognized delayed subject '{}'",
-            condition_text
-        ));
-        push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+        push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized delayed subject".into(),
             text: condition_text.trim().into(),
             line_index: 0,
@@ -1404,8 +1398,7 @@ fn try_parse_choose_one_of_inline(
     // failed trial pollutes the committed warnings buffer with spurious
     // gaps from a malformed branch (e.g., "return a red" left half from
     // splitting "return a red or green creature" at the wrong " or ").
-    let warnings_snapshot = super::oracle_warnings::snapshot_warnings();
-    let typed_snapshot = snapshot_typed_diagnostics();
+    let diagnostics_snapshot = snapshot_diagnostics();
     let left_clause = parse_effect_clause(left_orig, ctx);
     let right_clause = parse_effect_clause(right_orig, ctx);
 
@@ -1415,8 +1408,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::Unimplemented { .. })
         || matches!(right_clause.effect, Effect::Unimplemented { .. })
     {
-        super::oracle_warnings::truncate_warnings(warnings_snapshot);
-        truncate_typed_diagnostics(typed_snapshot);
+        truncate_diagnostics(diagnostics_snapshot);
         return None;
     }
 
@@ -1426,8 +1418,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::TargetOnly { .. })
         || matches!(right_clause.effect, Effect::TargetOnly { .. })
     {
-        super::oracle_warnings::truncate_warnings(warnings_snapshot);
-        truncate_typed_diagnostics(typed_snapshot);
+        truncate_diagnostics(diagnostics_snapshot);
         return None;
     }
 
@@ -2384,11 +2375,7 @@ fn try_parse_mass_forced_block(tp: TextPair) -> Option<ParsedEffectClause> {
     let (target, remainder) = parse_target(target_text);
     let (target, remainder) = refine_damage_target_remainder(target, remainder);
     if !remainder.trim().is_empty() {
-        push_warning(format!(
-            "ignored-remainder: '{}' after target parse in must-block",
-            remainder.trim()
-        ));
-        push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+        push_diagnostic(OracleDiagnostic::IgnoredRemainder {
             text: remainder.trim().into(),
             parser: "must-block".into(),
             line_index: 0,
@@ -2632,11 +2619,7 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
         let target_text = &tp.original[..idx];
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
-            push_warning(format!(
-                "ignored-remainder: '{}' after target parse in owner-puts-it",
-                remainder.trim()
-            ));
-            push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+            push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                 text: remainder.trim().into(),
                 parser: "owner-puts-it".into(),
                 line_index: 0,
@@ -2657,11 +2640,7 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
             let target_text = &rest.original[..idx];
             let (filter, remainder) = parse_target(target_text);
             if !remainder.trim().is_empty() {
-                push_warning(format!(
-                    "ignored-remainder: '{}' after target parse in owner-puts-it",
-                    remainder.trim()
-                ));
-                push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                     text: remainder.trim().into(),
                     parser: "owner-puts-it".into(),
                     line_index: 0,
@@ -2739,11 +2718,7 @@ fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
         let target_text = &tp.original[..idx];
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
-            push_warning(format!(
-                "ignored-remainder: '{}' after target parse in owner-of-target",
-                remainder.trim()
-            ));
-            push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+            push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                 text: remainder.trim().into(),
                 parser: "owner-of-target".into(),
                 line_index: 0,
@@ -2764,11 +2739,7 @@ fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
                 let target_text = &rest.original[..idx];
                 let (filter, remainder) = parse_target(target_text);
                 if !remainder.trim().is_empty() {
-                    push_warning(format!(
-                        "ignored-remainder: '{}' after target parse in owner-of-target",
-                        remainder.trim()
-                    ));
-                    push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                    push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                         text: remainder.trim().into(),
                         parser: "owner-of-target".into(),
                         line_index: 0,
@@ -3268,11 +3239,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
         let target = parse_subject_application(counter_target_text, &ParseContext::default())
             .map(|app| app.affected)
             .unwrap_or_else(|| {
-                push_warning(format!(
-                    "target-fallback: unrecognized counter target '{}'",
-                    after_counter_on
-                ));
-                push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                push_diagnostic(OracleDiagnostic::TargetFallback {
                     context: "unrecognized counter target".into(),
                     text: after_counter_on.trim().into(),
                     line_index: 0,
@@ -6153,11 +6120,7 @@ fn parse_choose_filter(lower: &str) -> TargetFilter {
     if let Some(f) = type_str_to_target_filter(cleaned) {
         return f;
     }
-    push_warning(format!(
-        "target-fallback: unrecognized type string '{}'",
-        cleaned
-    ));
-    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+    push_diagnostic(OracleDiagnostic::TargetFallback {
         context: "unrecognized type string".into(),
         text: cleaned.into(),
         line_index: 0,
@@ -6274,11 +6237,7 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
     {
         Some((_, before)) => before,
         None => {
-            push_warning(format!(
-                "target-fallback: choose-from-sentence missing 'card from' in '{}'",
-                lower.trim()
-            ));
-            push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+            push_diagnostic(OracleDiagnostic::TargetFallback {
                 context: "choose-from-sentence missing 'card from'".into(),
                 text: lower.trim().into(),
                 line_index: 0,
@@ -6298,11 +6257,7 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
         }
     }
     type_str_to_target_filter(word).unwrap_or_else(|| {
-        push_warning(format!(
-            "target-fallback: unrecognized choose-from-sentence type '{}'",
-            word
-        ));
-        push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+        push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized choose-from-sentence type".into(),
             text: word.into(),
             line_index: 0,
@@ -7278,7 +7233,7 @@ pub(crate) fn parse_effect_chain_ir(
                     &mut cascade_diags,
                 );
                 for d in cascade_diags {
-                    push_typed_diagnostic(d);
+                    push_diagnostic(d);
                 }
             }
             clauses.push(ClauseIr {
@@ -7326,7 +7281,7 @@ pub(crate) fn parse_effect_chain_ir(
                     &mut cascade_diags,
                 );
                 for d in cascade_diags {
-                    push_typed_diagnostic(d);
+                    push_diagnostic(d);
                 }
             }
             clauses.push(ClauseIr {
@@ -7696,7 +7651,7 @@ pub(crate) fn parse_effect_chain_ir(
                     &mut cascade_diags,
                 );
                 for d in cascade_diags {
-                    push_typed_diagnostic(d);
+                    push_diagnostic(d);
                 }
             }
         }
@@ -9885,10 +9840,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                         remainder.trim()
                     };
                     if !leftover.is_empty() {
-                        push_warning(format!(
-                            "ignored-remainder: '{leftover}' after target parse in damage-all"
-                        ));
-                        push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                        push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                             text: leftover.into(),
                             parser: "damage-all".into(),
                             line_index: 0,
@@ -9918,11 +9870,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                     let (target, remainder) = parse_target(target_phrase);
                     let (target, remainder) = refine_damage_target_remainder(target, remainder);
                     if !remainder.trim().is_empty() {
-                        push_warning(format!(
-                            "ignored-remainder: '{}' after target parse in deal-damage",
-                            remainder.trim()
-                        ));
-                        push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                        push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                             text: remainder.trim().into(),
                             parser: "deal-damage".into(),
                             line_index: 0,

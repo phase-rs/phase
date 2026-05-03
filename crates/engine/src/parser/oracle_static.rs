@@ -29,7 +29,7 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_warnings::{push_typed_diagnostic, push_warning};
+use crate::parser::oracle_warnings::push_diagnostic;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind,
     Comparator, ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr,
@@ -1554,11 +1554,7 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if nom_primitives::scan_contains(tp.lower, "can't cast spells from") {
         let zones = parse_zone_names_from_tp(&tp);
         let affected = if zones.is_empty() {
-            push_warning(
-                "target-fallback: no zones parsed for casting prohibition, defaulting to Any"
-                    .to_string(),
-            );
-            push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+            push_diagnostic(OracleDiagnostic::TargetFallback {
                 context: "no zones parsed for casting prohibition".into(),
                 text: String::new(),
                 line_index: 0,
@@ -7258,11 +7254,7 @@ fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefin
             // `Any` filter that would be wrong in a different way.
             return None;
         }
-        push_warning(format!(
-            "ignored-remainder: '{}' after type parse in cast-free-permission",
-            remainder.trim()
-        ));
-        push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+        push_diagnostic(OracleDiagnostic::IgnoredRemainder {
             text: remainder.trim().into(),
             parser: "cast-free-permission".into(),
             line_index: 0,

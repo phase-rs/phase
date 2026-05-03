@@ -19,10 +19,7 @@ use crate::types::zones::Zone;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::primitives::scan_contains;
-use super::oracle_warnings::{
-    clear_typed_diagnostics, clear_warnings, push_typed_diagnostic, push_warning,
-    take_typed_diagnostics, take_warnings,
-};
+use super::oracle_warnings::{clear_diagnostics, push_diagnostic, take_diagnostics};
 
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
@@ -585,8 +582,7 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    let saved_warnings = take_warnings();
-    let saved_typed = take_typed_diagnostics();
+    let saved_diagnostics = take_diagnostics();
     let parsed = parse_effect_chain_with_context(
         &prepared.effect_text,
         AbilityKind::Spell,
@@ -597,13 +593,9 @@ fn is_spell_resolution_instruction_line(
             ..Default::default()
         },
     );
-    let _candidate_warnings = take_warnings();
-    let _candidate_typed = take_typed_diagnostics();
-    for warning in saved_warnings {
-        push_warning(warning);
-    }
-    for d in saved_typed {
-        push_typed_diagnostic(d);
+    let _candidate_diagnostics = take_diagnostics();
+    for d in saved_diagnostics {
+        push_diagnostic(d);
     }
     !has_unimplemented(&parsed)
 }
@@ -879,6 +871,7 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
             }
         }
     }
+    result.parse_warnings = ir.diagnostics.clone();
     result
 }
 
@@ -2178,7 +2171,7 @@ pub(crate) fn parse_oracle_ir(
     let mut swallow_diags = Vec::new();
     super::swallow_check::check_swallowed_clauses(oracle_text, &result, &mut swallow_diags);
     for d in swallow_diags {
-        push_typed_diagnostic(d);
+        push_diagnostic(d);
     }
 
     parsed_abilities_to_doc_ir(result, oracle_text, card_name)
@@ -2232,7 +2225,7 @@ fn parsed_abilities_to_doc_ir(
         items,
         source_text: oracle_text.to_string(),
         card_name: card_name.to_string(),
-        diagnostics: take_typed_diagnostics(),
+        diagnostics: take_diagnostics(),
     }
 }
 
@@ -2240,8 +2233,8 @@ fn parsed_abilities_to_doc_ir(
 ///
 /// This is the public API entry point — a thin wrapper around [`parse_oracle_ir`]
 /// (IR production) and [`lower_oracle_ir`] (IR lowering). The thread-local
-/// warning system is managed here: `clear_warnings()` before parsing,
-/// `take_warnings()` after lowering.
+/// diagnostic system is managed here: `clear_diagnostics()` before parsing;
+/// diagnostics flow through `OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`.
 #[tracing::instrument(
     level = "info",
     skip(oracle_text, mtgjson_keyword_names, types, subtypes)
@@ -2253,8 +2246,7 @@ pub fn parse_oracle_text(
     types: &[String],
     subtypes: &[String],
 ) -> ParsedAbilities {
-    clear_warnings();
-    clear_typed_diagnostics();
+    clear_diagnostics();
     let ir = parse_oracle_ir(
         oracle_text,
         card_name,
@@ -2262,18 +2254,7 @@ pub fn parse_oracle_text(
         types,
         subtypes,
     );
-    let mut result = lower_oracle_ir(&ir);
-    // Dual-emit transition (D-11): thread-local warnings converted to Legacy diagnostics.
-    // Plan 3 will delete the thread-local path once all sites emit typed diagnostics.
-    let thread_local_warnings = take_warnings();
-    result.parse_warnings = thread_local_warnings
-        .into_iter()
-        .map(|msg| OracleDiagnostic::Legacy {
-            message: msg,
-            line_index: 0,
-        })
-        .collect();
-    result
+    lower_oracle_ir(&ir)
 }
 
 /// Try to parse "Equip {cost}" or "Equip — {cost}" lines.
@@ -3004,87 +2985,60 @@ pub(super) fn parse_activated_with_self_ref_fallback(
     effect_text: &str,
     card_name: &str,
 ) -> AbilityDefinition {
-    let pre_warnings = take_warnings();
-    let pre_typed = take_typed_diagnostics();
+    let pre_diagnostics = take_diagnostics();
 
     let def = parse_effect_chain(effect_text, AbilityKind::Activated);
-    let first_warnings = take_warnings();
-    let first_typed = take_typed_diagnostics();
-    let first_has_target_fallback = first_warnings
+    let first_diagnostics = take_diagnostics();
+    let first_has_target_fallback = first_diagnostics
         .iter()
-        .any(|w| w.starts_with("target-fallback"));
+        .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
     let first_clean = !has_unimplemented(&def) && !first_has_target_fallback;
 
     if first_clean {
-        for w in pre_warnings {
-            push_warning(w);
+        for d in pre_diagnostics {
+            push_diagnostic(d);
         }
-        for d in pre_typed {
-            push_typed_diagnostic(d);
-        }
-        for w in first_warnings {
-            push_warning(w);
-        }
-        for d in first_typed {
-            push_typed_diagnostic(d);
+        for d in first_diagnostics {
+            push_diagnostic(d);
         }
         return def;
     }
 
     let normalized = normalize_self_refs_for_static(effect_text, card_name);
     if normalized == effect_text {
-        for w in pre_warnings {
-            push_warning(w);
+        for d in pre_diagnostics {
+            push_diagnostic(d);
         }
-        for d in pre_typed {
-            push_typed_diagnostic(d);
-        }
-        for w in first_warnings {
-            push_warning(w);
-        }
-        for d in first_typed {
-            push_typed_diagnostic(d);
+        for d in first_diagnostics {
+            push_diagnostic(d);
         }
         return def;
     }
 
     let alt = parse_effect_chain(&normalized, AbilityKind::Activated);
-    let alt_warnings = take_warnings();
-    let alt_typed = take_typed_diagnostics();
-    let alt_has_target_fallback = alt_warnings
+    let alt_diagnostics = take_diagnostics();
+    let alt_has_target_fallback = alt_diagnostics
         .iter()
-        .any(|w| w.starts_with("target-fallback"));
+        .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
     let alt_clean = !has_unimplemented(&alt) && !alt_has_target_fallback;
 
-    for w in pre_warnings {
-        push_warning(w);
-    }
-    for d in pre_typed {
-        push_typed_diagnostic(d);
+    for d in pre_diagnostics {
+        push_diagnostic(d);
     }
     if alt_clean {
-        // Normalized pass is strictly better — keep only its (empty) warnings.
-        for w in alt_warnings {
-            push_warning(w);
-        }
-        for d in alt_typed {
-            push_typed_diagnostic(d);
+        // Normalized pass is strictly better — keep only its diagnostics.
+        for d in alt_diagnostics {
+            push_diagnostic(d);
         }
         alt
     } else {
         // Neither pass was clean; prefer the original result and preserve
         // first-pass diagnostics so the coverage dashboard reflects reality.
-        for w in first_warnings {
-            push_warning(w);
+        for d in first_diagnostics {
+            push_diagnostic(d);
         }
-        for d in first_typed {
-            push_typed_diagnostic(d);
-        }
-        for w in alt_warnings {
-            push_warning(w);
-        }
-        for d in alt_typed {
-            push_typed_diagnostic(d);
+        for d in alt_diagnostics {
+            push_diagnostic(d);
         }
         def
     }
@@ -9830,51 +9784,6 @@ mod tests {
             "unexpected Defiler warnings: {:?}",
             r.parse_warnings
         );
-    }
-
-    /// D-11 parity test: verify that typed diagnostics and thread-local string warnings
-    /// produce matching output for cards known to trigger target-fallback warnings.
-    #[test]
-    fn typed_diagnostics_parity_with_thread_local() {
-        use crate::parser::oracle_warnings::{
-            clear_typed_diagnostics, clear_warnings, take_typed_diagnostics, take_warnings,
-        };
-
-        // Cards whose Oracle text is known to produce target-fallback warnings.
-        let test_cases = [
-            // parse_target cannot classify "any target" without the "target" keyword prefix
-            (
-                "Lightning Helix deals 3 damage to any target.",
-                "Lightning Helix",
-                &["Instant"][..],
-            ),
-        ];
-
-        for (oracle, name, type_strs) in &test_cases {
-            clear_warnings();
-            clear_typed_diagnostics();
-            let types: Vec<String> = type_strs.iter().map(|s| s.to_string()).collect();
-            let _ir = parse_oracle_ir(oracle, name, &[], &types, &[]);
-            let string_warnings = take_warnings();
-            let typed_diagnostics = take_typed_diagnostics();
-
-            // Every typed diagnostic should have a corresponding string warning
-            // (since we dual-emit at every site). The typed count should equal
-            // the number of target-fallback/ignored-remainder string warnings
-            // (swallow-check warnings are thread-local only in this plan).
-            let typed_count = typed_diagnostics.len();
-            let string_target_fallback_count = string_warnings
-                .iter()
-                // allow-noncombinator: test assertion filtering on warning prefix labels, not parsing dispatch
-                .filter(|w| w.starts_with("target-fallback") || w.starts_with("ignored-remainder"))
-                .count();
-            assert_eq!(
-                typed_count, string_target_fallback_count,
-                "parity mismatch for {name}: typed={typed_count}, string_tf={string_target_fallback_count}\n\
-                 string_warnings={string_warnings:?}\n\
-                 typed_diagnostics={typed_diagnostics:?}"
-            );
-        }
     }
 }
 
