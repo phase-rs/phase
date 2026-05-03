@@ -6930,6 +6930,52 @@ fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
 /// CR 604.2 + CR 118.9: static continuous effect granting permission to cast via an
 /// alternative cost associated with the named keyword.
 fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+    // CR 110.4 + CR 305.1 + CR 601.2a: Muldrotha-class — "During each of your
+    // turns, you may play a land or cast a permanent spell of each permanent
+    // type from your graveyard." A single permission grants both the land
+    // play and permanent-spell cast, with each permanent type acting as an
+    // independent per-turn slot. The reminder text "(If a card has multiple
+    // permanent types, choose one as you play it.)" is stripped upstream by
+    // `strip_reminder_text`, so this matcher only sees the rules-text clause.
+    //
+    // The combined "play a land or cast a permanent spell" wording is a
+    // single-sentence shape — no other shipping card uses it. Match it as a
+    // fixed nom prefix and bail out immediately with the typed
+    // `OncePerTurnPerPermanentType` frequency + `CardPlayMode::Play` (Play
+    // covers both "play a land" and "cast a permanent spell" branches).
+    // Accept both the canonical "play a land or cast" Oracle wording and the
+    // older "play a land and cast" printing — both are equivalent under CR
+    // 110.4 (the per-permanent-type slot is what enforces the cap, not the
+    // conjunction). Try each prefix in turn via the file-wide `or_else`
+    // chaining idiom (see e.g. the article-stripping `"a "`/`"an "` chain
+    // below) — both calls are nom `tag()` matches under the hood.
+    let muldrotha_alt = nom_tag_lower(
+        lower,
+        lower,
+        "during each of your turns, you may play a land or cast a permanent spell of each permanent type from your graveyard",
+    )
+    .or_else(|| {
+        nom_tag_lower(
+            lower,
+            lower,
+            "during each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard",
+        )
+    });
+    if muldrotha_alt.is_some() {
+        // Affected filter: any permanent (CR 110.4 — artifact, battle,
+        // creature, enchantment, land, planeswalker). The downstream slot
+        // picker enforces the per-permanent-type per-turn limit.
+        let affected = TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent));
+        return Some(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                play_mode: CardPlayMode::Play,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
     // Determine pattern and extract the rest after the prefix
     let (rest, frequency, play_mode) = if let Some(r) = nom_tag_lower(
         lower,
@@ -10563,6 +10609,54 @@ mod tests {
                 def.affected
             );
         }
+    }
+
+    // --- Muldrotha-class once-per-turn-per-permanent-type tests (CR 110.4) ---
+
+    /// CR 110.4 + CR 305.1 + CR 601.2a: Muldrotha, the Gravetide — combined
+    /// "play a land or cast a permanent spell of each permanent type from
+    /// your graveyard" produces a single `GraveyardCastPermission` with the
+    /// `OncePerTurnPerPermanentType` frequency, `play_mode: Play` (covers
+    /// both lands and permanent spells), and a `Permanent` type filter.
+    #[test]
+    fn graveyard_cast_permission_muldrotha_canonical_or() {
+        let text = "During each of your turns, you may play a land or cast a permanent spell of each permanent type from your graveyard.";
+        let def = parse_static_line(text).expect("should parse Muldrotha canonical text");
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::GraveyardCastPermission {
+                    frequency: CastFrequency::OncePerTurnPerPermanentType,
+                    play_mode: CardPlayMode::Play,
+                }
+            ),
+            "expected OncePerTurnPerPermanentType + Play, got {:?}",
+            def.mode
+        );
+        let filter = def.affected.expect("should have affected filter");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got: {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Permanent),
+            "expected Permanent type filter, got: {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 110.4: Older "play a land and cast" wording is equivalent to the
+    /// canonical "play a land or cast" — both produce the same static.
+    #[test]
+    fn graveyard_cast_permission_muldrotha_legacy_and() {
+        let text = "During each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard.";
+        let def = parse_static_line(text).expect("should parse Muldrotha legacy text");
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                play_mode: CardPlayMode::Play,
+            }
+        ));
     }
 
     // --- Alt-cost rider tests (Ninja Teen et al., CR 118.9 / CR 702.190a) ---

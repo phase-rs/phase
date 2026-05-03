@@ -2164,8 +2164,16 @@ pub enum CastingVariant {
         source: ObjectId,
         /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot in
         /// `graveyard_cast_permissions_used`. `Unlimited` permissions (Conduit)
-        /// skip tracking entirely.
+        /// skip tracking entirely. When `OncePerTurnPerPermanentType` (Muldrotha),
+        /// casting consumes the `(source, slot_type)` entry in
+        /// `graveyard_cast_permissions_used_per_type` — see `slot_type`.
         frequency: super::statics::CastFrequency,
+        /// CR 110.4: Permanent type slot consumed when `frequency` is
+        /// `OncePerTurnPerPermanentType`. Always one of the six CR 110.4
+        /// permanent types. `None` for `Unlimited` and `OncePerTurn`
+        /// frequencies (those track by source only).
+        #[serde(default)]
+        slot_type: Option<super::card_type::CoreType>,
     },
     /// CR 601.2b + CR 118.9a: Cast from hand via a `CastFromHandFree` static
     /// permission source (Zaffai). Stores the granting permanent's ObjectId for
@@ -2564,6 +2572,18 @@ pub struct GameState {
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
     #[serde(default)]
     pub graveyard_cast_permissions_used: HashSet<ObjectId>,
+    /// CR 110.4 + CR 601.2a: Tracks which permanent-type slots a
+    /// `OncePerTurnPerPermanentType` graveyard-cast permission source has
+    /// already consumed this turn. Keyed by `(source_id, slot_core_type)`
+    /// where `slot_core_type` is the permanent type the cast/play was credited
+    /// to (one of the six CR 110.4 permanent types). Muldrotha, the Gravetide
+    /// is the canonical user: each permanent type acts as an independent
+    /// per-turn slot, so a single source may credit one cast per permanent
+    /// type per turn.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting all slots.
+    #[serde(default)]
+    pub graveyard_cast_permissions_used_per_type: HashSet<(ObjectId, super::card_type::CoreType)>,
     /// CR 601.2b: Tracks which `CastFromHandFree` once-per-turn permission sources
     /// have been used this turn (Zaffai and the Tempests). Keyed by the granting
     /// permanent's ObjectId. Unlimited sources (Omniscience) never populate this.
@@ -3028,6 +3048,7 @@ impl GameState {
             activated_abilities_this_game: HashMap::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
+            graveyard_cast_permissions_used_per_type: HashSet::new(),
             hand_cast_free_permissions_used: HashSet::new(),
             first_card_drawn_this_turn: HashMap::new(),
             pending_miracle_offers: Vec::new(),
@@ -3201,6 +3222,8 @@ impl PartialEq for GameState {
             && self.activated_abilities_this_game == other.activated_abilities_this_game
             && self.ability_resolutions_this_turn == other.ability_resolutions_this_turn
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
+            && self.graveyard_cast_permissions_used_per_type
+                == other.graveyard_cast_permissions_used_per_type
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn
             && self.pending_miracle_offers == other.pending_miracle_offers

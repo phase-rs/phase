@@ -214,6 +214,11 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "spells your opponents cast ",
     "you may look at the top card of your library",
     "once during each of your turns, you may cast",
+    // CR 110.4 + CR 305.1 + CR 601.2a: Muldrotha — combined "play a land or
+    // cast a permanent spell of each permanent type from your graveyard"
+    // prefix. Routed to `parse_static_line` so the
+    // `try_parse_graveyard_cast_permission` Muldrotha-class branch fires.
+    "during each of your turns, you may play a land",
     "a deck can have",
     "nonland ",
     "noncreature ",

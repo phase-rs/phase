@@ -1671,16 +1671,28 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         object_id,
     });
 
-    // CR 601.2a + CR 601.2b: Record permission usage when spell is finalized onto
-    // the stack. This prevents casting a second spell via the same source before
-    // the first resolves. Only `OncePerTurn` frequencies need tracking;
+    // CR 601.2a + CR 601.2b + CR 110.4: Record permission usage when the spell
+    // is finalized onto the stack. This prevents casting a second spell via the
+    // same source/slot before the first resolves. Only frequency-bounded
+    // variants (`OncePerTurn`, `OncePerTurnPerPermanentType`) need tracking;
     // `Unlimited` permissions (Conduit of Worlds, Omniscience) skip.
     match casting_variant {
         CastingVariant::GraveyardPermission {
             source,
             frequency: crate::types::statics::CastFrequency::OncePerTurn,
+            ..
         } => {
             state.graveyard_cast_permissions_used.insert(source);
+        }
+        CastingVariant::GraveyardPermission {
+            source,
+            frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
+            slot_type: Some(slot),
+        } => {
+            // CR 110.4: Consume the chosen permanent-type slot for this source.
+            state
+                .graveyard_cast_permissions_used_per_type
+                .insert((source, slot));
         }
         CastingVariant::HandPermission {
             source,

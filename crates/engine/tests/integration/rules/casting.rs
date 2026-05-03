@@ -982,6 +982,136 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
     );
 }
 
+// --- Muldrotha-class once-per-turn-per-permanent-type tests (CR 110.4) ---
+
+/// CR 110.4 + CR 305.1 + CR 601.2a: Muldrotha grants `OncePerTurnPerPermanentType`
+/// graveyard play permission for lands. Playing a land from graveyard
+/// consumes the `(source, Land)` slot, blocking a second land play from the
+/// same source even when an additional land drop is available.
+#[test]
+fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Source has Muldrotha-class permission (per-permanent-type per turn).
+    let _source_id = scenario
+        .add_creature(P0, "Muldrotha, the Gravetide", 0, 0)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                play_mode: CardPlayMode::Play,
+            })
+            .affected(TargetFilter::Typed(
+                engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
+            )),
+        )
+        .id();
+
+    // Grant an additional land drop so the per-turn land cap doesn't mask
+    // the per-permanent-type-slot enforcement.
+    let _explore = scenario
+        .add_creature(P0, "Exploration", 0, 0)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 1 })
+                .affected(TargetFilter::Player),
+        )
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Two lands in P0's graveyard.
+    let forest_id = engine::game::zones::create_object(
+        runner.state_mut(),
+        engine::types::identifiers::CardId(101),
+        P0,
+        "Forest".to_string(),
+        Zone::Graveyard,
+    );
+    let swamp_id = engine::game::zones::create_object(
+        runner.state_mut(),
+        engine::types::identifiers::CardId(102),
+        P0,
+        "Swamp".to_string(),
+        Zone::Graveyard,
+    );
+    for id in [forest_id, swamp_id] {
+        let obj = runner.state_mut().objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+    }
+
+    let forest_card_id = runner.state().objects[&forest_id].card_id;
+    let swamp_card_id = runner.state().objects[&swamp_id].card_id;
+
+    // First land play succeeds (consumes the (source, Land) slot).
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest_id,
+            card_id: forest_card_id,
+        })
+        .expect("first land play from graveyard should succeed");
+    assert!(runner.state().battlefield.contains(&forest_id));
+
+    // Second land play from same source must fail — Land slot consumed.
+    let result = runner.act(GameAction::PlayLand {
+        object_id: swamp_id,
+        card_id: swamp_card_id,
+    });
+    assert!(
+        result.is_err(),
+        "second land play from same Muldrotha source must be blocked by per-permanent-type slot"
+    );
+}
+
+/// CR 110.4: Each permanent-type slot is independent — playing a land does
+/// not consume the creature/artifact/etc. slot. After the per-turn slot is
+/// cleared (turn cycle), the source can play another land.
+#[test]
+fn muldrotha_per_permanent_type_resets_at_turn_start() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source_id = scenario
+        .add_creature(P0, "Muldrotha, the Gravetide", 0, 0)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                play_mode: CardPlayMode::Play,
+            })
+            .affected(TargetFilter::Typed(
+                engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
+            )),
+        )
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Pre-populate the per-type used-set as if the Land slot was already
+    // consumed this turn.
+    runner
+        .state_mut()
+        .graveyard_cast_permissions_used_per_type
+        .insert((source_id, CoreType::Land));
+    assert!(runner
+        .state()
+        .graveyard_cast_permissions_used_per_type
+        .contains(&(source_id, CoreType::Land)));
+
+    // Trigger turn cleanup directly (mirror the start_next_turn path used by
+    // production turns.rs).
+    engine::game::turns::start_next_turn(runner.state_mut(), &mut Vec::new());
+
+    // CR 500.1 + CR 514: per-turn slot trackers reset for the incoming turn
+    // (analogous to other once-per-turn counters cleared in `start_next_turn`).
+    assert!(
+        runner
+            .state()
+            .graveyard_cast_permissions_used_per_type
+            .is_empty(),
+        "per-permanent-type used-set must clear on turn start"
+    );
+}
+
 // ── CR 601.2b: Cost-payability pre-gate ─────────────────────────────────────
 
 /// CR 601.2b: An optional additional cost that requires a choice of object

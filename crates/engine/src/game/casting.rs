@@ -685,20 +685,72 @@ fn graveyard_objects_castable_by_permission(
         .collect();
 
     for (source_id, filter, frequency) in &sources {
-        // CR 604.2: Skip if this source's once-per-turn permission was already used
-        if *frequency == CastFrequency::OncePerTurn
-            && state.graveyard_cast_permissions_used.contains(source_id)
-        {
-            continue;
-        }
         let ctx = super::filter::FilterContext::from_source_with_controller(*source_id, player);
         for &gy_obj_id in &player_data.graveyard {
+            // CR 604.2 + CR 110.4: Per-source frequency slot check; for
+            // `OncePerTurnPerPermanentType` this is per-(source, permanent-type),
+            // so the per-object check must happen inside the inner loop.
+            if !frequency_slot_available(state, *source_id, gy_obj_id, *frequency) {
+                continue;
+            }
             if super::filter::matches_target_filter(state, gy_obj_id, filter, &ctx) {
                 results.push((gy_obj_id, *source_id));
             }
         }
     }
     results
+}
+
+/// CR 110.4 + CR 601.2a: For a `OncePerTurnPerPermanentType` source (Muldrotha),
+/// pick an available permanent-type slot that the graveyard object qualifies for.
+///
+/// Returns `Some(slot_type)` if the object has at least one permanent type whose
+/// `(source_id, slot_type)` entry is not yet present in
+/// `graveyard_cast_permissions_used_per_type`. Returns `None` if every permanent
+/// type the object carries has already been consumed by this source this turn,
+/// or if the object is not a permanent (per CR 110.4 instants/sorceries are not
+/// permanent types).
+///
+/// Selection order matches `CoreType::PERMANENT_TYPES` (CR 110.4 enumeration).
+/// CR 305.1: lands are picked here too — Muldrotha's "play a land or cast a
+/// permanent spell of each permanent type from your graveyard" treats land as
+/// one of the permanent type slots.
+pub(crate) fn pick_per_permanent_type_slot(
+    state: &GameState,
+    source_id: ObjectId,
+    object_id: ObjectId,
+) -> Option<crate::types::card_type::CoreType> {
+    let obj = state.objects.get(&object_id)?;
+    crate::types::card_type::CoreType::PERMANENT_TYPES
+        .iter()
+        .copied()
+        .find(|core_type| {
+            obj.card_types.core_types.contains(core_type)
+                && !state
+                    .graveyard_cast_permissions_used_per_type
+                    .contains(&(source_id, *core_type))
+        })
+}
+
+/// CR 601.2a: Returns true if a graveyard-cast source's frequency slot is
+/// available for the given object. Centralizes the
+/// `OncePerTurn` (per-source) vs `OncePerTurnPerPermanentType` (per-source +
+/// per-CR-110.4-permanent-type) vs `Unlimited` (always-available) check so the
+/// per-frequency logic lives in one place.
+fn frequency_slot_available(
+    state: &GameState,
+    source_id: ObjectId,
+    object_id: ObjectId,
+    frequency: CastFrequency,
+) -> bool {
+    match frequency {
+        CastFrequency::Unlimited => true,
+        CastFrequency::OncePerTurn => !state.graveyard_cast_permissions_used.contains(&source_id),
+        // CR 110.4: At least one permanent-type slot must remain unused.
+        CastFrequency::OncePerTurnPerPermanentType => {
+            pick_per_permanent_type_slot(state, source_id, object_id).is_some()
+        }
+    }
 }
 
 /// CR 601.2a: Find the first valid permission source for a specific graveyard object.
@@ -720,10 +772,8 @@ fn graveyard_permission_source(
                 }
                 _ => None,
             })?;
-        // CR 604.2: Skip if this source's once-per-turn permission was already used
-        if frequency == CastFrequency::OncePerTurn
-            && state.graveyard_cast_permissions_used.contains(&src_id)
-        {
+        // CR 604.2 + CR 110.4: Skip if this source's slot has already been used.
+        if !frequency_slot_available(state, src_id, object_id, frequency) {
             return None;
         }
         if super::filter::matches_target_filter(
@@ -834,21 +884,24 @@ pub fn graveyard_lands_playable_by_permission(
         .collect();
 
     for (source_id, filter, frequency) in &sources {
-        if *frequency == CastFrequency::OncePerTurn
-            && state.graveyard_cast_permissions_used.contains(source_id)
-        {
-            continue;
-        }
         let ctx = super::filter::FilterContext::from_source_with_controller(*source_id, player);
         for &gy_obj_id in &player_data.graveyard {
             if let Some(obj) = state.objects.get(&gy_obj_id) {
                 // CR 305.1: Only lands can be "played" (non-land cards require "cast")
-                if obj
+                if !obj
                     .card_types
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Land)
-                    && super::filter::matches_target_filter(state, gy_obj_id, filter, &ctx)
                 {
+                    continue;
+                }
+                // CR 604.2 + CR 110.4: Per-source frequency slot check; for
+                // `OncePerTurnPerPermanentType` (Muldrotha) the land slot is
+                // its own per-permanent-type entry.
+                if !frequency_slot_available(state, *source_id, gy_obj_id, *frequency) {
+                    continue;
+                }
+                if super::filter::matches_target_filter(state, gy_obj_id, filter, &ctx) {
                     results.push((gy_obj_id, *source_id));
                 }
             }
@@ -1219,7 +1272,20 @@ fn prepare_spell_cast_with_variant_override(
         {
             CastingVariant::Aftermath
         } else if let Some((source, frequency)) = graveyard_permission_src {
-            CastingVariant::GraveyardPermission { source, frequency }
+            // CR 110.4: For OncePerTurnPerPermanentType permissions, capture
+            // which permanent-type slot will be consumed when this spell is
+            // finalized to the stack. Picked deterministically by
+            // `pick_per_permanent_type_slot` (CR 110.4 enumeration order).
+            let slot_type = if frequency == CastFrequency::OncePerTurnPerPermanentType {
+                pick_per_permanent_type_slot(state, source, object_id)
+            } else {
+                None
+            };
+            CastingVariant::GraveyardPermission {
+                source,
+                frequency,
+                slot_type,
+            }
         } else if warp_cost.is_some() {
             CastingVariant::Warp
         } else {
@@ -13159,6 +13225,110 @@ mod tests {
             let top = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(903));
             let available = spell_objects_available_to_cast(&state, PlayerId(0));
             assert!(!available.contains(&top));
+        }
+    }
+
+    /// CR 110.4 + CR 601.2a: The per-permanent-type slot picker
+    /// (`pick_per_permanent_type_slot`) honors each of the six permanent
+    /// types independently. Marking the `(source, Land)` slot as used must
+    /// not affect the picker's choice for a non-Land permanent (e.g. a
+    /// Creature card in the graveyard), and a multi-type card returns the
+    /// first available slot in CR 110.4 enumeration order.
+    mod per_permanent_type_slot {
+        use super::*;
+
+        #[test]
+        fn pick_per_permanent_type_slot_independent_per_type() {
+            let mut state = setup_game_at_main_phase();
+            let source = create_object(
+                &mut state,
+                CardId(900),
+                PlayerId(0),
+                "Muldrotha source".to_string(),
+                Zone::Battlefield,
+            );
+
+            // Graveyard creature: Land slot is irrelevant; Creature slot is fresh.
+            let creature = create_object(
+                &mut state,
+                CardId(901),
+                PlayerId(0),
+                "Gy Creature".to_string(),
+                Zone::Graveyard,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+
+            // Mark the Land slot used — must not affect the Creature pick.
+            state
+                .graveyard_cast_permissions_used_per_type
+                .insert((source, CoreType::Land));
+
+            assert_eq!(
+                pick_per_permanent_type_slot(&state, source, creature),
+                Some(CoreType::Creature),
+                "Land-slot consumption must not block the Creature slot for the same source"
+            );
+
+            // Multi-type artifact creature in graveyard. CR 110.4 enumeration
+            // order is [Artifact, Battle, Creature, Enchantment, Land,
+            // Planeswalker], so Artifact is picked first.
+            let artifact_creature = create_object(
+                &mut state,
+                CardId(902),
+                PlayerId(0),
+                "Gy Artifact Creature".to_string(),
+                Zone::Graveyard,
+            );
+            {
+                let obj = state.objects.get_mut(&artifact_creature).unwrap();
+                obj.card_types.core_types.push(CoreType::Artifact);
+                obj.card_types.core_types.push(CoreType::Creature);
+            }
+            assert_eq!(
+                pick_per_permanent_type_slot(&state, source, artifact_creature),
+                Some(CoreType::Artifact),
+                "multi-type pick must follow CR 110.4 enumeration order (Artifact before Creature)"
+            );
+
+            // Consume the Artifact slot — picker must fall through to Creature.
+            state
+                .graveyard_cast_permissions_used_per_type
+                .insert((source, CoreType::Artifact));
+            assert_eq!(
+                pick_per_permanent_type_slot(&state, source, artifact_creature),
+                Some(CoreType::Creature),
+                "after Artifact slot consumed, multi-type card falls through to Creature slot"
+            );
+
+            // Consume the Creature slot — no available type left for this card.
+            state
+                .graveyard_cast_permissions_used_per_type
+                .insert((source, CoreType::Creature));
+            assert_eq!(
+                pick_per_permanent_type_slot(&state, source, artifact_creature),
+                None,
+                "with all carried types consumed, picker returns None"
+            );
+
+            // Sanity: a different source's slots remain unaffected.
+            let other_source = create_object(
+                &mut state,
+                CardId(903),
+                PlayerId(0),
+                "Other Muldrotha".to_string(),
+                Zone::Battlefield,
+            );
+            assert_eq!(
+                pick_per_permanent_type_slot(&state, other_source, artifact_creature),
+                Some(CoreType::Artifact),
+                "per-type tracking is keyed by source — unrelated source has all slots free"
+            );
         }
     }
 }

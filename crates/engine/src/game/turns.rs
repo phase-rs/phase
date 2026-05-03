@@ -216,6 +216,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // `trigger_fire_counts_this_turn`).
     state.ability_resolutions_this_turn.clear();
     state.graveyard_cast_permissions_used.clear();
+    // CR 110.4 + CR 601.2a: Reset per-turn-per-permanent-type tracking (Muldrotha).
+    state.graveyard_cast_permissions_used_per_type.clear();
     // CR 601.2b: Reset per-turn CastFromHandFree once-per-turn tracking (Zaffai).
     state.hand_cast_free_permissions_used.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.

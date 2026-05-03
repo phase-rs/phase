@@ -102,6 +102,39 @@ impl fmt::Display for CoreType {
     }
 }
 
+impl CoreType {
+    /// CR 110.4: Returns `true` if this core type is one of the six permanent
+    /// types — artifact, battle, creature, enchantment, land, planeswalker.
+    /// Instants and sorceries cannot enter the battlefield, so they are not
+    /// permanent types. Kindred/Tribal/Dungeon are non-permanent supplemental
+    /// types and also return false.
+    pub const fn is_permanent_type(self) -> bool {
+        matches!(
+            self,
+            CoreType::Artifact
+                | CoreType::Battle
+                | CoreType::Creature
+                | CoreType::Enchantment
+                | CoreType::Land
+                | CoreType::Planeswalker
+        )
+    }
+
+    /// CR 110.4: Canonical ordering of the six permanent types.
+    ///
+    /// Used by per-permanent-type cast trackers (e.g., Muldrotha) to give a
+    /// deterministic auto-pick order when a multi-type card has more than one
+    /// available slot. The order matches CR 110.4's enumeration.
+    pub const PERMANENT_TYPES: [CoreType; 6] = [
+        CoreType::Artifact,
+        CoreType::Battle,
+        CoreType::Creature,
+        CoreType::Enchantment,
+        CoreType::Land,
+        CoreType::Planeswalker,
+    ];
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardType {
     pub supertypes: Vec<Supertype>,

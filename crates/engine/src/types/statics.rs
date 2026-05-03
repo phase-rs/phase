@@ -194,6 +194,13 @@ impl fmt::Display for ActivationExemption {
 ///   source's `ObjectId` in the corresponding per-turn used-set. CR 400.7: zone
 ///   change creates a new `ObjectId`, so the permission naturally resets when the
 ///   source leaves and returns.
+/// - `OncePerTurnPerPermanentType` — at most one cast/play per turn from this
+///   source **for each permanent type** the consumed card has (CR 110.4 lists
+///   the six permanent types). Tracked by the source's `ObjectId` plus the
+///   `CoreType` slot consumed in `state.graveyard_cast_permissions_used_per_type`.
+///   Muldrotha, the Gravetide is the canonical card: a player may play a land
+///   and cast a permanent spell of each permanent type from their graveyard each
+///   turn, so each permanent type acts as an independent per-turn slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum CastFrequency {
     /// No per-turn limit — Omniscience, Conduit of Worlds, Crucible of Worlds.
@@ -201,6 +208,11 @@ pub enum CastFrequency {
     Unlimited,
     /// At most one cast per turn from this source — Lurrus, Karador, Zaffai.
     OncePerTurn,
+    /// CR 110.4 + CR 305.1 + CR 601.2a: Once per turn per permanent type from this
+    /// source — Muldrotha, the Gravetide. Lands, creatures, artifacts, enchantments,
+    /// planeswalkers, and battles each have an independent per-turn slot tracked
+    /// by `(source_id, CoreType)` in `graveyard_cast_permissions_used_per_type`.
+    OncePerTurnPerPermanentType,
 }
 
 impl fmt::Display for CastFrequency {
@@ -208,6 +220,9 @@ impl fmt::Display for CastFrequency {
         match self {
             CastFrequency::Unlimited => write!(f, "unlimited"),
             CastFrequency::OncePerTurn => write!(f, "once_per_turn"),
+            CastFrequency::OncePerTurnPerPermanentType => {
+                write!(f, "once_per_turn_per_permanent_type")
+            }
         }
     }
 }
@@ -219,6 +234,7 @@ impl FromStr for CastFrequency {
         match s {
             "unlimited" => Ok(CastFrequency::Unlimited),
             "once_per_turn" => Ok(CastFrequency::OncePerTurn),
+            "once_per_turn_per_permanent_type" => Ok(CastFrequency::OncePerTurnPerPermanentType),
             // CR 601.2a: Legacy bool-encoded wire format from pre-CastFrequency
             // migration — "true" meant once_per_turn, "false" meant unlimited.
             "true" => Ok(CastFrequency::OncePerTurn),
