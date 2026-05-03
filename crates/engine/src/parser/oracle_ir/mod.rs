@@ -30,3 +30,6 @@ pub(crate) use self::replacement::*;
 pub(crate) use self::static_ir::*;
 #[allow(unused_imports)] // Re-export for future consumers; wired into parser in Plan 01.
 pub(crate) use self::trigger::*;
+
+#[cfg(test)]
+mod snapshot_tests;
