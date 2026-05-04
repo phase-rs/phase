@@ -189,8 +189,12 @@ if [[ "$FAIL_ON_ENGINE" -eq 1 && "$engine_count" -gt 0 ]]; then
 fi
 
 # Diagnostic count ratchet (D-09): flag regressions in diagnostic categories.
-# Tolerates proportional increases when total_cards grew (new MTGJSON cards with
-# pre-existing gap patterns are not a parser regression).
+# Tolerates increases explained by:
+#   - New MTGJSON cards (total_cards grew): new cards can have pre-existing gaps.
+#   - Gained cards (flipped unsupported→supported): the swallow checker skips
+#     cards with Unimplemented effects; when a card becomes fully supported,
+#     pre-existing condition gaps are unmasked for the first time.
+# Only flags increases that exceed BOTH allowances combined.
 # Skip entirely when the baseline has no diagnostics field (first measurement).
 baseline_has_diag=0
 if jq -e '.diagnostics | keys | length > 0' "$BASELINE" > /dev/null 2>&1; then
@@ -205,19 +209,18 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
     if [[ "$new_cards" -lt 0 ]]; then
         new_cards=0
     fi
+    # gained_count is computed earlier in the script from flips.json
+    allowance=$((new_cards + gained_count))
 
     while IFS='=' read -r cat count; do
         base_count=$(jq -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
         if [[ "$count" -gt "$base_count" ]]; then
             increase=$((count - base_count))
-            # Allow up to (new_cards) increase per category — each new card
-            # can contribute at most 1 diagnostic per category. If the increase
-            # exceeds what new cards explain, it's a real parser regression.
-            if [[ "$increase" -gt "$new_cards" ]]; then
-                echo "DIAGNOSTIC REGRESSION: $cat increased from $base_count to $count (exceeds new-card allowance of +$new_cards)" >&2
+            if [[ "$increase" -gt "$allowance" ]]; then
+                echo "DIAGNOSTIC REGRESSION: $cat increased from $base_count to $count (exceeds allowance of +$allowance from $new_cards new cards + $gained_count gained cards)" >&2
                 diag_fail=1
             else
-                echo "DIAGNOSTIC NOTE: $cat increased from $base_count to $count (+$increase, within new-card allowance of +$new_cards)"
+                echo "DIAGNOSTIC NOTE: $cat increased from $base_count to $count (+$increase, within allowance of +$allowance)"
             fi
         elif [[ "$count" -lt "$base_count" ]]; then
             echo "DIAGNOSTIC IMPROVEMENT: $cat decreased from $base_count to $count"
