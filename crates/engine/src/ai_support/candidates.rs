@@ -3715,4 +3715,54 @@ mod tests {
         );
         assert!(matches!(actions[0].action, GameAction::PassPriority));
     }
+
+    /// Issue #167: A sorcery in the graveyard without any graveyard-cast keyword
+    /// (flashback, escape, harmonize, aftermath) must NOT appear as a CastSpell
+    /// candidate. Reproduces the Gitaxian Probe bug where the AI repeatedly cast
+    /// a card from the graveyard without paying any cost.
+    #[test]
+    fn graveyard_sorcery_without_keywords_not_castable() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Create a sorcery in the graveyard (simulates Gitaxian Probe post-resolution)
+        let probe = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Gitaxian Probe".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&probe).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Sorcery);
+            obj.mana_cost = crate::types::mana::ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianBlue],
+                generic: 0,
+            };
+        }
+
+        let actions = candidate_actions(&state);
+        let has_cast_from_gy = actions.iter().any(|c| {
+            matches!(
+                c.action,
+                GameAction::CastSpell {
+                    object_id,
+                    ..
+                } if object_id == probe
+            )
+        });
+        assert!(
+            !has_cast_from_gy,
+            "CR 601.2a: A sorcery in the graveyard without flashback/escape/harmonize/aftermath \
+             must NOT be offered as a CastSpell candidate"
+        );
+    }
 }

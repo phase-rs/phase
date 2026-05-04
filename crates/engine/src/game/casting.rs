@@ -2388,17 +2388,41 @@ pub fn handle_cast_spell(
     card_id: CardId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // Zone-agnostic validation: the AI candidate generator ensures only legal object_ids
-    // from valid zones (hand, command, exile, graveyard) are offered.
-    if !state
-        .objects
-        .get(&object_id)
-        .is_some_and(|obj| obj.card_id == card_id)
-    {
+    // CR 601.2a: Validate object identity and zone eligibility. The
+    // candidate generator gates these upstream, but defense-in-depth catches
+    // stale or illegal actions that bypass the generator (e.g., AI fallback
+    // paths, multiplayer desync, or hand-crafted JS payloads).
+    let obj = state.objects.get(&object_id).ok_or_else(|| {
+        EngineError::InvalidAction(format!("Object {:?} does not exist", object_id,))
+    })?;
+    if obj.card_id != card_id {
         return Err(EngineError::InvalidAction(format!(
-            "Object {:?} does not exist or does not match card_id {:?}",
+            "Object {:?} does not match card_id {:?}",
             object_id, card_id
         )));
+    }
+    // CR 601.2a: A spell can only be cast from a zone that permits it.
+    // Hand and Command are always eligible. Exile, Graveyard, and Library
+    // require an explicit permission (keyword or static). Stack is never
+    // eligible (the spell is already on the stack). This mirrors the
+    // zone check in `prepare_spell_cast` but catches illegal casts before
+    // any keyword-choice prompts (Adventure, Warp, Evoke, Overload) that
+    // would fire for hand-only objects.
+    match obj.zone {
+        Zone::Hand => {} // Always castable from hand
+        Zone::Command if state.format_config.command_zone && obj.is_commander => {}
+        Zone::Exile | Zone::Graveyard | Zone::Library => {
+            // These zones are allowed only with permission — defer the
+            // full permission check to `prepare_spell_cast` which already
+            // validates each zone-specific permission exhaustively. No
+            // early-reject here; just pass through.
+        }
+        zone => {
+            return Err(EngineError::InvalidAction(format!(
+                "Cannot cast {:?} from {:?} — not a castable zone",
+                object_id, zone,
+            )));
+        }
     }
 
     // CR 715.3 / CR 720.3: Adventure-family cards from hand require choosing
@@ -13267,5 +13291,74 @@ mod tests {
             let available = spell_objects_available_to_cast(&state, PlayerId(0));
             assert!(!available.contains(&top));
         }
+    }
+
+    /// Issue #167: A sorcery in the graveyard without flashback/escape/harmonize/
+    /// aftermath must NOT be included by `spell_objects_available_to_cast` and
+    /// must be rejected by `prepare_spell_cast`. Covers the Gitaxian Probe bug
+    /// where the AI allegedly cast a card from the graveyard without permission.
+    #[test]
+    fn graveyard_sorcery_without_keywords_not_castable() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(0x167),
+            PlayerId(0),
+            "Gitaxian Probe".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianBlue],
+                generic: 0,
+            };
+        }
+
+        // spell_objects_available_to_cast must not include the graveyard card.
+        let available = spell_objects_available_to_cast(&state, PlayerId(0));
+        assert!(
+            !available.contains(&obj_id),
+            "CR 601.2a: graveyard sorcery without flashback/escape/harmonize must not \
+             be available to cast"
+        );
+
+        // Even if somehow submitted, prepare_spell_cast must reject it.
+        let result = prepare_spell_cast(&state, PlayerId(0), obj_id);
+        assert!(
+            result.is_err(),
+            "CR 601.2a: prepare_spell_cast must reject graveyard sorcery without permission"
+        );
+    }
+
+    /// Defense-in-depth: `handle_cast_spell` rejects objects in zones that are
+    /// never castable (Battlefield, Stack). The early zone check catches these
+    /// before `prepare_spell_cast` is reached.
+    #[test]
+    fn handle_cast_spell_rejects_battlefield_zone() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(0x168),
+            PlayerId(0),
+            "Battlefield Card".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+        }
+
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(0x168), &mut events);
+        assert!(
+            result.is_err(),
+            "handle_cast_spell must reject objects on the battlefield"
+        );
     }
 }
