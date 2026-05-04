@@ -6,6 +6,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useRafPositions } from "../../hooks/useRafPositions.ts";
+import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
 import type { ObjectId } from "../../adapter/types.ts";
 import { isAttackerTargetingPlayer } from "../../viewmodel/battlefieldProps.ts";
 
@@ -31,8 +32,8 @@ export function BlockAssignmentLines() {
 
   return createPortal(
     <svg className="pointer-events-none fixed inset-0 z-30 h-full w-full">
-      {!isMinimal && (
-        <defs>
+      <defs>
+        {!isMinimal && (
           <filter id="block-line-glow">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge>
@@ -40,26 +41,43 @@ export function BlockAssignmentLines() {
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
-        </defs>
-      )}
+        )}
+        <marker
+          id="block-arrow-head"
+          markerWidth="10"
+          markerHeight="8"
+          refX="10"
+          refY="4"
+          orient="auto"
+        >
+          <path d="M0,0 L10,4 L0,8 Z" fill="rgba(249,115,22,0.9)" />
+        </marker>
+        <marker
+          id="block-arrow-head-dim"
+          markerWidth="8"
+          markerHeight="6"
+          refX="8"
+          refY="3"
+          orient="auto"
+        >
+          <path d="M0,0 L8,3 L0,6 Z" fill="rgba(249,115,22,0.45)" />
+        </marker>
+      </defs>
       {Array.from(positions.entries()).map(([blockerId, pos]) => {
         const attackerId = pairs.get(blockerId);
         const targetsMe = attackerId != null && isAttackerTargetingPlayer(combat, attackerId, myId);
-        // In multi-defender combat, dim lines for attackers not targeting the current player
-        const lineOpacity = targetsMe || combat === null ? 0.7 : 0.25;
+        const primary = targetsMe || combat === null;
         return (
-          <g key={blockerId} opacity={targetsMe || combat === null ? 1 : 0.4}>
-            <line
-              x1={pos.from.x}
-              y1={pos.from.y}
-              x2={pos.to.x}
-              y2={pos.to.y}
-              stroke={`rgba(249,115,22,${lineOpacity})`}
-              strokeWidth={isMinimal ? 1.5 : 2.5}
-              strokeDasharray={isMinimal ? undefined : "8 4"}
+          <g key={blockerId} opacity={primary ? 1 : 0.4}>
+            <path
+              d={arcPath(pos.from, pos.to)}
+              stroke={`rgba(249,115,22,${primary ? 0.85 : 0.35})`}
+              strokeWidth={isMinimal ? 1.5 : primary ? 3 : 2}
+              fill="none"
               filter={isMinimal ? undefined : "url(#block-line-glow)"}
+              markerEnd={primary ? "url(#block-arrow-head)" : "url(#block-arrow-head-dim)"}
             />
-            {!isMinimal && targetsMe && <PulseDot from={pos.from} to={pos.to} length={pos.length} />}
+            {!isMinimal && primary && <PulseDot from={pos.from} to={pos.to} length={pos.length} />}
           </g>
         );
       })}

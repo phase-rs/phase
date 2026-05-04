@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
@@ -37,6 +38,7 @@ interface StackEntryProps {
 }
 
 export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1 }: StackEntryProps) {
+  const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
@@ -105,11 +107,11 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       data-card-hover
       className="relative cursor-pointer"
       onClick={handleClick}
-      onMouseEnter={() => {
+      onMouseEnter={isMobile ? undefined : () => {
         inspectObject(entry.source_id);
         onHoverChange?.(true);
       }}
-      onMouseLeave={() => {
+      onMouseLeave={isMobile ? undefined : () => {
         inspectObject(null);
         onHoverChange?.(false);
       }}

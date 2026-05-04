@@ -12,6 +12,7 @@ import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -94,6 +95,7 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
 }
 
 export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride }: PermanentCardProps) {
+  const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -166,15 +168,20 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
   const isUndoableTap = undoableTapObjectIds.has(objectId);
 
+  // On mobile, skip mouse events — synthesized mouseenter from touch fires
+  // inspectObject every touch, opening the full-screen MobilePreviewOverlay
+  // and blocking combat interactions (blocker/attacker selection).
   const handleMouseEnter = useCallback(() => {
+    if (isMobile) return;
     hoverObject(objectId); inspectObject(objectId);
-  }, [hoverObject, inspectObject, objectId]);
+  }, [isMobile, hoverObject, inspectObject, objectId]);
 
   const handleMouseLeave = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (isMobile) return;
     const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
     hoverObject(nextObjectId);
     inspectObject(nextObjectId);
-  }, [hoverObject, inspectObject]);
+  }, [isMobile, hoverObject, inspectObject]);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
@@ -362,6 +369,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       }
     } else if (isUndoableTap) {
       dispatchAction({ type: "UntapLandForMana", data: { object_id: objectId } });
+    } else if (isMobile) {
+      inspectObject(objectId);
+      setPreviewSticky(true);
     } else {
       selectObject(isSelected ? null : objectId);
     }

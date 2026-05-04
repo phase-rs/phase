@@ -3,6 +3,7 @@ import { memo, useMemo } from "react";
 import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -23,6 +24,7 @@ const PT_COLORS: Record<PTColor, string> = {
 
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const isCompactHeight = useIsCompactHeight();
@@ -153,8 +155,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                 <button
                   type="button"
                   className="absolute bottom-1 left-4 z-30 bg-gray-900/90 border border-gray-500 rounded-sm px-1 py-0.5 text-[8px] font-bold text-gray-300 hover:bg-gray-700 hover:text-white cursor-pointer shadow-md"
-                  onMouseEnter={() => inspectObject(objectId, 1)}
-                  onMouseLeave={() => inspectObject(objectId, 0)}
+                  onMouseEnter={isMobile ? undefined : () => inspectObject(objectId, 1)}
+                  onMouseLeave={isMobile ? undefined : () => inspectObject(objectId, 0)}
                 >
                   DFC
                 </button>
