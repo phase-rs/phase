@@ -209,12 +209,12 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
           />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
+            <div className="shrink-0">{oppHud}</div>
             {focusedId != null ? (
               <PlayerArea
                 battlefieldView={focusedBattlefieldView ?? undefined}
                 playerId={focusedId}
                 mode="focused"
-                hud={oppHud}
               />
             ) : (
               <div className="flex flex-1 items-center justify-center">
