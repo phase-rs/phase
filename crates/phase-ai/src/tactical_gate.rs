@@ -11,6 +11,7 @@ use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
+use crate::combat_ai::is_lethal_attack_available;
 use crate::config::AiConfig;
 use crate::context::AiContext;
 use crate::policies::context::{collect_ability_effects, PolicyContext};
@@ -186,6 +187,18 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
         }
     }
 
+    // When a lethal attack is available (opponent has no untapped blockers and AI has
+    // enough power to kill them), penalize pre-combat main spells. Attacking first is
+    // almost always correct — spending mana dorks or convoke creatures before attacking
+    // removes them from the attack and misses the lethal window.
+    if matches!(
+        TacticalFacts::derive(ctx.state, ctx.ai_player).window,
+        TacticalWindow::OwnPreCombatMain
+    ) && is_lethal_attack_available(ctx.state, ctx.ai_player)
+    {
+        return GateDecision::AllowWithPenalty(-15.0);
+    }
+
     let effects = ctx.effects();
     if effects.is_empty() {
         return GateDecision::Allow;
@@ -231,8 +244,36 @@ fn target_choice_penalty(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
     let TargetRef::Object(object_id) = target else {
         return 0.0;
     };
-    let harmful = ctx
-        .effects()
+
+    let effects = ctx.effects();
+
+    // Destroying an Indestructible creature has no effect — hard block via large penalty.
+    let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
+    if is_destroy {
+        if let Some(object) = ctx.state.objects.get(object_id) {
+            if object.has_keyword(&Keyword::Indestructible) {
+                return -100.0;
+            }
+        }
+    }
+
+    // Pumping a tapped creature that is not an active attacker deals no combat benefit.
+    // A tapped non-attacker can't deal or prevent combat damage this turn.
+    let is_pump = effects.iter().any(|e| matches!(e, Effect::Pump { .. }));
+    if is_pump {
+        if let Some(object) = ctx.state.objects.get(object_id) {
+            if object.tapped {
+                let is_attacker = ctx.state.combat.as_ref().is_some_and(|c| {
+                    c.attackers.iter().any(|a| a.object_id == *object_id)
+                });
+                if !is_attacker {
+                    return -8.0;
+                }
+            }
+        }
+    }
+
+    let harmful = effects
         .iter()
         .any(|effect| matches!(effect_polarity(effect), EffectPolarity::Harmful));
     if harmful

@@ -1159,6 +1159,54 @@ fn can_attack(state: &GameState, obj_id: ObjectId) -> bool {
         .is_some_and(|etb| etb < state.turn_number)
 }
 
+/// Returns true when the AI can deal lethal damage this turn by attacking:
+/// - All opponent creatures are tapped (no blockers available)
+/// - The AI's total untapped attackable power >= the opponent's minimum life total
+///
+/// Used in the pre-combat main phase to discourage spending resources (mana from
+/// dorks, convoke creatures) before attacking when a winning attack is available.
+pub fn is_lethal_attack_available(state: &GameState, ai_player: PlayerId) -> bool {
+    let opponents: Vec<PlayerId> = players::opponents(state, ai_player);
+    if opponents.is_empty() {
+        return false;
+    }
+    let min_opp_life = opponents
+        .iter()
+        .map(|&opp| state.players[opp.0 as usize].life)
+        .min()
+        .unwrap_or(20);
+    if min_opp_life <= 0 {
+        return false;
+    }
+    // Check if ANY opponent creature is untapped (would be a potential blocker).
+    let any_untapped_blocker = opponents.iter().any(|&opp| {
+        state.battlefield.iter().any(|&id| {
+            state
+                .objects
+                .get(&id)
+                .is_some_and(|o| o.controller == opp && o.card_types.core_types.contains(&CoreType::Creature) && !o.tapped)
+        })
+    });
+    if any_untapped_blocker {
+        return false;
+    }
+    // Sum all AI creatures that could attack right now.
+    let attack_power: i32 = state
+        .battlefield
+        .iter()
+        .filter_map(|&id| {
+            if can_attack(state, id) {
+                let obj = state.objects.get(&id)?;
+                if obj.controller == ai_player {
+                    return obj.power;
+                }
+            }
+            None
+        })
+        .sum();
+    attack_power >= min_opp_life
+}
+
 /// Check if a creature has the absolute "can't be blocked" static ability.
 /// Intentionally excludes CantBeBlockedExceptBy / CantBeBlockedBy — those creatures
 /// can still be blocked by matching creatures and should go through normal evaluation.
