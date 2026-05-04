@@ -17,7 +17,9 @@ use super::super::oracle_quantity::parse_for_each_clause_expr;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::{resolve_it_pronoun, ParseContext};
-use crate::parser::oracle_ir::ast::{assert_no_compound_remainder, replace_fixed_quantity};
+#[cfg(debug_assertions)]
+use crate::parser::oracle_ir::ast::assert_no_compound_remainder;
+use crate::parser::oracle_ir::ast::replace_fixed_quantity;
 
 /// Check if text starts with a self-reference: "this ", "~"
 fn is_self_ref(text: &str) -> bool {
