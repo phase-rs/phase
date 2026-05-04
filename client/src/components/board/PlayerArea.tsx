@@ -189,7 +189,7 @@ export function PlayerArea({
           isCompactHeight ? "gap-0.5" : "gap-2"
         } ${
           mode === "full"
-            ? isCompactHeight ? "pt-0 pb-0.5" : "pt-1 pb-2"
+            ? isCompactHeight ? "pt-0 pb-0.5" : "pt-1 pb-8"
             : isCompactHeight ? "justify-end py-0" : "justify-end py-1"
         }`}
       >
