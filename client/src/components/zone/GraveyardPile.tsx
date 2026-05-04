@@ -8,6 +8,7 @@ const EMPTY: readonly number[] = [];
 interface GraveyardPileProps {
   playerId: number;
   onClick: () => void;
+  size?: { width: string; height: string };
 }
 
 function TopCard({ cardName }: { cardName: string }) {
@@ -31,7 +32,7 @@ function TopCard({ cardName }: { cardName: string }) {
   );
 }
 
-export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
+export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   const graveyard = useGameStore(
     (s) => s.gameState?.players[playerId]?.graveyard ?? EMPTY,
   );
@@ -56,16 +57,15 @@ export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
   if (count === 0) return null;
 
   const stackDepth = Math.min(count - 1, 3);
+  const w = size?.width ?? "var(--card-w)";
+  const h = size?.height ?? "var(--card-h)";
 
   return (
     <button
       onClick={onClick}
       className={`group relative cursor-pointer ${hasTargetableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={`Graveyard (${count})`}
-      style={{
-        width: "var(--card-w)",
-        height: "var(--card-h)",
-      }}
+      style={{ width: w, height: h }}
     >
       {/* Shadow stack layers */}
       {Array.from({ length: stackDepth }).map((_, i) => (
@@ -73,8 +73,8 @@ export function GraveyardPile({ playerId, onClick }: GraveyardPileProps) {
           key={i}
           className="absolute rounded-lg border border-gray-600 bg-gray-800"
           style={{
-            width: "var(--card-w)",
-            height: "var(--card-h)",
+            width: w,
+            height: h,
             bottom: (i + 1) * 3,
             left: (i + 1) * -1,
           }}

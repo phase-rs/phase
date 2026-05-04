@@ -6,6 +6,7 @@ import type { GameAction, GameObject, PlayerId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -49,6 +50,7 @@ export function CommanderCardZone({ playerId }: CommanderCardZoneProps) {
 }
 
 function CommanderCard({ commander }: { commander: GameObject }) {
+  const isCompactHeight = useIsCompactHeight();
   const legalActions = useGameStore((s) => s.legalActions);
   const effectiveCost = useGameStore(
     (s) => s.spellCosts[String(commander.id)],
@@ -157,6 +159,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
         <ManaCostPips
           cost={displayCost}
           isReduced={false}
+          size={isCompactHeight ? "xs" : "md"}
           className="absolute right-[4%] top-[2%]"
         />
       )}

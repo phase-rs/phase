@@ -5,6 +5,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 
 interface LibraryPileProps {
   playerId: number;
+  size?: { width: string; height: string };
 }
 
 function TopCard({ cardName }: { cardName: string }) {
@@ -28,7 +29,7 @@ function TopCard({ cardName }: { cardName: string }) {
   );
 }
 
-export function LibraryPile({ playerId }: LibraryPileProps) {
+export function LibraryPile({ playerId, size }: LibraryPileProps) {
   const myId = usePlayerId();
   const count = useGameStore(
     (s) => s.gameState?.players[playerId]?.library?.length ?? 0,
@@ -61,15 +62,14 @@ export function LibraryPile({ playerId }: LibraryPileProps) {
 
   const stackDepth = Math.min(count - 1, 4);
   const isPeeking = (canPeek || isRevealed) && topCardName;
+  const w = size?.width ?? "var(--card-w)";
+  const h = size?.height ?? "var(--card-h)";
 
   return (
     <div
       className="relative"
       title={`Library (${count})`}
-      style={{
-        width: "var(--card-w)",
-        height: "var(--card-h)",
-      }}
+      style={{ width: w, height: h }}
     >
       {/* Stack layers */}
       {Array.from({ length: stackDepth }).map((_, i) => (
@@ -77,8 +77,8 @@ export function LibraryPile({ playerId }: LibraryPileProps) {
           key={i}
           className="pointer-events-none absolute rounded-lg border border-gray-700 bg-gray-800"
           style={{
-            width: "var(--card-w)",
-            height: "var(--card-h)",
+            width: w,
+            height: h,
             bottom: (i + 1) * 3,
             left: (i + 1) * 1,
           }}
