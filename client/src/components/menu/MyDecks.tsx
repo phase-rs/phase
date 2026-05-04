@@ -35,8 +35,7 @@ import {
   isBundledDeck,
   loadDeck,
 } from "./deckHelpers";
-
-const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
+import { BASIC_LAND_NAMES } from "../../constants/game";
 const PRECON_PREFIX = "[Pre-built] ";
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
@@ -120,7 +119,7 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
     ? feedDeckOverride.main.reduce((sum, e) => sum + e.count, 0)
     : getDeckCardCount(deckName);
   const representativeCard = feedDeckOverride
-    ? (feedDeckOverride.commander?.[0] ?? feedDeckOverride.main.find((e) => !BASIC_LANDS.has(e.name))?.name ?? null)
+    ? (feedDeckOverride.commander?.[0] ?? feedDeckOverride.main.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
     : getRepresentativeCard(deckName);
   const feedOrigin = getDeckFeedOrigin(deckName);
   const feedForBadge = useCachedFeed(feedOrigin ?? "");

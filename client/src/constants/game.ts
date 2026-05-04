@@ -1,3 +1,21 @@
+/**
+ * All card names with the Basic supertype per CR 205.4c.
+ * CR 100.2a: basic lands are exempt from the 4-copy deck construction limit.
+ */
+export const BASIC_LAND_NAMES = new Set([
+  "Plains",
+  "Island",
+  "Swamp",
+  "Mountain",
+  "Forest",
+  "Wastes",
+  "Snow-Covered Plains",
+  "Snow-Covered Island",
+  "Snow-Covered Swamp",
+  "Snow-Covered Mountain",
+  "Snow-Covered Forest",
+]);
+
 /** Action types that don't reveal hidden information and are safe to undo. */
 export const UNDOABLE_ACTIONS = new Set([
   "PassPriority",

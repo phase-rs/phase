@@ -5,6 +5,7 @@ import type { ParsedDeck } from "../../services/deckParser";
 import { deduplicateEntries, resolveCommander } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { STORAGE_KEY_PREFIX, loadSavedDeck, stampDeckMeta } from "../../constants/storage";
+import { BASIC_LAND_NAMES } from "../../constants/game";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { CardSearch } from "./CardSearch";
 import type { CardSearchFilters } from "./CardSearch";
@@ -43,13 +44,6 @@ interface DeckBuilderProps {
   onResetSearch: () => void;
 }
 
-const BASIC_LANDS = new Set([
-  "Plains",
-  "Island",
-  "Swamp",
-  "Mountain",
-  "Forest",
-]);
 
 export function DeckBuilder({
   onCardHover,
@@ -129,7 +123,7 @@ export function DeckBuilder({
 
     setDeck((prev) => {
       const existing = prev.main.find((e) => e.name === card.name);
-      if (existing && existing.count >= maxCopies && !BASIC_LANDS.has(card.name)) {
+      if (existing && existing.count >= maxCopies && !BASIC_LAND_NAMES.has(card.name)) {
         return prev;
       }
 
@@ -192,7 +186,7 @@ export function DeckBuilder({
           to === "main" &&
           targetEntry &&
           targetEntry.count >= maxCopies &&
-          !BASIC_LANDS.has(name)
+          !BASIC_LAND_NAMES.has(name)
         ) {
           return prev;
         }
@@ -342,7 +336,7 @@ export function DeckBuilder({
       warnings.push(`Deck has ${mainTotal} cards (minimum 60)`);
     }
     for (const entry of deck.main) {
-      if (entry.count > 4 && !BASIC_LANDS.has(entry.name)) {
+      if (entry.count > 4 && !BASIC_LAND_NAMES.has(entry.name)) {
         warnings.push(`${entry.name}: ${entry.count} copies (max 4)`);
       }
     }

@@ -1,8 +1,7 @@
 import { loadSavedDeck } from "../../constants/storage";
 import { getDeckFeedOrigin, getCachedFeed } from "../../services/feedService";
 import type { ParsedDeck } from "../../services/deckParser";
-
-const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
+import { BASIC_LAND_NAMES } from "../../constants/game";
 
 export const COLOR_DOT_CLASS: Record<string, string> = {
   W: "bg-amber-200",
@@ -44,7 +43,7 @@ export function getRepresentativeCard(deckName: string): string | null {
   if (deck.commander && deck.commander.length > 0) {
     return deck.commander[0];
   }
-  const entry = deck.main.find((item) => !BASIC_LANDS.has(item.name));
+  const entry = deck.main.find((item) => !BASIC_LAND_NAMES.has(item.name));
   return entry?.name ?? null;
 }
 

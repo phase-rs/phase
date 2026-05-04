@@ -1,4 +1,5 @@
 import { isCardCommanderEligible } from "./engineRuntime";
+import { BASIC_LAND_NAMES } from "../constants/game";
 
 export interface DeckEntry {
   count: number;
@@ -52,7 +53,6 @@ export function expandParsedDeck(deck: ParsedDeck): ExpandedDeck {
 
 type DeckSection = "main" | "sideboard" | "commander" | "companion";
 const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
-const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
 
 // Archidekt / Moxfield category annotations on an individual card line:
 //   "1 Zimone (SOC) 10 [Commander {top}]"  /  "1x Zimone *CMDR*"  /  "[Companion]"
@@ -135,7 +135,7 @@ function totalCards(entries: DeckEntry[]): number {
 }
 
 function looksCommanderSingleton(entries: DeckEntry[]): boolean {
-  return entries.every((entry) => entry.count === 1 || BASIC_LANDS.has(entry.name));
+  return entries.every((entry) => entry.count === 1 || BASIC_LAND_NAMES.has(entry.name));
 }
 
 function removeOneCopy(entries: DeckEntry[], name: string): DeckEntry[] {

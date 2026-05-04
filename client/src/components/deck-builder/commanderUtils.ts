@@ -1,5 +1,6 @@
 import type { ScryfallCard } from "../../services/scryfall";
 import type { DeckEntry } from "../../services/deckParser";
+import { BASIC_LAND_NAMES } from "../../constants/game";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -62,9 +63,8 @@ export function getColorIdentityViolations(
 }
 
 export function getSingletonViolations(deck: DeckEntry[]): string[] {
-  const basicLands = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
   return deck
-    .filter((e) => e.count > 1 && !basicLands.has(e.name))
+    .filter((e) => e.count > 1 && !BASIC_LAND_NAMES.has(e.name))
     .map((e) => e.name);
 }
 

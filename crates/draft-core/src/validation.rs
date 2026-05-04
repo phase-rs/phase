@@ -3,8 +3,22 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Standard basic land names that are always available in unlimited quantity.
-pub const STANDARD_BASIC_LANDS: &[&str] =
-    &["Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"];
+/// CR 100.2a: basic lands are exempt from copy limits. All cards with the
+/// Basic supertype are listed here (five originals, Wastes, and all
+/// Snow-Covered variants).
+pub const STANDARD_BASIC_LANDS: &[&str] = &[
+    "Plains",
+    "Island",
+    "Swamp",
+    "Mountain",
+    "Forest",
+    "Wastes",
+    "Snow-Covered Plains",
+    "Snow-Covered Island",
+    "Snow-Covered Swamp",
+    "Snow-Covered Mountain",
+    "Snow-Covered Forest",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum LimitedDeckError {
