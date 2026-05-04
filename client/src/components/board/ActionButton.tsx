@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
@@ -346,10 +347,18 @@ export function ActionButton() {
             </button>
             <button
               disabled={actionPending}
-              onClick={() => dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } })}
+              onClick={() => {
+                const playerCount = useGameStore.getState().gameState?.players?.length ?? 2;
+                const aiSeats = usePreferencesStore.getState().aiSeats;
+                const seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
+                  playerId: i + 1,
+                  difficulty: aiSeats[i]?.difficulty ?? "Medium",
+                }));
+                dispatchResolveAll(playerId, seats);
+              }}
               className={gameButtonClass({ tone: "slate", size: "md", disabled: actionPending, className: secondaryButtonClass })}
             >
-              Auto-Resolve Stack
+              Resolve All
             </button>
           </>
         )}

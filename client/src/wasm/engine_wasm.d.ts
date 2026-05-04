@@ -182,6 +182,8 @@ export function load_card_database(json_str: string): number;
  */
 export function ping(): string;
 
+export function resolve_all(requester: number, ai_seats_json: string, max_resolutions: number): any;
+
 /**
  * Restore the game state from a JSON string.
  * Uses serde_json which handles string-keyed maps (from localStorage round-trip)
@@ -295,6 +297,7 @@ export interface InitOutput {
     readonly is_multiplayer_mode: () => number;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
+    readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
