@@ -2958,6 +2958,11 @@ pub fn hand_cast_free_candidates(
 }
 
 pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+    // CR 702.61a: While a spell with split second is on the stack, players can't
+    // cast spells (mana abilities are exempt per CR 702.61b, but spells are not).
+    if super::keywords::stack_has_split_second(state) {
+        return false;
+    }
     let Ok(prepared) = prepare_spell_cast(state, player, object_id) else {
         return false;
     };
@@ -3979,6 +3984,14 @@ pub fn can_activate_ability_now(
         return false;
     };
     if obj.controller != player || ability_index >= obj.abilities.len() {
+        return false;
+    }
+
+    // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
+    // players can't activate abilities that aren't mana abilities.
+    if super::keywords::stack_has_split_second(state)
+        && !super::mana_abilities::is_mana_ability(&obj.abilities[ability_index])
+    {
         return false;
     }
 
@@ -5272,6 +5285,70 @@ mod tests {
         assert!(
             !castable,
             "later spell abilities with unresolved targets must still gate castability"
+        );
+    }
+
+    /// CR 702.61a: `can_cast_object_now` returns false while split second is active.
+    /// CR 702.61b: `can_activate_ability_now` returns true for mana abilities.
+    #[test]
+    fn split_second_blocks_spells_but_permits_mana_abilities() {
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+
+        let mut state = setup_game_at_main_phase();
+        state.turn_number = 2;
+
+        // Instant in hand
+        let spell_id = create_sorcery_in_hand(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Instant];
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 3);
+
+        // Land with an explicit mana ability (not intrinsic basic-land tap)
+        let land_id = add_brushland_like_land(&mut state, CardId(900), "Llanowar Wastes", false);
+
+        // Before split second: spell castable, mana ability activatable
+        assert!(can_cast_object_now(&state, PlayerId(0), spell_id));
+        assert!(can_activate_ability_now(&state, PlayerId(0), land_id, 0));
+
+        // Put split-second spell on stack
+        let ss_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Krosan Grip".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&ss_id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::SplitSecond);
+        state.stack.push_back(StackEntry {
+            id: ss_id,
+            source_id: ss_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(901),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+
+        // CR 702.61a: can't cast spells
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell_id),
+            "spells must be blocked by split second"
+        );
+        // CR 702.61b: mana abilities still permitted
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), land_id, 0),
+            "mana abilities must remain activatable during split second"
         );
     }
 

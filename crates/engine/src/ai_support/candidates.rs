@@ -1763,6 +1763,11 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         Some(player),
     )];
 
+    // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
+    // players can't cast spells or activate non-mana abilities. Special actions
+    // (PlayLand, Foretell) and mana abilities remain permitted.
+    let split_second_active = crate::game::keywords::stack_has_split_second(state);
+
     let p = &state.players[player.0 as usize];
     let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
     let stack_empty = state.stack.is_empty();
@@ -1814,125 +1819,129 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
-    for object_id in casting::spell_objects_available_to_cast(state, player) {
-        let Some(obj) = state.objects.get(&object_id) else {
-            continue;
-        };
-        if casting::can_cast_object_now(state, player, object_id) {
+    // CR 702.61a: Spells and non-mana activated abilities are suppressed by split second.
+    if !split_second_active {
+        for object_id in casting::spell_objects_available_to_cast(state, player) {
+            let Some(obj) = state.objects.get(&object_id) else {
+                continue;
+            };
+            if casting::can_cast_object_now(state, player, object_id) {
+                actions.push(candidate(
+                    GameAction::CastSpell {
+                        object_id,
+                        card_id: obj.card_id,
+                        targets: Vec::new(),
+                    },
+                    TacticalClass::Spell,
+                    Some(player),
+                ));
+            }
+        }
+
+        // CR 601.2b + CR 118.9a: Opt-in CastFromHandFree once-per-turn candidates
+        // (Zaffai and the Tempests). Each (hand spell, source) pair that passes the
+        // filter AND hasn't had its slot consumed this turn yields one candidate.
+        for (object_id, source_id, _freq) in casting::hand_cast_free_candidates(state, player) {
+            let Some(obj) = state.objects.get(&object_id) else {
+                continue;
+            };
             actions.push(candidate(
-                GameAction::CastSpell {
+                GameAction::CastSpellForFree {
                     object_id,
                     card_id: obj.card_id,
-                    targets: Vec::new(),
+                    source_id,
                 },
                 TacticalClass::Spell,
                 Some(player),
             ));
         }
-    }
 
-    // CR 601.2b + CR 118.9a: Opt-in CastFromHandFree once-per-turn candidates
-    // (Zaffai and the Tempests). Each (hand spell, source) pair that passes the
-    // filter AND hasn't had its slot consumed this turn yields one candidate.
-    for (object_id, source_id, _freq) in casting::hand_cast_free_candidates(state, player) {
-        let Some(obj) = state.objects.get(&object_id) else {
-            continue;
-        };
-        actions.push(candidate(
-            GameAction::CastSpellForFree {
-                object_id,
-                card_id: obj.card_id,
-                source_id,
-            },
-            TacticalClass::Spell,
-            Some(player),
-        ));
-    }
-
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
-                for (i, ability_def) in obj.abilities.iter().enumerate() {
-                    if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                        && !crate::game::mana_abilities::is_mana_ability(ability_def)
-                        && casting::can_activate_ability_now(state, player, obj_id, i)
-                    {
+        for &obj_id in &state.battlefield {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                if obj.controller == player {
+                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && casting::can_activate_ability_now(state, player, obj_id, i)
+                        {
+                            actions.push(candidate(
+                                GameAction::ActivateAbility {
+                                    source_id: obj_id,
+                                    ability_index: i,
+                                },
+                                TacticalClass::Ability,
+                                Some(player),
+                            ));
+                        }
+                    }
+                    // CR 702.xxx: Prepare (Strixhaven) — priority-time offer to
+                    // cast a copy of the prepare-spell face. Gated on
+                    // `prepared.is_some()` (single-authority state flag managed
+                    // by `game::effects::prepare`). Assign when WotC publishes
+                    // SOS CR update.
+                    if obj.prepared.is_some() {
                         actions.push(candidate(
-                            GameAction::ActivateAbility {
-                                source_id: obj_id,
-                                ability_index: i,
-                            },
-                            TacticalClass::Ability,
+                            GameAction::CastPreparedCopy { source: obj_id },
+                            TacticalClass::Spell,
                             Some(player),
                         ));
                     }
                 }
-                // CR 702.xxx: Prepare (Strixhaven) — priority-time offer to
-                // cast a copy of the prepare-spell face. Gated on
-                // `prepared.is_some()` (single-authority state flag managed
-                // by `game::effects::prepare`). Assign when WotC publishes
-                // SOS CR update.
-                if obj.prepared.is_some() {
+            }
+        }
+
+        if is_main_phase && stack_empty && is_active {
+            for &obj_id in &state.battlefield {
+                let Some(obj) = state.objects.get(&obj_id) else {
+                    continue;
+                };
+                if obj.controller != player || !obj.card_types.subtypes.iter().any(|s| s == "Room")
+                {
+                    continue;
+                }
+                let unlocks = obj.room_unlocks.unwrap_or_default();
+                if !unlocks.left_unlocked {
                     actions.push(candidate(
-                        GameAction::CastPreparedCopy { source: obj_id },
-                        TacticalClass::Spell,
+                        GameAction::UnlockRoomDoor {
+                            object_id: obj_id,
+                            door: RoomDoor::Left,
+                        },
+                        TacticalClass::Ability,
+                        Some(player),
+                    ));
+                }
+                if obj.back_face.is_some() && !unlocks.right_unlocked {
+                    actions.push(candidate(
+                        GameAction::UnlockRoomDoor {
+                            object_id: obj_id,
+                            door: RoomDoor::Right,
+                        },
+                        TacticalClass::Ability,
                         Some(player),
                     ));
                 }
             }
         }
-    }
 
-    if is_main_phase && stack_empty && is_active {
-        for &obj_id in &state.battlefield {
-            let Some(obj) = state.objects.get(&obj_id) else {
-                continue;
-            };
-            if obj.controller != player || !obj.card_types.subtypes.iter().any(|s| s == "Room") {
-                continue;
-            }
-            let unlocks = obj.room_unlocks.unwrap_or_default();
-            if !unlocks.left_unlocked {
-                actions.push(candidate(
-                    GameAction::UnlockRoomDoor {
-                        object_id: obj_id,
-                        door: RoomDoor::Left,
-                    },
-                    TacticalClass::Ability,
-                    Some(player),
-                ));
-            }
-            if obj.back_face.is_some() && !unlocks.right_unlocked {
-                actions.push(candidate(
-                    GameAction::UnlockRoomDoor {
-                        object_id: obj_id,
-                        door: RoomDoor::Right,
-                    },
-                    TacticalClass::Ability,
-                    Some(player),
-                ));
-            }
-        }
-    }
-
-    // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
-    for &obj_id in &state.players[player.0 as usize].hand {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
-                for (i, ability_def) in obj.abilities.iter().enumerate() {
-                    if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                        && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
-                        && !crate::game::mana_abilities::is_mana_ability(ability_def)
-                        && casting::can_activate_ability_now(state, player, obj_id, i)
-                    {
-                        actions.push(candidate(
-                            GameAction::ActivateAbility {
-                                source_id: obj_id,
-                                ability_index: i,
-                            },
-                            TacticalClass::Ability,
-                            Some(player),
-                        ));
+        // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
+        for &obj_id in &state.players[player.0 as usize].hand {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                if obj.controller == player {
+                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                            && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
+                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && casting::can_activate_ability_now(state, player, obj_id, i)
+                        {
+                            actions.push(candidate(
+                                GameAction::ActivateAbility {
+                                    source_id: obj_id,
+                                    ability_index: i,
+                                },
+                                TacticalClass::Ability,
+                                Some(player),
+                            ));
+                        }
                     }
                 }
             }
@@ -1961,111 +1970,114 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
-    // CR 702.122a: Crew actions for Vehicles (keyword action, not ActivateAbility).
-    // Unlike Equip/Saddle, Crew has no "Activate only as a sorcery" restriction —
-    // it can be activated any time the controller has priority.
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
-                for kw in &obj.keywords {
-                    if let crate::types::keywords::Keyword::Crew(_) = kw {
-                        let has_eligible = state.battlefield.iter().any(|&cid| {
-                            cid != obj_id
-                                && state.objects.get(&cid).is_some_and(|c| {
-                                    c.controller == player
-                                        && !c.tapped
-                                        && c.card_types.core_types.contains(&CoreType::Creature)
-                                })
-                        });
-                        if has_eligible {
-                            actions.push(candidate(
-                                GameAction::CrewVehicle {
-                                    vehicle_id: obj_id,
-                                    creature_ids: vec![],
-                                },
-                                TacticalClass::Utility,
-                                Some(player),
-                            ));
+    // CR 702.61a: Crew/Saddle/Station are activated abilities — blocked by split second.
+    if !split_second_active {
+        // CR 702.122a: Crew actions for Vehicles (keyword action, not ActivateAbility).
+        // Unlike Equip/Saddle, Crew has no "Activate only as a sorcery" restriction —
+        // it can be activated any time the controller has priority.
+        for &obj_id in &state.battlefield {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                if obj.controller == player {
+                    for kw in &obj.keywords {
+                        if let crate::types::keywords::Keyword::Crew(_) = kw {
+                            let has_eligible = state.battlefield.iter().any(|&cid| {
+                                cid != obj_id
+                                    && state.objects.get(&cid).is_some_and(|c| {
+                                        c.controller == player
+                                            && !c.tapped
+                                            && c.card_types.core_types.contains(&CoreType::Creature)
+                                    })
+                            });
+                            if has_eligible {
+                                actions.push(candidate(
+                                    GameAction::CrewVehicle {
+                                        vehicle_id: obj_id,
+                                        creature_ids: vec![],
+                                    },
+                                    TacticalClass::Utility,
+                                    Some(player),
+                                ));
+                            }
+                            break; // One crew action per Vehicle
                         }
-                        break; // One crew action per Vehicle
                     }
                 }
             }
         }
-    }
 
-    // CR 702.171a: Saddle actions for Mounts (keyword action, not
-    // ActivateAbility). Sorcery-speed only — the duplicate check here keeps the
-    // AI search tree free of illegal candidates (mirrors the Station guard).
-    if crate::game::restrictions::is_sorcery_speed_window(state, player) {
-        for &obj_id in &state.battlefield {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                if obj.controller != player {
-                    continue;
-                }
-                if !obj
-                    .keywords
-                    .iter()
-                    .any(|k| matches!(k, crate::types::keywords::Keyword::Saddle(_)))
-                {
-                    continue;
-                }
-                let has_eligible = state.battlefield.iter().any(|&cid| {
-                    cid != obj_id
-                        && state.objects.get(&cid).is_some_and(|c| {
-                            c.controller == player
-                                && !c.tapped
-                                && c.card_types.core_types.contains(&CoreType::Creature)
-                        })
-                });
-                if has_eligible {
-                    actions.push(candidate(
-                        GameAction::SaddleMount {
-                            mount_id: obj_id,
-                            creature_ids: vec![],
-                        },
-                        TacticalClass::Utility,
-                        Some(player),
-                    ));
+        // CR 702.171a: Saddle actions for Mounts (keyword action, not
+        // ActivateAbility). Sorcery-speed only — the duplicate check here keeps the
+        // AI search tree free of illegal candidates (mirrors the Station guard).
+        if crate::game::restrictions::is_sorcery_speed_window(state, player) {
+            for &obj_id in &state.battlefield {
+                if let Some(obj) = state.objects.get(&obj_id) {
+                    if obj.controller != player {
+                        continue;
+                    }
+                    if !obj
+                        .keywords
+                        .iter()
+                        .any(|k| matches!(k, crate::types::keywords::Keyword::Saddle(_)))
+                    {
+                        continue;
+                    }
+                    let has_eligible = state.battlefield.iter().any(|&cid| {
+                        cid != obj_id
+                            && state.objects.get(&cid).is_some_and(|c| {
+                                c.controller == player
+                                    && !c.tapped
+                                    && c.card_types.core_types.contains(&CoreType::Creature)
+                            })
+                    });
+                    if has_eligible {
+                        actions.push(candidate(
+                            GameAction::SaddleMount {
+                                mount_id: obj_id,
+                                creature_ids: vec![],
+                            },
+                            TacticalClass::Utility,
+                            Some(player),
+                        ));
+                    }
                 }
             }
         }
-    }
 
-    // CR 702.184a: Station actions for Spacecraft (keyword action, not
-    // ActivateAbility). Sorcery-speed only — guarded by the priority arm of
-    // `handle_station_activation`; duplicating the check here keeps the AI
-    // search tree free of illegal candidates.
-    if crate::game::restrictions::is_sorcery_speed_window(state, player) {
-        for &obj_id in &state.battlefield {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                if obj.controller != player {
-                    continue;
-                }
-                if !obj
-                    .keywords
-                    .iter()
-                    .any(|k| matches!(k, crate::types::keywords::Keyword::Station))
-                {
-                    continue;
-                }
-                let has_eligible = state.battlefield.iter().any(|&cid| {
-                    cid != obj_id
-                        && state.objects.get(&cid).is_some_and(|c| {
-                            c.controller == player
-                                && !c.tapped
-                                && c.card_types.core_types.contains(&CoreType::Creature)
-                        })
-                });
-                if has_eligible {
-                    actions.push(candidate(
-                        GameAction::ActivateStation {
-                            spacecraft_id: obj_id,
-                            creature_id: None,
-                        },
-                        TacticalClass::Utility,
-                        Some(player),
-                    ));
+        // CR 702.184a: Station actions for Spacecraft (keyword action, not
+        // ActivateAbility). Sorcery-speed only — guarded by the priority arm of
+        // `handle_station_activation`; duplicating the check here keeps the AI
+        // search tree free of illegal candidates.
+        if crate::game::restrictions::is_sorcery_speed_window(state, player) {
+            for &obj_id in &state.battlefield {
+                if let Some(obj) = state.objects.get(&obj_id) {
+                    if obj.controller != player {
+                        continue;
+                    }
+                    if !obj
+                        .keywords
+                        .iter()
+                        .any(|k| matches!(k, crate::types::keywords::Keyword::Station))
+                    {
+                        continue;
+                    }
+                    let has_eligible = state.battlefield.iter().any(|&cid| {
+                        cid != obj_id
+                            && state.objects.get(&cid).is_some_and(|c| {
+                                c.controller == player
+                                    && !c.tapped
+                                    && c.card_types.core_types.contains(&CoreType::Creature)
+                            })
+                    });
+                    if has_eligible {
+                        actions.push(candidate(
+                            GameAction::ActivateStation {
+                                spacecraft_id: obj_id,
+                                creature_id: None,
+                            },
+                            TacticalClass::Utility,
+                            Some(player),
+                        ));
+                    }
                 }
             }
         }
@@ -2089,7 +2101,8 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     }
 
     // CR 702.49: Offer Ninjutsu-family activations during combat
-    if state.active_player == player {
+    // CR 702.61a: Ninjutsu is an activated ability — blocked by split second.
+    if !split_second_active && state.active_player == player {
         let family_cards = keywords::ninjutsu_family_activatable_cards(state, player);
         for (card_id, variant) in &family_cards {
             let returnable = keywords::returnable_creatures_for_variant(state, player, variant);
@@ -2136,7 +2149,11 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     // keyword to permanent spells; CR 702.190b's enter-attacking-alongside
     // only applies when the cast spell is a permanent (handled at
     // resolution).
-    if state.active_player == player && state.phase == Phase::DeclareBlockers {
+    // CR 702.61a: Sneak is a spell cast — blocked by split second.
+    if !split_second_active
+        && state.active_player == player
+        && state.phase == Phase::DeclareBlockers
+    {
         let unblocked: Vec<ObjectId> = crate::game::combat::unblocked_attackers(state)
             .into_iter()
             .filter(|&id| {
@@ -3543,5 +3560,53 @@ mod tests {
             163,
             "cap must collapse 80 ids → 8 unique names → 163 candidates"
         );
+    }
+
+    /// CR 702.61a: While a spell with split second is on the stack, players
+    /// can't cast spells or activate non-mana abilities. Only PassPriority
+    /// should be offered.
+    #[test]
+    fn priority_actions_suppressed_by_split_second_on_stack() {
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = p0;
+
+        // Put a spell with split second on the stack.
+        let ss_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Krosan Grip".to_string(),
+            Zone::Stack,
+        );
+        if let Some(obj) = state.objects.get_mut(&ss_id) {
+            obj.keywords.push(Keyword::SplitSecond);
+        }
+        state.stack.push_back(StackEntry {
+            id: ss_id,
+            source_id: ss_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(3),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+        state.priority_player = p0;
+
+        let actions = candidate_actions(&state);
+        assert_eq!(
+            actions.len(),
+            1,
+            "only PassPriority should be offered while split second is on the stack"
+        );
+        assert!(matches!(actions[0].action, GameAction::PassPriority));
     }
 }

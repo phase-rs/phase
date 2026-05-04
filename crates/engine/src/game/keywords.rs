@@ -42,6 +42,17 @@ pub fn object_has_effective_keyword_kind(
     crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, object_id, kind)
 }
 
+/// CR 702.61a: True when any spell on the stack has split second. While true,
+/// players can't cast spells or activate abilities that aren't mana abilities.
+pub fn stack_has_split_second(state: &GameState) -> bool {
+    state.stack.iter().any(|entry| {
+        state
+            .objects
+            .get(&entry.id)
+            .is_some_and(|obj| has_keyword(obj, &Keyword::SplitSecond))
+    })
+}
+
 pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Option<FlashbackCost> {
     let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Flashback)?;
     match keyword {
