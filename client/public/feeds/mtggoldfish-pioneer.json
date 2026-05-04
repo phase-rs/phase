@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-17T00:00:00Z",
+  "updated": "2026-05-18T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -686,12 +686,12 @@
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Den of the Bugbear"
+          "count": 4,
+          "name": "Burst Lightning"
         },
         {
-          "count": 4,
-          "name": "Kumano Faces Kakkazan"
+          "count": 2,
+          "name": "Den of the Bugbear"
         },
         {
           "count": 4,
@@ -699,15 +699,31 @@
         },
         {
           "count": 4,
+          "name": "Ghitu Lavarunner"
+        },
+        {
+          "count": 2,
+          "name": "Lightning Strike"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 4,
           "name": "Monstrous Rage"
         },
         {
-          "count": 4,
-          "name": "Burst Lightning"
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Ramunap Ruins"
         },
         {
           "count": 4,
-          "name": "Reckless Rage"
+          "name": "Slickshot Show-Off"
         },
         {
           "count": 2,
@@ -723,65 +739,45 @@
         },
         {
           "count": 4,
-          "name": "Screaming Nemesis"
-        },
-        {
-          "count": 14,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Lightning Strike"
-        },
-        {
-          "count": 3,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 3,
-          "name": "Ramunap Ruins"
+          "name": "Wizard's Lightning"
         },
         {
           "count": 1,
-          "name": "Abrade"
+          "name": "Mountain"
+        },
+        {
+          "count": 11,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
         },
         {
           "count": 4,
-          "name": "Emberheart Challenger"
+          "name": "Screaming Nemesis"
         }
       ],
       "sideboard": [
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
+        },
         {
           "count": 4,
           "name": "Magebane Lizard"
         },
         {
           "count": 2,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 2,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
           "name": "Redcap Melee"
         },
         {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
+          "count": 4,
+          "name": "Searing Blood"
         },
         {
-          "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Flowstone Infusion"
+          "count": 3,
+          "name": "Sunspine Lynx"
         }
       ]
     },
@@ -1059,16 +1055,16 @@
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Duress"
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
         },
         {
           "count": 1,
           "name": "Sulfurous Springs"
-        },
-        {
-          "count": 2,
-          "name": "Blazemire Verge"
         },
         {
           "count": 4,
@@ -1076,63 +1072,11 @@
         },
         {
           "count": 4,
-          "name": "Blood Crypt"
+          "name": "Mutavault"
         },
         {
           "count": 4,
           "name": "Bloodtithe Harvester"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Fable of the Mirror-Breaker"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 1,
-          "name": "Torch the Tower"
-        },
-        {
-          "count": 4,
-          "name": "Sheoldred, the Apocalypse"
-        },
-        {
-          "count": 2,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 3,
-          "name": "Blackcleave Cliffs"
-        },
-        {
-          "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Kroxa, Titan of Death's Hunger"
         },
         {
           "count": 3,
@@ -1140,21 +1084,85 @@
         },
         {
           "count": 1,
-          "name": "Strategic Betrayal"
+          "name": "Mountain"
         },
         {
-          "count": 3,
-          "name": "Abrade"
+          "count": 4,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
         },
         {
           "count": 2,
           "name": "Haunted Ridge"
+        },
+        {
+          "count": 1,
+          "name": "Kroxa, Titan of Death's Hunger"
+        },
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 4,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 2,
+          "name": "Blazemire Verge"
+        },
+        {
+          "count": 3,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 2,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 2,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
+          "count": 1,
           "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
         },
         {
           "count": 1,
@@ -1169,16 +1177,8 @@
           "name": "Invoke Despair"
         },
         {
-          "count": 2,
-          "name": "Unlicensed Hearse"
-        },
-        {
           "count": 1,
           "name": "Kroxa, Titan of Death's Hunger"
-        },
-        {
-          "count": 1,
-          "name": "Reckoner Bankbuster"
         },
         {
           "count": 1,
@@ -1186,11 +1186,15 @@
         },
         {
           "count": 1,
-          "name": "Abrade"
+          "name": "Reckoner Bankbuster"
         },
         {
           "count": 2,
-          "name": "Day of Black Sun"
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
         }
       ]
     },
@@ -1346,32 +1350,16 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
           "count": 1,
-          "name": "Plains"
+          "name": "Boseiju, Who Endures"
         },
         {
           "count": 3,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Godless Shrine"
+          "name": "Darkbore Pathway"
         },
         {
           "count": 4,
-          "name": "Formidable Speaker"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
+          "name": "Esika's Chariot"
         },
         {
           "count": 4,
@@ -1379,7 +1367,7 @@
         },
         {
           "count": 4,
-          "name": "Esika's Chariot"
+          "name": "Greasefang, Okiba Boss"
         },
         {
           "count": 4,
@@ -1390,32 +1378,8 @@
           "name": "Takenuma, Abandoned Mire"
         },
         {
-          "count": 4,
-          "name": "Raffine's Informant"
-        },
-        {
-          "count": 2,
-          "name": "Brushland"
-        },
-        {
-          "count": 2,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 4,
-          "name": "Razorverge Thicket"
-        },
-        {
-          "count": 4,
+          "count": 3,
           "name": "Blooming Marsh"
-        },
-        {
-          "count": 3,
-          "name": "Cache Grab"
-        },
-        {
-          "count": 3,
-          "name": "Witherbloom Command"
         },
         {
           "count": 1,
@@ -1423,57 +1387,51 @@
         },
         {
           "count": 1,
+          "name": "Brushland"
+        },
+        {
+          "count": 2,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 3,
+          "name": "Cache Grab"
+        },
+        {
+          "count": 1,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 4,
           "name": "Temple Garden"
         },
         {
           "count": 1,
-          "name": "Thundering Broodwagon"
+          "name": "Plains"
         },
         {
           "count": 1,
-          "name": "Yathan Roadwatcher"
+          "name": "Swamp"
         },
         {
-          "count": 1,
-          "name": "Selfless Savior"
-        },
-        {
-          "count": 1,
-          "name": "Overlord of the Balemurk"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
-          "count": 2,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Ashiok, Dream Render"
-        },
-        {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 1,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 1,
-          "name": "Loran of the Third Path"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
           "count": 3,
-          "name": "Pest Control"
+          "name": "Formidable Speaker"
+        },
+        {
+          "count": 1,
+          "name": "Lush Portico"
+        },
+        {
+          "count": 3,
+          "name": "Witherbloom Command"
         },
         {
           "count": 2,
-          "name": "Abrupt Decay"
+          "name": "Overlord of the Balemurk"
         },
         {
           "count": 1,
@@ -1481,7 +1439,61 @@
         },
         {
           "count": 1,
-          "name": "Kaervek, the Spiteful"
+          "name": "Starting Town"
+        },
+        {
+          "count": 2,
+          "name": "Thundering Broodwagon"
+        },
+        {
+          "count": 3,
+          "name": "Raffine's Informant"
+        },
+        {
+          "count": 2,
+          "name": "Collective Brutality"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 1,
+          "name": "Ashiok, Dream Render"
+        },
+        {
+          "count": 2,
+          "name": "Pest Control"
+        },
+        {
+          "count": 3,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 2,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 2,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 1,
+          "name": "Knight of Autumn"
+        },
+        {
+          "count": 1,
+          "name": "Tear Asunder"
+        },
+        {
+          "count": 1,
+          "name": "Sheoldred, the Apocalypse"
         }
       ]
     }
