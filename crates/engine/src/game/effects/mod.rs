@@ -5655,4 +5655,221 @@ mod tests {
             "NthResolutionThisTurn must evaluate false when ability lacks an index"
         );
     }
+
+    /// Abandon Attachments: "You may discard a card. If you do, draw two cards."
+    /// Regression test for #81: after discarding, the IfYouDo draw-2 sub-ability
+    /// must fire via the continuation chain. The bug was that context propagation
+    /// or cost_payment_failed_flag was blocking the IfYouDo condition.
+    #[test]
+    fn optional_discard_if_you_do_draw_fires_after_choice() {
+        let mut state = GameState::new_two_player(42);
+
+        // Card in hand to discard
+        let hand_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Fodder".to_string(),
+            Zone::Hand,
+        );
+
+        // Cards in library to draw
+        create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Draw A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Draw B".to_string(),
+            Zone::Library,
+        );
+
+        // Build Abandon Attachments: optional Discard 1 → sub: Draw 2 (IfYouDo)
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IfYouDo);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        ability.optional = true;
+
+        // Step 1: resolve_ability_chain → OptionalEffectChoice
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "Expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        // Step 2: Accept optional effect → forced discard (1 card in hand, count=1)
+        // then IfYouDo sub-ability should fire drawing 2 cards.
+        let waiting = crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        // Forced discard (hand_size == count) skips DiscardChoice, resolves inline.
+        // After: discard 1 (-1), draw 2 (+2) = 2 cards in hand.
+        let hand_after = state.players[0].hand.len();
+        assert_eq!(
+            hand_after,
+            2,
+            "After discarding 1 and drawing 2, hand should have 2 cards, got {}. \
+             IfYouDo sub-ability likely did not fire. waiting_for={:?}, Events: {:?}",
+            hand_after,
+            waiting,
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved { .. }
+                        | GameEvent::Discarded { .. }
+                        | GameEvent::CardsDrawn { .. }
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Abandon Attachments #81: interactive discard (player has 2+ cards) → IfYouDo draw 2.
+    /// When the discard requires player interaction (DiscardChoice), the sub-ability
+    /// must be stashed as a continuation and fire after the player selects a card.
+    #[test]
+    fn optional_discard_if_you_do_draw_fires_after_interactive_choice() {
+        let mut state = GameState::new_two_player(42);
+
+        // Two cards in hand so the discard is interactive (player must choose 1 of 2)
+        let hand_card_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Fodder A".to_string(),
+            Zone::Hand,
+        );
+        let _hand_card_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Fodder B".to_string(),
+            Zone::Hand,
+        );
+
+        // Cards in library to draw
+        create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Draw A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Draw B".to_string(),
+            Zone::Library,
+        );
+
+        // Build: optional Discard 1 → sub: Draw 2 (IfYouDo)
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IfYouDo);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        ability.optional = true;
+
+        // Step 1: resolve_ability_chain → OptionalEffectChoice
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "Expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        // Step 2: Accept optional effect → DiscardChoice (2 cards, must choose 1)
+        let waiting = crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(waiting, WaitingFor::DiscardChoice { .. }),
+            "Expected DiscardChoice after accepting optional with 2 cards in hand, got {:?}",
+            waiting
+        );
+
+        // Verify the sub-ability was stashed as a pending continuation
+        assert!(
+            state.pending_continuation.is_some(),
+            "IfYouDo sub-ability should be stashed as pending_continuation during DiscardChoice"
+        );
+
+        // Step 3: Select one card to discard
+        let wf = state.waiting_for.clone();
+        let _result = crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            wf,
+            crate::types::GameAction::SelectCards {
+                cards: vec![hand_card_a],
+            },
+            &mut events,
+        )
+        .unwrap();
+
+        // After: started with 2 in hand, discarded 1 (-1), drew 2 (+2) = 3 cards in hand.
+        let hand_after = state.players[0].hand.len();
+        assert_eq!(
+            hand_after,
+            3,
+            "After discarding 1 of 2 and drawing 2, hand should have 3 cards, got {}. \
+             IfYouDo sub-ability likely did not fire.",
+            hand_after,
+        );
+    }
 }
