@@ -55,6 +55,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_there_are_counters_on_source,
         parse_there_are_conditions,
         parse_there_exists_condition,
+        parse_subject_first_zone_count,
         parse_entered_this_turn,
         parse_youve_this_turn,
         parse_event_state_conditions,
@@ -1860,6 +1861,51 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
             n,
         ),
     ))
+}
+
+/// CR 700.2: Parse "N or more [type] cards are in your [zone]" — subject-first
+/// grammatical form of the threshold condition. Grammatically inverted form of
+/// `parse_there_are_conditions` ("there are N or more cards in your graveyard").
+///
+/// Covers the Threshold keyword family ("seven or more cards are in your
+/// graveyard") and typed variants ("seven or more land cards", "two or more Elf
+/// cards"). All observed instances target "your graveyard" but the zone axis is
+/// composed from a tag alt for extensibility.
+fn parse_subject_first_zone_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_ge_threshold(input)?;
+    // Optional type filter: "land ", "creature ", "Elf ", etc.
+    let (type_filters, rest) = if let Ok((after, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("cards are in your ").parse(rest)
+    {
+        (vec![], after)
+    } else {
+        let (filter, remainder) = parse_type_phrase(rest);
+        let card_types = match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => type_filters,
+            _ => vec![],
+        };
+        let (after, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("cards are in your ")
+            .parse(remainder)?;
+        (card_types, after)
+    };
+    let (rest, zone) = alt((
+        value(crate::types::ability::ZoneRef::Graveyard, tag("graveyard")),
+        value(crate::types::ability::ZoneRef::Exile, tag("exile")),
+        value(crate::types::ability::ZoneRef::Hand, tag("hand")),
+        value(crate::types::ability::ZoneRef::Library, tag("library")),
+    ))
+    .parse(rest)?;
+    let qty =
+        if type_filters.is_empty() && matches!(zone, crate::types::ability::ZoneRef::Graveyard) {
+            QuantityRef::GraveyardSize
+        } else {
+            QuantityRef::ZoneCardCount {
+                zone,
+                card_types: type_filters,
+                scope: crate::types::ability::CountScope::Controller,
+            }
+        };
+    Ok((rest, make_quantity_ge(qty, n)))
 }
 
 /// CR 122.1 + CR 608.2c: Parse "there are <quantity> [<type>] counter[s] on <source>".
