@@ -687,8 +687,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     let active = state.active_player;
 
-    // CR 514.1 + CR 402.2: Discard down to maximum hand size.
-    // If the player has "no maximum hand size" (CR 402.2), skip the discard check entirely.
+    // CR 514.1 + CR 402.2: Only the *active* player discards down to maximum hand size.
+    // Non-active players keep their cards regardless of hand size until their own cleanup.
+    // If the active player has "no maximum hand size" (CR 402.2), skip the discard check.
     let has_no_max = super::static_abilities::check_static_ability(
         state,
         StaticMode::NoMaximumHandSize,
@@ -2653,6 +2654,96 @@ mod tests {
             }
             other => panic!("Expected DiscardToHandSize, got {:?}", other),
         }
+    }
+
+    /// CR 514.1: Only the *active* player discards during the cleanup step.
+    /// A non-active player with more than seven cards keeps them until their
+    /// own turn's cleanup.
+    #[test]
+    fn execute_cleanup_ignores_non_active_player_hand_size() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Give the NON-active player (P1) 9 cards in hand — well over the
+        // default maximum of 7.
+        for i in 0..9 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(1),
+                format!("Card {}", i),
+                Zone::Hand,
+            );
+        }
+        // Active player (P0) has 0 cards — no discard needed for them.
+        assert_eq!(state.players[0].hand.len(), 0);
+        assert_eq!(state.players[1].hand.len(), 9);
+
+        let mut events = Vec::new();
+        let result = execute_cleanup(&mut state, &mut events);
+
+        // CR 514.1: Only the active player's hand size is checked.
+        // P1 is not the active player, so cleanup must complete without a
+        // discard prompt.
+        assert!(
+            result.is_none(),
+            "Non-active player should not be prompted to discard, got {:?}",
+            result
+        );
+        // P1's hand is untouched.
+        assert_eq!(state.players[1].hand.len(), 9);
+    }
+
+    /// CR 514.1: When both players exceed maximum hand size, only the active
+    /// player is prompted to discard during that turn's cleanup step.
+    #[test]
+    fn execute_cleanup_only_prompts_active_player_when_both_exceed_max() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Both players have 9 cards in hand.
+        for i in 0..9 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("P0 Card {}", i),
+                Zone::Hand,
+            );
+        }
+        for i in 10..19 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(1),
+                format!("P1 Card {}", i),
+                Zone::Hand,
+            );
+        }
+        assert_eq!(state.players[0].hand.len(), 9);
+        assert_eq!(state.players[1].hand.len(), 9);
+
+        let mut events = Vec::new();
+        let result = execute_cleanup(&mut state, &mut events);
+
+        // Only the active player (P0) should be prompted.
+        match result {
+            Some(WaitingFor::DiscardToHandSize {
+                player,
+                count,
+                cards,
+            }) => {
+                assert_eq!(player, PlayerId(0), "Only active player should discard");
+                assert_eq!(count, 2);
+                assert_eq!(cards.len(), 9);
+            }
+            other => panic!(
+                "Expected DiscardToHandSize for active player, got {:?}",
+                other
+            ),
+        }
+        // P1's hand is completely untouched.
+        assert_eq!(state.players[1].hand.len(), 9);
     }
 
     #[test]
