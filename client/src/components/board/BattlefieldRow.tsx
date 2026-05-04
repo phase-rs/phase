@@ -112,7 +112,7 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
    *  in the limited vertical space rather than wrapping into a tiny grid. */
   const MIN_CARD_H = isCompactHeight ? 56 : 80;
   /** Maximum creature card height — prevents oversized cards with few creatures */
-  const MAX_CARD_H = 150;
+  const MAX_CARD_H = isCompactHeight ? 90 : 150;
   let creatureWrap = false;
   const renderedGroups = groups.map((group) => {
     const manualExpanded = expandedGroupIds.has(group.ids[0]);

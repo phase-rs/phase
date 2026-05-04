@@ -13,9 +13,9 @@ import { CommandZone } from "../zone/CommandZone.tsx";
  *  On compact-height (landscape phones), lands shrink hard so creatures
  *  (which players actually interact with — attack, block, P/T, abilities)
  *  get vertical breathing room. */
-const LAND_BASE_SCALE = 0.78;
+const LAND_BASE_SCALE = 0.68;
 const LAND_BASE_SCALE_COMPACT = 0.42;
-const OTHER_BASE_SCALE = 1.0;
+const OTHER_BASE_SCALE = 0.82;
 const OTHER_BASE_SCALE_COMPACT = 0.42;
 /** Minimum scale floor */
 const MIN_ZONE_SCALE = 0.35;
@@ -102,7 +102,7 @@ export function PlayerArea({
   const commanderScale = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
   const commanderSection = isCommander ? (
     <div
-      className="flex shrink-0 flex-col items-end gap-1"
+      className="flex min-w-0 flex-col items-end gap-1"
       style={zoneStyle(commanderScale)}
     >
       <CommanderCardZone playerId={playerId} />
@@ -121,14 +121,16 @@ export function PlayerArea({
     <>
       <div className="mx-2 h-3/4 w-px shrink-0 bg-white/20" />
       <div
-        className="flex shrink-0 items-center gap-2"
+        className="flex min-w-0 items-center gap-2"
         style={zoneStyle(isCompactHeight ? OTHER_BASE_SCALE_COMPACT : OTHER_BASE_SCALE)}
       >
         {supportExtras}
       </div>
     </>
   ) : null;
-  const landAlignClass = "flex-wrap items-center content-center justify-start";
+  const landAlignClass = isCompactHeight
+    ? "flex-nowrap items-center justify-start"
+    : "flex-wrap items-center content-center justify-start";
 
   const landCount = partitioned?.lands.length ?? 0;
   const supportCount = partitioned?.support.length ?? 0;
@@ -138,7 +140,7 @@ export function PlayerArea({
   const supportStyle = zoneStyle(zoneScale(supportBase, supportCount));
 
   const middleRow = (
-    <div className="flex min-h-0 items-stretch justify-between gap-4" data-debug-label="Middle Row">
+    <div className="flex min-h-0 min-w-0 items-stretch justify-between gap-4" data-debug-label="Middle Row">
       <div
         className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 pl-2 ${landAlignClass}`}
         style={landStyle}
@@ -168,7 +170,7 @@ export function PlayerArea({
 
   return (
     <div
-      className={`relative flex min-h-0 flex-1 overflow-visible ${
+      className={`relative flex min-h-0 min-w-0 flex-1 overflow-visible ${
         isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""
       }`}
       data-testid={`player-area-${playerId}`}
@@ -186,7 +188,7 @@ export function PlayerArea({
         {isMirrored ? (
           <>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
-            <div className="shrink-0">
+            <div className={isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}>
               {middleRow}
             </div>
             <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
@@ -198,7 +200,7 @@ export function PlayerArea({
             <div className="min-h-0 flex-1 px-2" data-debug-label="Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" />
             </div>
-            <div className="shrink-0">
+            <div className={isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}>
               {middleRow}
             </div>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
