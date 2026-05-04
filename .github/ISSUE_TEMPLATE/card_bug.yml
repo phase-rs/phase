@@ -1,0 +1,72 @@
+name: Card or Rules Bug
+description: Report one card/rules bug in phase-rs
+title: "[Card Bug] "
+labels:
+  - status:needs-triage
+  - source:github
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please file one bug per issue. If multiple cards demonstrate the same underlying problem, list them as examples.
+
+  - type: input
+    id: cards
+    attributes:
+      label: Card(s)
+      description: List the card or cards involved.
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: Build/version
+      description: "Example: v0.1.19 14b40df"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: game_mode
+    attributes:
+      label: Game mode
+      options:
+        - AI
+        - P2P
+        - Solo/goldfish
+        - Deckbuilder
+        - Unknown
+    validations:
+      required: false
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Include board state, sequence of actions, and relevant screenshots/logs.
+    validations:
+      required: false
+
+  - type: textarea
+    id: attachments
+    attributes:
+      label: Logs/screenshots/game-state
+      description: Drag files here or paste links.
+    validations:
+      required: false

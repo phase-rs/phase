@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="phase-rs/phase"
+
+create_label() {
+  local name="$1"
+  local color="$2"
+  local description="$3"
+  gh label create "$name" --color "$color" --description "$description" --repo "$REPO" --force
+}
+
+echo "Creating status labels..."
+create_label "status:needs-triage"           "c2e0c6" "Bug needs initial classification"
+create_label "status:needs-repro"            "bfd4f2" "Needs reproduction steps"
+create_label "status:confirmed"              "0e8a16" "Confirmed bug"
+create_label "status:in-progress"            "fbca04" "Fix in progress"
+create_label "status:fixed-dirty-tree"       "d4c5f9" "Fixed locally, not merged"
+create_label "status:fixed-unreleased"       "c5def5" "Merged but not in public build"
+create_label "status:needs-card-data-regen"  "f9d0c4" "Needs card data regeneration"
+create_label "status:needs-runtime-verify"   "fef2c0" "May be fixed, needs runtime verification"
+create_label "status:verified"               "0e8a16" "Verified fixed"
+create_label "status:stale"                  "e4e669" "Cannot reproduce, no recent activity"
+create_label "status:duplicate"              "cfd3d7" "Duplicate of another issue"
+create_label "status:wont-fix"               "ffffff" "Will not fix"
+
+echo "Creating area labels..."
+create_label "area:engine"      "1d76db" "Core rules engine"
+create_label "area:parser"      "0075ca" "Oracle text parser"
+create_label "area:oracle-gen"  "0075ca" "Oracle generation pipeline"
+create_label "area:card-data"   "5319e7" "Card data pipeline"
+create_label "area:frontend"    "d876e3" "React frontend"
+create_label "area:ai"          "b60205" "AI opponent"
+create_label "area:deckbuilder" "d876e3" "Deck builder"
+create_label "area:sync"        "006b75" "Bug sync/triage system"
+create_label "area:docs"        "0075ca" "Documentation"
+
+echo "Creating mechanic labels..."
+create_label "mechanic:mana"                "d4c5f9" ""
+create_label "mechanic:costs"               "d4c5f9" ""
+create_label "mechanic:replacement-effects" "d4c5f9" ""
+create_label "mechanic:triggers"            "d4c5f9" ""
+create_label "mechanic:continuous-effects"  "d4c5f9" ""
+create_label "mechanic:layers"              "d4c5f9" ""
+create_label "mechanic:attachments"         "d4c5f9" ""
+create_label "mechanic:tokens"              "d4c5f9" ""
+create_label "mechanic:search"              "d4c5f9" ""
+create_label "mechanic:copy"                "d4c5f9" ""
+create_label "mechanic:combat"              "d4c5f9" ""
+create_label "mechanic:zone-change"         "d4c5f9" ""
+create_label "mechanic:keyword"             "d4c5f9" ""
+create_label "mechanic:modal"               "d4c5f9" ""
+create_label "mechanic:commander"           "d4c5f9" ""
+create_label "mechanic:ai-policy"           "d4c5f9" ""
+create_label "mechanic:ui-selection"        "d4c5f9" ""
+create_label "mechanic:card-data-regen"     "d4c5f9" ""
+
+echo "Creating priority labels..."
+create_label "priority:p0-panic"             "b60205" "Crashes or game-state corruption"
+create_label "priority:p0-softlock"          "b60205" "Game cannot progress"
+create_label "priority:p1-infinite-loop"     "d93f0b" "Unbounded triggers/actions"
+create_label "priority:p1-core-mechanic"     "d93f0b" "Broad engine feature broken"
+create_label "priority:p2-wrong-game-result" "e99695" "Rules behavior wrong but game continues"
+create_label "priority:p3-card-specific"     "f9d0c4" "Isolated card bug"
+create_label "priority:p4-ui-polish"         "fef2c0" "Display/UX problem"
+
+echo "Creating source labels..."
+create_label "source:discord"          "cfd3d7" "Reported via Discord"
+create_label "source:github"           "cfd3d7" "Reported via GitHub"
+create_label "source:internal-triage"  "cfd3d7" "Found during internal triage"
+
+echo "Creating resolution labels..."
+create_label "resolution:fixed"             "0e8a16" "Verified fixed"
+create_label "resolution:duplicate"         "cfd3d7" "Duplicate"
+create_label "resolution:split"             "fbca04" "Collector split into child issues"
+create_label "resolution:stale"             "e4e669" "Could not reproduce"
+create_label "resolution:wont-fix"          "ffffff" "Will not fix"
+create_label "resolution:cannot-reproduce"  "e4e669" "Cannot reproduce"
+
+echo "Creating special labels..."
+create_label "collector" "fbca04" "Omnibus issue pending split"
+
+echo "Done. All labels created/updated in $REPO."

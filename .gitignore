@@ -101,3 +101,12 @@ mtgish*.tgz
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Bug triage data (generated)
+triage/raw/discord-messages.jsonl
+triage/raw/github-events.jsonl
+triage/report-items.jsonl
+triage/report-links.jsonl
+triage/triage-items.jsonl
+triage/sync-state.json
+triage/dashboard.md
