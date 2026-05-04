@@ -758,6 +758,13 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
         .map(|((), rest)| rest)
         .unwrap_or(filter_text);
+    // "~" is the self-reference placeholder — filter: None means "this permanent"
+    if filter_text == "~" {
+        return Some(AbilityCost::ReturnToHand {
+            count: 1,
+            filter: None,
+        });
+    }
     let target_text = format!("target {filter_text}");
     let (filter, rem) = parse_target(&target_text);
     let filter = if rem.trim().is_empty() {
@@ -906,6 +913,17 @@ mod tests {
             AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,
                 count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_return_self_to_hand() {
+        assert_eq!(
+            parse_oracle_cost("Return ~ to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: None,
             }
         );
     }
