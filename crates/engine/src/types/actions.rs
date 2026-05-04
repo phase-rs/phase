@@ -1,11 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::TargetRef;
+use super::card_type::CoreType;
+use super::counter::CounterType;
 use super::game_state::{AutoPassRequest, CombatDamageAssignmentMode, ShardChoice};
 use super::identifiers::{CardId, ObjectId};
-use super::mana::ManaType;
+use super::keywords::Keyword;
+use super::mana::{ManaColor, ManaType};
 use super::match_config::DeckCardCount;
+use super::phase::Phase;
 use super::player::PlayerId;
+use super::zones::Zone;
 use crate::game::combat::AttackTarget;
 
 /// CR 701.57a + CR 702.85a: Player decision for any "you may cast that card
@@ -386,6 +391,10 @@ pub enum GameAction {
     /// may be offered again next turn. Assign when WotC publishes SOS CR
     /// update.
     PassParadigmOffer,
+    /// Debug/remediation action — bypasses WaitingFor validation (like Concede).
+    /// Gated on `GameState::debug_mode`. Rejected in multiplayer at both the
+    /// WASM and server-core layers.
+    Debug(DebugAction),
     /// CR 104.3a: A player may concede the game at any time. That player leaves the game.
     /// CR 800.4a: When a player leaves a multiplayer game, all objects owned by that player
     /// leave the game and all spells/abilities controlled by that player cease to exist.
@@ -407,6 +416,107 @@ pub enum LearnOption {
     Rummage { card_id: ObjectId },
     /// Decline to learn (skip).
     Skip,
+}
+
+/// Direct game-state manipulation actions for debugging, testing, and remediation.
+/// Bypasses `WaitingFor` validation — fires from any game state without disrupting
+/// the current prompt. Gated on `GameState::debug_mode`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DebugAction {
+    // ── Object Zone Manipulation ──────────────────────────────────────────
+    /// Move an existing object to a different zone.
+    /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs).
+    /// When false, raw placement with no triggers or SBAs.
+    MoveToZone {
+        object_id: ObjectId,
+        to_zone: Zone,
+        #[serde(default)]
+        simulate: bool,
+    },
+    /// Create a new card object by name. Resolved against CardDatabase at the
+    /// WASM layer; the engine returns InvalidAction if this reaches apply().
+    CreateCard {
+        card_name: String,
+        owner: PlayerId,
+        zone: Zone,
+    },
+    /// Remove an object from the game entirely.
+    RemoveObject { object_id: ObjectId },
+    /// Draw N cards using the real draw pipeline (CR 121.1).
+    /// Routes through replacement effects and emits CardDrawn events.
+    DrawCards { player_id: PlayerId, count: u32 },
+    /// Mill N cards from library to graveyard.
+    Mill { player_id: PlayerId, count: u32 },
+    /// Shuffle a player's library.
+    ShuffleLibrary { player_id: PlayerId },
+
+    // ── Object Property Manipulation ──────────────────────────────────────
+    /// Overwrite base power/toughness (layer 7a input). Marks layers dirty.
+    SetBasePowerToughness {
+        object_id: ObjectId,
+        power: Option<i32>,
+        toughness: Option<i32>,
+    },
+    /// Modify counters: positive delta adds, negative removes (clamped at 0).
+    /// Bypasses replacement effects.
+    ModifyCounters {
+        object_id: ObjectId,
+        counter_type: CounterType,
+        delta: i32,
+    },
+    /// Tap or untap an object.
+    SetTapped { object_id: ObjectId, tapped: bool },
+    /// Change an object's controller. Marks layers dirty.
+    SetController {
+        object_id: ObjectId,
+        controller: PlayerId,
+    },
+    /// Set summoning sickness flag directly.
+    SetSummoningSickness { object_id: ObjectId, sick: bool },
+    /// Transform a DFC, flip a flip-card, or turn face-down/up.
+    SetFaceState {
+        object_id: ObjectId,
+        face_down: Option<bool>,
+        transformed: Option<bool>,
+        flipped: Option<bool>,
+    },
+    /// Attach an object (equipment/aura) to a target permanent.
+    Attach {
+        object_id: ObjectId,
+        target_id: ObjectId,
+    },
+    /// Detach an object from whatever it's attached to.
+    Detach { object_id: ObjectId },
+
+    // ── Player State Manipulation ─────────────────────────────────────────
+    /// Set a player's life total directly.
+    SetLife { player_id: PlayerId, life: i32 },
+    /// Add mana to a player's pool (mixed types in one action).
+    AddMana {
+        player_id: PlayerId,
+        mana: Vec<ManaType>,
+    },
+
+    // ── Game Flow ─────────────────────────────────────────────────────────
+    /// Advance or rewind to a specific phase/step.
+    SetPhase {
+        phase: Phase,
+        active_player: PlayerId,
+    },
+    /// Explicitly run state-based actions. Use after a batch of raw mutations.
+    RunStateBasedActions,
+    /// Create a token with explicit characteristics on the battlefield.
+    CreateToken {
+        owner: PlayerId,
+        name: String,
+        power: Option<i32>,
+        toughness: Option<i32>,
+        core_types: Vec<CoreType>,
+        subtypes: Vec<String>,
+        colors: Vec<ManaColor>,
+        keywords: Vec<Keyword>,
+    },
 }
 
 impl GameAction {
@@ -516,7 +626,8 @@ impl GameAction {
             | GameAction::ChooseManaColor { .. }
             | GameAction::PayManaAbilityMana { .. }
             | GameAction::PassParadigmOffer
-            | GameAction::Concede { .. } => None,
+            | GameAction::Concede { .. }
+            | GameAction::Debug(_) => None,
         }
     }
 }

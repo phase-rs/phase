@@ -654,6 +654,10 @@ impl SessionManager {
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
 
+        if matches!(action, GameAction::Debug(_)) {
+            return Err("Debug actions are not permitted in multiplayer games".to_string());
+        }
+
         // CancelAutoPass: any valid player can cancel their own flag regardless of whose turn it is.
         // This allows canceling UntilEndOfTurn while the opponent has priority.
         if matches!(action, GameAction::CancelAutoPass) {

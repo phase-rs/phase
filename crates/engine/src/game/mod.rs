@@ -22,6 +22,7 @@ pub mod elimination;
 pub mod engine;
 pub(crate) mod engine_casting;
 pub(crate) mod engine_combat;
+pub(crate) mod engine_debug;
 pub(crate) mod engine_modes;
 pub(crate) mod engine_payment_choices;
 pub(crate) mod engine_priority;

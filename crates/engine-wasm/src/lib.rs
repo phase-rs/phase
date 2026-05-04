@@ -512,12 +512,68 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     };
     let actor = PlayerId(actor);
 
+    if matches!(action, GameAction::Debug(_)) && is_multiplayer_mode() {
+        return JsValue::from_str("Engine error: debug actions disabled in multiplayer");
+    }
+
+    if let GameAction::Debug(engine::types::actions::DebugAction::CreateCard {
+        ref card_name,
+        owner,
+        zone,
+    }) = action
+    {
+        return handle_debug_create_card(card_name, owner, zone);
+    }
+
     match with_state_mut(|state| match apply(state, actor, action) {
         Ok(result) => to_js(&result),
         Err(e) => {
             let error_msg = format!("Engine error: {}", e);
             JsValue::from_str(&error_msg)
         }
+    }) {
+        Ok(val) => val,
+        Err(e) => e,
+    }
+}
+
+fn handle_debug_create_card(
+    card_name: &str,
+    owner: PlayerId,
+    zone: engine::types::zones::Zone,
+) -> JsValue {
+    let face = CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err("Engine error: card database not loaded");
+        };
+        match db.get_face_by_name(card_name) {
+            Some(face) => Ok(face.clone()),
+            None => Err("Engine error: card not found in database"),
+        }
+    });
+    let face = match face {
+        Ok(f) => f,
+        Err(msg) => return JsValue::from_str(msg),
+    };
+    match with_state_mut(|state| {
+        if !state.debug_mode {
+            return JsValue::from_str(
+                "Engine error: Debug actions require debug_mode to be enabled",
+            );
+        }
+        let card_id = engine::types::identifiers::CardId(state.next_object_id);
+        let obj_id =
+            engine::game::zones::create_object(state, card_id, owner, face.name.clone(), zone);
+        let obj = state.objects.get_mut(&obj_id).expect("just created");
+        engine::game::printed_cards::apply_card_face_to_object(obj, &face);
+        state.layers_dirty = true;
+        let result = engine::types::game_state::ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        };
+        to_js(&result)
     }) {
         Ok(val) => val,
         Err(e) => e,

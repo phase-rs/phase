@@ -215,6 +215,19 @@ export type ExileCostSourceZone = "Hand" | "Graveyard";
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
 
+export type CoreType =
+  | "Artifact"
+  | "Creature"
+  | "Enchantment"
+  | "Instant"
+  | "Land"
+  | "Planeswalker"
+  | "Sorcery"
+  | "Tribal"
+  | "Battle"
+  | "Kindred"
+  | "Dungeon";
+
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
 
 /**
@@ -807,6 +820,27 @@ export interface ActionResult {
 
 // ── Game Actions (discriminated union, tag="type", content="data") ───────
 
+export type DebugAction =
+  | { type: "MoveToZone"; data: { object_id: ObjectId; to_zone: Zone; simulate?: boolean } }
+  | { type: "CreateCard"; data: { card_name: string; owner: PlayerId; zone: Zone } }
+  | { type: "RemoveObject"; data: { object_id: ObjectId } }
+  | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
+  | { type: "Mill"; data: { player_id: PlayerId; count: number } }
+  | { type: "ShuffleLibrary"; data: { player_id: PlayerId } }
+  | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }
+  | { type: "ModifyCounters"; data: { object_id: ObjectId; counter_type: CounterType; delta: number } }
+  | { type: "SetTapped"; data: { object_id: ObjectId; tapped: boolean } }
+  | { type: "SetController"; data: { object_id: ObjectId; controller: PlayerId } }
+  | { type: "SetSummoningSickness"; data: { object_id: ObjectId; sick: boolean } }
+  | { type: "SetFaceState"; data: { object_id: ObjectId; face_down?: boolean; transformed?: boolean; flipped?: boolean } }
+  | { type: "Attach"; data: { object_id: ObjectId; target_id: ObjectId } }
+  | { type: "Detach"; data: { object_id: ObjectId } }
+  | { type: "SetLife"; data: { player_id: PlayerId; life: number } }
+  | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
+  | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
+  | { type: "RunStateBasedActions" }
+  | { type: "CreateToken"; data: { owner: PlayerId; name: string; power?: number; toughness?: number; core_types: CoreType[]; subtypes: string[]; colors: ManaColor[]; keywords: Keyword[] } };
+
 export type GameAction =
   | { type: "PassPriority" }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
@@ -872,7 +906,8 @@ export type GameAction =
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
   | { type: "ChooseX"; data: { value: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
-  | { type: "ChooseManaColor"; data: { choice: ManaChoice } };
+  | { type: "ChooseManaColor"; data: { choice: ManaChoice } }
+  | { type: "Debug"; data: DebugAction };
 
 // CR 605.3b + CR 106.1a: Shape of the prompt surfaced by WaitingFor::ChooseManaColor.
 export type ManaChoicePrompt =
@@ -1050,6 +1085,7 @@ export interface GameState {
     controller: PlayerId;
     grant_extra_turn_after?: boolean;
   }>;
+  debug_mode?: boolean;
 }
 
 export type AutoPassMode =

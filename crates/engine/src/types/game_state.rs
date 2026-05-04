@@ -2520,6 +2520,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub lands_tapped_for_mana: HashMap<PlayerId, Vec<ObjectId>>,
 
+    /// When true, `GameAction::Debug(...)` actions are accepted.
+    /// Set at game initialization, immutable after creation.
+    /// Always false for multiplayer games.
+    #[serde(default)]
+    pub debug_mode: bool,
+
     #[serde(default)]
     pub match_config: MatchConfig,
     #[serde(default)]
@@ -3104,6 +3110,7 @@ impl GameState {
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
+            debug_mode: false,
         }
     }
 

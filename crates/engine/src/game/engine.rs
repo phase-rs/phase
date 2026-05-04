@@ -180,7 +180,7 @@ fn check_actor_authorization(
     }
     if matches!(
         action,
-        GameAction::SetPhaseStops { .. } | GameAction::CancelAutoPass
+        GameAction::SetPhaseStops { .. } | GameAction::CancelAutoPass | GameAction::Debug(_)
     ) {
         return Ok(());
     }
@@ -949,6 +949,16 @@ fn apply_action(
             waiting_for: state.waiting_for.clone(),
             log_entries: vec![],
         });
+    }
+
+    // Debug actions bypass WaitingFor dispatch — gated on debug_mode flag.
+    if let GameAction::Debug(debug_action) = action {
+        if !state.debug_mode {
+            return Err(EngineError::InvalidAction(
+                "Debug actions require debug_mode to be enabled".into(),
+            ));
+        }
+        return super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events);
     }
 
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass
