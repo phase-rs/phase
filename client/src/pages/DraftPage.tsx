@@ -61,7 +61,7 @@ export function DraftPage() {
     async (setCode: string) => {
       const { difficulty, startDraft } = useDraftStore.getState();
 
-      const resp = await fetch("/draft-pools.json");
+      const resp = await fetch(__DRAFT_POOLS_URL__);
       if (!resp.ok) throw new Error(`Failed to load draft pools: ${resp.status}`);
       const allPools: Record<string, unknown> = await resp.json();
       const setPool = allPools[setCode.toLowerCase()] ?? allPools[setCode.toUpperCase()];

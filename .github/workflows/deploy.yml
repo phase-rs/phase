@@ -91,6 +91,18 @@ jobs:
           # data/ itself, so downstream steps (validate, hash, badges) can
           # read from data/ without the workflow knowing the layout.
 
+      - name: Download draft set data
+        # fetch-draft-sets.sh needs SetList.json (produced by gen-card-data.sh).
+        # Per-set files land in data/mtgjson/sets/ which is covered by the
+        # mtgjson cache — subsequent runs skip already-downloaded sets.
+        run: ./scripts/fetch-draft-sets.sh
+
+      - name: Generate draft pools
+        # Reads data/mtgjson/sets/*.json → writes client/public/draft-pools.json.
+        # Included in data-files.json manifest so it's uploaded to R2 and
+        # stripped from the Pages dist automatically.
+        run: cargo run --release --bin draft-pool-gen
+
       - name: Validate card-data against engine schema
         # Deploy gate — parse the freshly produced card-data through the same
         # `CardDatabase::from_export` path the WASM uses at runtime. Catches

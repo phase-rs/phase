@@ -4,6 +4,10 @@ name: Clear Caches
 # (e.g. MTGJSON published a new AtomicCards.json) and the weekly cache key
 # would otherwise keep serving stale data via the `mtgjson-` restore-keys
 # fallback in ci.yml / deploy.yml.
+#
+# Note: the `mtgjson` cache includes draft set data (data/mtgjson/sets/)
+# used by draft-pool-gen. Clearing `mtgjson` forces re-download of both
+# AtomicCards.json and all per-set draft files on the next run.
 
 on:
   workflow_dispatch:

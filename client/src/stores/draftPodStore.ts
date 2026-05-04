@@ -139,7 +139,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
       try {
         // Load set pool data
-        const resp = await fetch("/draft-pools.json");
+        const resp = await fetch(__DRAFT_POOLS_URL__);
         if (!resp.ok) {
           throw new Error(`Failed to load draft pools: ${resp.status}`);
         }

@@ -159,6 +159,18 @@ jobs:
           # gen-card-data.sh mirrors card-data.json + coverage-data.json into
           # data/ itself, so downstream steps can read from data/ uniformly.
 
+      - name: Download draft set data
+        # fetch-draft-sets.sh needs SetList.json (produced by gen-card-data.sh).
+        # Per-set files land in data/mtgjson/sets/ which is covered by the
+        # mtgjson cache — subsequent runs skip already-downloaded sets.
+        run: ./scripts/fetch-draft-sets.sh
+
+      - name: Generate draft pools
+        # Reads data/mtgjson/sets/*.json → writes client/public/draft-pools.json.
+        # Included in data-files.json manifest so it's uploaded to R2 and
+        # stripped from the Pages dist automatically.
+        run: cargo run --release --bin draft-pool-gen
+
       - name: Validate card-data against engine schema
         # Deploy gate — refuse to ship card-data the current engine cannot parse.
         run: cargo run --release --bin card-data-validate -- client/public/card-data.json
