@@ -1181,10 +1181,11 @@ pub fn is_lethal_attack_available(state: &GameState, ai_player: PlayerId) -> boo
     // Check if ANY opponent creature is untapped (would be a potential blocker).
     let any_untapped_blocker = opponents.iter().any(|&opp| {
         state.battlefield.iter().any(|&id| {
-            state
-                .objects
-                .get(&id)
-                .is_some_and(|o| o.controller == opp && o.card_types.core_types.contains(&CoreType::Creature) && !o.tapped)
+            state.objects.get(&id).is_some_and(|o| {
+                o.controller == opp
+                    && o.card_types.core_types.contains(&CoreType::Creature)
+                    && !o.tapped
+            })
         })
     });
     if any_untapped_blocker {

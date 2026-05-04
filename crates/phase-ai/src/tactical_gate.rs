@@ -263,9 +263,11 @@ fn target_choice_penalty(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
     if is_pump {
         if let Some(object) = ctx.state.objects.get(object_id) {
             if object.tapped {
-                let is_attacker = ctx.state.combat.as_ref().is_some_and(|c| {
-                    c.attackers.iter().any(|a| a.object_id == *object_id)
-                });
+                let is_attacker = ctx
+                    .state
+                    .combat
+                    .as_ref()
+                    .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == *object_id));
                 if !is_attacker {
                     return -8.0;
                 }
