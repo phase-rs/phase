@@ -19,7 +19,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::parse_static_line_multi;
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::{
-    normalize_card_name_refs, parse_number, strip_reminder_text, TextPair,
+    normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
 
@@ -360,17 +360,6 @@ fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
 
-    // "X " / "x " -> Variable X
-    if let Some((_, rest)) = nom_on_lower(trimmed, &lower, |i| value((), tag("x ")).parse(i)) {
-        return Some((
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-            rest,
-        ));
-    }
     // "that many " -> EventContextAmount
     if let Some((_, rest)) =
         nom_on_lower(trimmed, &lower, |i| value((), tag("that many ")).parse(i))
@@ -395,16 +384,10 @@ fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
             rest,
         ));
     }
-    let (count, rest) = parse_number(trimmed)?;
-    if count == 0 && trimmed.starts_with(['x', 'X']) {
-        return None;
-    }
-    Some((
-        QuantityExpr::Fixed {
-            value: count as i32,
-        },
-        rest,
-    ))
+    // Delegate to parse_count_expr for all numeric/variable/multiplied
+    // quantities: "X", "twice X", "three", "half X rounded up", etc.
+    let (count, rest) = parse_count_expr(trimmed)?;
+    Some((count, rest))
 }
 
 fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
