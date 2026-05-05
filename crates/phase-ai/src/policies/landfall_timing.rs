@@ -27,9 +27,15 @@ use crate::features::DeckFeatures;
 const DELTA_NO_PAYOFF: f64 = -3.0;
 /// Bonus applied when the AI has a payoff in play and is cracking a fetch.
 const DELTA_WITH_PAYOFF: f64 = 2.5;
-/// `activation()` returns `None` for decks with commitment below this floor,
-/// so the policy opts out entirely for non-landfall decks.
+/// Commitment threshold separating landfall path from non-landfall path.
 const COMMITMENT_FLOOR: f32 = 0.1;
+/// Penalty for cracking a fetch reactively (opponent's turn, stack non-empty)
+/// when the AI doesn't need the mana. CR 305.4: fetching during an opponent's
+/// spell resolution wastes a resource for no tactical advantage.
+const DELTA_REACTIVE_CRACK: f64 = -2.0;
+/// If the AI has this many or fewer untapped lands, allow the crack even
+/// reactively — it likely needs the mana fixing.
+const REACTIVE_CRACK_LAND_THRESHOLD: usize = 2;
 
 pub struct LandfallTimingPolicy;
 
@@ -52,19 +58,15 @@ impl TacticalPolicy for LandfallTimingPolicy {
         _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        if features.landfall.commitment < COMMITMENT_FLOOR {
-            None
-        } else {
+        if features.landfall.commitment >= COMMITMENT_FLOOR {
             Some(features.landfall.commitment)
+        } else {
+            // activation-constant: universal fetch-timing guidance for non-landfall decks.
+            Some(1.0)
         }
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        // Only fetch-shaped activations are in scope. Everything else is a no-op.
-        // CR 701.21 + CR 305.4 + CR 701.23: fetchlands pay a sacrifice cost
-        // (CR 701.21), their effect searches the library (CR 701.23), and puts
-        // a land onto the battlefield (CR 305.4) — they do not play a land
-        // (CR 305.2).
         if !is_fetch_shaped_activation(ctx) {
             return PolicyVerdict::Score {
                 delta: 0.0,
@@ -80,25 +82,46 @@ impl TacticalPolicy for LandfallTimingPolicy {
             .cloned()
             .unwrap_or_default();
 
-        // CR 603: payoffs are triggered abilities; the relevant state is what
-        // is currently on the battlefield under the AI's control.
-        let payoffs_on_board =
-            count_payoffs_on_board(ctx.state, ctx.ai_player, &features.landfall.payoff_names);
+        // Landfall path: deck has landfall synergy — evaluate payoff presence.
+        if features.landfall.commitment >= COMMITMENT_FLOOR {
+            let payoffs_on_board =
+                count_payoffs_on_board(ctx.state, ctx.ai_player, &features.landfall.payoff_names);
 
-        if payoffs_on_board > 0 {
-            PolicyVerdict::Score {
-                delta: DELTA_WITH_PAYOFF,
-                reason: PolicyReason::new("landfall_payoff_present")
-                    .with_fact("payoff_count_on_board", payoffs_on_board as i64),
+            return if payoffs_on_board > 0 {
+                PolicyVerdict::Score {
+                    delta: DELTA_WITH_PAYOFF,
+                    reason: PolicyReason::new("landfall_payoff_present")
+                        .with_fact("payoff_count_on_board", payoffs_on_board as i64),
+                }
+            } else {
+                PolicyVerdict::Score {
+                    delta: DELTA_NO_PAYOFF,
+                    reason: PolicyReason::new("landfall_no_payoff_on_board").with_fact(
+                        "payoff_count_in_deck",
+                        features.landfall.payoff_count as i64,
+                    ),
+                }
+            };
+        }
+
+        // Non-landfall path: penalize reactive fetch cracks (opponent's turn,
+        // stack non-empty) unless the AI likely needs the mana.
+        let is_reactive = ctx.state.active_player != ctx.ai_player && !ctx.state.stack.is_empty();
+
+        if is_reactive {
+            let untapped_lands = count_untapped_lands(ctx.state, ctx.ai_player);
+            if untapped_lands > REACTIVE_CRACK_LAND_THRESHOLD {
+                return PolicyVerdict::Score {
+                    delta: DELTA_REACTIVE_CRACK,
+                    reason: PolicyReason::new("fetch_reactive_no_mana_need")
+                        .with_fact("untapped_lands", untapped_lands as i64),
+                };
             }
-        } else {
-            PolicyVerdict::Score {
-                delta: DELTA_NO_PAYOFF,
-                reason: PolicyReason::new("landfall_no_payoff_on_board").with_fact(
-                    "payoff_count_in_deck",
-                    features.landfall.payoff_count as i64,
-                ),
-            }
+        }
+
+        PolicyVerdict::Score {
+            delta: 0.0,
+            reason: PolicyReason::new("fetch_timing_ok"),
         }
     }
 }
@@ -177,6 +200,23 @@ fn type_filter_is_land(tf: &TypeFilter) -> bool {
         TypeFilter::AnyOf(inner) => inner.iter().any(type_filter_is_land),
         _ => false,
     }
+}
+
+fn count_untapped_lands(state: &GameState, player: PlayerId) -> usize {
+    state
+        .battlefield
+        .iter()
+        .filter(|&&id| {
+            state.objects.get(&id).is_some_and(|obj| {
+                obj.controller == player
+                    && !obj.tapped
+                    && obj
+                        .card_types
+                        .core_types
+                        .contains(&engine::types::card_type::CoreType::Land)
+            })
+        })
+        .count()
 }
 
 fn count_payoffs_on_board(state: &GameState, player: PlayerId, payoff_names: &[String]) -> usize {
@@ -424,19 +464,19 @@ mod tests {
     }
 
     #[test]
-    fn low_commitment_opts_out_via_activation() {
+    fn activates_universally() {
+        let state = GameState::new_two_player(42);
+        // Non-landfall: returns Some(1.0)
         let features = landfall_features(0.0, false);
-        let state = GameState::new_two_player(42);
-        assert!(LandfallTimingPolicy
-            .activation(&features, &state, AI)
-            .is_none());
-    }
-
-    #[test]
-    fn high_commitment_activation_scales_with_commitment() {
+        assert_eq!(
+            LandfallTimingPolicy.activation(&features, &state, AI),
+            Some(1.0)
+        );
+        // Landfall: returns commitment value
         let features = landfall_features(0.75, true);
-        let state = GameState::new_two_player(42);
-        let act = LandfallTimingPolicy.activation(&features, &state, AI);
-        assert!(matches!(act, Some(v) if (v - 0.75).abs() < 1e-5));
+        assert_eq!(
+            LandfallTimingPolicy.activation(&features, &state, AI),
+            Some(0.75)
+        );
     }
 }

@@ -18,12 +18,13 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
+use super::effect_classify::{effect_polarity, EffectPolarity};
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::strategy_helpers::sacrifice_cost;
 use crate::features::aristocrats::{ability_is_sacrifice_outlet, is_free_outlet_ability};
 use crate::features::DeckFeatures;
 
-/// Minimum commitment to activate this policy at all. CR 701.21: sac outlets
-/// only matter when the deck has enough synergy to exploit them.
+/// Commitment threshold separating aristocrats path from non-aristocrats path.
 const COMMITMENT_FLOOR: f32 = 0.1;
 /// Bonus when at least one death-trigger payoff is on the battlefield.
 /// CR 603.6c: payoffs fire immediately when the creature dies.
@@ -31,6 +32,11 @@ const DELTA_WITH_PAYOFF: f64 = 2.5;
 /// Penalty when no payoff is on board — cracking a free outlet wastes a
 /// creature without generating value. CR 701.21.
 const DELTA_NO_PAYOFF: f64 = -1.5;
+/// Penalty for non-aristocrats decks sacrificing without clear effect value.
+const DELTA_NO_SYNERGY_PENALTY: f64 = -5.0;
+/// Sacrifice cost threshold: non-aristocrats decks should never sacrifice a
+/// permanent worth more than this.
+const MAX_NON_ARISTOCRATS_SAC_COST: f64 = 4.0;
 
 pub struct FreeOutletActivationPolicy;
 
@@ -49,10 +55,11 @@ impl TacticalPolicy for FreeOutletActivationPolicy {
         _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        if features.aristocrats.commitment < COMMITMENT_FLOOR {
-            None
-        } else {
+        if features.aristocrats.commitment >= COMMITMENT_FLOOR {
             Some(features.aristocrats.commitment)
+        } else {
+            // activation-constant: universal sac-outlet guidance for non-aristocrats decks.
+            Some(1.0)
         }
     }
 
@@ -84,9 +91,7 @@ impl TacticalPolicy for FreeOutletActivationPolicy {
             };
         };
 
-        // Re-classify structurally — check both that it is a sac outlet AND that
-        // it is free (no mana cost). Uses `pub(crate)` parts-based predicates.
-        if !ability_is_sacrifice_outlet(ability) || !is_free_outlet_ability(ability) {
+        if !ability_is_sacrifice_outlet(ability) {
             return PolicyVerdict::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("free_outlet_activation_na"),
@@ -101,27 +106,66 @@ impl TacticalPolicy for FreeOutletActivationPolicy {
             .cloned()
             .unwrap_or_default();
 
-        // CR 603.6c: count how many death-trigger payoffs the AI has on board.
-        // Identical identity-lookup pattern to `landfall_timing.rs:182-193`.
-        let death_triggers_on_board = count_death_triggers_on_board(
-            ctx.state,
-            ctx.ai_player,
-            &features.aristocrats.death_trigger_names,
-        );
+        // Aristocrats path: deck has sacrifice synergy — evaluate payoff presence.
+        if features.aristocrats.commitment >= COMMITMENT_FLOOR && is_free_outlet_ability(ability) {
+            let death_triggers_on_board = count_death_triggers_on_board(
+                ctx.state,
+                ctx.ai_player,
+                &features.aristocrats.death_trigger_names,
+            );
 
-        if death_triggers_on_board > 0 {
-            PolicyVerdict::Score {
-                delta: DELTA_WITH_PAYOFF,
-                reason: PolicyReason::new("free_outlet_activate_with_payoff")
-                    .with_fact("death_triggers_on_board", death_triggers_on_board as i64),
-            }
-        } else {
-            PolicyVerdict::Score {
-                delta: DELTA_NO_PAYOFF,
-                reason: PolicyReason::new("free_outlet_no_payoff_on_board"),
-            }
+            return if death_triggers_on_board > 0 {
+                PolicyVerdict::Score {
+                    delta: DELTA_WITH_PAYOFF,
+                    reason: PolicyReason::new("free_outlet_activate_with_payoff")
+                        .with_fact("death_triggers_on_board", death_triggers_on_board as i64),
+                }
+            } else {
+                PolicyVerdict::Score {
+                    delta: DELTA_NO_PAYOFF,
+                    reason: PolicyReason::new("free_outlet_no_payoff_on_board"),
+                }
+            };
+        }
+
+        // Non-aristocrats path: no sacrifice synergy — only allow if the
+        // effect itself justifies the sacrifice cost.
+        let cheapest_sac_cost = cheapest_sacrificeable_cost(ctx);
+        if cheapest_sac_cost > MAX_NON_ARISTOCRATS_SAC_COST {
+            return PolicyVerdict::Reject {
+                reason: PolicyReason::new("sac_outlet_too_expensive"),
+            };
+        }
+
+        let polarity = effect_polarity(&ability.effect);
+        match polarity {
+            EffectPolarity::Harmful | EffectPolarity::Beneficial => PolicyVerdict::Score {
+                delta: 0.5,
+                reason: PolicyReason::new("sac_outlet_effect_justified"),
+            },
+            EffectPolarity::Contextual => PolicyVerdict::Score {
+                delta: DELTA_NO_SYNERGY_PENALTY,
+                reason: PolicyReason::new("sac_outlet_no_synergy"),
+            },
         }
     }
+}
+
+/// Cheapest sacrifice cost among AI-controlled creatures on the battlefield.
+fn cheapest_sacrificeable_cost(ctx: &PolicyContext<'_>) -> f64 {
+    ctx.state
+        .battlefield
+        .iter()
+        .filter_map(|&id| {
+            let obj = ctx.state.objects.get(&id)?;
+            (obj.controller == ctx.ai_player
+                && obj
+                    .card_types
+                    .core_types
+                    .contains(&engine::types::card_type::CoreType::Creature))
+            .then(|| sacrifice_cost(ctx.state, id, ctx.penalties()))
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Count AI-controlled death-trigger payoff objects currently on the battlefield.
@@ -274,16 +318,15 @@ mod tests {
     }
 
     #[test]
-    fn opts_out_below_commitment_floor() {
-        let features = DeckFeatures::default(); // commitment = 0.0
+    fn activates_universally() {
         let state = GameState::new_two_player(42);
-        assert!(FreeOutletActivationPolicy
-            .activation(&features, &state, AI)
-            .is_none());
-    }
-
-    #[test]
-    fn opts_in_above_floor() {
+        // Non-aristocrats: returns Some(1.0)
+        let features = DeckFeatures::default();
+        assert_eq!(
+            FreeOutletActivationPolicy.activation(&features, &state, AI),
+            Some(1.0)
+        );
+        // Aristocrats: returns commitment value
         let features = DeckFeatures {
             aristocrats: AristocratsFeature {
                 commitment: 0.5,
@@ -291,10 +334,10 @@ mod tests {
             },
             ..DeckFeatures::default()
         };
-        let state = GameState::new_two_player(42);
-        assert!(FreeOutletActivationPolicy
-            .activation(&features, &state, AI)
-            .is_some());
+        assert_eq!(
+            FreeOutletActivationPolicy.activation(&features, &state, AI),
+            Some(0.5)
+        );
     }
 
     #[test]
@@ -392,8 +435,9 @@ mod tests {
     }
 
     #[test]
-    fn non_free_outlet_yields_na() {
-        // An outlet with a mana cost → is_free_outlet_ability returns false.
+    fn non_free_outlet_rejects_without_cheap_sacrifice() {
+        // A non-free sac outlet (has mana cost) with no creatures on board to
+        // sacrifice cheaply → Reject via the non-aristocrats path.
         let mut state = GameState::new_two_player(42);
         let outlet_id = create_object(
             &mut state,
@@ -423,13 +467,10 @@ mod tests {
         };
 
         let verdict = FreeOutletActivationPolicy.verdict(&ctx);
-        match verdict {
-            PolicyVerdict::Score { delta, reason } => {
-                assert_eq!(reason.kind, "free_outlet_activation_na");
-                assert_eq!(delta, 0.0);
-            }
-            PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
-        }
+        assert!(
+            matches!(verdict, PolicyVerdict::Reject { .. }),
+            "expected Reject when no cheap sacrificeable creature exists"
+        );
     }
 
     #[test]
