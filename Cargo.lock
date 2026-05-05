@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "draft-core"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "engine",
  "rand 0.9.4",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "draft-wasm"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "console_error_panic_hook",
  "draft-core",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "assert_matches",
  "im",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "engine-inventory-gen"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "engine-wasm"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "console_error_panic_hook",
  "engine",
@@ -681,7 +681,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "feed-scraper"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "clap",
  "reqwest",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "mtgish-import"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "engine",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "engine",
  "rand 0.9.4",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "phase-server"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "axum",
  "clap",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "seat-reducer"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "engine",
  "phase-ai",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "draft-core",
  "engine",
