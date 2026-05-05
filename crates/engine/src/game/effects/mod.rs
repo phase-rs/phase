@@ -2408,7 +2408,7 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
-    use crate::types::player::PlayerId;
+    use crate::types::player::{PlayerCounterKind, PlayerId};
     use crate::types::zones::Zone;
 
     #[test]
@@ -4292,6 +4292,47 @@ mod tests {
             1,
             "unscoped tail must resolve once after all opponent iterations"
         );
+    }
+
+    #[test]
+    fn player_scope_opponent_counter_then_unscoped_draw() {
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "P0 Draw".to_string(),
+            Zone::Library,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Poison,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].poison_counters, 0);
+        assert_eq!(state.players[1].poison_counters, 1);
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[1].hand.len(), 0);
     }
 
     #[test]

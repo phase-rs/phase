@@ -22103,6 +22103,37 @@ mod tests {
     }
 
     #[test]
+    fn each_opponent_gets_counter_keeps_followup_unscoped() {
+        let def = parse_effect_chain(
+            "Each opponent gets a poison counter. Draw a card.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+        assert!(matches!(
+            *def.effect,
+            Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Poison,
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("follow-up draw should remain chained after scoped clause");
+        assert!(sub.player_scope.is_none());
+        assert!(matches!(
+            *sub.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn veil_of_summer_effect_chain_parses_supported_clauses() {
         let def = parse_effect_chain(
             "Draw a card if an opponent has cast a blue or black spell this turn. Spells you control can't be countered this turn. You and permanents you control gain hexproof from blue and from black until end of turn.",
