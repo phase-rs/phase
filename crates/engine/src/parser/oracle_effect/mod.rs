@@ -28,7 +28,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
     parse_cda_quantity, parse_for_each_clause, parse_for_each_clause_expr,
-    parse_for_each_object_filter_clause,
+    parse_for_each_clause_expr_with_context, parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
     parse_event_context_ref, parse_target, parse_target_with_ctx, parse_type_phrase,
@@ -3245,6 +3245,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     let (base_tp, _) = tp.split_at(for_each_idx);
     let base_tp = base_tp.trim_end();
     let for_each_clause = &tp.lower[for_each_idx + "for each ".len()..];
+    let (base_no_duration, base_duration) = strip_trailing_duration(base_tp.original);
+    let quantity_ctx = for_each_quantity_context(base_no_duration, ctx);
 
     // Parse the "for each" clause into a QuantityExpr. Try the full clause
     // before stripping duration-like suffixes: "this turn" is part of
@@ -3253,22 +3255,22 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     let (for_each_no_duration, stripped_for_each_duration) =
         strip_trailing_duration(for_each_clause);
     let for_each_stripped = for_each_no_duration.trim_end_matches('.');
-    let (quantity, for_each_duration, reference_clause) =
-        if let Some(quantity) = parse_for_each_clause_expr(for_each_full) {
-            (quantity, None, for_each_full)
-        } else {
-            (
-                parse_for_each_clause_expr(for_each_stripped)?,
-                stripped_for_each_duration,
-                for_each_stripped,
-            )
-        };
+    let (quantity, for_each_duration, reference_clause) = if let Some(quantity) =
+        parse_for_each_clause_expr_with_context(for_each_full, &quantity_ctx)
+    {
+        (quantity, None, for_each_full)
+    } else {
+        (
+            parse_for_each_clause_expr_with_context(for_each_stripped, &quantity_ctx)?,
+            stripped_for_each_duration,
+            for_each_stripped,
+        )
+    };
     let reference_target = for_each_clause_target_controller_filter(reference_clause);
 
     // Strip trailing duration from the base text (e.g., "gets +2/+0 until end of turn"
     // → "gets +2/+0" with duration=UntilEndOfTurn). Duration often appears between
     // the base effect and the "for each" clause.
-    let (base_no_duration, base_duration) = strip_trailing_duration(base_tp.original);
     let duration = base_duration.or(for_each_duration);
     let numeric_base_storage = subject::strip_subject_clause(base_no_duration);
     let numeric_base = numeric_base_storage.as_deref().unwrap_or(base_no_duration);
@@ -3698,7 +3700,7 @@ fn parse_energy_gain_continuation(rest: &str) -> Option<&str> {
 /// Thread subject through for-each effects that carry a `target` field.
 /// Locates the predicate verb, extracts subject text before it, and replaces
 /// default targets (Any/Controller) with the parsed subject filter.
-fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
+fn for_each_subject_application(original: &str) -> Option<SubjectApplication> {
     let lower = original.to_lowercase();
     // Predicate verbs that the for-each base parsers recognize — find the earliest one.
     // Note: uses str::find (not nom) because this is positional splitting on already-dispatched
@@ -3731,17 +3733,45 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
 
     let subject_text = match verb_pos {
         Some(pos) if pos > 0 => original[..pos].trim(),
-        _ => return effect,
+        _ => return None,
     };
     if subject_text.is_empty() {
-        return effect;
+        return None;
     }
 
-    let (target, is_targeted) =
-        match parse_subject_application(subject_text, &mut ParseContext::default()) {
-            Some(app) => (app.affected, app.target.is_some()),
-            None => return effect,
-        };
+    parse_subject_application(subject_text, &mut ParseContext::default())
+}
+
+fn for_each_quantity_context(original: &str, ctx: &ParseContext) -> ParseContext {
+    let mut quantity_ctx = ctx.clone();
+    if quantity_ctx.third_person_player_controller_ref().is_none()
+        && for_each_subject_application(original)
+            .is_some_and(|app| app.target.is_some() && is_player_filter(&app.affected))
+    {
+        quantity_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
+    }
+    quantity_ctx
+}
+
+fn is_player_filter(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Player)
+        || matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(_),
+                ..
+            }) if type_filters.is_empty()
+        )
+}
+
+fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
+    let application = match for_each_subject_application(original) {
+        Some(application) => application,
+        None => return effect,
+    };
+    let target = application.affected;
+    let is_targeted = application.target.is_some();
 
     // Only replace default/placeholder targets — leave already-resolved targets alone.
     match effect {
@@ -7485,7 +7515,10 @@ pub(crate) fn parse_effect_chain_ir(
             // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope
             // from the trigger condition so "that player controls" inside any
             // chunk resolves to TargetPlayer rather than defaulting to You.
-            relative_player_scope: ctx.relative_player_scope.clone(),
+            relative_player_scope: ctx
+                .relative_player_scope
+                .clone()
+                .or_else(|| player_scope.map(|_| ControllerRef::ScopedPlayer)),
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -20374,6 +20407,26 @@ mod tests {
     }
 
     #[test]
+    fn effect_target_player_draws_for_each_attacking_creature_they_control() {
+        let e = parse_effect("target player draws a card for each attacking creature they control");
+        assert_eq!(
+            e,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::TargetPlayer),
+                            properties: vec![FilterProp::Attacking],
+                        }),
+                    },
+                },
+                target: TargetFilter::Player,
+            },
+        );
+    }
+
+    #[test]
     fn effect_draw_for_each_tapped_creature_target_opponent_controls() {
         let def = parse_effect_chain(
             "Draw a card for each tapped creature target opponent controls.",
@@ -22438,6 +22491,31 @@ mod tests {
             ),
             "filter must be Non(Land)"
         );
+    }
+
+    #[test]
+    fn each_player_for_each_attacking_creature_they_control_binds_scoped_player() {
+        let def = parse_effect_chain(
+            "each player loses 1 life for each attacking creature they control.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        let Effect::LoseLife { amount, .. } = &*def.effect else {
+            panic!("expected LoseLife, got {:?}", def.effect);
+        };
+        assert!(matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::ScopedPlayer),
+                        properties,
+                        ..
+                    })
+                }
+            } if properties.as_slice() == [FilterProp::Attacking]
+        ));
     }
 
     #[test]

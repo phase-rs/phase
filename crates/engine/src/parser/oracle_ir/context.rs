@@ -39,6 +39,14 @@ pub(crate) struct ParseContext {
 }
 
 impl ParseContext {
+    /// Resolve third-person player pronouns ("they", "their") against the
+    /// nearest parser context that introduced a player referent.
+    pub fn third_person_player_controller_ref(&self) -> Option<ControllerRef> {
+        self.relative_player_scope
+            .clone()
+            .or_else(|| self.actor.clone())
+    }
+
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
         self.diagnostics.push(d);

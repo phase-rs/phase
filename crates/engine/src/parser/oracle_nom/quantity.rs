@@ -11,6 +11,7 @@ use nom::sequence::{pair, preceded};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::context::ParseContext;
 use super::error::OracleResult;
 use super::primitives::{parse_counter_type_typed, parse_number};
 use super::target::parse_type_filter_word;
@@ -1400,6 +1401,23 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// Parse the inner content after "for each ".
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_for_each_clause_ref_with_they_controller(input, ControllerRef::ScopedPlayer)
+}
+
+pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, QuantityRef> {
+    let they_controller = ctx
+        .third_person_player_controller_ref()
+        .unwrap_or(ControllerRef::ScopedPlayer);
+    parse_for_each_clause_ref_with_they_controller(input, they_controller)
+}
+
+fn parse_for_each_clause_ref_with_they_controller(
+    input: &str,
+    they_controller: ControllerRef,
+) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_counter_added_this_turn_for_each,
         parse_object_colors_for_each,
@@ -1424,7 +1442,7 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_entered_this_turn_ref,
     ))
     .or(alt((
-        parse_for_each_combat_creature_controlled,
+        |input| parse_for_each_combat_creature_controlled(input, they_controller.clone()),
         parse_for_each_combat_creature_other_than_source,
         parse_for_each_attacking_controller_type,
         parse_for_each_blocking_source_type,
@@ -1719,9 +1737,12 @@ fn parse_number_of_object_colors_tail(input: &str) -> OracleResult<'_, QuantityR
     Ok((rest, QuantityRef::ObjectColorCount { scope }))
 }
 
-/// Parse controller/scoped-player combat-class counts:
+/// Parse controller-relative combat-class counts:
 /// "for each attacking/blocking creature they/you control".
-fn parse_for_each_combat_creature_controlled(input: &str) -> OracleResult<'_, QuantityRef> {
+fn parse_for_each_combat_creature_controlled(
+    input: &str,
+    they_controller: ControllerRef,
+) -> OracleResult<'_, QuantityRef> {
     let (rest, combat_property) = alt((
         value(FilterProp::Attacking, tag("attacking ")),
         value(FilterProp::Blocking, tag("blocking ")),
@@ -1729,7 +1750,7 @@ fn parse_for_each_combat_creature_controlled(input: &str) -> OracleResult<'_, Qu
     .parse(input)?;
     let (rest, tf) = parse_type_filter_word(rest)?;
     let (rest, controller) = alt((
-        value(ControllerRef::ScopedPlayer, tag(" they control")),
+        value(they_controller, tag(" they control")),
         value(ControllerRef::You, tag(" you control")),
     ))
     .parse(rest)?;
@@ -3346,12 +3367,52 @@ mod tests {
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter {
                     type_filters,
-                    controller: Some(ControllerRef::You),
                     properties,
                     ..
                 })
             } if type_filters == vec![TypeFilter::Creature]
                 && properties == vec![FilterProp::Attacking]
+        ));
+    }
+
+    #[test]
+    fn test_parse_for_each_attacking_creature_they_control_uses_context() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let (rest, q) =
+            parse_for_each_clause_ref_with_context("attacking creature they control", &ctx)
+                .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::TargetPlayer),
+                    ..
+                })
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_for_each_attacking_creature_you_control_ignores_they_context() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let (rest, q) =
+            parse_for_each_clause_ref_with_context("attacking creature you control", &ctx).unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::You),
+                    ..
+                })
+            }
         ));
     }
 

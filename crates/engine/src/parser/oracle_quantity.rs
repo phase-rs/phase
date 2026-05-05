@@ -10,11 +10,12 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, value};
+use nom::combinator::value;
 use nom::sequence::terminated;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
@@ -619,6 +620,22 @@ fn try_parse_counters_removed_this_way(lower: &str) -> bool {
 /// Class: A-Alrund ("+1/+1 for each card in your hand and each foretold
 /// card you own in exile") and ~21 similar cards in the database.
 pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
+    parse_for_each_clause_expr_with_parser(clause, parse_for_each_clause)
+}
+
+pub(crate) fn parse_for_each_clause_expr_with_context(
+    clause: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityExpr> {
+    parse_for_each_clause_expr_with_parser(clause, |segment| {
+        parse_for_each_clause_with_context(segment, ctx)
+    })
+}
+
+fn parse_for_each_clause_expr_with_parser(
+    clause: &str,
+    parse_clause: impl Fn(&str) -> Option<QuantityRef> + Copy,
+) -> Option<QuantityExpr> {
     use nom::branch::alt;
     use nom::bytes::complete::{tag, take_until};
     use nom::combinator::rest;
@@ -632,10 +649,10 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
         }
     }
 
-    if let Ok((rest, expr)) = parse_for_each_beyond_first_clause_expr(clause) {
-        if rest.is_empty() {
-            return Some(expr);
-        }
+    if let Some((rest, expr)) =
+        parse_for_each_beyond_first_clause_expr_with_parser(clause, parse_clause)
+    {
+        return rest.is_empty().then_some(expr);
     }
 
     fn segment(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
@@ -647,10 +664,7 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
         .map(|(_, v)| v)
         .unwrap_or_else(|_| vec![clause]);
 
-    let refs: Option<Vec<QuantityRef>> = segments
-        .iter()
-        .map(|s| parse_for_each_clause(s.trim()))
-        .collect();
+    let refs: Option<Vec<QuantityRef>> = segments.iter().map(|s| parse_clause(s.trim())).collect();
     let mut exprs: Vec<QuantityExpr> = refs?
         .into_iter()
         .map(|qty| QuantityExpr::Ref { qty })
@@ -665,13 +679,18 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
 /// normal object-count quantity with an offset of -1. This preserves the
 /// shared `for each` grammar and keeps "beyond the first" as an expression
 /// modifier rather than adding a leaf-level `QuantityRef` variant.
-fn parse_for_each_beyond_first_clause_expr(
+fn parse_for_each_beyond_first_clause_expr_with_parser(
     input: &str,
-) -> nom::IResult<&str, QuantityExpr, VerboseError<&str>> {
-    let (input, base_clause) =
-        terminated(take_until(" beyond the first"), tag(" beyond the first")).parse(input)?;
-    let (_, qty) = all_consuming(nom_quantity::parse_for_each_clause_ref).parse(base_clause)?;
-    Ok((
+    parse_clause: impl Fn(&str) -> Option<QuantityRef>,
+) -> Option<(&str, QuantityExpr)> {
+    let (input, base_clause) = terminated::<_, _, VerboseError<&str>, _, _>(
+        take_until(" beyond the first"),
+        tag(" beyond the first"),
+    )
+    .parse(input)
+    .ok()?;
+    let qty = parse_clause(base_clause)?;
+    Some((
         input,
         QuantityExpr::Offset {
             inner: Box::new(QuantityExpr::Ref { qty }),
@@ -744,13 +763,36 @@ fn parse_opponent_searched_library_this_way(
 
 /// Parse the clause after "for each" into a QuantityRef.
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
+    parse_for_each_clause_with_they_controller(clause, ControllerRef::ScopedPlayer)
+}
+
+pub(crate) fn parse_for_each_clause_with_context(
+    clause: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityRef> {
+    let they_controller = ctx
+        .third_person_player_controller_ref()
+        .unwrap_or(ControllerRef::ScopedPlayer);
+    parse_for_each_clause_with_they_controller(clause, they_controller)
+}
+
+fn parse_for_each_clause_with_they_controller(
+    clause: &str,
+    they_controller: ControllerRef,
+) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
 
     if let Some(qty) = parse_for_each_kicker_count(clause) {
         return Some(qty);
     }
 
-    if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref.parse(clause) {
+    if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref_with_context(
+        clause,
+        &ParseContext {
+            relative_player_scope: Some(they_controller),
+            ..Default::default()
+        },
+    ) {
         if rest.is_empty() {
             return Some(qty);
         }
