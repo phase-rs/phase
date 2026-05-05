@@ -16,8 +16,8 @@ use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
-    FilterProp, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter,
-    TypedFilter,
+    CountScope, FilterProp, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::DayNight;
@@ -1873,39 +1873,95 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
 /// composed from a tag alt for extensibility.
 fn parse_subject_first_zone_count(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, n) = parse_ge_threshold(input)?;
-    // Optional type filter: "land ", "creature ", "Elf ", etc.
-    let (type_filters, rest) = if let Ok((after, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("cards are in your ").parse(rest)
+    let (rest, type_filters) = parse_subject_first_card_subject(rest)?;
+    let (rest, (zone, scope)) = parse_scoped_zone_count_ref(rest)?;
+    let qty = if type_filters.is_empty()
+        && matches!(zone, crate::types::ability::ZoneRef::Graveyard)
+        && matches!(scope, CountScope::Controller)
     {
-        (vec![], after)
+        QuantityRef::GraveyardSize
     } else {
-        let (filter, remainder) = parse_type_phrase(rest);
-        let card_types = match filter {
-            TargetFilter::Typed(TypedFilter { type_filters, .. }) => type_filters,
-            _ => vec![],
-        };
-        let (after, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("cards are in your ")
-            .parse(remainder)?;
-        (card_types, after)
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types: type_filters,
+            scope,
+        }
     };
-    let (rest, zone) = alt((
-        value(crate::types::ability::ZoneRef::Graveyard, tag("graveyard")),
-        value(crate::types::ability::ZoneRef::Exile, tag("exile")),
-        value(crate::types::ability::ZoneRef::Hand, tag("hand")),
-        value(crate::types::ability::ZoneRef::Library, tag("library")),
-    ))
-    .parse(rest)?;
-    let qty =
-        if type_filters.is_empty() && matches!(zone, crate::types::ability::ZoneRef::Graveyard) {
-            QuantityRef::GraveyardSize
-        } else {
-            QuantityRef::ZoneCardCount {
-                zone,
-                card_types: type_filters,
-                scope: crate::types::ability::CountScope::Controller,
-            }
-        };
     Ok((rest, make_quantity_ge(qty, n)))
+}
+
+fn parse_subject_first_card_subject(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("cards are in ").parse(input)
+    {
+        return Ok((rest, vec![]));
+    }
+
+    let (rest, type_text) = alt((
+        |i| {
+            let (after_type, type_text) = take_until(" cards are in ").parse(i)?;
+            let (after, _) = tag(" cards are in ").parse(after_type)?;
+            Ok((after, type_text))
+        },
+        |i| {
+            let (after_type, type_text) = take_until(" are in ").parse(i)?;
+            let (after, _) = tag(" are in ").parse(after_type)?;
+            Ok((after, type_text))
+        },
+    ))
+    .parse(input)?;
+    let (filter, _) = parse_type_phrase(type_text.trim());
+    let mut card_types = match filter {
+        TargetFilter::Typed(TypedFilter { type_filters, .. }) => type_filters,
+        _ => vec![],
+    };
+    card_types.retain(|type_filter| *type_filter != TypeFilter::Card);
+    Ok((rest, card_types))
+}
+
+fn parse_scoped_zone_count_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)> {
+    alt((
+        |i| {
+            let (rest, _) = tag("your ").parse(i)?;
+            let (rest, zone) = parse_zone_count_ref(rest)?;
+            Ok((rest, (zone, CountScope::Controller)))
+        },
+        |i| {
+            let (rest, _) = alt((
+                tag("an opponent's "),
+                tag("opponent's "),
+                tag("opponents' "),
+                tag("opponents "),
+                tag("each opponent's "),
+            ))
+            .parse(i)?;
+            let (rest, zone) = parse_zone_count_ref(rest)?;
+            Ok((rest, (zone, CountScope::Opponents)))
+        },
+        |i| {
+            let (rest, _) = alt((tag("all "), tag("each player's "), tag("players' "))).parse(i)?;
+            let (rest, zone) = parse_zone_count_ref(rest)?;
+            Ok((rest, (zone, CountScope::All)))
+        },
+        |i| {
+            let (rest, zone) = parse_zone_count_ref(i)?;
+            Ok((rest, (zone, CountScope::All)))
+        },
+    ))
+    .parse(input)
+}
+
+fn parse_zone_count_ref(input: &str) -> OracleResult<'_, ZoneRef> {
+    alt((
+        value(
+            ZoneRef::Graveyard,
+            alt((tag("graveyard"), tag("graveyards"))),
+        ),
+        value(ZoneRef::Exile, tag("exile")),
+        value(ZoneRef::Hand, alt((tag("hand"), tag("hands")))),
+        value(ZoneRef::Library, alt((tag("library"), tag("libraries")))),
+    ))
+    .parse(input)
 }
 
 /// CR 122.1 + CR 608.2c: Parse "there are <quantity> [<type>] counter[s] on <source>".
@@ -3154,6 +3210,31 @@ mod tests {
                 assert_eq!(card_types, vec![TypeFilter::Subtype("Lesson".to_string())]);
             }
             other => panic!("expected Lesson graveyard count GE 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_subject_first_land_cards_in_graveyard() {
+        let (rest, c) =
+            parse_inner_condition("seven or more land cards are in your graveyard").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone: crate::types::ability::ZoneRef::Graveyard,
+                                card_types,
+                                scope: crate::types::ability::CountScope::Controller,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            } => {
+                assert_eq!(card_types, vec![TypeFilter::Land]);
+            }
+            other => panic!("expected land graveyard count GE 7, got {other:?}"),
         }
     }
 

@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{rest, value};
+use nom::combinator::{opt, rest, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -39,7 +39,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     let lower = text.to_lowercase();
 
     // "create a token that's a copy of {target}"
-    if lower.contains("token that's a copy of") || lower.contains("token thats a copy of") {
+    if let Ok((_, (tapped, enters_attacking))) = parse_copy_token_entry_modifiers(&lower) {
         let tp = TextPair::new(&text, &lower);
         let after_copy_tp = tp.strip_after("copy of ").unwrap_or(tp);
         // Handle "another target ..." -- strip "another" prefix and add FilterProp::Another
@@ -74,8 +74,8 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         }
         return Some(Effect::CopyTokenOf {
             target,
-            enters_attacking: false,
-            tapped: false,
+            enters_attacking,
+            tapped,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords,
             additional_modifications,
@@ -103,6 +103,21 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
     })
+}
+
+fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, (bool, bool)> {
+    let (rest, _) = tag("create ").parse(input)?;
+    let (rest, _) = opt(alt((tag("a "), tag("one ")))).parse(rest)?;
+    let (rest, flags) = alt((
+        value((true, true), tag("tapped and attacking ")),
+        value((true, false), tag("tapped ")),
+        value((false, true), tag("attacking ")),
+        value((false, false), tag("")),
+    ))
+    .parse(rest)?;
+    let (rest, _) =
+        alt((tag("token that's a copy of"), tag("token thats a copy of"))).parse(rest)?;
+    Ok((rest, flags))
 }
 
 /// CR 707.2 + CR 707.9: Split off a trailing `, except <body>` clause from a

@@ -624,6 +624,11 @@ pub(crate) enum SearchCreationImperativeAst {
     },
     CopyTokenOf {
         target: TargetFilter,
+        /// CR 508.4: Whether the copy token enters attacking.
+        enters_attacking: bool,
+        /// CR 110.5a: Status is not copied; this captures printed token-entry
+        /// status from the creating effect.
+        tapped: bool,
         /// CR 707.2 + CR 702: "except it has [keyword]" — extra keywords granted
         /// to each created copy token. See `Effect::CopyTokenOf::extra_keywords`.
         extra_keywords: Vec<crate::types::keywords::Keyword>,

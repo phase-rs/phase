@@ -6034,9 +6034,9 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, Comparator, ControllerRef, DamageModification, Duration, Effect,
-        FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TypeFilter,
-        TypedFilter, UnlessCost,
+        AbilityCondition, AbilityKind, Comparator, ControllerRef, DamageModification, Duration,
+        Effect, FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter, UnlessCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -10696,6 +10696,67 @@ mod tests {
             }
             other => panic!("Expected PutCounter in else_ability, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn trigger_copy_token_suffix_condition_attaches_otherwise() {
+        let (effect_without_if, trigger_condition) = extract_if_condition(
+            "create a tapped token that's a copy of ~ if seven or more land cards are in your graveyard. otherwise, create a tapped 1/1 black insect creature token with flying.",
+        );
+        assert!(
+            trigger_condition.is_none(),
+            "suffix condition before otherwise must stay in effect chain, got {trigger_condition:?}"
+        );
+        assert!(
+            crate::parser::oracle_nom::primitives::scan_contains(
+                &effect_without_if,
+                "if seven or more land cards are in your graveyard"
+            ),
+            "effect text should preserve suffix condition, got {effect_without_if:?}"
+        );
+        let mut effect_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            card_name: Some("Scouring Swarm".to_string()),
+            ..Default::default()
+        };
+        let chain_ir =
+            parse_effect_chain_ir(&effect_without_if, AbilityKind::Spell, &mut effect_ctx);
+        let chain = lower_effect_chain_ir(&chain_ir);
+        assert!(
+            chain.condition.is_some(),
+            "effect chain should carry suffix condition, got {chain:?}"
+        );
+
+        let def = parse_trigger_line(
+            "Whenever you sacrifice a land, create a tapped token that's a copy of this creature if seven or more land cards are in your graveyard. Otherwise, create a tapped 1/1 black Insect creature token with flying.",
+            "Scouring Swarm",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(
+                &*exec.effect,
+                Effect::CopyTokenOf {
+                    tapped: true,
+                    enters_attacking: false,
+                    ..
+                }
+            ),
+            "expected tapped CopyTokenOf, got {:?}",
+            exec.effect
+        );
+        assert!(
+            exec.condition.is_some(),
+            "copy branch should carry suffix condition"
+        );
+        let else_ab = exec
+            .else_ability
+            .as_ref()
+            .expect("should have else_ability");
+        assert!(
+            matches!(&*else_ab.effect, Effect::Token { tapped: true, .. }),
+            "expected tapped token in else_ability, got {:?}",
+            else_ab.effect
+        );
     }
 
     #[test]

@@ -11016,10 +11016,10 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
-        ControllerRef, CountScope, DoublePTMode, Duration, FilterProp, GainLifePlayer,
-        LinkedExileScope, ManaContribution, ManaProduction, ObjectScope, PaymentCost, QuantityExpr,
-        QuantityRef, TypeFilter, ZoneRef,
+        AbilityCondition, CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator,
+        ContinuousModification, ControllerRef, CountScope, DoublePTMode, Duration, FilterProp,
+        GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction, ObjectScope,
+        PaymentCost, QuantityExpr, QuantityRef, TypeFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::keywords::Keyword;
@@ -19531,6 +19531,79 @@ mod tests {
             first.condition.is_some(),
             "should have RevealedHasCardType condition, got: {:?}",
             first
+        );
+    }
+
+    #[test]
+    fn copy_token_suffix_condition_attaches_otherwise() {
+        let (suffix_cond, suffix_text) = strip_suffix_conditional(
+            "create a tapped token that's a copy of ~ if seven or more land cards are in your graveyard",
+            &mut ParseContext::default(),
+        );
+        let condition_probe = try_nom_condition_as_ability_condition(
+            "seven or more land cards are in your graveyard",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            condition_probe.is_some(),
+            "condition bridge should parse subject-first zone count"
+        );
+        assert!(
+            suffix_cond.is_some(),
+            "suffix stripper should parse condition"
+        );
+        assert_eq!(suffix_text, "create a tapped token that's a copy of ~");
+
+        let chain = parse_effect_chain(
+            "create a tapped token that's a copy of this creature if seven or more land cards are in your graveyard. Otherwise, create a tapped 1/1 black Insect creature token with flying.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*chain.effect,
+                Effect::CopyTokenOf {
+                    tapped: true,
+                    enters_attacking: false,
+                    ..
+                }
+            ),
+            "expected tapped CopyTokenOf, got {:?}",
+            chain.effect
+        );
+        assert!(
+            matches!(
+                chain.condition,
+                Some(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            ref card_types,
+                            scope: CountScope::Controller,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 7 },
+                }) if card_types == &vec![TypeFilter::Land]
+            ),
+            "expected land graveyard condition, got {:?}",
+            chain.condition
+        );
+        let else_ab = chain
+            .else_ability
+            .as_ref()
+            .expect("CopyTokenOf should carry Otherwise else_ability");
+        assert!(
+            matches!(
+                &*else_ab.effect,
+                Effect::Token {
+                    name,
+                    tapped: true,
+                    keywords,
+                    ..
+                } if name == "Insect" && keywords.contains(&Keyword::Flying)
+            ),
+            "expected tapped flying Insect fallback, got {:?}",
+            else_ab.effect
         );
     }
 
