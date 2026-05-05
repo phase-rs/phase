@@ -1,8 +1,9 @@
 /* eslint-disable react-refresh/only-export-components */
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ManaType, PlayerId } from "../../adapter/types";
+import { getCardNames } from "../../services/cardNames";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
 
@@ -226,6 +227,116 @@ export function ManaTypeSelect({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ── Card Name Autocomplete ─────────────────────────────────────────────
+
+const MAX_SUGGESTIONS = 12;
+
+export function CardNameAutocomplete({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const [allNames, setAllNames] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
+  const [highlightIndex, setHighlightIndex] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    getCardNames().then(setAllNames);
+  }, []);
+
+  const matches = useMemo(() => {
+    if (value.length < 2) return [];
+    const lower = value.toLowerCase();
+    const prefix: string[] = [];
+    const substring: string[] = [];
+    for (const name of allNames) {
+      const nameLower = name.toLowerCase();
+      if (nameLower === lower) return [];
+      if (nameLower.startsWith(lower)) {
+        prefix.push(name);
+      } else if (nameLower.includes(lower)) {
+        substring.push(name);
+      }
+      if (prefix.length + substring.length >= MAX_SUGGESTIONS) break;
+    }
+    return [...prefix, ...substring].slice(0, MAX_SUGGESTIONS);
+  }, [value, allNames]);
+
+  useEffect(() => {
+    setHighlightIndex(0);
+  }, [matches]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handleClick, true);
+    return () => document.removeEventListener("pointerdown", handleClick, true);
+  }, [open]);
+
+  const select = (name: string) => {
+    onChange(name);
+    setOpen(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!matches.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightIndex((i) => Math.min(i + 1, matches.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter" && open && matches[highlightIndex]) {
+      e.preventDefault();
+      select(matches[highlightIndex]);
+    } else if (e.key === "Escape") {
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div ref={containerRef} className="relative">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        className={inputClass}
+      />
+      {open && matches.length > 0 && (
+        <div className="absolute left-0 right-0 top-full z-50 mt-0.5 max-h-40 overflow-y-auto rounded border border-gray-700 bg-gray-800 shadow-lg">
+          {matches.map((name, i) => (
+            <button
+              key={name}
+              type="button"
+              onClick={() => select(name)}
+              className={
+                "block w-full px-2 py-1 text-left font-mono text-[10px] transition-colors " +
+                (i === highlightIndex
+                  ? "bg-blue-700/40 text-blue-200"
+                  : "text-gray-300 hover:bg-white/10")
+              }
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

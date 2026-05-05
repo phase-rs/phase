@@ -165,6 +165,9 @@ export class WasmAdapter implements EngineAdapter {
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized();
+    if (action.type === "Debug" && action.data.type === "CreateCard") {
+      await this.ensureCardDb();
+    }
     try {
       if (this.engine) return await this.engine.submitAction(actor, action);
       return await this.fallback!.submitAction(action, actor);

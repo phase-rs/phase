@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { CoreType, DebugAction, ManaColor, PlayerId, Zone } from "../../adapter/types";
 import {
   AccordionItem,
+  CardNameAutocomplete,
   CheckboxInput,
   FieldRow,
   NumberInput,
@@ -65,7 +66,7 @@ function CreateCardForm({ onDispatch }: Props) {
   return (
     <>
       <FieldRow label="Card Name">
-        <TextInput value={cardName} onChange={setCardName} placeholder="Lightning Bolt" />
+        <CardNameAutocomplete value={cardName} onChange={setCardName} placeholder="Lightning Bolt" />
       </FieldRow>
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
@@ -135,7 +136,7 @@ function CreateTokenForm({ onDispatch }: Props) {
   return (
     <>
       <FieldRow label="Name">
-        <TextInput value={name} onChange={setName} placeholder="Token" />
+        <CardNameAutocomplete value={name} onChange={setName} placeholder="Token" />
       </FieldRow>
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
