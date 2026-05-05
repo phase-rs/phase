@@ -29,6 +29,7 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::card_type::CoreType;
+use crate::types::phase::Phase;
 use crate::types::player::PlayerCounterKind;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -3526,18 +3527,30 @@ pub(super) fn parse_imperative_family_ast(
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
-    // CR 500.8: "additional combat phase" can appear in various sentence structures
+    // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
     if nom_primitives::scan_contains(lower, "additional combat phase") {
         let with_main =
             nom_primitives::scan_contains(lower, "followed by an additional main phase");
-        return Some(ImperativeFamilyAst::GainKeyword(
-            Effect::AdditionalCombatPhase {
-                target: TargetFilter::Controller,
-                with_main_phase: with_main,
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::BeginCombat,
+            after: Phase::EndCombat,
+            followed_by: if with_main {
+                vec![Phase::PostCombatMain]
+            } else {
+                vec![]
             },
-        ));
+        }));
+    }
+    if nom_primitives::scan_contains(lower, "additional upkeep step") {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::Upkeep,
+            after: Phase::Upkeep,
+            followed_by: vec![],
+        }));
     }
 
     // CR 722.1: "You control target player during that player's next turn"
@@ -5845,7 +5858,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_additional_combat_phase() {
+    fn parse_additional_phase_phase() {
         let text = "there is an additional combat phase after this phase";
         let lower = text.to_lowercase();
         let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
@@ -5854,17 +5867,19 @@ mod tests {
         assert!(
             matches!(
                 effect,
-                Effect::AdditionalCombatPhase {
-                    with_main_phase: false,
+                Effect::AdditionalPhase {
+                    phase: Phase::BeginCombat,
+                    after: Phase::EndCombat,
+                    ref followed_by,
                     ..
-                }
+                } if followed_by.is_empty()
             ),
-            "Expected AdditionalCombatPhase without main phase, got {effect:?}"
+            "Expected AdditionalPhase without main phase, got {effect:?}"
         );
     }
 
     #[test]
-    fn parse_additional_combat_with_main_phase() {
+    fn parse_additional_phase_with_main_phase() {
         let text = "there is an additional combat phase followed by an additional main phase";
         let lower = text.to_lowercase();
         let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
@@ -5873,17 +5888,40 @@ mod tests {
         assert!(
             matches!(
                 effect,
-                Effect::AdditionalCombatPhase {
-                    with_main_phase: true,
+                Effect::AdditionalPhase {
+                    phase: Phase::BeginCombat,
+                    after: Phase::EndCombat,
+                    ref followed_by,
                     ..
-                }
+                } if followed_by == &vec![Phase::PostCombatMain]
             ),
-            "Expected AdditionalCombatPhase with main phase, got {effect:?}"
+            "Expected AdditionalPhase with main phase, got {effect:?}"
         );
     }
 
     #[test]
-    fn parse_after_this_phase_additional_combat() {
+    fn parse_additional_upkeep_step() {
+        let text = "get an additional upkeep step after this step";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        assert!(result.is_some(), "Should parse additional upkeep step");
+        let effect = lower_imperative_family_effect(result.unwrap());
+        assert!(
+            matches!(
+                effect,
+                Effect::AdditionalPhase {
+                    phase: Phase::Upkeep,
+                    after: Phase::Upkeep,
+                    ref followed_by,
+                    ..
+                } if followed_by.is_empty()
+            ),
+            "Expected AdditionalPhase for upkeep step, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn parse_after_this_phase_additional_phase() {
         let text = "after this phase, there is an additional combat phase";
         let lower = text.to_lowercase();
         let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());

@@ -153,9 +153,7 @@ pub fn apply_debug_action(
                     .unwrap_or(0);
                 obj.defense = Some(val);
             }
-            if matches!(counter_type, CounterType::Lore)
-                && obj.class_level.is_some()
-            {
+            if matches!(counter_type, CounterType::Lore) && obj.class_level.is_some() {
                 let lore = obj.counters.get(&CounterType::Lore).copied().unwrap_or(0);
                 obj.class_level = Some((lore as u8).max(1));
             }

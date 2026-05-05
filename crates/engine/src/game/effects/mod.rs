@@ -16,7 +16,7 @@ use crate::types::player::PlayerId;
 pub mod adapt;
 pub mod add_restriction;
 pub mod add_target_replacement;
-pub mod additional_combat;
+pub mod additional_phase;
 pub mod amass;
 pub mod animate;
 pub mod attach;
@@ -587,7 +587,7 @@ pub fn resolve_effect(
         Effect::LoseAllPlayerCounters { .. } => {
             player_counter::resolve_lose_all(state, ability, events)
         }
-        Effect::AdditionalCombatPhase { .. } => additional_combat::resolve(state, ability, events),
+        Effect::AdditionalPhase { .. } => additional_phase::resolve(state, ability, events),
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
         Effect::RevealUntil { .. } => reveal_until::resolve(state, ability, events),
         Effect::Discover { .. } => discover::resolve(state, ability, events),
@@ -1041,7 +1041,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::SetLifeTotal { target, .. }
         | Effect::SkipNextTurn { target, .. }
         | Effect::ControlNextTurn { target, .. }
-        | Effect::AdditionalCombatPhase { target, .. }
+        | Effect::AdditionalPhase { target, .. }
         | Effect::GiveControl { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,

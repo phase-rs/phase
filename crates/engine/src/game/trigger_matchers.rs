@@ -1284,15 +1284,16 @@ pub(super) fn match_turn_begin(
 pub(super) fn match_phase(
     event: &GameEvent,
     trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
     if let GameEvent::PhaseChanged { phase } = event {
-        if let Some(ref trigger_phase) = trigger.phase {
+        let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
             phase == trigger_phase
         } else {
             true
-        }
+        };
+        phase_matches && valid_player_matches(trigger, state, state.active_player, source_id)
     } else {
         false
     }
@@ -3547,6 +3548,31 @@ mod tests {
             ObjectId(1),
             &state
         ));
+    }
+
+    #[test]
+    fn phase_trigger_valid_target_scopes_active_player() {
+        let mut state = setup();
+        let aura = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Paradox Haze".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(AttachTarget::Player(PlayerId(1)));
+        let mut trigger = make_trigger(TriggerMode::Phase);
+        trigger.phase = Some(crate::types::phase::Phase::Upkeep);
+        trigger.valid_target = Some(TargetFilter::AttachedTo);
+        let event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        };
+
+        state.active_player = PlayerId(0);
+        assert!(!match_phase(&event, &trigger, aura, &state));
+
+        state.active_player = PlayerId(1);
+        assert!(match_phase(&event, &trigger, aura, &state));
     }
 
     #[test]

@@ -1513,7 +1513,7 @@ mod tests {
 
         let mut state = setup();
         state.phase = Phase::DeclareAttackers;
-        // Mirror `additional_combat::resolve` push order with `with_main_phase = true`.
+        // Mirror `additional_phase::resolve` push order with PostCombatMain as a follow-up.
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::PostCombatMain,

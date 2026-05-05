@@ -4611,15 +4611,18 @@ pub enum Effect {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
-    /// CR 500.8: Add an additional combat phase (and optionally an additional main phase)
-    /// after the current phase. Uses a LIFO stack on GameState.extra_phases.
-    /// CR 500.10a: Only adds phases to the controller's own turn.
-    AdditionalCombatPhase {
+    /// CR 500.8: Add an additional step or phase after the specified anchor phase.
+    /// Uses a LIFO stack on GameState.extra_phases. `followed_by` entries are pushed
+    /// before `phase`, so "additional combat followed by an additional main phase"
+    /// resolves in printed order while preserving CR 500.8 LIFO ordering.
+    /// CR 500.10a: Only adds steps/phases to the affected player's own turn.
+    AdditionalPhase {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
-        /// If true, also adds an additional main phase after the combat phase.
+        phase: Phase,
+        after: Phase,
         #[serde(default)]
-        with_main_phase: bool,
+        followed_by: Vec<Phase>,
     },
     /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
     /// Uses `DoubleTarget` enum per D-05 to distinguish the three variants.
@@ -5178,7 +5181,7 @@ impl Effect {
             | Effect::Detain { target, .. }
             | Effect::ExtraTurn { target, .. }
             | Effect::SkipNextTurn { target, .. }
-            | Effect::AdditionalCombatPhase { target, .. }
+            | Effect::AdditionalPhase { target, .. }
             | Effect::Double { target, .. }
             | Effect::BlightEffect { target, .. }
             | Effect::SetLifeTotal { target, .. }
@@ -5434,7 +5437,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ManifestDread => "ManifestDread",
         Effect::ExtraTurn { .. } => "ExtraTurn",
         Effect::SkipNextTurn { .. } => "SkipNextTurn",
-        Effect::AdditionalCombatPhase { .. } => "AdditionalCombatPhase",
+        Effect::AdditionalPhase { .. } => "AdditionalPhase",
         Effect::Double { .. } => "Double",
         Effect::RuntimeHandled { handler } => match handler {
             RuntimeHandler::NinjutsuFamily => "RuntimeHandled:NinjutsuFamily",
@@ -5596,7 +5599,7 @@ pub enum EffectKind {
     ManifestDread,
     ExtraTurn,
     SkipNextTurn,
-    AdditionalCombatPhase,
+    AdditionalPhase,
     Double,
     RuntimeHandled,
     Learn,
@@ -5762,7 +5765,7 @@ impl From<&Effect> for EffectKind {
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
             Effect::SkipNextTurn { .. } => EffectKind::SkipNextTurn,
-            Effect::AdditionalCombatPhase { .. } => EffectKind::AdditionalCombatPhase,
+            Effect::AdditionalPhase { .. } => EffectKind::AdditionalPhase,
             Effect::Double { .. } => EffectKind::Double,
             Effect::RuntimeHandled { .. } => EffectKind::RuntimeHandled,
             Effect::Learn => EffectKind::Learn,

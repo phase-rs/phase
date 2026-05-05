@@ -4356,6 +4356,12 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     // Uses nom prefix dispatch: opponent possessives checked before bare "your" to avoid
     // "your opponent's" matching as "your".
     def.constraint = parse_turn_constraint(phase_text);
+    if scan_contains(phase_text, "enchanted player's") {
+        def.valid_target = Some(TargetFilter::AttachedTo);
+    }
+    if scan_contains(phase_text, "first upkeep") && scan_contains(phase_text, "each turn") {
+        def.constraint = Some(TriggerConstraint::MaxTimesPerTurn { max: 1 });
+    }
     // "each player's upkeep" / "each upkeep" / "the end step" → no constraint (fires every turn)
 
     Some((TriggerMode::Phase, def))
@@ -9330,6 +9336,30 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::Upkeep));
         assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn phase_trigger_enchanted_players_first_upkeep() {
+        let def = parse_trigger_line(
+            "At the beginning of enchanted player's first upkeep each turn, that player gets an additional upkeep step after this step.",
+            "Paradox Haze",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::MaxTimesPerTurn { max: 1 })
+        );
+        assert!(matches!(
+            def.execute.as_ref().map(|ability| ability.effect.as_ref()),
+            Some(Effect::AdditionalPhase {
+                target: TargetFilter::TriggeringPlayer,
+                phase: Phase::Upkeep,
+                after: Phase::Upkeep,
+                followed_by,
+            }) if followed_by.is_empty()
+        ));
     }
 
     #[test]

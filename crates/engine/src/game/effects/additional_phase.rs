@@ -3,30 +3,32 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ExtraPhase, GameState};
-use crate::types::phase::Phase;
 
 /// CR 500.8: Add extra phases to the current turn via a LIFO stack.
-/// CR 500.10a: Only adds phases to the controller's own turn.
+/// CR 500.10a: Only adds phases to the affected player's own turn.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target, with_main_phase) = match &ability.effect {
-        Effect::AdditionalCombatPhase {
+    let (target, phase, after, followed_by) = match &ability.effect {
+        Effect::AdditionalPhase {
             target,
-            with_main_phase,
-        } => (target, *with_main_phase),
-        _ => {
-            return Err(EffectError::MissingParam(
-                "expected AdditionalCombatPhase".into(),
-            ))
-        }
+            phase,
+            after,
+            followed_by,
+        } => (target, *phase, *after, followed_by),
+        _ => return Err(EffectError::MissingParam("expected AdditionalPhase".into())),
     };
 
     // CR 500.8: Resolve the target to a PlayerId.
     let player = match target {
         TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
+        TargetFilter::TriggeringPlayer => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(|event| crate::game::targeting::extract_player_from_event(event, state))
+            .unwrap_or(ability.controller),
         _ => {
             if let Some(TargetRef::Player(pid)) = ability.targets.first() {
                 *pid
@@ -37,46 +39,31 @@ pub fn resolve(
     };
 
     // CR 500.10a: "If an effect that says 'you get' an additional step or phase
-    // would add a step or phase to a turn other than its controller's, no steps
+    // would add a step or phase to a turn other than that player's, no steps
     // or phases are added."
     if player != state.active_player {
         events.push(GameEvent::EffectResolved {
-            kind: EffectKind::AdditionalCombatPhase,
+            kind: EffectKind::AdditionalPhase,
             source_id: ability.source_id,
         });
         return Ok(());
     }
 
-    // CR 500.8 + CR 506.1: The combat phase ends after `EndCombat`. "After
-    // this phase, there is an additional combat phase" anchors the new
-    // `BeginCombat` to `EndCombat` so it consumes only when transitioning out
-    // of the *current* combat (not mid-combat between DeclareAttackers and
-    // DeclareBlockers, which would silently skip the rest of the first
-    // combat's steps). For `with_main_phase = true` (e.g., World at War /
-    // Combat Celebrant exert variant), the extra `PostCombatMain` is also
-    // anchored to `EndCombat` — but because `EndCombat` is encountered a
-    // second time after the *extra* combat finishes, the LIFO `rposition`
-    // scan in `advance_phase` consumes `BeginCombat` first (the more recent
-    // push) and `PostCombatMain` on the second pass. Result: current combat
-    // → extra combat → extra postcombat main → End.
-    //
-    // Note: If the extra combat is skipped (no attackers), the no-attackers
-    // path in turns.rs sets phase = PostCombatMain directly. The stacked
-    // PostCombatMain still fires as an additional main phase — arguably
-    // correct per CR 505.1a.
-    if with_main_phase {
+    // CR 500.8: Push follow-up phases before the primary phase so the
+    // `advance_phase` LIFO scan consumes the primary phase first.
+    for &follow_up in followed_by.iter().rev() {
         state.extra_phases.push(ExtraPhase {
-            anchor: Phase::EndCombat,
-            phase: Phase::PostCombatMain,
+            anchor: after,
+            phase: follow_up,
         });
     }
     state.extra_phases.push(ExtraPhase {
-        anchor: Phase::EndCombat,
-        phase: Phase::BeginCombat,
+        anchor: after,
+        phase,
     });
 
     events.push(GameEvent::EffectResolved {
-        kind: EffectKind::AdditionalCombatPhase,
+        kind: EffectKind::AdditionalPhase,
         source_id: ability.source_id,
     });
 
@@ -88,17 +75,22 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, SpellContext, TargetFilter};
     use crate::types::identifiers::ObjectId;
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
 
     fn make_ability(
         target: TargetFilter,
-        with_main_phase: bool,
+        phase: Phase,
+        after: Phase,
+        followed_by: Vec<Phase>,
         controller: PlayerId,
     ) -> ResolvedAbility {
         ResolvedAbility {
-            effect: Effect::AdditionalCombatPhase {
+            effect: Effect::AdditionalPhase {
                 target,
-                with_main_phase,
+                phase,
+                after,
+                followed_by,
             },
             controller,
             source_id: ObjectId(1),
@@ -126,13 +118,19 @@ mod tests {
     }
 
     #[test]
-    fn additional_combat_pushes_begin_combat() {
+    fn additional_phase_pushes_begin_combat() {
         let mut state = GameState {
             active_player: PlayerId(0),
             ..Default::default()
         };
         let mut events = Vec::new();
-        let ability = make_ability(TargetFilter::Controller, false, PlayerId(0));
+        let ability = make_ability(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::EndCombat,
+            vec![],
+            PlayerId(0),
+        );
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -148,13 +146,19 @@ mod tests {
     }
 
     #[test]
-    fn additional_combat_with_main_pushes_both() {
+    fn additional_phase_with_main_pushes_both() {
         let mut state = GameState {
             active_player: PlayerId(0),
             ..Default::default()
         };
         let mut events = Vec::new();
-        let ability = make_ability(TargetFilter::Controller, true, PlayerId(0));
+        let ability = make_ability(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::EndCombat,
+            vec![Phase::PostCombatMain],
+            PlayerId(0),
+        );
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -185,11 +189,23 @@ mod tests {
         let mut events = Vec::new();
 
         // First effect: additional combat
-        let ability1 = make_ability(TargetFilter::Controller, false, PlayerId(0));
+        let ability1 = make_ability(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::EndCombat,
+            vec![],
+            PlayerId(0),
+        );
         resolve(&mut state, &ability1, &mut events).unwrap();
 
         // Second effect: another additional combat (most recent → first)
-        let ability2 = make_ability(TargetFilter::Controller, false, PlayerId(0));
+        let ability2 = make_ability(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::EndCombat,
+            vec![],
+            PlayerId(0),
+        );
         resolve(&mut state, &ability2, &mut events).unwrap();
 
         let begin_combat_after_end = ExtraPhase {
@@ -214,11 +230,46 @@ mod tests {
             ..Default::default()
         };
         let mut events = Vec::new();
-        let ability = make_ability(TargetFilter::Controller, false, PlayerId(0));
+        let ability = make_ability(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::EndCombat,
+            vec![],
+            PlayerId(0),
+        );
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // CR 500.10a: No phases added on opponent's turn
         assert!(state.extra_phases.is_empty());
+    }
+
+    #[test]
+    fn additional_upkeep_uses_triggering_player() {
+        let mut state = GameState {
+            active_player: PlayerId(1),
+            current_trigger_event: Some(GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }),
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability(
+            TargetFilter::TriggeringPlayer,
+            Phase::Upkeep,
+            Phase::Upkeep,
+            vec![],
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.extra_phases,
+            vec![ExtraPhase {
+                anchor: Phase::Upkeep,
+                phase: Phase::Upkeep,
+            }]
+        );
     }
 }

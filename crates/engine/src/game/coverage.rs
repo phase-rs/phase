@@ -1671,11 +1671,17 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("extra turn after".into(), "yes".into()));
             }
         }
-        Effect::AdditionalCombatPhase {
-            with_main_phase, ..
+        Effect::AdditionalPhase {
+            target,
+            phase,
+            after,
+            followed_by,
         } => {
-            if *with_main_phase {
-                d.push(("+ main phase".into(), "yes".into()));
+            d.push(("player".into(), fmt_target(target)));
+            d.push(("phase".into(), format!("{phase:?}")));
+            d.push(("after".into(), format!("{after:?}")));
+            if !followed_by.is_empty() {
+                d.push(("followed by".into(), format!("{followed_by:?}")));
             }
         }
         Effect::Double {

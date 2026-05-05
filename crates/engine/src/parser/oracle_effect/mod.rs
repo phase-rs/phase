@@ -5452,7 +5452,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
             *target = subject_filter;
         }
         // CR 500.8: "target player gets an additional combat phase" — inject subject target
-        Effect::AdditionalCombatPhase { target, .. } if *target == TargetFilter::Controller => {
+        Effect::AdditionalPhase { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;
         }
         // CR 400.7: "shuffle [subject]'s graveyard into their library" — inject
