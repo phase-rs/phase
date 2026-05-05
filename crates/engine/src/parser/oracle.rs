@@ -5315,6 +5315,33 @@ mod tests {
     }
 
     #[test]
+    fn tiered_restoration_magic_parses_modal_with_mode_costs() {
+        let text = "Tiered (Choose one additional cost.)\n\
+                    • Cure — {0} — Target permanent gains hexproof and indestructible until end of turn.\n\
+                    • Cura — {1} — Target permanent gains hexproof and indestructible until end of turn. You gain 3 life.\n\
+                    • Curaga — {3}{W} — Permanents you control gain hexproof and indestructible until end of turn. You gain 6 life.";
+        let result = parse(text, "Restoration Magic", &[], &["Instant"], &[]);
+        let modal = result.modal.expect("Tiered should parse as modal");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.mode_costs.len(), 3);
+        assert_eq!(modal.mode_costs[0], ManaCost::zero());
+        assert_eq!(modal.mode_costs[1], ManaCost::generic(1));
+        assert_eq!(
+            modal.mode_costs[2],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3
+            }
+        );
+        assert!(result
+            .abilities
+            .iter()
+            .all(|ability| { !matches!(*ability.effect, Effect::Unimplemented { .. }) }));
+    }
+
+    #[test]
     fn parse_saga_the_eldest_reborn() {
         let oracle = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Each opponent discards a card.\nII — Put target creature card from a graveyard onto the battlefield under your control.\nIII — Return target nonland permanent card from your graveyard to the battlefield under your control.";
         let result = parse_oracle_text(

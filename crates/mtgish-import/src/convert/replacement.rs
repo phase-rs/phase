@@ -7,9 +7,9 @@
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, QuantityExpr,
-    QuantityModification, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    TargetFilter,
+    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, ManaReplacementScope,
+    QuantityExpr, QuantityModification, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, TargetFilter,
 };
 use engine::types::card_type::Supertype;
 use engine::types::replacements::ReplacementEvent;
@@ -88,6 +88,7 @@ pub fn convert_as_enters(
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });
@@ -164,6 +165,7 @@ pub fn convert_replace_would_enter(
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });
@@ -223,6 +225,7 @@ pub fn convert_replace_would_deal_damage(
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });
@@ -591,6 +594,7 @@ pub fn convert_replace_would_draw(
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });
@@ -707,6 +711,7 @@ pub fn convert_replace_would_put_into_graveyard(
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });
@@ -922,6 +927,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });
@@ -1000,6 +1006,7 @@ pub fn convert_replace_would_put_counters(
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });
@@ -1158,6 +1165,7 @@ pub fn convert_replace_would_gain_life(
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });
@@ -1274,6 +1282,7 @@ fn try_build_may_cost_pair(
         is_consumed: false,
         redirect_target: None,
         mana_modification: None,
+        mana_replacement_scope: ManaReplacementScope::Any,
         additional_token_spec: None,
         ensure_token_specs: None,
     }))

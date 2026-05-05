@@ -8343,6 +8343,60 @@ mod tests {
     }
 
     #[test]
+    fn modal_damage_mode_to_target_player_resolves_damage() {
+        let mut state = setup_game_at_main_phase();
+        let charm_id = create_modal_charm(&mut state, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&charm_id).unwrap();
+            obj.name = "Boros Charm".to_string();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::White],
+                generic: 0,
+            };
+            let abilities = Arc::make_mut(&mut obj.abilities);
+            abilities[0] = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    target: TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Player,
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                        ],
+                    },
+                    damage_source: None,
+                },
+            );
+            obj.modal.as_mut().unwrap().mode_descriptions[0] =
+                "Boros Charm deals 4 damage to target player or planeswalker.".to_string();
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), charm_id, CardId(50), &mut events).unwrap();
+        state.waiting_for = result;
+
+        let result = handle_select_modes(&mut state, PlayerId(0), vec![0], &mut events).unwrap();
+        state.waiting_for = result;
+
+        let result = handle_select_targets(
+            &mut state,
+            PlayerId(0),
+            vec![TargetRef::Player(PlayerId(1))],
+            &mut events,
+        )
+        .unwrap();
+        state.waiting_for = result;
+
+        stack::resolve_top(&mut state, &mut events);
+
+        let opponent = state.players.iter().find(|p| p.id == PlayerId(1)).unwrap();
+        assert_eq!(opponent.life, 16);
+    }
+
+    #[test]
     fn select_mode_invalid_count_rejected() {
         let mut state = setup_game_at_main_phase();
         let obj_id = create_modal_charm(&mut state, PlayerId(0));

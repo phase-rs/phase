@@ -427,6 +427,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 timestamp,
                 has_prowess,
                 has_exploit,
+                has_ravenous,
                 firebending_n,
                 ward_costs,
                 has_decayed,
@@ -465,6 +466,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         && obj.has_keyword(&Keyword::Prowess),
                     matches!(event, GameEvent::ZoneChanged { .. })
                         && obj.has_keyword(&Keyword::Exploit),
+                    obj.has_keyword(&Keyword::Ravenous),
                     fb_n,
                     wards,
                     obj.has_keyword(&Keyword::Decayed),
@@ -531,6 +533,49 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
+                        }));
+                    }
+                }
+            }
+
+            // CR 702.156a + CR 107.3m: Ravenous includes "When this permanent
+            // enters, if X is 5 or more, draw a card." The paid X is stamped
+            // on the permanent as `cost_x_paid` during spell finalization.
+            if has_ravenous {
+                if let GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } = event
+                {
+                    let x_paid = state
+                        .objects
+                        .get(&obj_id)
+                        .and_then(|obj| obj.cost_x_paid)
+                        .unwrap_or(0);
+                    if *object_id == obj_id && x_paid >= 5 {
+                        let draw_ability = ResolvedAbility::new(
+                            Effect::Draw {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Controller,
+                            },
+                            Vec::new(),
+                            obj_id,
+                            controller,
+                        );
+                        let ravenous_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                            .description("Ravenous".to_string());
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
+                            source_id: obj_id,
+                            controller,
+                            condition: ravenous_trigger.condition,
+                            ability: draw_ability,
+                            timestamp,
+                            target_constraints: Vec::new(),
+                            trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
+                            description: ravenous_trigger.description,
                         }));
                     }
                 }
@@ -2425,7 +2470,7 @@ pub mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
-    use crate::types::game_state::{GameState, SpellCastRecord, ZoneChangeRecord};
+    use crate::types::game_state::{GameState, SpellCastRecord, StackEntryKind, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
@@ -2480,6 +2525,41 @@ pub mod tests {
                 ..ZoneChangeRecord::test_minimal(object_id, None, Zone::Battlefield)
             }),
         }
+    }
+
+    #[test]
+    fn ravenous_draw_triggers_when_paid_x_is_five_or_more() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let ravener = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Ravener".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&ravener).unwrap();
+            obj.keywords.push(Keyword::Ravenous);
+            obj.cost_x_paid = Some(5);
+        }
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                ravener,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec!["Tyranid"],
+            )],
+        );
+
+        assert!(state.stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { ability, .. }
+                if matches!(ability.effect, Effect::Draw { .. })
+        )));
     }
 
     #[test]

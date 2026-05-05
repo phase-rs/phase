@@ -90,6 +90,20 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
 
+    if line.eq_ignore_ascii_case("tiered")
+        && !modes.is_empty()
+        && modes.iter().all(|m| m.mode_cost.is_some())
+    {
+        let header = ModalHeaderAst {
+            raw: line.to_string(),
+            min_choices: 1,
+            max_choices: 1,
+            allow_repeat_modes: false,
+            constraints: vec![],
+        };
+        return Some((OracleBlockAst::Modal { header, modes }, next));
+    }
+
     None
 }
 
@@ -105,12 +119,7 @@ pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
             let stripped = stripped.trim();
             if let Some((cost, rest)) = parse_mana_symbols(stripped) {
                 // Strip " — " or " – " separator between cost and effect text
-                let body = rest
-                    .trim()
-                    .strip_prefix('—')
-                    .or_else(|| rest.trim().strip_prefix('–'))
-                    .unwrap_or(rest)
-                    .trim();
+                let body = strip_mode_separator(rest);
                 modes.push(ModeAst {
                     raw: body.to_string(),
                     label: None,
@@ -130,6 +139,16 @@ pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
 
 fn parse_mode_ast(text: &str) -> ModeAst {
     if let Some((label, body)) = split_short_label_prefix(text, 4) {
+        if let Some((cost, rest)) = parse_mana_symbols(body) {
+            let body = strip_mode_separator(rest);
+            return ModeAst {
+                raw: text.to_string(),
+                label: Some(label.to_string()),
+                body: body.to_string(),
+                mode_cost: Some(cost),
+            };
+        }
+
         return ModeAst {
             raw: text.to_string(),
             label: Some(label.to_string()),
@@ -144,6 +163,17 @@ fn parse_mode_ast(text: &str) -> ModeAst {
         body: text.to_string(),
         mode_cost: None,
     }
+}
+
+fn strip_mode_separator(text: &str) -> &str {
+    let trimmed = text.trim();
+    alt((
+        tag::<_, _, VerboseError<&str>>("—"),
+        tag::<_, _, VerboseError<&str>>("–"),
+    ))
+    .parse(trimmed)
+    .map(|(rest, _)| rest.trim())
+    .unwrap_or(trimmed)
 }
 
 pub(super) fn split_short_label_prefix(text: &str, max_words: usize) -> Option<(&str, &str)> {

@@ -3,6 +3,7 @@ use crate::types::ability::{CopiableValues, PtValue};
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
+use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use std::sync::Arc;
 
@@ -219,6 +220,16 @@ pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(String, u32)> {
     if let Some(def) = obj.defense {
         if def > 0 {
             counters.push((CounterType::Defense.as_str().to_string(), def));
+        }
+    }
+    // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
+    // effect. The paid X is stamped on the object when the spell leaves the
+    // stack, before the ZoneChange replacement pipeline applies counters.
+    if obj.has_keyword(&Keyword::Ravenous) {
+        if let Some(x_paid) = obj.cost_x_paid {
+            if x_paid > 0 {
+                counters.push((CounterType::Plus1Plus1.as_str().to_string(), x_paid));
+            }
         }
     }
     counters
@@ -571,6 +582,24 @@ mod tests {
             brawl_commander: false,
             metadata: Default::default(),
         }
+    }
+
+    #[test]
+    fn ravenous_intrinsic_counters_use_paid_x() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Ravener".to_string(),
+            Zone::Stack,
+        );
+        obj.keywords.push(Keyword::Ravenous);
+        obj.cost_x_paid = Some(4);
+
+        assert_eq!(
+            intrinsic_etb_counters(&obj),
+            vec![(CounterType::Plus1Plus1.as_str().to_string(), 4)]
+        );
     }
 
     /// CR 712.12: MDFC land face selection requires `LayoutKind::Modal` on the back
