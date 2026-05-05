@@ -2830,6 +2830,38 @@ pub(crate) fn parse_shared_quality_clause(
     ))
 }
 
+pub(crate) fn parse_attachment_kind_disjunction(
+    input: &str,
+) -> nom::IResult<&str, Vec<AttachmentKind>, nom_language::error::VerboseError<&str>> {
+    // Longest-match-first: handle compound forms before single-kind forms.
+    alt((
+        value(
+            vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+            tag("enchanted or equipped"),
+        ),
+        value(
+            vec![AttachmentKind::Equipment, AttachmentKind::Aura],
+            tag("equipped or enchanted"),
+        ),
+        value(vec![AttachmentKind::Aura], tag("enchanted")),
+        value(vec![AttachmentKind::Equipment], tag("equipped")),
+    ))
+    .parse(input)
+}
+
+pub(crate) fn attachment_kinds_filter_prop(
+    kinds: Vec<AttachmentKind>,
+    controller: Option<ControllerRef>,
+) -> FilterProp {
+    match kinds.as_slice() {
+        [kind] => FilterProp::HasAttachment {
+            kind: kind.clone(),
+            controller,
+        },
+        _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
+    }
+}
+
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
 ///
 /// Handles multiple pattern classes:
@@ -2859,26 +2891,7 @@ pub(crate) fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, u
     if let Ok((after_intro, _)) = intro {
         // Note: `parse_that_isnt_subtype_suffix` runs first in `parse_type_phrase`
         // and consumes "that's not …", so this branch only sees positive forms.
-        fn parse_attachment_disjunction(
-            input: &str,
-        ) -> nom::IResult<&str, Vec<AttachmentKind>, nom_language::error::VerboseError<&str>>
-        {
-            // Longest-match-first: handle compound forms before single-kind forms.
-            alt((
-                value(
-                    vec![AttachmentKind::Aura, AttachmentKind::Equipment],
-                    tag("enchanted or equipped"),
-                ),
-                value(
-                    vec![AttachmentKind::Equipment, AttachmentKind::Aura],
-                    tag("equipped or enchanted"),
-                ),
-                value(vec![AttachmentKind::Aura], tag("enchanted")),
-                value(vec![AttachmentKind::Equipment], tag("equipped")),
-            ))
-            .parse(input)
-        }
-        if let Ok((rest, kinds)) = parse_attachment_disjunction(after_intro) {
+        if let Ok((rest, kinds)) = parse_attachment_kind_disjunction(after_intro) {
             // Word-boundary check: the next char must terminate the adjective so
             // we don't false-match e.g. "that's enchanted by something else".
             // Accept end-of-string or any non-alphanumeric terminator.
@@ -2888,17 +2901,7 @@ pub(crate) fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, u
                 .is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if next_char_is_boundary {
                 let consumed = leading_ws + trimmed.len() - rest.len();
-                let prop = if kinds.len() == 1 {
-                    FilterProp::HasAttachment {
-                        kind: kinds.into_iter().next().expect("len == 1"),
-                        controller: None,
-                    }
-                } else {
-                    FilterProp::HasAnyAttachmentOf {
-                        kinds,
-                        controller: None,
-                    }
-                };
+                let prop = attachment_kinds_filter_prop(kinds, None);
                 return Some((vec![prop], consumed));
             }
         }

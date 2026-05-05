@@ -15,7 +15,10 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
 use super::oracle_nom::quantity as nom_quantity;
-use super::oracle_target::{parse_type_phrase, starts_with_type_word};
+use super::oracle_target::{
+    attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase,
+    starts_with_type_word,
+};
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
     normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
@@ -1524,6 +1527,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
+    if let Some(result) = try_extract_zone_change_object_filter_condition(&lower, text) {
+        return result;
+    }
+
     // CR 509.1a + CR 603.4: "if defending player controls no [type]"
     // Nom combinator prefix dispatch + parse_type_phrase for the remainder.
     {
@@ -1561,46 +1568,68 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return result;
     }
 
-    // CR 603.4 + CR 603.10a + CR 509.1g: Death-trigger look-back condition.
-    // The subject is the dying event object, not the source in its current zone.
-    if let Some((prefix, negated, rest)) = scan_preceded(&lower, |i| {
-        preceded(
-            tag::<_, _, VerboseError<&str>>("if it "),
-            alt((
-                value(
-                    true,
-                    alt((
-                        tag::<_, _, VerboseError<&str>>("wasn't blocking"),
-                        tag("was not blocking"),
-                    )),
-                ),
-                value(false, tag("was blocking")),
-            )),
-        )
-        .parse(i)
-    }) {
-        let filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Blocking]));
-        let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
-            origin: Some(Zone::Battlefield),
-            destination: Zone::Graveyard,
-            filter,
-        };
-        let condition = if negated {
-            TriggerCondition::Not {
-                condition: Box::new(condition),
-            }
-        } else {
-            condition
-        };
-        let consumed = lower.len() - prefix.len() - rest.len();
-        return (
-            strip_condition_clause(text, prefix.len(), consumed),
-            Some(condition),
-        );
+    (text.to_string(), None)
+}
+
+fn try_extract_zone_change_object_filter_condition(
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let (before, condition, rest) =
+        scan_preceded(lower, parse_zone_change_object_filter_condition)?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
     }
 
-    (text.to_string(), None)
+    let consumed = lower.len() - before.len() - rest.len();
+    Some((
+        strip_condition_clause(text, before.len(), consumed),
+        Some(condition),
+    ))
+}
+
+fn parse_zone_change_object_filter_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
+    preceded(tag("if it "), parse_zone_change_object_filter_predicate).parse(input)
+}
+
+fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, negated) = alt((
+        value(false, tag("was ")),
+        value(true, tag("wasn't ")),
+        value(true, tag("was not ")),
+    ))
+    .parse(input)?;
+
+    let (rest, prop) = alt((
+        value(FilterProp::Blocking, tag("blocking")),
+        map_attachment_kind_filter_prop,
+    ))
+    .parse(rest)?;
+    let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Graveyard,
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![prop])),
+    };
+
+    if negated {
+        Ok((
+            rest,
+            TriggerCondition::Not {
+                condition: Box::new(condition),
+            },
+        ))
+    } else {
+        Ok((rest, condition))
+    }
+}
+
+fn map_attachment_kind_filter_prop(input: &str) -> OracleResult<'_, FilterProp> {
+    let (rest, kinds) = parse_attachment_kind_disjunction(input)?;
+    Ok((rest, attachment_kinds_filter_prop(kinds, None)))
 }
 
 fn try_extract_no_mana_spent_condition(
@@ -11739,6 +11768,26 @@ mod tests {
                         TypedFilter::creature().properties(vec![FilterProp::Blocking])
                     ),
                 }),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_if_it_was_enchanted_or_equipped_as_zone_change_lookback() {
+        let (cleaned, cond) =
+            extract_if_condition("if it was enchanted or equipped, return it to its owner's hand");
+        assert_eq!(cleaned, "return it to its owner's hand");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Graveyard,
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::HasAnyAttachmentOf {
+                        kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                        controller: None,
+                    },
+                ])),
             }
         );
     }

@@ -1734,30 +1734,7 @@ fn matches_filter_prop(
             if !kind_matches {
                 return false;
             }
-            match controller {
-                None => true,
-                Some(ControllerRef::You) => source.controller == Some(att.controller),
-                Some(ControllerRef::Opponent) => {
-                    source.controller.is_some_and(|c| c != att.controller)
-                }
-                Some(ControllerRef::ScopedPlayer) => {
-                    scoped_player_or_controller(source.ability, source.controller)
-                        .is_some_and(|pid| pid == att.controller)
-                }
-                Some(ControllerRef::TargetPlayer) => source
-                    .ability
-                    .and_then(|a| {
-                        a.targets.iter().find_map(|t| match t {
-                            crate::types::ability::TargetRef::Player(pid) => Some(*pid),
-                            crate::types::ability::TargetRef::Object(_) => None,
-                        })
-                    })
-                    .is_some_and(|pid| pid == att.controller),
-                Some(ControllerRef::DefendingPlayer) => {
-                    crate::game::combat::defending_player_for_attacker(state, source.id)
-                        .is_some_and(|pid| pid == att.controller)
-                }
-            }
+            attachment_controller_matches(controller.as_ref(), att.controller, state, source)
         }),
         // CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches when the
         // object has at least one attachment whose subtype is in `kinds` and whose
@@ -1779,30 +1756,7 @@ fn matches_filter_prop(
                 if !kind_matches {
                     return false;
                 }
-                match controller {
-                    None => true,
-                    Some(ControllerRef::You) => source.controller == Some(att.controller),
-                    Some(ControllerRef::Opponent) => {
-                        source.controller.is_some_and(|c| c != att.controller)
-                    }
-                    Some(ControllerRef::ScopedPlayer) => {
-                        scoped_player_or_controller(source.ability, source.controller)
-                            .is_some_and(|pid| pid == att.controller)
-                    }
-                    Some(ControllerRef::TargetPlayer) => source
-                        .ability
-                        .and_then(|a| {
-                            a.targets.iter().find_map(|t| match t {
-                                crate::types::ability::TargetRef::Player(pid) => Some(*pid),
-                                crate::types::ability::TargetRef::Object(_) => None,
-                            })
-                        })
-                        .is_some_and(|pid| pid == att.controller),
-                    Some(ControllerRef::DefendingPlayer) => {
-                        crate::game::combat::defending_player_for_attacker(state, source.id)
-                            .is_some_and(|pid| pid == att.controller)
-                    }
-                }
+                attachment_controller_matches(controller.as_ref(), att.controller, state, source)
             })
         }
         // CR 613.4c: In per-recipient layer contexts, "other" is relative to
@@ -2160,6 +2114,26 @@ fn zone_change_record_matches_property(
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
+        FilterProp::HasAttachment { kind, controller } => record.attachments.iter().any(|att| {
+            att.kind == *kind
+                && attachment_controller_matches(
+                    controller.as_ref(),
+                    att.controller,
+                    state,
+                    source,
+                )
+        }),
+        FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+            record.attachments.iter().any(|att| {
+                kinds.contains(&att.kind)
+                    && attachment_controller_matches(
+                        controller.as_ref(),
+                        att.controller,
+                        state,
+                        source,
+                    )
+            })
+        }
 
         // These predicates query live battlefield state (tap status, attachment,
         // current counters, face-down). The snapshot has already left its public
@@ -2184,8 +2158,6 @@ fn zone_change_record_matches_property(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
-        | FilterProp::HasAttachment { .. }
-        | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::FaceDown
         | FilterProp::Foretold
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
@@ -2226,6 +2198,38 @@ fn zone_change_record_matches_property(
         // plumbing (no current consumer).
         | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
+    }
+}
+
+fn attachment_controller_matches(
+    controller: Option<&ControllerRef>,
+    attachment_controller: PlayerId,
+    state: &GameState,
+    source: &SourceContext<'_>,
+) -> bool {
+    match controller {
+        None => true,
+        Some(ControllerRef::You) => source.controller == Some(attachment_controller),
+        Some(ControllerRef::Opponent) => source
+            .controller
+            .is_some_and(|controller| controller != attachment_controller),
+        Some(ControllerRef::ScopedPlayer) => {
+            scoped_player_or_controller(source.ability, source.controller)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
+        Some(ControllerRef::TargetPlayer) => source
+            .ability
+            .and_then(|a| {
+                a.targets.iter().find_map(|t| match t {
+                    TargetRef::Player(pid) => Some(*pid),
+                    TargetRef::Object(_) => None,
+                })
+            })
+            .is_some_and(|pid| pid == attachment_controller),
+        Some(ControllerRef::DefendingPlayer) => {
+            combat::defending_player_for_attacker(state, source.id)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
     }
 }
 
@@ -2589,11 +2593,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, ChosenAttribute, Comparator, ControllerRef, FilterProp, PlayerScope,
-        QuantityExpr, QuantityRef, TargetFilter,
+        AggregateFunction, AttachmentKind, ChosenAttribute, Comparator, ControllerRef, FilterProp,
+        PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
+    use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -5215,8 +5220,6 @@ mod tests {
     /// "whenever a creature token dies" triggers depend on this.
     #[test]
     fn zone_change_record_token_property_matches_snapshot() {
-        use crate::types::game_state::ZoneChangeRecord;
-
         let state = GameState::default();
         let source_ctx = SourceContext {
             id: ObjectId(1),
@@ -5251,6 +5254,43 @@ mod tests {
             &FilterProp::Token,
             &state,
             &nontoken_record,
+            &source_ctx,
+        ));
+
+        let enchanted_record = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            attachments: vec![AttachmentSnapshot {
+                object_id: ObjectId(100),
+                controller: PlayerId(0),
+                kind: AttachmentKind::Aura,
+            }],
+            ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        assert!(zone_change_record_matches_property(
+            &FilterProp::HasAnyAttachmentOf {
+                kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                controller: None,
+            },
+            &state,
+            &enchanted_record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: Some(ControllerRef::You),
+            },
+            &state,
+            &enchanted_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::HasAttachment {
+                kind: AttachmentKind::Equipment,
+                controller: None,
+            },
+            &state,
+            &enchanted_record,
             &source_ctx,
         ));
     }
