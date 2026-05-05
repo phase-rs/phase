@@ -347,7 +347,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         }
 
         // Choose-one-of branch: pick the first branch.
-        WaitingFor::ChooseOneOfBranch { .. } => Some(GameAction::SelectModes { indices: vec![0] }),
+        WaitingFor::ChooseOneOfBranch { .. } => Some(GameAction::ChooseBranch { index: 0 }),
 
         // Discover/Cascade: decline.
         WaitingFor::DiscoverChoice { .. } => Some(GameAction::DiscoverChoice {

@@ -520,7 +520,7 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
             .iter_mut()
             .map(|card| rewrite_bound_x_in_quantity_expr(&mut card.count, binding))
             .sum(),
-        Effect::ChooseOneOf { branches } => branches
+        Effect::ChooseOneOf { branches, .. } => branches
             .iter_mut()
             .map(|branch| rewrite_bound_x_in_ability_definition(branch, binding))
             .sum(),

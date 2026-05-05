@@ -1051,6 +1051,7 @@ impl GameRunner {
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
+            WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",

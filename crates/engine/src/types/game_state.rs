@@ -543,6 +543,20 @@ pub struct PendingRepeatIteration {
     pub total_iterations: usize,
 }
 
+/// CR 701.55d: Remaining players queued to face the same resolution-time
+/// branch choice after the current chosen branch finishes resolving.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingChooseOneOf {
+    pub controller: PlayerId,
+    pub source_id: ObjectId,
+    pub branches: Vec<AbilityDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_targets: Vec<TargetRef>,
+    #[serde(default)]
+    pub context: super::ability::SpellContext,
+    pub remaining_players: Vec<PlayerId>,
+}
+
 /// CR 603.7: A delayed triggered ability created during resolution of a spell or ability.
 /// Fires once at the specified condition, then is removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1093,6 +1107,24 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
         source_id: ObjectId,
+    },
+    /// CR 701.55a: Player chooses one branch while facing a villainous choice,
+    /// or another inline resolution-time "choose A or B" effect.
+    ChooseOneOfBranch {
+        player: PlayerId,
+        controller: PlayerId,
+        source_id: ObjectId,
+        branches: Vec<AbilityDefinition>,
+        /// Display labels for each branch, derived from branch ability descriptions.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        branch_descriptions: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parent_targets: Vec<TargetRef>,
+        #[serde(default)]
+        context: super::ability::SpellContext,
+        /// Players still to face the same choice in APNAP order (CR 701.55d).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining_players: Vec<PlayerId>,
     },
     /// CR 701.50a: Player chooses card(s) to discard for connive.
     /// After discarding, nonland discards add +1/+1 counters to the conniving creature.
@@ -1909,6 +1941,7 @@ impl WaitingFor {
             | WaitingFor::RevealChoice { player, .. }
             | WaitingFor::SearchChoice { player, .. }
             | WaitingFor::ChooseFromZoneChoice { player, .. }
+            | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
             | WaitingFor::EffectZoneChoice { player, .. }
@@ -2708,6 +2741,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_repeat_iteration: Option<PendingRepeatIteration>,
 
+    /// CR 701.55d: Pending continuation of a multi-player ChooseOneOf after a
+    /// selected branch has finished resolving, including any nested choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_choose_one_of: Option<PendingChooseOneOf>,
+
     /// Pending optional effect ability chain, awaiting player accept/decline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
@@ -3078,6 +3116,7 @@ impl GameState {
             revealed_cards: HashSet::new(),
             pending_continuation: None,
             pending_repeat_iteration: None,
+            pending_choose_one_of: None,
             pending_optional_effect: None,
             last_named_choice: None,
             last_chosen_damage_source: None,
@@ -3255,6 +3294,7 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
+            && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
@@ -3272,6 +3312,7 @@ impl Eq for GameState {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{AbilityKind, Effect, QuantityExpr};
 
     #[test]
     fn default_creates_two_player_game() {
@@ -3474,6 +3515,22 @@ mod tests {
             constraint: None,
             source_id: ObjectId(100),
         }));
+        variants.push(Box::new(WaitingFor::ChooseOneOfBranch {
+            player: PlayerId(0),
+            controller: PlayerId(0),
+            source_id: ObjectId(100),
+            branches: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )],
+            branch_descriptions: vec!["Draw a card.".to_string()],
+            parent_targets: vec![],
+            context: crate::types::ability::SpellContext::default(),
+            remaining_players: vec![],
+        }));
         variants.push(Box::new(WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
             target_slots: vec![TargetSelectionSlot {
@@ -3600,7 +3657,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 30);
+        assert_eq!(variants.len(), 31);
     }
 
     #[test]

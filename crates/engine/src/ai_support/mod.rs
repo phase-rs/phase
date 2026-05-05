@@ -127,6 +127,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::NamedChoice { options, .. }, GameAction::ChooseOption { choice }) => {
             !options.is_empty() && !options.iter().any(|option| option == choice)
         }
+        (WaitingFor::ChooseOneOfBranch { branches, .. }, GameAction::ChooseBranch { index }) => {
+            *index >= branches.len()
+        }
         (
             WaitingFor::DamageSourceChoice { options, .. },
             GameAction::ChooseDamageSource { source },

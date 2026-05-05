@@ -2354,6 +2354,8 @@ pub enum PlayerFilter {
     Controller,
     /// All opponents of the controller.
     Opponent,
+    /// CR 506.2: The defending player for the source creature's attack.
+    DefendingPlayer,
     /// Each opponent who lost life this turn (life_lost_this_turn > 0).
     OpponentLostLife,
     /// Each opponent who gained life this turn (life_gained_this_turn > 0).
@@ -4746,9 +4748,10 @@ pub enum Effect {
         #[serde(default)]
         tapped: bool,
     },
-    /// CR 700.2 + CR 608.2d: Inline "you may [effect A] or [effect B]" —
-    /// controller chooses at resolution which of the two (or more) branches to
-    /// execute. Building block for optional binary-choice imperatives like
+    /// CR 701.55 + CR 608.2d: Inline "[player] chooses/faces [effect A] or
+    /// [effect B]" — the configured chooser scope chooses at resolution which
+    /// branch to execute. Building block for villainous choices and optional
+    /// binary-choice imperatives like
     /// Highway Robbery's "You may discard a card or sacrifice a land" and
     /// analogous "you may X or Y" patterns that are not expressed as a bulleted
     /// `Choose one —` modal block. Each branch is a full `AbilityDefinition`
@@ -4757,12 +4760,13 @@ pub enum Effect {
     /// stripped; this effect represents the branching choice once the
     /// controller opts in.
     ///
-    /// Resolution: controller picks exactly one branch by index; the chosen
-    /// branch's effect resolves normally. Runtime resolver is not yet wired —
-    /// the typed shape is emitted so the parser stops silently dropping the
-    /// second branch; full runtime support can follow without changing the
-    /// card data format.
+    /// Resolution: each chooser picks exactly one branch by index; the chosen
+    /// branch's effect resolves normally with the original ability controller.
     ChooseOneOf {
+        /// Which player(s) make the branch choice. Defaults to the controller
+        /// for pre-existing inline "you may A or B" card data.
+        #[serde(default = "default_player_filter_controller")]
+        chooser: PlayerFilter,
         /// The branches the controller may choose between. Each element is a
         /// self-contained ability (effect + optional cost + optional target).
         branches: Vec<AbilityDefinition>,
@@ -4782,6 +4786,10 @@ fn default_one() -> u32 {
 
 fn default_one_i32() -> i32 {
     1
+}
+
+fn default_player_filter_controller() -> PlayerFilter {
+    PlayerFilter::Controller
 }
 
 fn default_quantity_one() -> QuantityExpr {

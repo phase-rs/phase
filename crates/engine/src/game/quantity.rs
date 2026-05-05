@@ -1856,6 +1856,17 @@ pub(crate) fn resolve_player_count(
                     && match filter {
                         PlayerFilter::Controller => p.id == controller,
                         PlayerFilter::Opponent => p.id != controller,
+                        PlayerFilter::DefendingPlayer => {
+                            crate::game::targeting::resolve_event_context_target_for_event_or_state(
+                                state,
+                                &TargetFilter::DefendingPlayer,
+                                source_id,
+                                state.current_trigger_event.as_ref(),
+                            )
+                            .is_some_and(
+                                |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
+                            )
+                        }
                         PlayerFilter::OpponentLostLife => {
                             p.id != controller && p.life_lost_this_turn > 0
                         }

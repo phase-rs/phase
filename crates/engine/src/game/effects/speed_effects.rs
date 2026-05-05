@@ -19,6 +19,20 @@ fn players_for_filter(
             .filter(|player| !player.is_eliminated && player.id != controller)
             .map(|player| player.id)
             .collect(),
+        PlayerFilter::DefendingPlayer => {
+            crate::game::targeting::resolve_event_context_target_for_event_or_state(
+                state,
+                &crate::types::ability::TargetFilter::DefendingPlayer,
+                source_id,
+                state.current_trigger_event.as_ref(),
+            )
+            .and_then(|target| match target {
+                crate::types::ability::TargetRef::Player(player) => Some(player),
+                _ => None,
+            })
+            .into_iter()
+            .collect()
+        }
         PlayerFilter::OpponentLostLife => state
             .players
             .iter()

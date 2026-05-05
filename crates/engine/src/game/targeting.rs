@@ -294,7 +294,7 @@ pub fn resolve_event_context_targets(
         .collect()
 }
 
-fn resolve_event_context_target_for_event_or_state(
+pub(crate) fn resolve_event_context_target_for_event_or_state(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,

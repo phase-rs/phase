@@ -852,6 +852,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
+        PlayerFilter::DefendingPlayer => "defending player",
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
         PlayerFilter::All => "each player",
@@ -4389,6 +4390,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     match scope {
         PlayerFilter::All => ("All", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
+        PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),

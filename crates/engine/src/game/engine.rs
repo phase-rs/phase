@@ -9453,6 +9453,7 @@ mod phase_trigger_regression_tests {
         UnlessCost, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
@@ -9469,6 +9470,16 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn draw_ability(count: i32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: count },
+                target: TargetFilter::Controller,
+            },
+        )
     }
 
     fn draw_that_many(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
@@ -10689,6 +10700,132 @@ mod phase_trigger_regression_tests {
         assert!(state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn choose_one_of_enters_branch_choice_state() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![draw_ability(1), draw_ability(2)],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(0),
+                controller: PlayerId(0),
+                source_id: ObjectId(100),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let branch_gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: GainLifePlayer::Controller,
+            },
+        );
+        let branch_lose = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: None,
+            },
+        );
+        state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            player: PlayerId(1),
+            controller: PlayerId(0),
+            source_id,
+            branches: vec![branch_gain, branch_lose],
+            branch_descriptions: vec!["Gain 3 life.".to_string(), "Lose 3 life.".to_string()],
+            parent_targets: vec![],
+            context: Default::default(),
+            remaining_players: vec![],
+        };
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
+
+        assert_eq!(
+            state.players[0].life, 23,
+            "branch text using controller must resolve for original controller"
+        );
+        assert_eq!(state.players[1].life, 20);
+    }
+
+    #[test]
+    fn choose_one_of_each_opponent_prompts_apnap_and_branch_targets_faced_player() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        let source_id = ObjectId(100);
+        let branch_target_player_loses_life = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::Player),
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Opponent,
+                branches: vec![branch_target_player_loses_life.clone(), draw_ability(1)],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(1),
+                remaining_players: ref rest,
+                ..
+            } if rest == &vec![PlayerId(2)]
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
+
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 20);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(2),
+                remaining_players: ref rest,
+                ..
+            } if rest.is_empty()
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
+
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 19);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     #[test]

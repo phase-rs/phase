@@ -1373,6 +1373,31 @@ fn try_parse_choose_one_of_inline(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
+    let mut chooser = PlayerFilter::Controller;
+    let mut tp = tp;
+    if let Some((prefix_chooser, rest_original)) = nom_on_lower(tp.original, tp.lower, |i| {
+        alt((
+            value(
+                PlayerFilter::DefendingPlayer,
+                tag("defending player faces a villainous choice — "),
+            ),
+            value(
+                PlayerFilter::Opponent,
+                tag("target opponent faces a villainous choice — "),
+            ),
+            value(PlayerFilter::Controller, tag("face a villainous choice — ")),
+            value(
+                PlayerFilter::Controller,
+                tag("faces a villainous choice — "),
+            ),
+        ))
+        .parse(i)
+    }) {
+        let consumed = tp.original.len() - rest_original.len();
+        tp = TextPair::new(rest_original, &tp.lower[consumed..]);
+        chooser = prefix_chooser;
+    }
+
     // CR 115.1: bail on target phrases — "target creature or player" is a
     // typed-target disjunction, not a choice between effects.
     if tag::<_, _, VerboseError<&str>>("target ")
@@ -1477,10 +1502,13 @@ fn try_parse_choose_one_of_inline(
         return None;
     }
 
-    let left_def = AbilityDefinition::new(AbilityKind::Spell, left_clause.effect);
-    let right_def = AbilityDefinition::new(AbilityKind::Spell, right_clause.effect);
+    let mut left_def = AbilityDefinition::new(AbilityKind::Spell, left_clause.effect);
+    left_def.description = Some(left_orig.to_string());
+    let mut right_def = AbilityDefinition::new(AbilityKind::Spell, right_clause.effect);
+    right_def.description = Some(right_orig.to_string());
 
     Some(parsed_clause(Effect::ChooseOneOf {
+        chooser,
         branches: vec![left_def, right_def],
     }))
 }
@@ -7255,7 +7283,7 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 608.2d: When the optional prefix ("each opponent may") carries an
         // implicit per-player iteration, propagate it to the ability so the
         // OptionalEffectChoice is emitted once per matching player.
-        let player_scope = player_scope.or(implicit_player_scope);
+        let mut player_scope = player_scope.or(implicit_player_scope);
 
         // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -7482,6 +7510,14 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
+            if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =
+                (&mut clause.effect, player_scope)
+            {
+                *chooser = scope;
+                player_scope = None;
+            }
+        }
         if let Some(ref anchor) = anchor_subject {
             apply_anchor_subject(&mut clause.effect, anchor);
         }
@@ -21734,7 +21770,7 @@ mod tests {
             "outer 'you may' must mark ability optional"
         );
         match &*ability.effect {
-            Effect::ChooseOneOf { branches } => {
+            Effect::ChooseOneOf { branches, .. } => {
                 assert_eq!(branches.len(), 2, "Highway Robbery has exactly 2 branches");
                 assert!(
                     matches!(&*branches[0].effect, Effect::Discard { .. }),
@@ -21744,6 +21780,44 @@ mod tests {
                     matches!(&*branches[1].effect, Effect::Sacrifice { .. }),
                     "second branch is Sacrifice"
                 );
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_routes_chooser_without_player_scope_rebinding() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — You draw a card, or that player discards a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(
+                    ability.player_scope, None,
+                    "villainous choice must not use player_scope because branch text still uses the original controller for 'you'"
+                );
+                assert_eq!(*chooser, PlayerFilter::Opponent);
+                assert_eq!(branches.len(), 2);
+                assert!(matches!(&*branches[0].effect, Effect::Draw { .. }));
+                assert!(matches!(&*branches[1].effect, Effect::Discard { .. }));
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_supports_defending_player_chooser() {
+        let ability = parse_effect_chain(
+            "Defending player faces a villainous choice — That player sacrifices a creature, or you draw a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(*chooser, PlayerFilter::DefendingPlayer);
+                assert_eq!(branches.len(), 2);
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }

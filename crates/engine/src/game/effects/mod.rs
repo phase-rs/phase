@@ -33,6 +33,7 @@ pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
 pub mod choose_damage_source;
 pub mod choose_from_zone;
+pub mod choose_one_of;
 pub mod clash;
 pub mod cleanup;
 pub mod collect_evidence;
@@ -136,6 +137,17 @@ fn matches_player_scope(
                     PlayerFilter::Controller => p.id == controller,
                     PlayerFilter::All => true,
                     PlayerFilter::Opponent => p.id != controller,
+                    PlayerFilter::DefendingPlayer => {
+                        crate::game::targeting::resolve_event_context_target_for_event_or_state(
+                            state,
+                            &TargetFilter::DefendingPlayer,
+                            source_id,
+                            state.current_trigger_event.as_ref(),
+                        )
+                        .is_some_and(
+                            |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
+                        )
+                    }
                     PlayerFilter::OpponentLostLife => {
                         p.id != controller && p.life_lost_this_turn > 0
                     }
@@ -220,6 +232,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // chain of resumed iterations until the loop completes.
     if !waits_for_resolution_choice(&state.waiting_for) {
         drain_pending_repeat_iteration(state, events);
+    }
+    if !waits_for_resolution_choice(&state.waiting_for) {
+        choose_one_of::resume_pending(state, events);
     }
 }
 
@@ -367,6 +382,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::PayAmountChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ChooseManaColor { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -647,18 +663,7 @@ pub fn resolve_effect(
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
-        Effect::ChooseOneOf { .. } => {
-            // CR 700.2: Runtime resolver for `ChooseOneOf` is not yet wired —
-            // full support requires a new `WaitingFor::ChooseOneOfBranch`
-            // state + effect resolver + UI integration. The typed shape is
-            // emitted by the parser (Highway Robbery and analogous binary
-            // "you may A or B" imperatives) so it is preserved in card data
-            // for future runtime activation. Treat as a no-op at resolution
-            // for now — the outer `optional: true` on the ability means the
-            // controller can simply decline.
-            eprintln!("Warning: ChooseOneOf resolver not yet implemented — treating as no-op");
-            Ok(())
-        }
+        Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);

@@ -38,6 +38,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -778,6 +779,37 @@ pub(super) fn handle_resolution_choice(
                 }
             }
             effects::drain_pending_continuation(state, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                controller,
+                source_id,
+                branches,
+                branch_descriptions: _,
+                parent_targets,
+                context,
+                remaining_players,
+            },
+            GameAction::ChooseBranch { index },
+        ) => {
+            set_priority(state, player);
+            effects::choose_one_of::resolve_branch(
+                state,
+                effects::choose_one_of::BranchSelection {
+                    player,
+                    controller,
+                    source_id,
+                    branches,
+                    parent_targets,
+                    context,
+                    remaining_players,
+                    index,
+                },
+                events,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (

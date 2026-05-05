@@ -135,6 +135,10 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// CR 701.55a: Choose one branch of a resolution-time "A or B" instruction.
+    ChooseBranch {
+        index: usize,
+    },
     /// CR 609.7a: Choose a source of damage for a prevention or replacement effect.
     ChooseDamageSource {
         source: ObjectId,
@@ -602,6 +606,7 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::ChooseBranch { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }
             | GameAction::ChooseAdventureFace { .. }

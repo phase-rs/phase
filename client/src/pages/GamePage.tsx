@@ -43,6 +43,7 @@ import { WarpCostModal } from "../components/modal/WarpCostModal.tsx";
 import { MiracleRevealModal } from "../components/modal/MiracleRevealModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
+import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
@@ -1141,6 +1142,7 @@ function GamePageContent({
         <CombatTaxModal />
         <EvokeCostModal />
         <ModeChoiceModal />
+        <ChooseOneOfBranchModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
         <ModalFaceModal />

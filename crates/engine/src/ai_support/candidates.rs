@@ -645,6 +645,17 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 })
                 .collect()
         }
+        WaitingFor::ChooseOneOfBranch {
+            player, branches, ..
+        } => (0..branches.len())
+            .map(|index| {
+                candidate(
+                    GameAction::ChooseBranch { index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::EffectZoneChoice {
             player,
             cards,
