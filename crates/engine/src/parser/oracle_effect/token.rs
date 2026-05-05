@@ -74,6 +74,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         }
         return Some(Effect::CopyTokenOf {
             target,
+            source_filter: None,
             enters_attacking,
             tapped,
             count: QuantityExpr::Fixed { value: 1 },

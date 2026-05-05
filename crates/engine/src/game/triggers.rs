@@ -5510,6 +5510,27 @@ pub mod tests {
         );
     }
 
+    #[test]
+    fn extract_target_skips_copy_token_source_filter() {
+        let effect = Effect::CopyTokenOf {
+            target: TargetFilter::None,
+            source_filter: Some(TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Token, FilterProp::EnteredThisTurn]),
+            )),
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "source-filtered CopyTokenOf chooses sources at resolution, not as targets"
+        );
+    }
+
     // === CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers integration tests ===
 
     use crate::types::ability::StaticDefinition;

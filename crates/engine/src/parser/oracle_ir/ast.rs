@@ -627,6 +627,9 @@ pub(crate) enum SearchCreationImperativeAst {
     },
     CopyTokenOf {
         target: TargetFilter,
+        /// CR 115.10: Non-targeted "for each <object>, create a token that's a
+        /// copy of it" source set. Lowered to `Effect::CopyTokenOf::source_filter`.
+        source_filter: Option<TargetFilter>,
         /// CR 508.4: Whether the copy token enters attacking.
         enters_attacking: bool,
         /// CR 110.5a: Status is not copied; this captures printed token-entry

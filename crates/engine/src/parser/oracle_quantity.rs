@@ -990,6 +990,52 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     None
 }
 
+/// CR 608.2c + CR 609.3: Parse the object set named by a "for each [object]"
+/// clause when the following instruction acts on each object itself rather than
+/// only needing the count. This preserves object identity for patterns such as
+/// "for each token you control that entered this turn, create a token that's a
+/// copy of it".
+pub(crate) fn parse_for_each_object_filter_clause(clause: &str) -> Option<TargetFilter> {
+    match parse_for_each_clause(clause)? {
+        QuantityRef::ObjectCount { filter } => Some(filter),
+        QuantityRef::EnteredThisTurn { filter } => {
+            Some(add_filter_property(filter, FilterProp::EnteredThisTurn))
+        }
+        _ => None,
+    }
+}
+
+fn add_filter_property(filter: TargetFilter, property: FilterProp) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed
+                .properties
+                .iter()
+                .any(|existing| existing == &property)
+            {
+                typed.properties.push(property);
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_filter_property(filter, property.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_filter_property(filter, property.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(add_filter_property(*filter, property)),
+        },
+        other => other,
+    }
+}
+
 fn parse_for_each_kicker_count(clause: &str) -> Option<QuantityRef> {
     let (rest, _) = tag::<_, _, VerboseError<&str>>("time ")
         .parse(clause)

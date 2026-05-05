@@ -6988,6 +6988,40 @@ mod tests {
     }
 
     #[test]
+    fn trigger_ocelot_pride_copy_each_entered_token_not_source() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you gained life this turn, create a 1/1 white Cat creature token. Then if you have the city's blessing, for each token you control that entered the battlefield this turn, create a token that's a copy of it.",
+            "Ocelot Pride",
+        );
+        let create_cat = def.execute.expect("token creation execute");
+        let copy_each = create_cat.sub_ability.expect("city blessing copy clause");
+        assert!(matches!(
+            copy_each.condition,
+            Some(AbilityCondition::HasCityBlessing)
+        ));
+        assert!(copy_each.repeat_for.is_none());
+        match &*copy_each.effect {
+            Effect::CopyTokenOf {
+                target,
+                source_filter: Some(TargetFilter::Typed(filter)),
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::None);
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(filter
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::Token)));
+                assert!(filter
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::EnteredThisTurn)));
+            }
+            other => panic!("expected source-filtered CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn extract_if_strips_condition_from_effect() {
         let (cleaned, cond) =
             extract_if_condition("draw a card if you've gained 3 or more life this turn.");

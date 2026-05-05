@@ -1325,6 +1325,7 @@ pub(super) fn parse_search_and_creation_ast(
         return match try_parse_token(lower, text, ctx) {
             Some(Effect::CopyTokenOf {
                 target,
+                source_filter,
                 enters_attacking,
                 tapped,
                 extra_keywords,
@@ -1332,6 +1333,7 @@ pub(super) fn parse_search_and_creation_ast(
                 ..
             }) => Some(SearchCreationImperativeAst::CopyTokenOf {
                 target,
+                source_filter,
                 enters_attacking,
                 tapped,
                 extra_keywords,
@@ -1414,12 +1416,14 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         },
         SearchCreationImperativeAst::CopyTokenOf {
             target,
+            source_filter,
             enters_attacking,
             tapped,
             extra_keywords,
             additional_modifications,
         } => Effect::CopyTokenOf {
             target,
+            source_filter,
             enters_attacking,
             tapped,
             count: QuantityExpr::Fixed { value: 1 },

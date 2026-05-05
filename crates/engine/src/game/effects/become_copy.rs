@@ -643,6 +643,7 @@ mod tests {
         let token_ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },

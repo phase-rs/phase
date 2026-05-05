@@ -201,6 +201,7 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
             let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: filter::convert_permanent(perm)?,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
@@ -216,6 +217,7 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
             let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: filter::convert(perms)?,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
@@ -235,6 +237,24 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
             let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords,
+                additional_modifications,
+            }
+        }
+        // CR 115.1 + CR 608.2c + CR 707.2: Non-targeting "copy each
+        // permanent matching this set" effects choose their copy sources at
+        // resolution. This covers Ocelot Pride's "for each token you control
+        // that entered this turn, create a token that's a copy of it" without
+        // routing through target declaration.
+        CreatableToken::TokenCopyOfEachPermanent(perms, copy_effects) => {
+            let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
+            Effect::CopyTokenOf {
+                target: TargetFilter::ParentTarget,
+                source_filter: Some(filter::convert(perms)?),
                 enters_attacking: false,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },

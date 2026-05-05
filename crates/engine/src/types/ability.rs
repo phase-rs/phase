@@ -3878,11 +3878,17 @@ pub enum Effect {
     },
     /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
     /// Copies copiable characteristics (name, mana cost, color, types, P/T, abilities, keywords)
-    /// from the target to a newly created token on the battlefield.
+    /// from the chosen copy source to a newly created token on the battlefield.
     CopyTokenOf {
-        /// Filter for the object to copy. SelfRef = "copy of ~", Any/Typed = "copy of target..."
+        /// CR 115.1: Targeted copy source. SelfRef/ParentTarget are context refs;
+        /// Any/Typed are selected as targets when `source_filter` is absent.
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 115.1 + CR 608.2c: Non-targeting copy source set for "for each
+        /// [object], create a token that's a copy of it" effects. These objects
+        /// are chosen by the effect at resolution, not by target declaration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_filter: Option<TargetFilter>,
         /// CR 508.4: Token enters the battlefield attacking (not declared as attacker).
         #[serde(default)]
         enters_attacking: bool,
@@ -5172,7 +5178,6 @@ impl Effect {
             | Effect::Bounce { target, .. }
             | Effect::SwitchPT { target, .. }
             | Effect::CopySpell { target, .. }
-            | Effect::CopyTokenOf { target, .. }
             | Effect::BecomeCopy { target, .. }
             | Effect::ChooseCard { target, .. }
             | Effect::PutCounter { target, .. }
@@ -5210,6 +5215,12 @@ impl Effect {
             | Effect::SetLifeTotal { target, .. }
             | Effect::GiveControl { target, .. }
             | Effect::RemoveFromCombat { target, .. } => Some(target),
+
+            Effect::CopyTokenOf {
+                target,
+                source_filter,
+                ..
+            } => source_filter.is_none().then_some(target),
 
             Effect::ExileTop { player, .. } => Some(player),
 

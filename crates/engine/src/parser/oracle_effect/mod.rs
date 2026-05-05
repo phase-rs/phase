@@ -27,6 +27,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
     parse_cda_quantity, parse_for_each_clause, parse_for_each_clause_expr,
+    parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
     parse_event_context_ref, parse_target, parse_target_with_ctx, parse_type_phrase,
@@ -1714,6 +1715,59 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
     clause
 }
 
+fn try_parse_for_each_copy_token_source(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let (source_filter, body) = parse_for_each_object_copy_parts(text, lower)?;
+    let body_lower = body.to_lowercase();
+    let Effect::CopyTokenOf {
+        target,
+        enters_attacking,
+        tapped,
+        count,
+        extra_keywords,
+        additional_modifications,
+        ..
+    } = token::try_parse_token(&body_lower, body, ctx)?
+    else {
+        return None;
+    };
+    if !matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef) {
+        return None;
+    }
+    Some(parsed_clause(Effect::CopyTokenOf {
+        target: TargetFilter::None,
+        source_filter: Some(source_filter),
+        enters_attacking,
+        tapped,
+        count,
+        extra_keywords,
+        additional_modifications,
+    }))
+}
+
+fn parse_for_each_object_copy_parts<'a>(
+    text: &'a str,
+    lower: &str,
+) -> Option<(TargetFilter, &'a str)> {
+    let (after_prefix, _) = tag::<_, _, VerboseError<&str>>("for each ")
+        .parse(lower)
+        .ok()?;
+    let clause_start = lower.len() - after_prefix.len();
+    let (after_clause, clause_lower) = take_until::<_, _, VerboseError<&str>>(", ")
+        .parse(after_prefix)
+        .ok()?;
+    let (body_lower, _) = tag::<_, _, VerboseError<&str>>(", ")
+        .parse(after_clause)
+        .ok()?;
+    let clause = &lower[clause_start..clause_start + clause_lower.len()];
+    let source_filter = parse_for_each_object_filter_clause(clause)?;
+    let body_start = text.len() - body_lower.len();
+    Some((source_filter, text[body_start..].trim()))
+}
+
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
@@ -1790,6 +1844,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
     if let Some(effect) = try_parse_next_time_source_damage_replacement(&lower) {
         return parsed_clause(effect);
+    }
+
+    if let Some(clause) = try_parse_for_each_copy_token_source(text, &lower, ctx) {
+        return clause;
     }
 
     // CR 700.2 + CR 608.2d: Inline binary-choice imperative — "discard a card
@@ -8542,6 +8600,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
             ..
         } => Some(Effect::CopyTokenOf {
             target: target.clone(),
+            source_filter: None,
             enters_attacking: *enters_attacking,
             tapped: *tapped,
             count: count.clone(),
@@ -8930,6 +8989,9 @@ fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
                         .trim()
                         .eq_ignore_ascii_case("add one mana of that color")
                 {
+                    return (None, text.to_string());
+                }
+                if parse_for_each_object_copy_parts(text, &lower).is_some() {
                     return (None, text.to_string());
                 }
                 let offset = text.len() - remainder.len();
@@ -13468,6 +13530,34 @@ mod tests {
                 qty: QuantityRef::EnteredThisTurn { .. },
             })
         ));
+    }
+
+    #[test]
+    fn effect_for_each_object_copy_token_uses_source_filter_not_repeat() {
+        let def = parse_effect_chain(
+            "For each token you control that entered the battlefield this turn, create a token that's a copy of it",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.repeat_for.is_none(),
+            "copy-source set should not be lowered to repeat_for"
+        );
+        match &*def.effect {
+            Effect::CopyTokenOf {
+                target,
+                source_filter: Some(TargetFilter::Typed(tf)),
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::None);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.iter().any(|p| matches!(p, FilterProp::Token)));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::EnteredThisTurn)));
+            }
+            other => panic!("expected CopyTokenOf with typed source_filter, got {other:?}"),
+        }
     }
 
     #[test]

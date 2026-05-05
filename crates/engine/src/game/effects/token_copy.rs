@@ -1,6 +1,7 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::layers::compute_current_copiable_values;
 use crate::game::quantity::resolve_quantity;
-use crate::game::zones;
+use crate::game::{targeting, zones};
 use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
     TargetRef,
@@ -24,6 +25,7 @@ pub fn resolve(
     // Extract fields from effect
     let (
         target_filter,
+        source_filter,
         enters_attacking,
         tapped,
         count_expr,
@@ -32,6 +34,7 @@ pub fn resolve(
     ) = match &ability.effect {
         Effect::CopyTokenOf {
             target,
+            source_filter,
             enters_attacking,
             tapped,
             count,
@@ -39,6 +42,7 @@ pub fn resolve(
             additional_modifications,
         } => (
             target,
+            source_filter,
             *enters_attacking,
             *tapped,
             count.clone(),
@@ -64,12 +68,29 @@ pub fn resolve(
     // Zone-eligibility: unlike `Bounce` / `ChangeZone`, `CopyTokenOf` reads
     // copiable values via `compute_current_copiable_values`, which is
     // zone-agnostic — so a source in the graveyard is fine.
-    let use_self = matches!(
-        target_filter,
-        TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
-    ) && ability.targets.is_empty();
+    let use_self = source_filter.is_none()
+        && matches!(
+            target_filter,
+            TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
+        )
+        && ability.targets.is_empty();
 
-    let copy_source_ids: Vec<ObjectId> = if use_self {
+    let copy_source_ids: Vec<ObjectId> = if let Some(source_filter) = source_filter {
+        let zones = {
+            let explicit_zones = source_filter.extract_zones();
+            if explicit_zones.is_empty() {
+                vec![Zone::Battlefield]
+            } else {
+                explicit_zones
+            }
+        };
+        let filter_ctx = FilterContext::from_ability(ability);
+        zones
+            .into_iter()
+            .flat_map(|zone| targeting::zone_object_ids(state, zone))
+            .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
+            .collect()
+    } else if use_self {
         vec![ability.source_id]
     } else {
         let ids: Vec<ObjectId> = ability
@@ -377,7 +398,9 @@ fn apply_token_modifications(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter, TargetRef};
+    use crate::types::ability::{
+        ControllerRef, Effect, FilterProp, TargetFilter, TargetRef, TypedFilter,
+    };
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::ObjectId;
     use crate::types::keywords::Keyword;
@@ -418,6 +441,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::SelfRef,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -487,6 +511,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -539,6 +564,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::ParentTarget,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -588,6 +614,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                source_filter: None,
                 enters_attacking: true,
                 tapped: true,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -639,6 +666,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -703,6 +731,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::ParentTarget,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -729,6 +758,83 @@ mod tests {
             .collect();
         assert!(names.contains(&"Bear A"));
         assert!(names.contains(&"Bear B"));
+    }
+
+    #[test]
+    fn copy_token_source_filter_copies_matching_tokens_not_source() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 5;
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ocelot Pride".to_string(),
+            Zone::Battlefield,
+        );
+        let cat_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Cat".to_string(),
+            Zone::Battlefield,
+        );
+        let old_cat_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Old Cat".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_cat_id = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Opponent Cat".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, turn) in [
+            (cat_id, Some(5)),
+            (old_cat_id, Some(4)),
+            (opponent_cat_id, Some(5)),
+        ] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.is_token = true;
+            obj.entered_battlefield_turn = turn;
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Cat".to_string()],
+            };
+            obj.card_types = obj.base_card_types.clone();
+        }
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::ParentTarget,
+                source_filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::Token, FilterProp::EnteredThisTurn],
+                })),
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.last_created_token_ids.len(), 1);
+        let copied = state.objects.get(&state.last_created_token_ids[0]).unwrap();
+        assert_eq!(copied.name, "Cat");
+        assert!(copied.is_token);
     }
 
     /// CR 205.4 + CR 707.9b + CR 704.5j: Miirym, Sentinel Wyrm class —
@@ -769,6 +875,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -839,6 +946,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
@@ -903,6 +1011,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
@@ -1018,6 +1127,7 @@ mod tests {
                     controller: None,
                     properties: vec![FilterProp::EquippedBy],
                 }),
+                source_filter: None,
                 enters_attacking: false,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
