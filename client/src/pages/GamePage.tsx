@@ -38,6 +38,7 @@ import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
+import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
@@ -1142,6 +1143,8 @@ function GamePageContent({
           canActForWaitingState && <ManaPaymentUI />}
         {waitingFor?.type === "ChooseXValue" &&
           canActForWaitingState && <ChooseXValueUI />}
+        {waitingFor?.type === "PayAmountChoice" &&
+          canActForWaitingState && <PayAmountChoiceUI />}
         {waitingFor?.type === "ReplacementChoice" &&
           canActForWaitingState && <ReplacementModal />}
         <BattleProtectorModal />

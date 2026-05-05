@@ -1817,6 +1817,7 @@ pub enum WaitingFor {
         resource: PayableResource,
         min: u32,
         max: u32,
+        source_id: ObjectId,
     },
     /// CR 115.7: Change the target(s) of a spell or ability on the stack.
     /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
@@ -1915,6 +1916,15 @@ pub enum DistributionUnit {
 pub enum PayableResource {
     /// CR 107.14: Pay any amount of `{E}` — removes N energy counters from the player.
     Energy,
+    /// CR 107.3 + CR 118.1: Pay a chosen X as generic mana while resolving an effect.
+    ManaGeneric {
+        #[serde(default = "default_one")]
+        per_x: u32,
+    },
+}
+
+fn default_one() -> u32 {
+    1
 }
 
 /// CR 115.7: Scope of retargeting — single target, all targets, or forced.

@@ -659,6 +659,7 @@ export type WaitingFor =
   | { type: "MulliganBottomCards"; data: { player: PlayerId; count: number } }
   | { type: "ManaPayment"; data: { player: PlayerId } }
   | { type: "ChooseXValue"; data: { player: PlayerId; max: number; pending_cast: PendingCast } }
+  | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; source_id: ObjectId } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]> } }
@@ -911,6 +912,7 @@ export type GameAction =
   | { type: "ChooseDungeonRoom"; data: { room_index: number } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
   | { type: "ChooseX"; data: { value: number } }
+  | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
   | { type: "ChooseManaColor"; data: { choice: ManaChoice } }
   | { type: "Debug"; data: DebugAction };
@@ -930,6 +932,10 @@ export type ManaChoice =
 export type ShardChoice =
   | { type: "PayMana" }
   | { type: "PayLife" };
+
+export type PayableResource =
+  | { type: "Energy" }
+  | { type: "ManaGeneric"; data: { per_x: number } };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }

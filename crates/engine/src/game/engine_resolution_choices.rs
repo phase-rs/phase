@@ -5,16 +5,17 @@ use crate::types::ability::{
 use crate::types::actions::{GameAction, LearnOption};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, ChosenDamageSource, GameState, PendingContinuation, WaitingFor,
+    ActionResult, ChosenDamageSource, GameState, PayableResource, PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
-use super::casting_costs;
 use super::effects;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
+use super::{casting, casting_costs};
 
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
@@ -267,6 +268,7 @@ pub(super) fn handle_resolution_choice(
                 resource,
                 min,
                 max,
+                source_id,
             },
             GameAction::SubmitPayAmount { amount },
         ) => {
@@ -277,7 +279,7 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
             match resource {
-                crate::types::game_state::PayableResource::Energy => {
+                PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                         if p.energy < amount {
@@ -293,11 +295,28 @@ pub(super) fn handle_resolution_choice(
                         });
                     }
                 }
+                PayableResource::ManaGeneric { per_x } => {
+                    let cost = ManaCost::Cost {
+                        shards: vec![],
+                        generic: amount.saturating_mul(per_x),
+                    };
+                    if !casting::can_pay_cost_after_auto_tap(state, player, source_id, &cost) {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Player {:?} cannot pay {} generic mana",
+                            player,
+                            cost.mana_value()
+                        )));
+                    }
+                    let _ = casting::pay_unless_cost(state, player, &cost, events);
+                }
             }
             // CR 603.7c: Bind the paid amount for downstream chain steps that
             // read `QuantityRef::EventContextAmount` (e.g. "deals that much
             // damage"). `last_effect_count` is the documented fallback slot.
             state.last_effect_count = Some(amount as i32);
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.set_chosen_x_recursive(amount);
+            }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
