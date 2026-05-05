@@ -7404,7 +7404,7 @@ mod tests {
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::HandSize {
-                        player: PlayerScope::Controller
+                        player: PlayerScope::ScopedPlayer
                     }
                 },
                 comparator: Comparator::EQ,
@@ -8777,8 +8777,8 @@ mod tests {
     // each time." chain exercises all four fixes landed in the punisher-chain
     // commit:
     //   A. player_scope rewrite: `their life` / `their hand` → LifeTotal /
-    //      HandSize so per-player iteration resolves against the rebound
-    //      controller, not the empty targets list.
+    //      HandSize so per-player iteration resolves against the scoped
+    //      player, not the empty targets list or original controller.
     //   B. half-rounded inner: `half the cards in their hand` parses through
     //      the new `parse_cards_in_possessive_zone` combinator, producing a
     //      HalfRounded count rather than collapsing to 1.
@@ -8814,7 +8814,7 @@ mod tests {
             ability.player_scope
         );
 
-        // Fix A: LoseLife amount uses controller-scoped LifeTotal.
+        // Fix A: LoseLife amount uses per-player-scoped LifeTotal.
         match &*ability.effect {
             Effect::LoseLife { amount, .. } => match amount {
                 QuantityExpr::HalfRounded { inner, rounding } => {
@@ -8824,7 +8824,7 @@ mod tests {
                             **inner,
                             QuantityExpr::Ref {
                                 qty: QuantityRef::LifeTotal {
-                                    player: crate::types::ability::PlayerScope::Controller
+                                    player: crate::types::ability::PlayerScope::ScopedPlayer
                                 }
                             }
                         ),
@@ -8836,7 +8836,7 @@ mod tests {
             other => panic!("expected LoseLife top-level, got {other:?}"),
         }
 
-        // Fix B + A: Discard count uses HalfRounded(HandSize).
+        // Fix B + A: Discard count uses HalfRounded(HandSize) for the scoped player.
         let discard = ability.sub_ability.as_ref().expect("discard sub_ability");
         match &*discard.effect {
             Effect::Discard { count, .. } => match count {
@@ -8847,7 +8847,7 @@ mod tests {
                             **inner,
                             QuantityExpr::Ref {
                                 qty: QuantityRef::HandSize {
-                                    player: crate::types::ability::PlayerScope::Controller
+                                    player: crate::types::ability::PlayerScope::ScopedPlayer
                                 }
                             }
                         ),
