@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 
 import type { AttackTarget, ObjectId, PlayerId } from "../../adapter/types.ts";
@@ -171,7 +172,7 @@ export function AttackTargetPicker({
                       onClick={() => assignAllCreatures(target)}
                       className={gameButtonClass({ tone: "slate", size: "xs" })}
                     >
-                      {"All → "}<span className="font-bold" style={color ? { color } : undefined}>{getTargetLabel(target)}</span>
+                      All → <span className="ml-1 font-bold" style={color ? { color } : undefined}>{getTargetLabel(target)}</span>
                     </button>
                   );
                 })}
@@ -183,8 +184,8 @@ export function AttackTargetPicker({
                   const obj = gameState?.objects[creatureId];
                   const currentTarget = perCreatureTargets.get(creatureId) ?? validTargets[0];
                   return (
-                    <div key={creatureId} className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-white/5" {...hoverProps(creatureId)}>
-                      <span className="min-w-0 flex-1 truncate text-sm text-gray-200">
+                    <div key={creatureId} className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-white/5">
+                      <span className="min-w-0 flex-1 truncate text-sm text-gray-200" {...hoverProps(creatureId)}>
                         {obj?.name ?? `Creature #${creatureId}`}
                       </span>
                       <TargetDropdown
@@ -277,14 +278,38 @@ interface TargetDropdownProps {
 
 function TargetDropdown({ targets, currentTarget, getLabel, getColor, onChange }: TargetDropdownProps) {
   const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const currentColor = getColor(currentTarget);
 
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (
+        !buttonRef.current?.contains(e.target as Node) &&
+        !menuRef.current?.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  const [pos, setPos] = useState({ top: 0, right: 0 });
+  useEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setPos({
+      top: rect.bottom + 4,
+      right: window.innerWidth - rect.right,
+    });
+  }, [open]);
+
   return (
-    <div ref={containerRef} className="relative" onBlur={(e) => {
-      if (!containerRef.current?.contains(e.relatedTarget as Node)) setOpen(false);
-    }}>
+    <>
       <button
+        ref={buttonRef}
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-1.5 rounded border border-gray-600 bg-gray-800 px-2 py-1 text-sm text-gray-100 transition-colors hover:border-gray-400"
@@ -293,16 +318,18 @@ function TargetDropdown({ targets, currentTarget, getLabel, getColor, onChange }
         <span>{getLabel(currentTarget)}</span>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3 text-gray-400">
           <path fillRule="evenodd" d="M4.22 6.22a.75.75 0 0 1 1.06 0L8 8.94l2.72-2.72a.75.75 0 1 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0L4.22 7.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
-        </svg>
+          </svg>
       </button>
-      <AnimatePresence>
-        {open && (
+      {open && createPortal(
+        <AnimatePresence>
           <motion.div
+            ref={menuRef}
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.12 }}
-            className="absolute right-0 top-full z-50 mt-1 min-w-full overflow-hidden rounded-lg border border-gray-600 bg-gray-800 py-1 shadow-xl"
+            className="fixed z-[100] min-w-[120px] overflow-hidden rounded-lg border border-gray-600 bg-gray-800 py-1 shadow-xl"
+            style={{ top: pos.top, right: pos.right }}
           >
             {targets.map((target) => {
               const color = getColor(target);
@@ -325,9 +352,10 @@ function TargetDropdown({ targets, currentTarget, getLabel, getColor, onChange }
               );
             })}
           </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+        </AnimatePresence>,
+        document.body,
+      )}
+    </>
   );
 }
 
