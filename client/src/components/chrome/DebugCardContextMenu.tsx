@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { CounterType, DebugAction, Keyword, ObjectId, Zone } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
@@ -52,22 +52,13 @@ function DebugCardContextMenuInner({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = useState({ left: x, top: y });
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const players = useGameStore((s) => s.gameState?.players);
   const dispatch = useGameDispatch();
 
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const maxLeft = window.innerWidth - rect.width - 8;
-    const maxTop = window.innerHeight - rect.height - 8;
-    setPosition({
-      left: Math.max(8, Math.min(x, maxLeft)),
-      top: Math.max(8, Math.min(y, maxTop)),
-    });
-  }, [x, y]);
+  const anchorBottom = y > window.innerHeight / 2;
+  const left = Math.max(8, Math.min(x, window.innerWidth - 232));
+  const maxHeight = anchorBottom ? y - 8 : window.innerHeight - y - 8;
 
   useEffect(() => {
     const handlePointerDown = (e: PointerEvent) => {
@@ -112,8 +103,14 @@ function DebugCardContextMenuInner({
     <div
       ref={ref}
       role="menu"
-      className="fixed z-[120] w-56 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm"
-      style={{ left: position.left, top: position.top }}
+      className="fixed z-[120] w-56 overflow-y-auto rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm"
+      style={{
+        left,
+        maxHeight,
+        ...(anchorBottom
+          ? { bottom: window.innerHeight - y }
+          : { top: y }),
+      }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {/* Card name header */}

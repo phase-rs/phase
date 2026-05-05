@@ -4867,8 +4867,8 @@ mod tests {
         ActivationRestriction, BasicLandType, CastVariantPaid, CastingPermission, ChosenAttribute,
         ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, GameRestriction,
         ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-        QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter,
+        QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -13359,6 +13359,151 @@ mod tests {
         assert!(
             result.is_err(),
             "handle_cast_spell must reject objects on the battlefield"
+        );
+    }
+
+    /// CR 702.29e + CR 601.2b: Generous Ent ({5}{G}) with only 2 Forests in play.
+    ///
+    /// The creature is uncastable (insufficient mana), but its Forestcycling {1}
+    /// activated ability is payable (costs {1} + discard self). Verifies that:
+    /// 1. `can_cast_object_now` returns false — the AI must not offer CastSpell.
+    /// 2. `can_activate_ability_now` returns true — cycling is a legal action.
+    /// 3. `handle_cast_spell` returns Err — the runtime rejects the unaffordable cast.
+    /// 4. `handle_activate_ability` succeeds — cycling pays its cost and pushes to stack.
+    #[test]
+    fn generous_ent_forestcycling_legal_when_creature_cast_is_unaffordable() {
+        let mut state = setup_game_at_main_phase();
+
+        // Two Forests on the battlefield — each produces {G} (covers the {1} cycling cost).
+        for card_id_raw in [200u64, 201u64] {
+            let forest = add_basic_land(&mut state, CardId(card_id_raw), "Forest", "Forest");
+            let obj = state.objects.get_mut(&forest).unwrap();
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // Generous Ent in hand: mana cost {5}{G} (generic=5, shard=Green).
+        let ent = create_object(
+            &mut state,
+            CardId(202u64),
+            PlayerId(0),
+            "Generous Ent".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&ent).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 5,
+            };
+
+            // Forestcycling {1}: {1} + Discard self → SearchLibrary(Forest) →
+            // ChangeZone(Library→Hand) → Shuffle. Mirrors synthesis::synthesize_cycling.
+            let shuffle_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            );
+            let mut put_in_hand_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Hand,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            );
+            put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
+            let mut cycling_def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Typed(TypedFilter::card().subtype("Forest".to_string())),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: true,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic: 1,
+                        },
+                    },
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        random: false,
+                        self_ref: true,
+                    },
+                ],
+            });
+            cycling_def.activation_zone = Some(Zone::Hand);
+            cycling_def.sub_ability = Some(Box::new(put_in_hand_def));
+            Arc::make_mut(&mut obj.abilities).push(cycling_def);
+        }
+
+        // 1. Creature cast is unaffordable with 2 Forests — can_cast_object_now must be false.
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), ent),
+            "CR 601.2b: {{5}}{{G}} creature must not be castable with only 2 Forests"
+        );
+
+        // 2. Forestcycling {1} (ability index 0) is payable with one Forest tapped.
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), ent, 0),
+            "CR 702.29e: Forestcycling {{1}} must be activatable with 2 Forests in play"
+        );
+
+        // 3. Runtime cast attempt must be rejected (defense-in-depth).
+        let cast_result =
+            handle_cast_spell(&mut state, PlayerId(0), ent, CardId(202u64), &mut vec![]);
+        assert!(
+            cast_result.is_err(),
+            "handle_cast_spell must reject {{5}}{{G}} creature with only 2 Forests"
+        );
+
+        // 4. Activate the cycling ability — should pay {1}, discard Generous Ent, push to stack.
+        let mut events = Vec::new();
+        let activate_result = handle_activate_ability(&mut state, PlayerId(0), ent, 0, &mut events);
+        assert!(
+            activate_result.is_ok(),
+            "handle_activate_ability must succeed for Forestcycling with sufficient mana: {:?}",
+            activate_result
+        );
+        // The ability is on the stack after activation.
+        assert!(
+            !state.stack.is_empty(),
+            "Forestcycling ability must be on the stack after activation"
+        );
+        // The card was discarded as part of the cost — it must no longer be in hand.
+        assert!(
+            !state.players[0].hand.contains(&ent),
+            "Generous Ent must be discarded as part of the cycling cost"
         );
     }
 }
