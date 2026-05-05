@@ -7239,6 +7239,26 @@ pub enum ManaModification {
     /// CR 614.1a: Replace with a specific mana type regardless of what was produced.
     /// e.g., Contamination ("produces {B} instead"), Pale Moon ("produces colorless instead").
     ReplaceWith { mana_type: ManaType },
+    /// CR 106.12b + CR 614.1a: Multiply the amount of mana produced while
+    /// preserving its type and restrictions.
+    Multiply { factor: u32 },
+}
+
+/// CR 106.12b + CR 614.1a: Event scope for mana-production replacements.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaReplacementScope {
+    /// Applies to any mana-production event.
+    #[default]
+    Any,
+    /// Applies only when a permanent is tapped for mana.
+    TappedForMana,
+}
+
+impl ManaReplacementScope {
+    pub fn is_any(&self) -> bool {
+        matches!(self, Self::Any)
+    }
 }
 
 /// CR 614.1a: Player axis for damage-recipient replacement filters.
@@ -7366,6 +7386,10 @@ pub struct ReplacementDefinition {
     /// e.g., Contamination ("produces {B} instead") → `ReplaceWith { Black }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mana_modification: Option<ManaModification>,
+    /// CR 106.12b + CR 614.1a: Restricts mana replacements to the relevant
+    /// production event class, e.g. "is tapped for mana".
+    #[serde(default, skip_serializing_if = "ManaReplacementScope::is_any")]
+    pub mana_replacement_scope: ManaReplacementScope,
     /// CR 614.1a + CR 111.1: Additional token creation appended to a
     /// `CreateToken` replacement. Covers the "those tokens plus a [Name] token"
     /// / "those tokens plus that many 1/1 green Squirrel creature tokens"
@@ -7418,6 +7442,7 @@ impl ReplacementDefinition {
             expiry: None,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         }
@@ -7510,6 +7535,11 @@ impl ReplacementDefinition {
     /// CR 106.3 + CR 614.1a: Set the mana modification for `ProduceMana` replacements.
     pub fn mana_modification(mut self, modification: ManaModification) -> Self {
         self.mana_modification = Some(modification);
+        self
+    }
+
+    pub fn mana_replacement_scope(mut self, scope: ManaReplacementScope) -> Self {
+        self.mana_replacement_scope = scope;
         self
     }
 

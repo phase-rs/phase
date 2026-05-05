@@ -26,8 +26,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
     ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, FilterProp, ManaModification,
-    PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
@@ -3519,12 +3519,30 @@ fn parse_event_substitution_replacement(
 fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     if !nom_primitives::scan_contains(norm_lower, "would produce mana")
         && !nom_primitives::scan_contains(norm_lower, "tapped for mana")
+        && !nom_primitives::scan_contains(norm_lower, "tap a permanent for mana")
+        && !nom_primitives::scan_contains(norm_lower, "tap a land for mana")
     {
         return None;
     }
 
     let def = ReplacementDefinition::new(ReplacementEvent::ProduceMana)
         .description(original_text.to_string());
+
+    if let Ok((rest, (filter, factor))) = parse_mana_multiplier_replacement(norm_lower) {
+        if rest.trim().is_empty() {
+            return Some(
+                def.mana_modification(ManaModification::Multiply { factor })
+                    .mana_replacement_scope(ManaReplacementScope::TappedForMana)
+                    .valid_card(filter),
+            );
+        }
+    }
+
+    let scope = if nom_primitives::scan_contains(norm_lower, "tapped for mana") {
+        ManaReplacementScope::TappedForMana
+    } else {
+        ManaReplacementScope::Any
+    };
 
     match scan_produces_replacement(norm_lower) {
         // CR 106.3: The mana source must be a land — scope the replacement so it
@@ -3534,10 +3552,38 @@ fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<Repla
         // parse-only behavior.
         Some(mana_type) => Some(
             def.mana_modification(ManaModification::ReplaceWith { mana_type })
+                .mana_replacement_scope(scope)
                 .valid_card(TargetFilter::Typed(TypedFilter::land())),
         ),
-        None => Some(def),
+        None => Some(def.mana_replacement_scope(scope)),
     }
+}
+
+fn parse_mana_multiplier_replacement(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, (TargetFilter, u32)> {
+    let (input, _) = tag::<_, _, VerboseError<&str>>("if you tap ").parse(input)?;
+    let (input, filter) = alt((
+        value(
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+            tag("a permanent"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            tag("a land"),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" for mana, it produces ").parse(input)?;
+    let (input, factor) = alt((
+        value(2, tag("twice as much")),
+        value(2, tag("two times as much")),
+        value(3, tag("three times as much")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" of that mana instead").parse(input)?;
+    let (input, _) = opt(char('.')).parse(input)?;
+    Ok((input, (filter, factor)))
 }
 
 /// Walk `text` forward, trying `parse_produces_replacement` at each word boundary.
@@ -6514,6 +6560,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::ProduceMana);
+        assert_eq!(
+            def.mana_replacement_scope,
+            ManaReplacementScope::TappedForMana
+        );
+    }
+
+    #[test]
+    fn mana_replacement_multiplies_tapped_permanent_mana() {
+        // CR 106.12b + CR 614.1a: Nyxbloom Ancient multiplies the mana
+        // production event for permanents you tap for mana.
+        let def = parse_replacement_line(
+            "If you tap a permanent for mana, it produces three times as much of that mana instead.",
+            "Nyxbloom Ancient",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::ProduceMana);
+        assert_eq!(
+            def.mana_modification,
+            Some(ManaModification::Multiply { factor: 3 })
+        );
+        assert_eq!(
+            def.mana_replacement_scope,
+            ManaReplacementScope::TappedForMana
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]

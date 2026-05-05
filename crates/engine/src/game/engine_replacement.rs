@@ -199,24 +199,28 @@ pub(super) fn handle_replacement_choice(
                     source_id,
                     player_id,
                     mana_type,
+                    count,
+                    tapped_for_mana,
                     ..
                 } => {
-                    let unit = crate::types::mana::ManaUnit {
-                        color: mana_type,
-                        source_id,
-                        snow: false,
-                        restrictions: Vec::new(),
-                        grants: Vec::new(),
-                        expiry: None,
-                    };
                     if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        player.mana_pool.add(unit);
-                        events.push(GameEvent::ManaAdded {
-                            player_id,
-                            mana_type,
-                            source_id,
-                            tapped_for_mana: false,
-                        });
+                        for _ in 0..count {
+                            let unit = crate::types::mana::ManaUnit {
+                                color: mana_type,
+                                source_id,
+                                snow: false,
+                                restrictions: Vec::new(),
+                                grants: Vec::new(),
+                                expiry: None,
+                            };
+                            player.mana_pool.add(unit);
+                            events.push(GameEvent::ManaAdded {
+                                player_id,
+                                mana_type,
+                                source_id,
+                                tapped_for_mana,
+                            });
+                        }
                     }
                 }
                 // CR 614.1b + CR 614.10: BeginTurn / BeginPhase replacements are

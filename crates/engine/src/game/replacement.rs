@@ -973,19 +973,26 @@ fn produce_mana_applier(
         source_id,
         player_id,
         mana_type,
+        count,
+        tapped_for_mana,
         applied,
     } = event
     {
-        let new_mana_type = match modification {
+        let (new_mana_type, new_count) = match modification {
             Some(ManaModification::ReplaceWith {
                 mana_type: replacement,
-            }) => replacement,
-            None => mana_type,
+            }) => (replacement, count),
+            Some(ManaModification::Multiply { factor }) => {
+                (mana_type, count.saturating_mul(factor))
+            }
+            None => (mana_type, count),
         };
         ApplyResult::Modified(ProposedEvent::ProduceMana {
             source_id,
             player_id,
             mana_type: new_mana_type,
+            count: new_count,
+            tapped_for_mana,
             applied,
         })
     } else {
@@ -1944,6 +1951,19 @@ pub fn find_applicable_replacements(
                             if !matches_damage_target_filter(tf, target, obj.controller, state) {
                                 continue;
                             }
+                        }
+                    }
+                    // CR 106.12b + CR 614.1a: Mana replacements can be scoped to
+                    // production caused by tapping a permanent for mana.
+                    if repl_def.mana_replacement_scope
+                        == crate::types::ability::ManaReplacementScope::TappedForMana
+                    {
+                        match event {
+                            ProposedEvent::ProduceMana {
+                                tapped_for_mana, ..
+                            } if *tapped_for_mana => {}
+                            ProposedEvent::ProduceMana { .. } => continue,
+                            _ => {}
                         }
                     }
                     // CR 614.16: Skip damage prevention replacements when prevention is disabled
@@ -4977,6 +4997,59 @@ mod tests {
                     ManaType::Black,
                     "Green should be rewritten to Black"
                 );
+            }
+            other => panic!("expected Execute(ProduceMana), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn produce_mana_replacement_multiplies_tapped_for_mana_amount() {
+        // CR 106.12b + CR 614.1a: Nyxbloom-style replacements multiply only
+        // mana produced by tapping a permanent for mana.
+        use crate::types::ability::{
+            ControllerRef, ManaModification, ManaReplacementScope, TargetFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaType;
+
+        let land_id = ObjectId(10);
+        let nyxbloom_id = ObjectId(20);
+        let repl = ReplacementDefinition::new(ReplacementEvent::ProduceMana)
+            .mana_modification(ManaModification::Multiply { factor: 3 })
+            .mana_replacement_scope(ManaReplacementScope::TappedForMana)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            ));
+        let mut state = test_state_with_object(nyxbloom_id, Zone::Battlefield, vec![repl]);
+        let mut land = GameObject::new(
+            land_id,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        land.card_types.core_types.push(CoreType::Land);
+        state.objects.insert(land_id, land);
+        state.battlefield.push_back(land_id);
+
+        let mut events = Vec::new();
+        let tapped_event =
+            ProposedEvent::produce_mana_with_context(land_id, PlayerId(0), ManaType::Green, true);
+        let result = replace_event(&mut state, tapped_event, &mut events);
+
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ProduceMana { count, .. }) => {
+                assert_eq!(count, 3);
+            }
+            other => panic!("expected Execute(ProduceMana), got {:?}", other),
+        }
+
+        let untapped_event =
+            ProposedEvent::produce_mana_with_context(land_id, PlayerId(0), ManaType::Green, false);
+        let result = replace_event(&mut state, untapped_event, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ProduceMana { count, .. }) => {
+                assert_eq!(count, 1);
             }
             other => panic!("expected Execute(ProduceMana), got {:?}", other),
         }

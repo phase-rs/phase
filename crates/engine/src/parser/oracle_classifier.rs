@@ -372,6 +372,12 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if scan_contains(lower, "tapped for mana") && scan_contains(lower, "instead") {
         return true;
     }
+    if scan_contains(lower, "you tap")
+        && scan_contains(lower, "for mana")
+        && scan_contains(lower, "instead")
+    {
+        return true;
+    }
     false
 }
 

@@ -231,13 +231,24 @@ pub enum ProposedEvent {
     /// CR 106.3 + CR 614.1a: Mana is about to be produced by a source and added
     /// to a player's mana pool. Carried through the replacement pipeline so
     /// static effects like Contamination ("produces {B} instead") can replace
-    /// the produced mana type before it enters the pool.
+    /// the produced mana type or amount before it enters the pool.
     ProduceMana {
         source_id: ObjectId,
         player_id: PlayerId,
         mana_type: ManaType,
+        /// CR 106.3: Number of mana units of `mana_type` this event produces.
+        #[serde(default = "default_produce_mana_count")]
+        count: u32,
+        /// CR 106.12: True when this production comes from activating a mana
+        /// ability with the tap symbol in its cost.
+        #[serde(default)]
+        tapped_for_mana: bool,
         applied: HashSet<ReplacementId>,
     },
+}
+
+fn default_produce_mana_count() -> u32 {
+    1
 }
 
 impl ProposedEvent {
@@ -276,10 +287,24 @@ impl ProposedEvent {
 
     /// CR 106.3 + CR 614.1a: Construct a `ProduceMana` proposed event.
     pub fn produce_mana(source_id: ObjectId, player_id: PlayerId, mana_type: ManaType) -> Self {
+        Self::produce_mana_with_context(source_id, player_id, mana_type, false)
+    }
+
+    /// CR 106.3 + CR 106.12 + CR 614.1a: Construct a `ProduceMana` proposed
+    /// event while preserving whether the mana was produced by tapping the
+    /// source for mana.
+    pub fn produce_mana_with_context(
+        source_id: ObjectId,
+        player_id: PlayerId,
+        mana_type: ManaType,
+        tapped_for_mana: bool,
+    ) -> Self {
         Self::ProduceMana {
             source_id,
             player_id,
             mana_type,
+            count: 1,
+            tapped_for_mana,
             applied: HashSet::new(),
         }
     }
