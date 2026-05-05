@@ -1713,10 +1713,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, ContinuousModification, ControllerRef, DevotionColors, Duration,
-        Effect, LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, PlayerScope,
-        QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityKind, ContinuousModification, ControllerRef,
+        DevotionColors, Duration, Effect, LinkedExileScope, ManaContribution, ManaProduction,
+        MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+        TypedFilter,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCostShard, ManaType};
@@ -2005,6 +2007,92 @@ mod tests {
         assert_eq!(
             state.players[0].mana_pool.count_color(ManaType::Colorless),
             1
+        );
+    }
+
+    #[test]
+    fn resolve_mana_ability_conditional_urza_delta() {
+        let mut state = GameState::new_two_player(42);
+        let tower = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Urza's Tower".to_string(),
+            Zone::Battlefield,
+        );
+        let mine = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Urza's Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let plant = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Urza's Power Plant".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, subtype) in [(tower, "Tower"), (mine, "Mine"), (plant, "Power-Plant")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Urza's".to_string());
+            obj.card_types.subtypes.push(subtype.to_string());
+        }
+
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+        .sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 2 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .condition(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::ControllerControlsMatching {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::land()
+                                .subtype("Mine".to_string())
+                                .controller(ControllerRef::You),
+                        ),
+                    },
+                    AbilityCondition::ControllerControlsMatching {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::land()
+                                .subtype("Power-Plant".to_string())
+                                .controller(ControllerRef::You),
+                        ),
+                    },
+                ],
+            }),
+        );
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, tower, PlayerId(0), &ability, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            3
         );
     }
 

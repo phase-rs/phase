@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, CastingRestriction, Comparator, ContinuousModification, Effect, ModalChoice,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    AdditionalCost, CastingRestriction, Comparator, ContinuousModification, Effect, ManaProduction,
+    ModalChoice, QuantityExpr, ReplacementDefinition, SolveCondition, SpellCastingOption,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -1361,6 +1362,7 @@ pub(crate) fn parse_oracle_ir(
             // Unimplemented node or emitted a `target-fallback` warning
             // (Metalhead class: PutCounter silently fell back to `Any`).
             let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, &mut ctx);
+            normalize_activated_mana_instead_delta(&mut def);
             def.cost = Some(cost);
             def.description = Some(line.to_string());
             if constraints.sorcery_speed() {
@@ -3055,16 +3057,56 @@ pub(super) fn parse_activated_with_self_ref_fallback(
     }
 }
 
+fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition) {
+    let Effect::Mana {
+        produced:
+            ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: base_count },
+            },
+        ..
+    } = def.effect.as_ref()
+    else {
+        return;
+    };
+    let Some(sub) = def.sub_ability.as_mut() else {
+        return;
+    };
+    let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.take() else {
+        return;
+    };
+    let Effect::Mana {
+        produced:
+            ManaProduction::Colorless {
+                count:
+                    QuantityExpr::Fixed {
+                        value: replacement_count,
+                    },
+            },
+        ..
+    } = sub.effect.as_mut()
+    else {
+        sub.condition = Some(AbilityCondition::ConditionInstead { inner });
+        return;
+    };
+    let delta = replacement_count.saturating_sub(*base_count);
+    if delta == 0 {
+        sub.condition = Some(AbilityCondition::ConditionInstead { inner });
+        return;
+    }
+    *replacement_count = delta;
+    sub.condition = Some(*inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-        FilterProp, ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
-        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
-        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionCondition,
+        ModalSelectionConstraint, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue,
+        QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SharedQuality,
+        SharedQualityRelation, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -4451,6 +4493,41 @@ mod tests {
                 )
             }]
         ));
+    }
+
+    #[test]
+    fn parses_urza_tower_conditional_mana_as_delta() {
+        let r = parse(
+            "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
+            "Urza's Tower",
+            &[],
+            &["Land"],
+            &["Urza's", "Tower"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        match ability.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected base colorless mana, got {other:?}"),
+        }
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional delta");
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 2 }),
+            other => panic!("expected colorless mana delta, got {other:?}"),
+        }
+        match sub.condition.as_ref().expect("expected condition") {
+            AbilityCondition::And { conditions } => assert_eq!(conditions.len(), 2),
+            other => panic!("expected conjunction condition, got {other:?}"),
+        }
     }
 
     #[test]

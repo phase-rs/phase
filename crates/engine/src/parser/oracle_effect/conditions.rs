@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::char;
 use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
@@ -1107,6 +1108,10 @@ pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, Quant
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     let text = text.trim().trim_end_matches('.');
 
+    if let Some(condition) = parse_you_control_urza_land_types_condition_text(text) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_cast_during_phase_condition_text(text) {
         return Some(condition);
     }
@@ -1131,6 +1136,59 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         comparator,
         rhs,
     })
+}
+
+fn parse_you_control_urza_land_types_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    let subtypes = nom_parse_lower(&lower, |i| {
+        all_consuming(parse_you_control_urza_land_types).parse(i)
+    })?;
+    let conditions = subtypes
+        .into_iter()
+        .map(|subtype| AbilityCondition::ControllerControlsMatching {
+            filter: TargetFilter::Typed(
+                TypedFilter::land()
+                    .subtype(subtype)
+                    .controller(ControllerRef::You),
+            ),
+        })
+        .collect();
+    Some(AbilityCondition::And { conditions })
+}
+
+fn parse_you_control_urza_land_types(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, Vec<String>> {
+    let (mut input, _) = tag::<_, _, VerboseError<&str>>("you control ").parse(input)?;
+    let (rest, first) = parse_urza_land_type(input)?;
+    input = rest;
+    let mut subtypes = vec![first];
+    while let Ok((rest, subtype)) = preceded(
+        tag::<_, _, VerboseError<&str>>(" and "),
+        parse_urza_land_type,
+    )
+    .parse(input)
+    {
+        subtypes.push(subtype);
+        input = rest;
+    }
+    let (input, _) = opt(char('.')).parse(input)?;
+    Ok((input, subtypes))
+}
+
+fn parse_urza_land_type(input: &str) -> super::super::oracle_nom::error::OracleResult<'_, String> {
+    let (input, _) = alt((
+        tag::<_, _, VerboseError<&str>>("an "),
+        tag::<_, _, VerboseError<&str>>("a "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("urza's ").parse(input)?;
+    alt((
+        value("Mine".to_string(), tag("mine")),
+        value("Power-Plant".to_string(), tag("power-plant")),
+        value("Tower".to_string(), tag("tower")),
+    ))
+    .parse(input)
 }
 
 fn parse_cast_during_phase_condition_text(text: &str) -> Option<AbilityCondition> {
