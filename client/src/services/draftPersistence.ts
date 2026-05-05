@@ -65,7 +65,7 @@ const GUEST_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 
 let _store: ReturnType<typeof createStore> | undefined;
 
-function getDraftStore(): ReturnType<typeof createStore> {
+export function getDraftStore(): ReturnType<typeof createStore> {
   if (!_store) {
     _store = createStore("phase-draft-session", "phase-draft-session");
   }

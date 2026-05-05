@@ -28,6 +28,12 @@ export const FEED_DECK_ORIGINS_KEY = "phase-feed-deck-origins";
 /** Flag to short-circuit async feed init on subsequent loads */
 export const FEEDS_INITIALIZED_KEY = "phase-feeds-initialized";
 
+/** Key for active quick-draft metadata in localStorage (synchronous resume detection) */
+export const ACTIVE_QUICK_DRAFT_KEY = "phase-active-quick-draft";
+
+/** Prefix for quick-draft session blobs in IndexedDB. Full key: `${QUICK_DRAFT_KEY_PREFIX}${draftId}` */
+export const QUICK_DRAFT_KEY_PREFIX = "phase-quick-draft:";
+
 export interface DeckMeta {
   addedAt: number;
   lastPlayedAt?: number;

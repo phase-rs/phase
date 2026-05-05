@@ -11,6 +11,7 @@ import {
   ACTIVE_DECK_KEY,
   listSavedDeckNames,
 } from "../constants/storage";
+import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import { isTauri } from "../services/sidecar";
 import { loadWsSession } from "../services/multiplayerSession";
 import { loadP2PSession } from "../services/p2pSession";
@@ -47,6 +48,7 @@ export function MenuPage() {
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
   const [formatCoverage, setFormatCoverage] = useState<[string, FormatCoverageSummary][]>([]);
+  const [hasActiveDraft, setHasActiveDraft] = useState(false);
   const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   useAudioContext("menu");
 
@@ -54,6 +56,8 @@ export function MenuPage() {
     const savedNames = listSavedDeckNames();
     setDeckCount(savedNames.length);
     setActiveDeckName(localStorage.getItem(ACTIVE_DECK_KEY));
+
+    setHasActiveDraft(loadActiveQuickDraft() !== null);
 
     const saved = loadActiveGame();
     if (saved) {
@@ -158,12 +162,22 @@ export function MenuPage() {
       },
     );
     if (experimentalFeatures) {
+      if (hasActiveDraft) {
+        actions.push({
+          key: "resume-draft",
+          title: "Resume Draft",
+          description: "Continue your saved Quick Draft in progress.",
+          accent: "ember" as const,
+          onClick: () => navigate("/draft"),
+          icon: <DraftIcon />,
+        });
+      }
       actions.push(
         {
           key: "draft",
-          title: "Quick Draft",
+          title: hasActiveDraft ? "New Quick Draft" : "Quick Draft",
           description: "Draft against bots, build a deck, play a match.",
-          accent: "ember" as const,
+          accent: hasActiveDraft ? ("stone" as const) : ("ember" as const),
           onClick: () => navigate("/draft"),
           icon: <DraftIcon />,
         },
@@ -188,7 +202,7 @@ export function MenuPage() {
       },
     );
     return actions;
-  }, [hasSavedGame, experimentalFeatures, navigate, handleResumeGame]);
+  }, [hasSavedGame, hasActiveDraft, experimentalFeatures, navigate, handleResumeGame]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">

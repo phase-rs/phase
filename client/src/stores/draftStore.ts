@@ -5,6 +5,14 @@ import {
   type DraftPlayerView,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
+import {
+  clearActiveQuickDraft,
+  clearQuickDraftSession,
+  loadActiveQuickDraft,
+  loadQuickDraftSession,
+  saveActiveQuickDraft,
+  saveQuickDraftSession,
+} from "../services/quickDraftPersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -12,6 +20,7 @@ export type DraftPhase = "setup" | "drafting" | "deckbuilding" | "launching";
 export type PoolSortMode = "color" | "type" | "cmc";
 
 interface DraftStoreState {
+  draftId: string | null;
   adapter: DraftAdapter | null;
   view: DraftPlayerView | null;
   selectedCard: string | null;
@@ -26,6 +35,8 @@ interface DraftStoreState {
 
 interface DraftStoreActions {
   startDraft: (setPoolJson: string, setCode: string, difficulty: number) => Promise<void>;
+  resumeDraft: () => Promise<void>;
+  abandonDraft: () => Promise<void>;
   pickCard: (cardInstanceId: string) => Promise<void>;
   selectCard: (cardInstanceId: string | null) => void;
   confirmPick: () => Promise<void>;
@@ -45,6 +56,7 @@ interface DraftStoreActions {
 // ── Initial state ───────────────────────────────────────────────────────
 
 const initialState: DraftStoreState = {
+  draftId: null,
   adapter: null,
   view: null,
   selectedCard: null,
@@ -57,6 +69,44 @@ const initialState: DraftStoreState = {
   poolPanelOpen: true,
 };
 
+// ── Persistence helpers ─────────────────────────────────────────────────
+
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+function persistDraft(): void {
+  const { adapter, draftId, phase, mainDeck, landCounts, poolSortMode, poolPanelOpen, difficulty, selectedSet } =
+    useDraftStore.getState();
+  if (!adapter || !draftId || !selectedSet || phase === "setup" || phase === "launching") return;
+  const persistPhase = phase;
+
+  void (async () => {
+    try {
+      const sessionJson = await adapter.exportSession();
+      await saveQuickDraftSession(draftId, sessionJson, {
+        phase: persistPhase,
+        mainDeck,
+        landCounts,
+        poolSortMode,
+        poolPanelOpen,
+      });
+      saveActiveQuickDraft({
+        id: draftId,
+        setCode: selectedSet,
+        difficulty,
+        phase: persistPhase,
+        updatedAt: Date.now(),
+      });
+    } catch (err) {
+      console.warn("[persistDraft] failed:", err);
+    }
+  })();
+}
+
+function persistDraftDebounced(): void {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(persistDraft, 500);
+}
+
 // ── Store ───────────────────────────────────────────────────────────────
 
 export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
@@ -66,8 +116,6 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     startDraft: async (setPoolJson, setCode, difficulty) => {
       const adapter = new DraftAdapter();
 
-      // Per D-02/RESEARCH Pitfall 2: Hard/VeryHard bots need the card database
-      // for deeper evaluation. Load it before starting the draft.
       if (difficulty >= 3) {
         const resp = await fetch(__CARD_DATA_URL__);
         const json = await resp.text();
@@ -76,8 +124,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
 
       const seed = Math.floor(Math.random() * 0xffffffff);
       const view = await adapter.initialize(setPoolJson, difficulty, seed);
+      const draftId = crypto.randomUUID();
 
       set({
+        draftId,
         adapter,
         view,
         phase: "drafting",
@@ -87,6 +137,60 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         mainDeck: [],
         landCounts: {},
       });
+
+      persistDraft();
+    },
+
+    resumeDraft: async () => {
+      const meta = loadActiveQuickDraft();
+      if (!meta) return;
+
+      const saved = await loadQuickDraftSession(meta.id);
+      if (!saved) {
+        await clearQuickDraftSession(meta.id);
+        return;
+      }
+
+      try {
+        const adapter = new DraftAdapter();
+
+        if (meta.difficulty >= 3) {
+          const resp = await fetch(__CARD_DATA_URL__);
+          const json = await resp.text();
+          await adapter.loadCardDatabase(json);
+        }
+
+        const view = await adapter.importSession(saved.sessionJson);
+
+        set({
+          draftId: meta.id,
+          adapter,
+          view,
+          phase: meta.phase,
+          difficulty: meta.difficulty,
+          selectedSet: meta.setCode,
+          selectedCard: null,
+          mainDeck: saved.mainDeck,
+          landCounts: saved.landCounts,
+          poolSortMode: saved.poolSortMode,
+          poolPanelOpen: saved.poolPanelOpen,
+        });
+      } catch (err) {
+        console.warn("[resumeDraft] failed, clearing saved session:", err);
+        await clearQuickDraftSession(meta.id);
+        throw err;
+      }
+    },
+
+    abandonDraft: async () => {
+      const { draftId } = get();
+      const id = draftId ?? loadActiveQuickDraft()?.id;
+      if (id) {
+        await clearQuickDraftSession(id);
+      } else {
+        clearActiveQuickDraft();
+      }
+      set(initialState);
     },
 
     pickCard: async (cardInstanceId) => {
@@ -98,6 +202,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         view.status === "Deckbuilding" ? "deckbuilding" : "drafting";
 
       set({ view, phase: nextPhase, selectedCard: null });
+      persistDraft();
     },
 
     selectCard: (cardInstanceId) => {
@@ -112,6 +217,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
 
     addToDeck: (cardName) => {
       set((prev) => ({ mainDeck: [...prev.mainDeck, cardName] }));
+      persistDraftDebounced();
     },
 
     removeFromDeck: (cardName) => {
@@ -122,12 +228,14 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         next.splice(idx, 1);
         return { mainDeck: next };
       });
+      persistDraftDebounced();
     },
 
     setLandCount: (landName, count) => {
       set((prev) => ({
         landCounts: { ...prev.landCounts, [landName]: Math.max(0, count) },
       }));
+      persistDraftDebounced();
     },
 
     autoSuggestDeck: async () => {
@@ -136,6 +244,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
 
       const result: SuggestedDeck = await adapter.suggestDeck();
       set({ mainDeck: result.main_deck, landCounts: result.lands });
+      persistDraftDebounced();
     },
 
     autoSuggestLands: async () => {
@@ -144,13 +253,13 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
 
       const lands = await adapter.suggestLands(mainDeck);
       set({ landCounts: lands });
+      persistDraftDebounced();
     },
 
     submitDeck: async () => {
-      const { adapter, mainDeck, landCounts } = get();
+      const { adapter, mainDeck, landCounts, draftId } = get();
       if (!adapter) return;
 
-      // Expand land counts into repeated card names for the deck list
       const landCards: string[] = [];
       for (const [name, count] of Object.entries(landCounts)) {
         for (let i = 0; i < count; i++) {
@@ -161,14 +270,18 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       const fullDeck = [...mainDeck, ...landCards];
       const view = await adapter.submitDeck(fullDeck);
       set({ view, phase: "launching" });
+
+      if (draftId) void clearQuickDraftSession(draftId);
     },
 
     setPoolSortMode: (mode) => {
       set({ poolSortMode: mode });
+      persistDraftDebounced();
     },
 
     togglePoolPanel: () => {
       set((prev) => ({ poolPanelOpen: !prev.poolPanelOpen }));
+      persistDraftDebounced();
     },
 
     setDifficulty: (d) => {
@@ -180,6 +293,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     },
 
     reset: () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
       set(initialState);
     },
   }),

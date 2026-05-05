@@ -3,6 +3,10 @@ import { useNavigate } from "react-router";
 
 import { useDraftStore } from "../stores/draftStore";
 import { useGameStore } from "../stores/gameStore";
+import {
+  loadActiveQuickDraft,
+  type ActiveQuickDraftMeta,
+} from "../services/quickDraftPersistence";
 import { CardPreview } from "../components/card/CardPreview";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { SetSelector } from "../components/draft/SetSelector";
@@ -19,14 +23,23 @@ const DIFFICULTY_NAMES = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"] as c
 
 const DRAFT_DECK_SESSION_KEY = "phase:draft-deck";
 
+const SET_LABELS: Record<string, string> = {
+  otj: "Outlaws of Thunder Junction",
+  mkm: "Murders at Karlov Manor",
+  lci: "The Lost Caverns of Ixalan",
+  woe: "Wilds of Eldraine",
+  mom: "March of the Machine",
+  one: "Phyrexia: All Will Be One",
+  bro: "The Brothers' War",
+  dmu: "Dominaria United",
+  snc: "Streets of New Capenna",
+  dsk: "Duskmourn",
+  blb: "Bloomburrow",
+  fdn: "Foundations",
+};
+
 // ── Helpers ────────────────────────────────────────────────────────────
 
-/**
- * Store the pre-built deck data in sessionStorage so GameProvider can
- * pick it up when the game page loads. Draft decks bypass the normal
- * localStorage active-deck flow because both the human's deck and the
- * bot opponent's deck come from the draft adapter, not from saved decks.
- */
 function storeDraftDeckData(
   gameId: string,
   playerDeck: string[],
@@ -43,7 +56,17 @@ function storeDraftDeckData(
   );
 }
 
+function formatSetLabel(code: string): string {
+  return SET_LABELS[code.toLowerCase()] ?? code.toUpperCase();
+}
+
+function formatPhaseLabel(phase: string): string {
+  return phase === "deckbuilding" ? "deck building" : "drafting";
+}
+
 // ── Component ──────────────────────────────────────────────────────────
+
+type ResumeState = "checking" | "prompt" | "none";
 
 export function DraftPage() {
   const phase = useDraftStore((s) => s.phase);
@@ -51,13 +74,45 @@ export function DraftPage() {
   const navigate = useNavigate();
   const [hoveredCardName, setHoveredCardName] = useState<string | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
+  const [resumeState, setResumeState] = useState<ResumeState>("checking");
+  const [savedDraftMeta, setSavedDraftMeta] = useState<ActiveQuickDraftMeta | null>(null);
+  const [resumeLoading, setResumeLoading] = useState(false);
 
-  // Cleanup on unmount
+  useEffect(() => {
+    const meta = loadActiveQuickDraft();
+    if (meta) {
+      setSavedDraftMeta(meta);
+      setResumeState("prompt");
+    } else {
+      setResumeState("none");
+    }
+  }, []);
+
   useEffect(() => {
     return () => {
       reset();
     };
   }, [reset]);
+
+  const handleResumeDraft = useCallback(async () => {
+    setResumeLoading(true);
+    try {
+      await useDraftStore.getState().resumeDraft();
+      setResumeState("none");
+      setIntroDismissed(true);
+    } catch {
+      await useDraftStore.getState().abandonDraft();
+      setResumeState("none");
+    } finally {
+      setResumeLoading(false);
+    }
+  }, []);
+
+  const handleDiscardDraft = useCallback(async () => {
+    await useDraftStore.getState().abandonDraft();
+    setSavedDraftMeta(null);
+    setResumeState("none");
+  }, []);
 
   const handleStartDraft = useCallback(
     async (setCode: string) => {
@@ -78,7 +133,6 @@ export function DraftPage() {
     const { mainDeck, landCounts, adapter, difficulty } = useDraftStore.getState();
     if (!adapter) return;
 
-    // Build full deck: spells + expanded basic lands
     const landCards: string[] = [];
     for (const [name, count] of Object.entries(landCounts)) {
       for (let i = 0; i < count; i++) {
@@ -87,7 +141,6 @@ export function DraftPage() {
     }
     const fullDeck = [...mainDeck, ...landCards];
 
-    // Get a random bot's deck (seats 1-7)
     const botSeat = Math.floor(Math.random() * 7) + 1;
     const botDeck = await adapter.getBotDeck(botSeat);
     const botFullDeck = [
@@ -97,11 +150,9 @@ export function DraftPage() {
       ),
     ];
 
-    // Generate game ID and store deck data for GameProvider
     const gameId = crypto.randomUUID();
     storeDraftDeckData(gameId, fullDeck, botFullDeck);
 
-    // Per D-09: engine-wasm loads independently when GamePage mounts
     const headDifficulty = DIFFICULTY_NAMES[difficulty] ?? "Medium";
     useGameStore.setState({ gameId });
     navigate(
@@ -115,7 +166,40 @@ export function DraftPage() {
       {phase === "drafting" && introDismissed && <CardPreview cardName={hoveredCardName} />}
 
       <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col px-6 py-16">
-        {phase === "setup" && (
+        {resumeState === "checking" && null}
+
+        {resumeState === "prompt" && savedDraftMeta && (
+          <div className="mx-auto w-full max-w-lg">
+            <h1 className="mb-8 text-3xl font-bold text-white">Quick Draft</h1>
+            <div className="rounded-[16px] border border-white/10 bg-white/[0.03] p-6">
+              <div className="mb-1 text-sm font-medium text-white/50">Draft in progress</div>
+              <div className="mb-4 text-lg font-semibold text-white">
+                {formatSetLabel(savedDraftMeta.setCode)}
+                <span className="ml-2 text-sm font-normal text-white/40">
+                  — {formatPhaseLabel(savedDraftMeta.phase)}
+                </span>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={handleResumeDraft}
+                  disabled={resumeLoading}
+                  className={menuButtonClass({ tone: "emerald", size: "md" })}
+                >
+                  {resumeLoading ? "Loading…" : "Resume Draft"}
+                </button>
+                <button
+                  onClick={handleDiscardDraft}
+                  disabled={resumeLoading}
+                  className={menuButtonClass({ tone: "neutral", size: "md" })}
+                >
+                  Start New
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {resumeState === "none" && phase === "setup" && (
           <div className="mx-auto w-full max-w-4xl">
             <h1 className="mb-8 text-3xl font-bold text-white">Quick Draft</h1>
             <SetSelector onStartDraft={handleStartDraft} />
