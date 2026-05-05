@@ -3114,7 +3114,11 @@ fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
     inner(rest_lower).is_ok()
 }
 
-pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
+pub(super) fn parse_exile_ast(
+    text: &str,
+    lower: &str,
+    ctx: &ParseContext,
+) -> Option<ZoneCounterImperativeAst> {
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("exile the top ").parse(lower) {
         let (count, remainder) = if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
             (QuantityExpr::Fixed { value: n as i32 }, rem.trim_start())
@@ -3130,11 +3134,12 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         } else {
             (QuantityExpr::Fixed { value: 1 }, rest)
         };
+        let that_player = that_player_library_filter(ctx);
         for (pattern, player) in [
             ("card of your library", TargetFilter::Controller),
             ("cards of your library", TargetFilter::Controller),
-            ("card of that player's library", TargetFilter::ParentTarget),
-            ("cards of that player's library", TargetFilter::ParentTarget),
+            ("card of that player's library", that_player.clone()),
+            ("cards of that player's library", that_player),
         ] {
             if tag::<_, _, VerboseError<&str>>(pattern)
                 .parse(remainder)
@@ -3205,6 +3210,16 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         target,
         all: false,
     })
+}
+
+fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
+    match &ctx.subject {
+        Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {
+            TargetFilter::TriggeringPlayer
+        }
+        Some(TargetFilter::Player) => TargetFilter::TriggeringPlayer,
+        _ => TargetFilter::ParentTarget,
+    }
 }
 
 pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
@@ -4670,7 +4685,7 @@ pub(super) fn parse_zone_counter_ast(
     if let Some(ast) = parse_destroy_ast(text, lower) {
         return Some(ast);
     }
-    if let Some(ast) = parse_exile_ast(text, lower) {
+    if let Some(ast) = parse_exile_ast(text, lower, ctx) {
         return Some(ast);
     }
     if let Some(ast) = parse_counter_ast(text, lower) {

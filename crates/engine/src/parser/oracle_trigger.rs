@@ -23,10 +23,10 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef, DamageKindFilter,
-    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
-    UnlessPayModifier,
+    AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef, CounterTriggerFilter,
+    DamageKindFilter, FilterProp, PlayerFilter, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessCost, UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::PlayerActionKind;
@@ -2947,7 +2947,10 @@ fn try_parse_event(
             alt((
                 value(
                     AttackTargetFilter::PlayerOrPlaneswalker,
-                    tag(" you or a planeswalker you control"),
+                    alt((
+                        tag(" you or a planeswalker you control"),
+                        tag(" you and/or one or more planeswalkers you control"),
+                    )),
                 ),
                 value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
                 value(AttackTargetFilter::Player, tag(" a player")),
@@ -5242,7 +5245,7 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     // Find "counter(s) ... on SUBJECT" — locate "counter" then " on " after it.
     // Uses scan_split_at_phrase for word-boundary-aware "counter" match,
     // then split_once_on for the positional " on " split.
-    let (_, counter_start) = scan_split_at_phrase(lower, |i| {
+    let (counter_prefix, counter_start) = scan_split_at_phrase(lower, |i| {
         tag::<_, _, VerboseError<&str>>("counter").parse(i)
     })?;
     let Ok((_, (_, subject_text))) = nom_primitives::split_once_on(counter_start, " on ") else {
@@ -5252,6 +5255,9 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 
     let mut def = make_base();
     def.mode = TriggerMode::CounterAdded;
+    if let Some(filter) = parse_counter_threshold_prefix(counter_prefix) {
+        def = def.counter_filter(filter);
+    }
 
     // Parse the subject after "on "
     if tag::<_, _, VerboseError<&str>>("~")
@@ -5265,6 +5271,27 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     }
 
     Some((TriggerMode::CounterAdded, def))
+}
+
+/// "When the twelfth hour counter is put on ~" — thresholded counter triggers.
+/// Uses the same `CounterTriggerFilter` building block as Saga chapters, so the
+/// runtime fires only when the object crosses the named counter threshold.
+fn parse_counter_threshold_prefix(prefix: &str) -> Option<CounterTriggerFilter> {
+    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("when "), tag("whenever ")))
+        .parse(prefix.trim_start())
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("the ")
+        .parse(rest.trim_start())
+        .ok()?;
+    let (threshold, rest) = parse_ordinal(rest)?;
+    let counter_type_text = rest.trim();
+    if counter_type_text.is_empty() {
+        return None;
+    }
+    Some(CounterTriggerFilter {
+        counter_type: crate::types::counter::parse_counter_type(counter_type_text),
+        threshold: Some(threshold),
+    })
 }
 
 /// CR 122.1: Parse "a [type] counter is removed from [subject]" patterns.
@@ -6446,6 +6473,32 @@ mod tests {
     }
 
     #[test]
+    fn opponent_attacks_that_player_library_binds_to_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent attacks you and/or one or more planeswalkers you control, exile the top card of that player's library.",
+            "Cunning Rhetoric",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::PlayerOrPlaneswalker)
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ExileTop {
+                    player: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            ),
+            "expected ExileTop to bind to TriggeringPlayer, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
     fn trigger_battalion() {
         let def = parse_trigger_line(
             "Whenever Boros Elite and at least two other creatures attack, Boros Elite gets +2/+2 until end of turn.",
@@ -6537,6 +6590,23 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::CounterAdded);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_ordinal_counter_threshold_on_self() {
+        let def = parse_trigger_line(
+            "When the twelfth hour counter is put on ~, draw seven cards.",
+            "Midnight Clock",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.counter_filter,
+            Some(crate::types::ability::CounterTriggerFilter {
+                counter_type: crate::types::counter::CounterType::Generic("hour".to_string()),
+                threshold: Some(12),
+            })
+        );
     }
 
     #[test]

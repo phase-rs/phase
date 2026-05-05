@@ -538,7 +538,7 @@ pub(crate) fn exiled_color_options(
     options
 }
 
-fn chosen_color_for_mana(
+pub(crate) fn chosen_color_for_mana(
     state: &GameState,
     source_id: crate::types::identifiers::ObjectId,
 ) -> Option<ManaColor> {

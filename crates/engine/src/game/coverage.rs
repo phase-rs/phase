@@ -1611,7 +1611,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("rest".into(), format!("{:?}", rest_destination)));
         }
         Effect::Discover { mana_value_limit } => {
-            d.push(("mv limit".into(), mana_value_limit.to_string()));
+            d.push(("mv limit".into(), format!("{:?}", mana_value_limit)));
         }
         // CR 702.85a: Cascade takes no parameters — source MV is read from the
         // stack object at resolution time.

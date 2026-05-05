@@ -6276,6 +6276,114 @@ mod tests {
     }
 
     #[test]
+    fn brainstorm_resolves_draw_then_put_two_cards_on_top() {
+        use crate::types::ability::{ControllerRef, FilterProp, LibraryPosition};
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+
+        let mut state = setup_game_at_main_phase();
+        let brainstorm = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Brainstorm".to_string(),
+            Zone::Hand,
+        );
+        let first_hand = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "First Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let second_hand = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Second Hand Card".to_string(),
+            Zone::Hand,
+        );
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let mut brainstorm_ability = make_draw_ability(3);
+        brainstorm_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                ),
+                count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
+            },
+        )));
+        {
+            let obj = state.objects.get_mut(&brainstorm).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).push(brainstorm_ability);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+        }
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Blue,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: brainstorm,
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(0),
+                count: 2,
+                effect_kind: EffectKind::PutAtLibraryPosition,
+                zone: Zone::Hand,
+                ..
+            }
+        ));
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![first_hand, second_hand],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty());
+        assert!(state.players[0].graveyard.contains(&brainstorm));
+        assert_eq!(state.players[0].library[0], first_hand);
+        assert_eq!(state.players[0].library[1], second_hand);
+        assert!(!state.players[0].hand.contains(&first_hand));
+        assert!(!state.players[0].hand.contains(&second_hand));
+    }
+
+    #[test]
     fn fizzle_target_removed_before_resolution() {
         use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 

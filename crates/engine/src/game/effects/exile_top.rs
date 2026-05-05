@@ -111,6 +111,61 @@ mod tests {
     }
 
     #[test]
+    fn exile_top_triggering_player_uses_attacking_players_library() {
+        let mut state = GameState::new_two_player(42);
+        let controller_top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Controller Top".to_string(),
+            Zone::Library,
+        );
+        let opponent_top = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Top".to_string(),
+            Zone::Library,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            )],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::TriggeringPlayer,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&opponent_top).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&controller_top).map(|obj| obj.zone),
+            Some(Zone::Library)
+        );
+    }
+
+    #[test]
     fn exile_top_moves_multiple_cards() {
         let mut state = GameState::new_two_player(42);
         let top = create_object(

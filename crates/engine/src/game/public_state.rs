@@ -12,9 +12,7 @@ use super::turn_control;
 /// from `waiting_for`, evaluates layers when dirty, and derives display-only
 /// state used by the frontend.
 pub fn finalize_public_state(state: &mut GameState) {
-    if let WaitingFor::Priority { player } = state.waiting_for {
-        state.priority_player = turn_control::authorized_submitter_for_player(state, player);
-    }
+    sync_priority_player_from_waiting_for(state);
     if state.layers_dirty {
         evaluate_layers(state);
     }
@@ -24,8 +22,12 @@ pub fn finalize_public_state(state: &mut GameState) {
 
 pub fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     state.waiting_for = waiting_for.clone();
-    if let WaitingFor::Priority { player } = waiting_for {
-        state.priority_player = turn_control::authorized_submitter_for_player(state, *player);
+    sync_priority_player_from_waiting_for(state);
+}
+
+fn sync_priority_player_from_waiting_for(state: &mut GameState) {
+    if let Some(player) = state.waiting_for.acting_player() {
+        state.priority_player = turn_control::authorized_submitter_for_player(state, player);
     }
 }
 
@@ -59,4 +61,42 @@ pub fn bump_state_revision(state: &mut GameState) {
 
 pub fn clear_public_state_dirty(state: &mut GameState) {
     state.public_state_dirty = PublicStateDirty::default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::identifiers::ObjectId;
+
+    #[test]
+    fn sync_waiting_for_updates_priority_player_for_resolution_choices() {
+        let mut state = GameState::new_two_player(42);
+        state.priority_player = PlayerId(1);
+
+        sync_waiting_for(
+            &mut state,
+            &WaitingFor::DiscoverChoice {
+                player: PlayerId(0),
+                hit_card: ObjectId(10),
+                exiled_misses: Vec::new(),
+            },
+        );
+
+        assert_eq!(state.priority_player, PlayerId(0));
+    }
+
+    #[test]
+    fn finalize_public_state_updates_priority_player_for_resolution_choices() {
+        let mut state = GameState::new_two_player(42);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::DiscoverChoice {
+            player: PlayerId(0),
+            hit_card: ObjectId(10),
+            exiled_misses: Vec::new(),
+        };
+
+        finalize_public_state(&mut state);
+
+        assert_eq!(state.priority_player, PlayerId(0));
+    }
 }

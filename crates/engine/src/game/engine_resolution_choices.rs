@@ -1083,7 +1083,7 @@ pub(super) fn handle_resolution_choice(
                 // "put two cards from your hand on top of your library").
                 // Cards are placed in selection order (first chosen = top).
                 EffectKind::PutAtLibraryPosition => {
-                    for &card_id in &chosen {
+                    for &card_id in chosen.iter().rev() {
                         super::zones::move_to_library_at_index(state, card_id, Some(0), events);
                     }
                 }

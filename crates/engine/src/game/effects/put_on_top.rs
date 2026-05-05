@@ -134,8 +134,17 @@ pub fn resolve(
         LibraryPosition::Bottom => None,
         LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
     };
-    for object_id in to_place {
-        zones::move_to_library_at_index(state, *object_id, index, events);
+    match position {
+        LibraryPosition::Top => {
+            for object_id in to_place.iter().rev() {
+                zones::move_to_library_at_index(state, *object_id, index, events);
+            }
+        }
+        LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => {
+            for object_id in to_place {
+                zones::move_to_library_at_index(state, *object_id, index, events);
+            }
+        }
     }
 
     events.push(GameEvent::EffectResolved {

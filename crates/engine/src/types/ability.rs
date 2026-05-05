@@ -4496,7 +4496,7 @@ pub enum Effect {
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
     Discover {
-        mana_value_limit: u32,
+        mana_value_limit: QuantityExpr,
     },
     /// CR 702.85a: Cascade — when you cast a spell with cascade, exile cards from
     /// the top of your library until you exile a nonland card whose mana value is

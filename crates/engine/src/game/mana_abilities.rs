@@ -405,9 +405,15 @@ pub(crate) fn mana_choice_prompt(
                     .collect(),
             })
         }
-        ManaProduction::ChosenColor { .. } => Some(ManaChoicePrompt::SingleColor {
-            options: ManaColor::ALL.iter().map(mana_color_to_type).collect(),
-        }),
+        ManaProduction::ChosenColor { .. } => {
+            if super::effects::mana::chosen_color_for_mana(state, source_id).is_some() {
+                None
+            } else {
+                Some(ManaChoicePrompt::SingleColor {
+                    options: ManaColor::ALL.iter().map(mana_color_to_type).collect(),
+                })
+            }
+        }
         // CR 106.7 + CR 106.1b: Reflecting Pool class — surface the union of
         // mana types that filter-matching lands could produce, including
         // `Colorless`. With 0 or 1 options the resolver handles it without a

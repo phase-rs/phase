@@ -1,4 +1,4 @@
-use crate::game::zones;
+use crate::game::{quantity, zones};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -16,7 +16,9 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let limit = match &ability.effect {
-        Effect::Discover { mana_value_limit } => *mana_value_limit,
+        Effect::Discover { mana_value_limit } => {
+            quantity::resolve_quantity_with_targets(state, mana_value_limit, ability).max(0) as u32
+        }
         _ => return Err(EffectError::InvalidParam("Expected Discover".to_string())),
     };
 
@@ -95,6 +97,8 @@ fn shuffle_to_bottom(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef};
+    use crate::types::events::GameEvent;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
@@ -151,7 +155,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Discover {
-                mana_value_limit: 3,
+                mana_value_limit: QuantityExpr::Fixed { value: 3 },
             },
             vec![],
             ObjectId(100),
@@ -173,5 +177,61 @@ mod tests {
             }
             other => panic!("Expected DiscoverChoice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn discover_limit_can_use_triggering_spell_mana_value() {
+        let mut state = GameState::new_two_player(42);
+
+        let hit = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Four Drop".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&hit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(4);
+        }
+
+        let triggering_spell = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Triggering Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&triggering_spell).unwrap().mana_cost = ManaCost::generic(4);
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(4),
+            controller: PlayerId(0),
+            object_id: triggering_spell,
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Discover {
+                mana_value_limit: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DiscoverChoice {
+                hit_card,
+                ..
+            } if hit_card == hit
+        ));
     }
 }
