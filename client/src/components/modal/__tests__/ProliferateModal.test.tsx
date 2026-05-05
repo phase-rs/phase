@@ -110,7 +110,7 @@ describe("ProliferateModal (via CardChoiceModal)", () => {
     expect(screen.getByText(/Proliferate/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Walking Ballista" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Hangarback Walker" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Player 2" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Opp 2" })).toBeInTheDocument();
   });
 
   it("defaults to all eligible selected and dispatches the full set", () => {
@@ -130,7 +130,7 @@ describe("ProliferateModal (via CardChoiceModal)", () => {
     render(<CardChoiceModal />);
 
     fireEvent.click(screen.getByRole("button", { name: "Walking Ballista" }));
-    fireEvent.click(screen.getByRole("button", { name: "Player 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Opp 2" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
     expect(dispatchMock).toHaveBeenCalledWith({

@@ -103,8 +103,8 @@ describe("BattleProtectorModal", () => {
     expect(screen.getByText(/Invasion of Arcavios/)).toBeInTheDocument();
 
     // Both candidates rendered
-    const player2 = screen.getByRole("button", { name: "Player 2" });
-    const player3 = screen.getByRole("button", { name: "Player 3" });
+    const player2 = screen.getByRole("button", { name: "Opp 2" });
+    const player3 = screen.getByRole("button", { name: "Opp 3" });
     expect(player2).toBeInTheDocument();
     expect(player3).toBeInTheDocument();
 
