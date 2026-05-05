@@ -1695,6 +1695,20 @@ fn apply_battlefield_cost_modifiers(
                 _ => continue,
             };
 
+            // CR 113.6: SelfRef statics are self-cost-reduction ("this spell costs
+            // {N} less") — handled by apply_self_spell_cost_modifiers for the spell
+            // being cast. They must never apply from a battlefield permanent to
+            // other spells.
+            if matches!(def.affected, Some(TargetFilter::SelfRef)) {
+                continue;
+            }
+
+            // CR 113.6: Statics that declare non-battlefield active_zones must not
+            // fire from the battlefield. Empty active_zones = battlefield default.
+            if !def.active_zones.is_empty() && !def.active_zones.contains(&Zone::Battlefield) {
+                continue;
+            }
+
             // CR 601.2f: Check player scope — does this modifier apply to spells the caster casts?
             // Must run before condition check so QuantityComparison resolves against the caster.
             if let Some(TargetFilter::Typed(ref tf)) = def.affected {
