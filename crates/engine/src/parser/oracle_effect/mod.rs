@@ -42,10 +42,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
     ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, GainLifePlayer, GameRestriction, MultiTargetSpec, ObjectScope, PlayerFilter,
-    PlayerScope, PreventionAmount, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
-    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
+    FilterProp, GainLifePlayer, GameRestriction, ManaProduction, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessCost,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -6632,6 +6633,36 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
     }
 }
 
+fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
+    if matches!(
+        &*def.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Color,
+            persist: false,
+        }
+    ) {
+        let can_collapse = def.sub_ability.as_ref().is_some_and(|sub| {
+            matches!(
+                &*sub.effect,
+                Effect::Mana {
+                    produced: ManaProduction::ChosenColor { .. },
+                    target: None,
+                    ..
+                }
+            )
+        });
+        if can_collapse {
+            let mut mana = *def.sub_ability.take().expect("sub_ability checked above");
+            def.effect = mana.effect;
+            def.sub_ability = mana.sub_ability.take();
+        }
+    }
+
+    if let Some(sub) = def.sub_ability.as_mut() {
+        collapse_ephemeral_color_choice_mana(sub);
+    }
+}
+
 /// Parse a compound effect chain into an `AbilityDefinition` sub-ability chain.
 ///
 /// Phase 1 keeps the existing clause/effect semantics but replaces the fragile
@@ -8289,6 +8320,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     if let Some(mode) = chain_rounding {
         rewrite_rounding_mode(&mut result, mode);
     }
+
+    collapse_ephemeral_color_choice_mana(&mut result);
 
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
     // parent zone-change to Battlefield when the chained sub-ability is an
@@ -14413,6 +14446,32 @@ mod tests {
                 choice_type: ChoiceType::CreatureType,
                 persist: true
             }
+        );
+    }
+
+    #[test]
+    fn choose_color_then_add_mana_of_that_color_collapses_to_mana_effect() {
+        let def = parse_effect_chain(
+            "Choose a color. Add an amount of mana of that color equal to your devotion to that color.",
+            AbilityKind::Activated,
+        );
+        let Effect::Mana { produced, .. } = &*def.effect else {
+            panic!("expected collapsed mana effect, got {:?}", def.effect);
+        };
+        assert!(matches!(
+            produced,
+            ManaProduction::ChosenColor {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: crate::types::ability::DevotionColors::ChosenColor
+                    }
+                },
+                ..
+            }
+        ));
+        assert!(
+            def.sub_ability.is_none(),
+            "ephemeral color choice should not remain as a stack sub-ability"
         );
     }
 

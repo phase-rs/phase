@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, CostPaidObjectSnapshot, Effect, ManaProduction,
+    AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect, ManaProduction,
     ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
@@ -8,7 +8,7 @@ use crate::types::game_state::{
     PendingManaAbility, ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaCost, ManaPool, ManaType, PaymentContext};
+use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -18,7 +18,7 @@ use super::filter::{matches_target_filter, FilterContext};
 use super::life_costs::{self, PayLifeCostResult};
 use super::mana_payment;
 use super::mana_sources;
-use super::mana_sources::mana_color_to_type;
+use super::mana_sources::{mana_color_to_type, mana_type_to_color};
 use super::sacrifice;
 
 /// Check if a typed ability definition represents a mana ability (CR 605).
@@ -243,12 +243,7 @@ fn produce_mana_from_ability(
                 // so the exact sequence lands in the pool (CR 605.3b).
                 Some(ProductionOverride::Combination(types)) => types,
                 Some(ProductionOverride::SingleColor(color)) => {
-                    let resolved = super::effects::mana::resolve_mana_types_for_ability(
-                        produced,
-                        state,
-                        &resolved_for_quantity,
-                    );
-                    vec![color; resolved.len()]
+                    resolve_single_color_override(state, produced, &resolved_for_quantity, color)
                 }
                 None => super::effects::mana::resolve_mana_types_for_ability(
                     produced,
@@ -282,6 +277,33 @@ fn produce_mana_from_ability(
     // resolves that chain inline — mana abilities don't use the stack, so
     // the sub-ability runs as part of the same atomic resolution.
     resolve_mana_ability_sub_chain(state, source_id, player, ability_def, events);
+}
+
+fn resolve_single_color_override(
+    state: &mut GameState,
+    produced: &ManaProduction,
+    ability: &ResolvedAbility,
+    color: ManaType,
+) -> Vec<ManaType> {
+    let previous_choice = if matches!(produced, ManaProduction::ChosenColor { .. }) {
+        let Some(chosen_color) = mana_type_to_color(color) else {
+            return Vec::new();
+        };
+        Some(std::mem::replace(
+            &mut state.last_named_choice,
+            Some(ChoiceValue::Color(chosen_color)),
+        ))
+    } else {
+        None
+    };
+
+    let resolved = super::effects::mana::resolve_mana_types_for_ability(produced, state, ability);
+
+    if let Some(previous) = previous_choice {
+        state.last_named_choice = previous;
+    }
+
+    vec![color; resolved.len()]
 }
 
 /// CR 605.3b: Mana abilities resolve immediately unless paying the cost requires a choice.
@@ -369,6 +391,9 @@ pub(crate) fn mana_choice_prompt(
                     .collect(),
             })
         }
+        ManaProduction::ChosenColor { .. } => Some(ManaChoicePrompt::SingleColor {
+            options: ManaColor::ALL.iter().map(mana_color_to_type).collect(),
+        }),
         // CR 106.7 + CR 106.1b: Reflecting Pool class — surface the union of
         // mana types that filter-matching lands could produce, including
         // `Colorless`. With 0 or 1 options the resolver handles it without a
@@ -872,12 +897,7 @@ fn resolve_mana_ability_with_selected_choices(
             let mana = match color_override {
                 Some(ProductionOverride::Combination(types)) => types,
                 Some(ProductionOverride::SingleColor(color)) => {
-                    let resolved = super::effects::mana::resolve_mana_types_for_ability(
-                        produced,
-                        &*state,
-                        &resolved_for_quantity,
-                    );
-                    vec![color; resolved.len()]
+                    resolve_single_color_override(state, produced, &resolved_for_quantity, color)
                 }
                 None => super::effects::mana::resolve_mana_types_for_ability(
                     produced,
@@ -1693,9 +1713,9 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-        LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, PlayerScope,
-        QuantityExpr, StaticDefinition, TargetFilter, TypedFilter,
+        AbilityCost, AbilityKind, ContinuousModification, ControllerRef, DevotionColors, Duration,
+        Effect, LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, PlayerScope,
+        QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
     };
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
@@ -3775,6 +3795,67 @@ mod tests {
             0,
             &ability,
         ));
+    }
+
+    #[test]
+    fn chosen_color_devotion_mana_ability_uses_activation_choice_for_count() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let nykthos = create_object(
+            &mut state,
+            CardId(8100),
+            player,
+            "Nykthos, Shrine to Nyx".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&nykthos)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+
+        let green_permanent = create_object(
+            &mut state,
+            CardId(8101),
+            player,
+            "Green Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&green_permanent).unwrap().mana_cost =
+            crate::types::mana::ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 0,
+            };
+
+        let ability = make_mana_ability(ManaProduction::ChosenColor {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Devotion {
+                    colors: DevotionColors::ChosenColor,
+                },
+            },
+            contribution: ManaContribution::Base,
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&nykthos).unwrap().abilities)
+            .push(ability.clone());
+
+        let prompt = mana_choice_prompt(&ability.effect, &state, nykthos, None)
+            .expect("chosen-color mana should prompt for a color");
+        assert!(matches!(prompt, ManaChoicePrompt::SingleColor { .. }));
+
+        let mut events = Vec::new();
+        resolve_mana_ability(
+            &mut state,
+            nykthos,
+            player,
+            &ability,
+            &mut events,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        )
+        .unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 2);
     }
 
     #[test]

@@ -401,7 +401,15 @@ pub fn activatable_land_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Vec<ManaSourceOption> {
-    land_mana_options(state, object_id, controller, true)
+    land_mana_options(state, object_id, controller, true, true)
+}
+
+pub(crate) fn auto_tap_land_mana_options(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> Vec<ManaSourceOption> {
+    land_mana_options(state, object_id, controller, true, false)
 }
 
 /// Return display pips for a land based on mana abilities that are currently
@@ -613,11 +621,29 @@ pub fn activatable_mana_options(
     scan_mana_abilities(state, obj, object_id, controller, true)
 }
 
+pub(crate) fn auto_tap_mana_options(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> Vec<ManaSourceOption> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    if obj.zone != Zone::Battlefield || obj.controller != controller || obj.tapped {
+        return Vec::new();
+    }
+    if combat::has_summoning_sickness(obj) {
+        return Vec::new();
+    }
+    scan_mana_abilities(state, obj, object_id, controller, false)
+}
+
 fn land_mana_options(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     require_untapped: bool,
+    require_current_payability: bool,
 ) -> Vec<ManaSourceOption> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
@@ -637,7 +663,13 @@ fn land_mana_options(
         return Vec::new();
     }
 
-    let mut options = scan_mana_abilities(state, obj, object_id, controller, require_untapped);
+    let mut options = scan_mana_abilities(
+        state,
+        obj,
+        object_id,
+        controller,
+        require_current_payability,
+    );
 
     // Legacy fallback for basic-land subtype-only objects (no explicit mana ability).
     if options.is_empty() {

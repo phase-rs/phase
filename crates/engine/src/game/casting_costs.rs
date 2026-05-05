@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, CostPaidObjectSnapshot, KickerVariant, ResolvedAbility,
+    AbilityCost, AdditionalCost, CostPaidObjectSnapshot, Effect, KickerVariant, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -1896,6 +1896,24 @@ pub(super) fn auto_tap_mana_sources(
     events: &mut Vec<GameEvent>,
     deprioritize_source: Option<ObjectId>,
 ) {
+    auto_tap_mana_sources_inner(
+        state,
+        player,
+        cost,
+        events,
+        deprioritize_source,
+        &HashSet::new(),
+    );
+}
+
+fn auto_tap_mana_sources_inner(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    deprioritize_source: Option<ObjectId>,
+    excluded_sources: &HashSet<ObjectId>,
+) {
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaCost;
 
@@ -1929,19 +1947,22 @@ pub(super) fn auto_tap_mana_sources(
     let mut available: Vec<ManaSourceOption> = state
         .battlefield
         .iter()
+        .filter(|oid| !excluded_sources.contains(oid))
         .filter_map(|&oid| {
             let obj = state.objects.get(&oid)?;
             if obj.controller != player || obj.tapped {
                 return None;
             }
-            // Use land-specific function for lands (includes basic-subtype fallback),
-            // general function for everything else (includes summoning sickness check).
+            // Use land-specific function for lands (includes basic-subtype
+            // fallback), general function for everything else (includes
+            // summoning sickness check). Auto-tap plans with potential mana
+            // sources, not only sources whose own mana sub-cost is already
+            // payable from the current pool; Phase 3 pays those sub-costs from
+            // other selected sources before resolving the paid mana ability.
             if obj.card_types.core_types.contains(&CoreType::Land) {
-                Some(mana_sources::activatable_land_mana_options(
-                    state, oid, player,
-                ))
+                Some(mana_sources::auto_tap_land_mana_options(state, oid, player))
             } else {
-                Some(mana_sources::activatable_mana_options(state, oid, player))
+                Some(mana_sources::auto_tap_mana_options(state, oid, player))
             }
         })
         .flatten()
@@ -2085,6 +2106,18 @@ pub(super) fn auto_tap_mana_sources(
                 .and_then(|obj| obj.abilities.get(idx))
                 .cloned();
             if let Some(ability_def) = ability_def {
+                if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
+                    let mut excluded = excluded_sources.clone();
+                    excluded.insert(option.object_id);
+                    auto_tap_mana_sources_inner(
+                        state,
+                        player,
+                        sub_cost,
+                        events,
+                        Some(option.object_id),
+                        &excluded,
+                    );
+                }
                 // color_override tells resolve_mana_ability how to resolve the
                 // ability's choice dimension. `SingleColor` replays a per-color
                 // pick (AnyOneColor/ChoiceAmongExiledColors); `Combination`
@@ -2093,19 +2126,14 @@ pub(super) fn auto_tap_mana_sources(
                 // so sources can't change state between collection and resolution. If a
                 // source is somehow invalid (e.g., removed by a replacement effect), we
                 // skip it silently — the player can still manually tap other sources.
-                let override_value = match option.atomic_combination {
-                    Some(combo) => crate::types::game_state::ProductionOverride::Combination(combo),
-                    None => {
-                        crate::types::game_state::ProductionOverride::SingleColor(option.mana_type)
-                    }
-                };
+                let override_value = production_override_for_option(&ability_def, &option);
                 let _ = mana_abilities::resolve_mana_ability(
                     state,
                     option.object_id,
                     player,
                     &ability_def,
                     events,
-                    Some(override_value),
+                    override_value,
                 );
             }
         } else {
@@ -2128,6 +2156,49 @@ pub(super) fn auto_tap_mana_sources(
                 events,
             );
         }
+    }
+}
+
+fn production_override_for_option(
+    ability_def: &crate::types::ability::AbilityDefinition,
+    option: &ManaSourceOption,
+) -> Option<crate::types::game_state::ProductionOverride> {
+    if let Some(combo) = option.atomic_combination.clone() {
+        return Some(crate::types::game_state::ProductionOverride::Combination(
+            combo,
+        ));
+    }
+
+    let Effect::Mana { produced, .. } = &*ability_def.effect else {
+        return None;
+    };
+    match produced {
+        crate::types::ability::ManaProduction::AnyOneColor { .. }
+        | crate::types::ability::ManaProduction::AnyCombination { .. }
+        | crate::types::ability::ManaProduction::ChoiceAmongExiledColors { .. }
+        | crate::types::ability::ManaProduction::OpponentLandColors { .. }
+        | crate::types::ability::ManaProduction::AnyTypeProduceableBy { .. }
+        | crate::types::ability::ManaProduction::AnyInCommandersColorIdentity { .. } => Some(
+            crate::types::game_state::ProductionOverride::SingleColor(option.mana_type),
+        ),
+        crate::types::ability::ManaProduction::Fixed { .. }
+        | crate::types::ability::ManaProduction::Colorless { .. }
+        | crate::types::ability::ManaProduction::Mixed { .. }
+        | crate::types::ability::ManaProduction::ChosenColor { .. }
+        | crate::types::ability::ManaProduction::ChoiceAmongCombinations { .. }
+        | crate::types::ability::ManaProduction::DistinctColorsAmongPermanents { .. }
+        | crate::types::ability::ManaProduction::TriggerEventManaType => None,
+    }
+}
+
+fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> {
+    match cost {
+        Some(AbilityCost::Mana { cost }) => Some(cost),
+        Some(AbilityCost::Composite { costs }) => costs.iter().find_map(|sub| match sub {
+            AbilityCost::Mana { cost } => Some(cost),
+            _ => None,
+        }),
+        _ => None,
     }
 }
 
@@ -3118,6 +3189,97 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentTapped { .. })));
+    }
+
+    #[test]
+    fn auto_tap_pays_mana_source_sub_cost_from_other_source() {
+        // Nykthos `{T}: Add {C}` can pay Sunscorched Divide's `{1}, {T}`
+        // activation, which then produces `{R}{W}` for a spell cost. The
+        // planner must not discard Sunscorched just because its mana sub-cost
+        // is not payable from the initial empty pool.
+        let mut state = GameState::new_two_player(42);
+        let nykthos = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Nykthos, Shrine to Nyx".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&nykthos).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let divide = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Sunscorched Divide".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&divide).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Fixed {
+                            colors: vec![ManaColor::Red, ManaColor::White],
+                            contribution: crate::types::ability::ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+            );
+        }
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::White],
+                generic: 0,
+            },
+            &mut events,
+            None,
+        );
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::White), 1);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            0
+        );
+        assert!(state.objects.get(&nykthos).unwrap().tapped);
+        assert!(state.objects.get(&divide).unwrap().tapped);
     }
 
     #[test]
