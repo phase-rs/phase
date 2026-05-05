@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use engine::ai_support::{AiDecisionContext, CandidateAction};
 use engine::game::combat::AttackTarget;
-use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetRef};
+use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -127,6 +127,9 @@ fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
         GameAction::ChooseTarget {
             target: Some(target),
         } => {
+            if let Some(rejection) = reject_futile_target(ctx, target) {
+                return rejection;
+            }
             let penalty = target_choice_penalty(ctx, target);
             if penalty < 0.0 {
                 GateDecision::AllowWithPenalty(penalty)
@@ -136,6 +139,11 @@ fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
         }
         GameAction::ChooseTarget { target: None } => GateDecision::Allow,
         GameAction::SelectTargets { targets } => {
+            for target in targets {
+                if let Some(rejection) = reject_futile_target(ctx, target) {
+                    return rejection;
+                }
+            }
             let penalty = targets
                 .iter()
                 .map(|target| target_choice_penalty(ctx, target))
@@ -188,7 +196,7 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     }
 
     // When a lethal attack is available (opponent has no untapped blockers and AI has
-    // enough power to kill them), penalize pre-combat main spells. Attacking first is
+    // enough power to kill them), reject pre-combat main spells. Attacking first is
     // almost always correct — spending mana dorks or convoke creatures before attacking
     // removes them from the attack and misses the lethal window.
     if matches!(
@@ -196,7 +204,22 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
         TacticalWindow::OwnPreCombatMain
     ) && is_lethal_attack_available(ctx.state, ctx.ai_player)
     {
-        return GateDecision::AllowWithPenalty(-15.0);
+        // Carve-out: direct-damage spells that can target players may themselves be
+        // lethal or supplement the attack — allow with a mild penalty.
+        let effects = ctx.effects();
+        let is_direct_damage = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::DealDamage {
+                    target: TargetFilter::Any | TargetFilter::Player,
+                    ..
+                }
+            )
+        });
+        if is_direct_damage {
+            return GateDecision::AllowWithPenalty(-5.0);
+        }
+        return GateDecision::Reject;
     }
 
     let effects = ctx.effects();
@@ -240,6 +263,24 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     GateDecision::Allow
 }
 
+/// Hard-reject targets that are provably futile (e.g., destroy vs indestructible).
+/// Called before `target_choice_penalty` so these never reach scoring.
+fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<GateDecision> {
+    let TargetRef::Object(object_id) = target else {
+        return None;
+    };
+    let effects = ctx.effects();
+    let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
+    if is_destroy {
+        if let Some(object) = ctx.state.objects.get(object_id) {
+            if object.has_keyword(&Keyword::Indestructible) {
+                return Some(GateDecision::Reject);
+            }
+        }
+    }
+    None
+}
+
 fn target_choice_penalty(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
     let TargetRef::Object(object_id) = target else {
         return 0.0;
@@ -247,28 +288,17 @@ fn target_choice_penalty(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
 
     let effects = ctx.effects();
 
-    // Destroying an Indestructible creature has no effect — hard block via large penalty.
-    let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
-    if is_destroy {
-        if let Some(object) = ctx.state.objects.get(object_id) {
-            if object.has_keyword(&Keyword::Indestructible) {
-                return -100.0;
-            }
-        }
-    }
-
-    // Pumping a tapped creature that is not an active attacker deals no combat benefit.
-    // A tapped non-attacker can't deal or prevent combat damage this turn.
+    // Pumping a tapped creature not participating in combat deals no combat benefit.
+    // CR 508.1d / CR 509.1a: Both attackers and blockers can benefit from pump.
     let is_pump = effects.iter().any(|e| matches!(e, Effect::Pump { .. }));
     if is_pump {
         if let Some(object) = ctx.state.objects.get(object_id) {
             if object.tapped {
-                let is_attacker = ctx
-                    .state
-                    .combat
-                    .as_ref()
-                    .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == *object_id));
-                if !is_attacker {
+                let in_combat = ctx.state.combat.as_ref().is_some_and(|c| {
+                    c.attackers.iter().any(|a| a.object_id == *object_id)
+                        || c.blocker_to_attacker.contains_key(object_id)
+                });
+                if !in_combat {
                     return -8.0;
                 }
             }
