@@ -38,6 +38,7 @@ type CrewVehicle = Extract<WaitingFor, { type: "CrewVehicle" }>;
 type StationTarget = Extract<WaitingFor, { type: "StationTarget" }>;
 type SaddleMount = Extract<WaitingFor, { type: "SaddleMount" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
+type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
 const CHOICE_CARD_IMAGE_CLASS = "";
 const SCRY_CARD_IMAGE_CLASS = "";
 
@@ -199,12 +200,77 @@ export function CardChoiceModal() {
     case "ChooseDungeonRoom":
       if (!canActForWaitingState) return null;
       return <RoomChoiceModal data={waitingFor.data} />;
+    case "ChooseRingBearer":
+      if (!canActForWaitingState) return null;
+      return <RingBearerModal data={waitingFor.data} />;
     case "ChooseManaColor":
       if (!canActForWaitingState) return null;
       return <ManaColorChoiceModal data={waitingFor.data} />;
     default:
       return null;
   }
+}
+
+// ── Ring-bearer Modal ──────────────────────────────────────────────────────
+
+function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<ObjectId | null>(null);
+
+  const handleConfirm = useCallback(() => {
+    if (selected !== null) {
+      dispatch({ type: "ChooseRingBearer", data: { target: selected } });
+    }
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title="Choose Ring-bearer"
+      subtitle="Choose a creature you control"
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
+    >
+      <ScrollableCardStrip>
+        {data.candidates.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected === id;
+          return (
+            <motion.button
+              key={id}
+              type="button"
+              aria-label={obj.name}
+              className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
+                isSelected
+                  ? "ring-2 ring-emerald-400/80"
+                  : "ring-1 ring-white/10 hover:ring-white/35"
+              }`}
+              initial={{ opacity: 0, y: 40, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => setSelected(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage cardName={obj.name} size="normal" />
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
+                  isSelected
+                    ? "bg-emerald-500/80 text-white"
+                    : "bg-slate-800/90 text-slate-300"
+                }`}
+              >
+                {isSelected ? "Selected" : "Choose"}
+              </span>
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
 }
 
 // ── Scry Modal ──────────────────────────────────────────────────────────────

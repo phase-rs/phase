@@ -99,4 +99,18 @@ mod tests {
 
         assert_eq!(state.priority_player, PlayerId(0));
     }
+
+    #[test]
+    fn finalize_public_state_updates_priority_player_for_ring_bearer_choice() {
+        let mut state = GameState::new_two_player(42);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::ChooseRingBearer {
+            player: PlayerId(0),
+            candidates: vec![ObjectId(10), ObjectId(11)],
+        };
+
+        finalize_public_state(&mut state);
+
+        assert_eq!(state.priority_player, PlayerId(0));
+    }
 }
