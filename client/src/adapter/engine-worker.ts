@@ -169,6 +169,18 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitAction": {
+        if (
+          !cardDbLoaded &&
+          msg.action?.type === "Debug" &&
+          msg.action?.data?.type === "CreateCard"
+        ) {
+          const resp = await fetch(__CARD_DATA_URL__);
+          if (resp.ok) {
+            const text = await resp.text();
+            load_card_database(text);
+            cardDbLoaded = true;
+          }
+        }
         const actionResult = submit_action(msg.actor, msg.action);
         if (typeof actionResult === "string") {
           // Rust's submit_action error contract: returns the error string
