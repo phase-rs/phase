@@ -1058,7 +1058,7 @@ export class P2PDraftHost {
     this.draftCode = session.draftCode;
 
     if (session.draftSessionJson) {
-      const view = await this.adapter.importSession(session.draftSessionJson);
+      const view = await this.adapter.importSession(session.draftSessionJson, 2);
 
       // Arm grace windows for all guest seats
       for (const seatStr of Object.keys(session.seatTokens)) {

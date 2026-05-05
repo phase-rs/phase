@@ -80,10 +80,13 @@ export function get_view_for_seat(seat: number): any;
 /**
  * Restore a DraftSession from a persisted JSON snapshot.
  *
- * After calling this, subsequent `submit_pick_for_seat`, `get_view_for_seat`,
- * etc. operate on the restored session.
+ * Also re-initializes RNG and difficulty from the session config so that
+ * `submit_pick` (which runs bot picks) works after resume.  The RNG is
+ * re-seeded from the config seed offset by the current pick progress —
+ * bot pick quality remains reasonable but won't be identical to the
+ * original session's RNG stream, which is fine.
  */
-export function import_draft_session(json: string): any;
+export function import_draft_session(json: string, difficulty: number): any;
 
 /**
  * Initialize panic hook for better error messages in WASM.
@@ -181,7 +184,7 @@ export interface InitOutput {
     readonly get_draft_view_for_seat: (a: number) => [number, number, number];
     readonly get_view: () => [number, number, number];
     readonly get_view_for_seat: (a: number) => [number, number, number];
-    readonly import_draft_session: (a: number, b: number) => [number, number, number];
+    readonly import_draft_session: (a: number, b: number, c: number) => [number, number, number];
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly start_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly start_quick_draft: (a: number, b: number, c: number, d: number) => [number, number, number];

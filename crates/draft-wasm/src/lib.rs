@@ -418,12 +418,22 @@ pub fn export_draft_session() -> Result<String, JsValue> {
 
 /// Restore a DraftSession from a persisted JSON snapshot.
 ///
-/// After calling this, subsequent `submit_pick_for_seat`, `get_view_for_seat`,
-/// etc. operate on the restored session.
+/// Also re-initializes RNG and difficulty from the session config so that
+/// `submit_pick` (which runs bot picks) works after resume.  The RNG is
+/// re-seeded from the config seed offset by the current pick progress —
+/// bot pick quality remains reasonable but won't be identical to the
+/// original session's RNG stream, which is fine.
 #[wasm_bindgen]
-pub fn import_draft_session(json: &str) -> Result<JsValue, JsValue> {
+pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsValue> {
     let session: DraftSession = serde_json::from_str(json)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize draft session: {e}")))?;
+
+    let offset = session.current_pack_number as u64 * session.config.cards_per_pack as u64
+        + session.pick_number as u64;
+    let resume_seed = session.config.rng_seed.wrapping_add(offset);
+
+    DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
+    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(resume_seed))));
 
     let view = filter_for_player(&session, 0);
     DRAFT_SESSION.with(|cell| cell.set(Some(session)));

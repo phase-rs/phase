@@ -235,7 +235,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
           await adapter.loadCardDatabase(json);
         }
 
-        const view = await adapter.importSession(saved.sessionJson);
+        const view = await adapter.importSession(saved.sessionJson, meta.difficulty);
 
         set({
           draftId: meta.id,
@@ -270,7 +270,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
           await adapter.loadCardDatabase(json);
         }
 
-        const view = await adapter.importSession(saved.sessionJson);
+        const view = await adapter.importSession(saved.sessionJson, meta.difficulty);
 
         set({
           draftId: meta.id,

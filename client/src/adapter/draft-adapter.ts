@@ -196,9 +196,9 @@ export class DraftAdapter {
     return wasm.export_draft_session();
   }
 
-  async importSession(json: string): Promise<DraftPlayerView> {
+  async importSession(json: string, difficulty: number): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    return wasm.import_draft_session(json) as DraftPlayerView;
+    return wasm.import_draft_session(json, difficulty) as DraftPlayerView;
   }
 
   async allPicksSubmitted(): Promise<boolean> {
