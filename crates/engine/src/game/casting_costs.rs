@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::types::ability::{
     AbilityCost, AdditionalCost, CostPaidObjectSnapshot, Effect, KickerVariant, ResolvedAbility,
+    SpellCastingOptionKind,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -74,7 +75,14 @@ pub(crate) fn handle_decide_additional_cost(
         }
         AdditionalCost::Choice(preferred, fallback) => {
             if pay {
-                ability.context.additional_cost_paid = true;
+                if state
+                    .objects
+                    .get(&pending.object_id)
+                    .and_then(|obj| obj.additional_cost.as_ref())
+                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
+                {
+                    ability.context.additional_cost_paid = true;
+                }
                 Some(preferred.clone())
             } else {
                 Some(fallback.clone())
@@ -94,6 +102,57 @@ pub(crate) fn handle_decide_additional_cost(
         pay_additional_cost(state, player, cost, updated_pending, events)
     } else {
         finish_pending_cost_or_cast(state, player, updated_pending, events)
+    }
+}
+
+pub(crate) fn payable_spell_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AbilityCost> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Hand || obj.controller != player {
+        return None;
+    }
+    // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
+    // alternative-cost cards until the pending-cast flow can compose
+    // alternative and additional costs in one CR 601.2f total-cost pass.
+    if obj.additional_cost.is_some() {
+        return None;
+    }
+
+    obj.casting_options.iter().find_map(|option| {
+        if option.kind != SpellCastingOptionKind::AlternativeCost {
+            return None;
+        }
+        if option.condition.as_ref().is_some_and(|condition| {
+            !restrictions::evaluate_condition(state, player, object_id, condition)
+        }) {
+            return None;
+        }
+        let cost = option.cost.clone()?;
+        if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
+            Some(cost)
+        } else {
+            None
+        }
+    })
+}
+
+fn spell_alternative_cost_is_payable(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    match cost {
+        AbilityCost::Mana { cost } => {
+            super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .all(|sub_cost| spell_alternative_cost_is_payable(state, player, object_id, sub_cost)),
+        other => other.is_payable(state, player, object_id),
     }
 }
 
@@ -669,6 +728,25 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         .objects
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone());
+
+    // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
+    // before total cost determination and paid rather than the spell's mana
+    // cost. Reuse the existing `AdditionalCost::Choice` prompt shape by making
+    // the pending spell mana cost `NoCost`: accepting pays the alternative cost,
+    // declining pays the printed mana cost as the fallback branch.
+    if casting_variant == CastingVariant::Normal {
+        if let Some(alt_cost) = payable_spell_alternative_cost(state, player, object_id) {
+            let mut pending = PendingCast::new(object_id, card_id, ability, ManaCost::NoCost);
+            pending.casting_variant = casting_variant;
+            pending.distribute = distribute.clone();
+            pending.origin_zone = origin_zone;
+            return Ok(WaitingFor::OptionalCostChoice {
+                player,
+                cost: AdditionalCost::Choice(alt_cost, AbilityCost::Mana { cost: cost.clone() }),
+                pending_cast: Box::new(pending),
+            });
+        }
+    }
 
     if let Some(additional_cost) = additional {
         match &additional_cost {

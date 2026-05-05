@@ -3066,6 +3066,13 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
         return true;
     }
 
+    if (prepared.modal.is_some() || spell_has_legal_targets(state, obj, player))
+        && super::casting_costs::payable_spell_alternative_cost(state, player, prepared.object_id)
+            .is_some()
+    {
+        return true;
+    }
+
     // CR 715.3a / CR 720.3a: For Adventure-family cards, also evaluate the
     // alternative spell face. The creature face may be unaffordable while the
     // spell face is castable; in that case the card is still legally castable
@@ -6947,6 +6954,103 @@ mod tests {
         handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(20), &mut Vec::new())
             .expect("normal-timing cast should not require flash surcharge");
         assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+        state.players[0].life = 20;
+
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        let spell = state.objects.get_mut(&spell_id).unwrap();
+        spell.name = "Alt Cost Spell".to_string();
+        spell.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        };
+        let abilities = Arc::make_mut(&mut spell.abilities);
+        abilities.clear();
+        abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+        spell.casting_options.push(
+            crate::types::ability::SpellCastingOption::alternative_cost(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+            })
+            .condition(
+                crate::types::ability::ParsedCondition::YouControlSubtypeCountAtLeast {
+                    subtype: "swamp".to_string(),
+                    count: 1,
+                },
+            ),
+        );
+
+        let swamp_id = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+        let swamp = state.objects.get_mut(&swamp_id).unwrap();
+        swamp.card_types.core_types.push(CoreType::Land);
+        swamp.card_types.subtypes.push("Swamp".to_string());
+
+        let target_id = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell_id),
+            "payable alternative cost should make the spell castable without mana"
+        );
+
+        let mut events = Vec::new();
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(10), &mut events)
+            .expect("cast should reach alternative-cost choice");
+        state.waiting_for = waiting;
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
+                ..
+            }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalCost { pay: true },
+        )
+        .expect("paying alternative life cost should cast");
+
+        assert_eq!(state.players[0].life, 16);
+        assert_eq!(state.stack.len(), 1);
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell on stack");
+        };
+        assert!(
+            !ability.context.additional_cost_paid,
+            "alternative costs are not additional costs"
+        );
     }
 
     #[test]

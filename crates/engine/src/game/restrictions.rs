@@ -499,7 +499,7 @@ fn casting_restriction_applies(
 
 /// Evaluate a parsed restriction condition against the current game state.
 /// CR 601.3 / CR 602.5: These conditions gate whether a spell can be cast or ability activated.
-fn evaluate_condition(
+pub(crate) fn evaluate_condition(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     source_id: ObjectId,
