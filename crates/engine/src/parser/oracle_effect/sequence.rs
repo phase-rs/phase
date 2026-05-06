@@ -488,6 +488,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("exile ")),
         value((), tag("gain control ")),
         value((), tag("have ")),
+        value((), tag("manifest ")),
         value((), tag("mill ")),
         value((), tag("put ")),
         value((), tag("return ")),
@@ -1866,6 +1867,20 @@ mod tests {
     fn bare_and_splits_destroy_and_gain() {
         let chunks = clause_texts("destroy target creature and gain 3 life");
         assert_eq!(chunks, vec!["destroy target creature", "gain 3 life"]);
+    }
+
+    #[test]
+    fn bare_and_splits_create_token_and_manifest() {
+        let chunks = clause_texts(
+            "create a Treasure token and manifest the top card of that player's library",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a Treasure token",
+                "manifest the top card of that player's library"
+            ]
+        );
     }
 
     #[test]

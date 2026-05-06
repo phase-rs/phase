@@ -13966,6 +13966,30 @@ mod tests {
     }
 
     #[test]
+    fn effect_manifest_that_players_library_uses_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let def = parse_effect_chain_with_context(
+            "Manifest the top card of that player's library",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Manifest {
+                    target: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            ),
+            "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
     fn effect_its_controller_manifests_top_card() {
         // CR 701.40a + CR 608.2c: Reality Shift — subject-shifted manifest binds
         // the acting player to ParentTargetController (the exiled creature's

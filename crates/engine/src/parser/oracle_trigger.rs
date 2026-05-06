@@ -6460,6 +6460,34 @@ mod tests {
     }
 
     #[test]
+    fn trigger_combat_damage_create_treasure_and_manifest_that_players_library() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token and manifest the top card of that player's library.",
+            "Orochi Soul-Reaver",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(matches!(*execute.effect, Effect::Token { .. }));
+
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("manifest should be chained after Treasure creation");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Manifest {
+                    target: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            ),
+            "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn trigger_upkeep() {
         let def = parse_trigger_line(
             "At the beginning of your upkeep, look at the top card of your library.",

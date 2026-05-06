@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, rest, value};
+use nom::combinator::{map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -1328,11 +1328,12 @@ pub(super) fn parse_search_and_creation_ast(
                 source_filter,
                 enters_attacking,
                 tapped,
+                count,
                 extra_keywords,
                 additional_modifications,
-                ..
             }) => Some(SearchCreationImperativeAst::CopyTokenOf {
                 target,
+                count,
                 source_filter,
                 enters_attacking,
                 tapped,
@@ -1416,6 +1417,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         },
         SearchCreationImperativeAst::CopyTokenOf {
             target,
+            count,
             source_filter,
             enters_attacking,
             tapped,
@@ -1426,7 +1428,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             source_filter,
             enters_attacking,
             tapped,
-            count: QuantityExpr::Fixed { value: 1 },
+            count,
             extra_keywords,
             additional_modifications,
         },
@@ -3220,6 +3222,10 @@ pub(super) fn parse_exile_ast(
 }
 
 fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
+        return TargetFilter::TriggeringPlayer;
+    }
+
     match &ctx.subject {
         Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {
             TargetFilter::TriggeringPlayer
@@ -3706,15 +3712,53 @@ pub(super) fn parse_imperative_family_ast(
                 tag::<_, _, VerboseError<&str>>("manifest the top ").parse(lower)
             {
                 // CR 701.40a: "manifest the top card of your library"
-                // or "manifest the top N cards of your library"
-                let count = if rest.starts_with("card ") {
-                    QuantityExpr::Fixed { value: 1 }
-                } else if let Ok((_, n)) = nom_primitives::parse_number.parse(rest) {
-                    QuantityExpr::Fixed { value: n as i32 }
+                // or "manifest the top N cards of your/that player's library"
+                let parsed = alt((
+                    value(
+                        QuantityExpr::Fixed { value: 1 },
+                        alt((
+                            tag::<_, _, VerboseError<&str>>("card "),
+                            tag("cards "),
+                        )),
+                    ),
+                    map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+                        value: n as i32,
+                    }),
+                ))
+                .parse(rest);
+
+                let (count, after_count) = if let Ok((after_count, count)) = parsed {
+                    let after_count = if matches!(&count, QuantityExpr::Fixed { value: 1 }) {
+                        after_count
+                    } else if let Ok((after_cards, _)) = preceded(
+                        tag::<_, _, VerboseError<&str>>(" "),
+                        alt((tag("card "), tag("cards "))),
+                    )
+                    .parse(after_count)
+                    {
+                        after_cards
+                    } else {
+                        after_count
+                    };
+                    (count, after_count)
                 } else {
-                    QuantityExpr::Fixed { value: 1 }
+                    (QuantityExpr::Fixed { value: 1 }, rest)
                 };
-                Some(ImperativeFamilyAst::Manifest { count })
+
+                let target = if tag::<_, _, VerboseError<&str>>("of your library")
+                    .parse(after_count)
+                    .is_ok()
+                {
+                    TargetFilter::Controller
+                } else if tag::<_, _, VerboseError<&str>>("of that player's library")
+                    .parse(after_count)
+                    .is_ok()
+                {
+                    that_player_library_filter(ctx)
+                } else {
+                    TargetFilter::Controller
+                };
+                Some(ImperativeFamilyAst::Manifest { target, count })
             } else {
                 None
             }
@@ -4629,10 +4673,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
-        ImperativeFamilyAst::Manifest { count } => Effect::Manifest {
-            target: TargetFilter::Controller,
-            count,
-        },
+        ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,

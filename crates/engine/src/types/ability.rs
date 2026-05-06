@@ -4628,9 +4628,10 @@ pub enum Effect {
     /// battlefield face down as a 2/2 creature with no text, no name, no
     /// subtypes, and no mana cost. `target` selects whose library is manifested
     /// from: `Controller` for "you manifest..." (Whisperwood Elemental,
-    /// Qarsi High Priest) and `ParentTargetController` for "its controller
-    /// manifests..." (Reality Shift). `count` determines how many cards to
-    /// manifest.
+    /// Qarsi High Priest), `ParentTargetController` for "its controller
+    /// manifests..." (Reality Shift), and `TriggeringPlayer` for "that player's
+    /// library" trigger bodies (Orochi Soul-Reaver). `count` determines how
+    /// many cards to manifest.
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,

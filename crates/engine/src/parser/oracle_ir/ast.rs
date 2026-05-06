@@ -311,6 +311,7 @@ pub(crate) enum ImperativeFamilyAst {
     Learn,
     /// CR 701.40a: Manifest the top card(s) of library.
     Manifest {
+        target: TargetFilter,
         count: QuantityExpr,
     },
     /// CR 701.62a: Manifest dread.
@@ -627,6 +628,8 @@ pub(crate) enum SearchCreationImperativeAst {
     },
     CopyTokenOf {
         target: TargetFilter,
+        /// CR 107.1 + CR 707.2: Number of copy tokens to create.
+        count: QuantityExpr,
         /// CR 115.10: Non-targeted "for each <object>, create a token that's a
         /// copy of it" source set. Lowered to `Effect::CopyTokenOf::source_filter`.
         source_filter: Option<TargetFilter>,

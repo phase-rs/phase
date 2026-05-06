@@ -1,7 +1,5 @@
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -13,8 +11,9 @@ use crate::types::game_state::GameState;
 ///
 /// The acting player is resolved from `Effect::Manifest { target }`:
 /// - `Controller` — the ability's controller ("you manifest...").
-/// - `ParentTargetController` — the controller of the parent target object
-///   ("its controller manifests..."). Mirrors the Shuffle resolver pattern.
+/// - `ParentTargetController` — the controller of the parent target object.
+/// - `TriggeringPlayer` — the player involved in the triggering event
+///   ("that player's library").
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -28,22 +27,7 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("count".to_string())),
     };
 
-    // CR 608.2c: Resolve the manifest's acting player. `ParentTargetController`
-    // binds to the first `TargetRef::Object` in `ability.targets` (Reality
-    // Shift's exiled creature); `Controller` and any other filter fall back to
-    // the ability's controller.
-    let player = if matches!(target, TargetFilter::ParentTargetController) {
-        ability
-            .targets
-            .iter()
-            .find_map(|t| match t {
-                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-                _ => None,
-            })
-            .unwrap_or(ability.controller)
-    } else {
-        ability.controller
-    };
+    let player = super::resolve_player_for_context_ref(state, ability, &target);
 
     // CR 701.40e: Manifest cards one at a time
     for _ in 0..count {
@@ -75,7 +59,8 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::QuantityExpr;
+    use crate::types::ability::{QuantityExpr, TargetFilter, TargetRef};
+    use crate::types::events::GameEvent;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -250,5 +235,51 @@ mod tests {
         assert!(obj.face_down);
         assert_eq!(obj.zone, Zone::Battlefield);
         assert_eq!(obj.controller, target_controller);
+    }
+
+    #[test]
+    fn manifest_triggering_player_uses_damaged_players_library() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let damaged_player = PlayerId(1);
+
+        let opponent_card = create_object(
+            &mut state,
+            CardId(1),
+            damaged_player,
+            "Damaged Player Card".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Caster Card".to_string(),
+            Zone::Library,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Orochi Soul-Reaver".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(damaged_player),
+            amount: 5,
+            is_combat: true,
+            excess: 0,
+        });
+
+        let ability = make_manifest_ability_for_target(1, TargetFilter::TriggeringPlayer, vec![]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&opponent_card];
+        assert!(obj.face_down);
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(obj.controller, damaged_player);
     }
 }
