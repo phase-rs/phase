@@ -1504,11 +1504,13 @@ fn apply_self_spell_cost_modifiers_inner(
             _ => continue,
         };
 
-        if target_sensitive_only
-            && !spell_filter
-                .as_ref()
-                .is_some_and(cost_filter_has_target_ref)
-        {
+        let has_target_filter = spell_filter
+            .as_ref()
+            .is_some_and(cost_filter_has_target_ref);
+        if target_sensitive_only && !has_target_filter {
+            continue;
+        }
+        if selected_ability.is_none() && has_target_filter {
             continue;
         }
 
@@ -1566,26 +1568,29 @@ fn cost_filter_has_target_ref(filter: &TargetFilter) -> bool {
 
 fn target_ref_matches_cost_filter(
     state: &GameState,
-    caster: PlayerId,
     source_id: ObjectId,
+    source_controller: PlayerId,
     target: &TargetRef,
     filter: &TargetFilter,
 ) -> bool {
     match target {
         TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_source_with_controller(source_id, caster);
+            let ctx = super::filter::FilterContext::from_source_with_controller(
+                source_id,
+                source_controller,
+            );
             super::filter::matches_target_filter(state, *object_id, filter, &ctx)
         }
         TargetRef::Player(player_id) => {
-            super::filter::player_matches_target_filter(filter, *player_id, Some(caster))
+            super::filter::player_matches_target_filter(filter, *player_id, Some(source_controller))
         }
     }
 }
 
 fn selected_targets_match_filter(
     state: &GameState,
-    caster: PlayerId,
     source_id: ObjectId,
+    source_controller: PlayerId,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
     require_all: bool,
@@ -1596,13 +1601,13 @@ fn selected_targets_match_filter(
     }
 
     if require_all {
-        targets
-            .iter()
-            .all(|target| target_ref_matches_cost_filter(state, caster, source_id, target, filter))
+        targets.iter().all(|target| {
+            target_ref_matches_cost_filter(state, source_id, source_controller, target, filter)
+        })
     } else {
-        targets
-            .iter()
-            .any(|target| target_ref_matches_cost_filter(state, caster, source_id, target, filter))
+        targets.iter().any(|target| {
+            target_ref_matches_cost_filter(state, source_id, source_controller, target, filter)
+        })
     }
 }
 
@@ -1614,6 +1619,10 @@ fn spell_matches_cost_filter_with_selected_targets(
     source_id: ObjectId,
     ability: &ResolvedAbility,
 ) -> bool {
+    let Some(source_controller) = state.objects.get(&source_id).map(|obj| obj.controller) else {
+        return false;
+    };
+
     match filter {
         TargetFilter::Typed(tf) => {
             let non_target_props: Vec<_> = tf
@@ -1639,10 +1648,24 @@ fn spell_matches_cost_filter_with_selected_targets(
 
             tf.properties.iter().all(|prop| match prop {
                 crate::types::ability::FilterProp::Targets { filter } => {
-                    selected_targets_match_filter(state, caster, source_id, ability, filter, false)
+                    selected_targets_match_filter(
+                        state,
+                        source_id,
+                        source_controller,
+                        ability,
+                        filter,
+                        false,
+                    )
                 }
                 crate::types::ability::FilterProp::TargetsOnly { filter } => {
-                    selected_targets_match_filter(state, caster, source_id, ability, filter, true)
+                    selected_targets_match_filter(
+                        state,
+                        source_id,
+                        source_controller,
+                        ability,
+                        filter,
+                        true,
+                    )
                 }
                 _ => true,
             })
@@ -1680,6 +1703,27 @@ fn apply_battlefield_cost_modifiers(
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
+    apply_battlefield_cost_modifiers_inner(state, caster, spell_id, None, false, mana_cost);
+}
+
+pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    ability: &ResolvedAbility,
+    mana_cost: &mut ManaCost,
+) {
+    apply_battlefield_cost_modifiers_inner(state, caster, spell_id, Some(ability), true, mana_cost);
+}
+
+fn apply_battlefield_cost_modifiers_inner(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    selected_ability: Option<&ResolvedAbility>,
+    target_sensitive_only: bool,
+    mana_cost: &mut ManaCost,
+) {
     use crate::types::ability::ControllerRef;
 
     // CR 702.26b + CR 114.4: Functioning gate (phased-out / command-zone) owned
@@ -1706,6 +1750,16 @@ fn apply_battlefield_cost_modifiers(
                 } => (amount, spell_filter, dynamic_count, true),
                 _ => continue,
             };
+
+            let has_target_filter = spell_filter
+                .as_ref()
+                .is_some_and(cost_filter_has_target_ref);
+            if target_sensitive_only && !has_target_filter {
+                continue;
+            }
+            if selected_ability.is_none() && has_target_filter {
+                continue;
+            }
 
             // CR 113.6: SelfRef statics are self-cost-reduction ("this spell costs
             // {N} less") — handled by apply_self_spell_cost_modifiers for the spell
@@ -1741,7 +1795,14 @@ fn apply_battlefield_cost_modifiers(
 
             // CR 601.2f: Check spell type filter — does the spell match?
             if let Some(ref filter) = spell_filter {
-                if !spell_matches_cost_filter(state, caster, spell_id, filter, bf_id) {
+                let matches = if let Some(ability) = selected_ability {
+                    spell_matches_cost_filter_with_selected_targets(
+                        state, caster, spell_id, filter, bf_id, ability,
+                    )
+                } else {
+                    spell_matches_cost_filter(state, caster, spell_id, filter, bf_id)
+                };
+                if !matches {
                     continue;
                 }
             }
@@ -8743,6 +8804,187 @@ mod tests {
 
         let opponent = state.players.iter().find(|p| p.id == PlayerId(1)).unwrap();
         assert_eq!(opponent.life, 16);
+    }
+
+    fn add_esior_style_tax(state: &mut GameState) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(501),
+            PlayerId(1),
+            "Esior Tax".to_string(),
+            Zone::Battlefield,
+        );
+        let commander_filter = TargetFilter::Typed(
+            TypedFilter::permanent()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::IsCommander]),
+        );
+        let spell_filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Targets {
+                filter: Box::new(commander_filter),
+            }]));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::RaiseCost {
+                    amount: ManaCost::generic(3),
+                    spell_filter: Some(spell_filter),
+                    dynamic_count: None,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::card().controller(ControllerRef::Opponent),
+                )),
+            );
+        source
+    }
+
+    fn add_commander_creature(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let commander = create_object(
+            state,
+            CardId(502),
+            player,
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&commander).unwrap();
+        obj.is_commander = true;
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        commander
+    }
+
+    #[test]
+    fn target_dependent_battlefield_tax_does_not_block_modal_cast_before_targets() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_modal_charm(&mut state, PlayerId(0));
+        add_esior_style_tax(&mut state);
+        add_commander_creature(&mut state, PlayerId(1));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        assert!(can_cast_object_now(&state, PlayerId(0), spell));
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, CardId(50), &mut vec![])
+            .expect("modal spell should remain announceable before targets");
+        match waiting {
+            WaitingFor::ModeChoice { pending_cast, .. } => {
+                assert_eq!(
+                    pending_cast.cost,
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::Red],
+                        generic: 0,
+                    }
+                );
+            }
+            other => panic!("expected ModeChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn target_dependent_battlefield_tax_applies_after_targeting_matching_commander() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_modal_charm(&mut state, PlayerId(0));
+        add_esior_style_tax(&mut state);
+        let commander = add_commander_creature(&mut state, PlayerId(1));
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "test".to_string(),
+                description: None,
+            },
+            vec![TargetRef::Object(commander)],
+            spell,
+            PlayerId(0),
+        );
+        let mut cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        };
+
+        apply_battlefield_cost_modifiers_with_selected_targets(
+            &state,
+            PlayerId(0),
+            spell,
+            &ability,
+            &mut cost,
+        );
+
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn target_dependent_battlefield_tax_is_paid_after_matching_target_selection() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_modal_charm(&mut state, PlayerId(0));
+        add_esior_style_tax(&mut state);
+        let commander = add_commander_creature(&mut state, PlayerId(1));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell, CardId(50), &mut events).unwrap();
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![0], &mut events).unwrap();
+
+        let waiting = handle_select_targets(
+            &mut state,
+            PlayerId(0),
+            vec![TargetRef::Object(commander)],
+            &mut events,
+        )
+        .expect("matching target tax should be payable after target selection");
+
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert!(
+            state.players[0].mana_pool.mana.is_empty(),
+            "target-dependent tax should consume the three generic mana"
+        );
+    }
+
+    #[test]
+    fn target_dependent_battlefield_tax_ignores_nonmatching_targets() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_modal_charm(&mut state, PlayerId(0));
+        add_esior_style_tax(&mut state);
+        add_commander_creature(&mut state, PlayerId(1));
+        let other_creature = create_object(
+            &mut state,
+            CardId(503),
+            PlayerId(0),
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell, CardId(50), &mut events).unwrap();
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![0], &mut events).unwrap();
+
+        let waiting = handle_select_targets(
+            &mut state,
+            PlayerId(0),
+            vec![TargetRef::Object(other_creature)],
+            &mut events,
+        )
+        .expect("nonmatching target should keep printed cost payable");
+
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
     }
 
     #[test]

@@ -7323,6 +7323,80 @@ fn parse_self_spell_target_cost_filter(lower: &str) -> Option<TargetFilter> {
     ])))
 }
 
+fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFilter> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    let (input, _) = take_until::<_, _, VE>(" that target").parse(lower).ok()?;
+    let (input, _) = tag::<_, _, VE>(" that target").parse(input).ok()?;
+    let (input, _) = opt(tag::<_, _, VE>("s")).parse(input).ok()?;
+    let (input, _) = tag::<_, _, VE>(" ").parse(input).ok()?;
+    let (input, _) = opt(alt((
+        tag::<_, _, VE>("one or more "),
+        tag("a "),
+        tag("an "),
+    )))
+    .parse(input)
+    .ok()?;
+    let (_, target_text) = take_until::<_, _, VE>(" cost").parse(input).ok()?;
+
+    let target_text = target_text.trim();
+    let target_filter = parse_commander_subject_filter(target_text).or_else(|| {
+        let (filter, remainder) = parse_type_phrase(target_text);
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            Some(filter)
+        } else {
+            None
+        }
+    })?;
+
+    Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+        FilterProp::Targets {
+            filter: Box::new(target_filter),
+        },
+    ])))
+}
+
+fn strip_cost_modifier_target_clause(prefix: &str) -> &str {
+    take_until::<_, _, VerboseError<&str>>(" that target")
+        .parse(prefix)
+        .map_or(prefix, |(_, before)| before)
+}
+
+fn merge_cost_modifier_target_filter(
+    spell_filter: Option<TargetFilter>,
+    target_filter: Option<TargetFilter>,
+) -> Option<TargetFilter> {
+    let Some(target_filter) = target_filter else {
+        return spell_filter;
+    };
+
+    let TargetFilter::Typed(target_typed) = target_filter else {
+        return match spell_filter {
+            Some(spell_filter) => Some(TargetFilter::And {
+                filters: vec![spell_filter, target_filter],
+            }),
+            None => Some(target_filter),
+        };
+    };
+
+    let target_props = target_typed.properties;
+    match spell_filter {
+        Some(TargetFilter::Typed(mut tf)) => {
+            tf.properties.extend(target_props);
+            Some(TargetFilter::Typed(tf))
+        }
+        Some(spell_filter) => Some(TargetFilter::And {
+            filters: vec![
+                spell_filter,
+                TargetFilter::Typed(TypedFilter::card().properties(target_props)),
+            ],
+        }),
+        None => Some(TargetFilter::Typed(
+            TypedFilter::card().properties(target_props),
+        )),
+    }
+}
+
 /// CR 601.2f: Parse cost modification statics from Oracle text.
 /// Handles all four sub-patterns:
 /// 1. Type-filtered: "Creature spells you cast cost {1} less to cast"
@@ -7377,6 +7451,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     };
 
     let first_qualified_spell_filter = parse_first_qualified_spell_filter(lower);
+    let target_cost_filter = parse_cost_modifier_target_filter(lower);
 
     // Extract "from [zone(s)]" clause between player scope and "cost".
     // E.g., "cast from graveyards or from exile" → [Graveyard, Exile]
@@ -7419,6 +7494,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         Some(filter)
     } else if let Some(cost_idx) = lower.find(" cost") {
         let prefix = &lower[..cost_idx];
+        let prefix = strip_cost_modifier_target_clause(prefix);
         // Strip "from [zones]" clause (only if zones were detected), player scope, then "spells"
         let without_from = if !cast_from_zones.is_empty() {
             if let Some(from_idx) = prefix.find(" from ") {
@@ -7464,6 +7540,8 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     } else {
         None
     };
+
+    let spell_filter = merge_cost_modifier_target_filter(spell_filter, target_cost_filter);
 
     // Merge cast-from-zone restriction into the spell filter.
     // If zones were extracted, add InZone/InAnyZone to ensure the cost modification
@@ -8518,6 +8596,94 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn static_opponent_spells_targeting_commanders_cost_more() {
+        let def = parse_static_line(
+            "Spells your opponents cast that target one or more commanders you control cost {3} more to cast.",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            def.mode,
+            StaticMode::RaiseCost {
+                amount: ManaCost::Cost { generic: 3, .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ));
+        let StaticMode::RaiseCost {
+            ref spell_filter, ..
+        } = def.mode
+        else {
+            panic!("expected RaiseCost");
+        };
+        let TargetFilter::Typed(tf) = spell_filter
+            .as_ref()
+            .expect("expected target-gated spell filter")
+        else {
+            panic!("expected typed spell filter");
+        };
+        let commander_filter = tf
+            .properties
+            .iter()
+            .find_map(|prop| match prop {
+                FilterProp::Targets { filter } => Some(filter),
+                _ => None,
+            })
+            .expect("expected Targets property");
+        let TargetFilter::Typed(commander_tf) = commander_filter.as_ref() else {
+            panic!("expected typed commander filter");
+        };
+        assert_eq!(commander_tf.controller, Some(ControllerRef::You));
+        assert!(commander_tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(commander_tf.properties.contains(&FilterProp::IsCommander));
+    }
+
+    #[test]
+    fn static_spells_targeting_creature_cost_less() {
+        let def =
+            parse_static_line("Spells you cast that target a creature cost {2} less to cast.")
+                .unwrap();
+
+        assert!(matches!(
+            def.mode,
+            StaticMode::ReduceCost {
+                amount: ManaCost::Cost { generic: 2, .. },
+                ..
+            }
+        ));
+        let StaticMode::ReduceCost {
+            ref spell_filter, ..
+        } = def.mode
+        else {
+            panic!("expected ReduceCost");
+        };
+        let TargetFilter::Typed(tf) = spell_filter
+            .as_ref()
+            .expect("expected target-gated spell filter")
+        else {
+            panic!("expected typed spell filter");
+        };
+        let target_filter = tf
+            .properties
+            .iter()
+            .find_map(|prop| match prop {
+                FilterProp::Targets { filter } => Some(filter),
+                _ => None,
+            })
+            .expect("expected Targets property");
+        let TargetFilter::Typed(target_tf) = target_filter.as_ref() else {
+            panic!("expected typed target filter");
+        };
+        assert!(target_tf.type_filters.contains(&TypeFilter::Creature));
     }
 
     #[test]
