@@ -16,7 +16,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_nom::primitives as nom_primitives;
-use super::super::oracle_static::parse_static_line_multi;
+use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
@@ -631,7 +631,21 @@ fn push_parsed_statics(ability_text: &str, token_name: &str, out: &mut Vec<Stati
         normalized = normalize_card_name_refs(ability_text, token_name);
         &normalized
     };
-    out.extend(parse_static_line_multi(static_text));
+    let static_definitions = parse_static_line_multi(static_text);
+    if !static_definitions.is_empty() {
+        out.extend(static_definitions);
+        return;
+    }
+
+    let quoted = format!("\"{static_text}\"");
+    let modifications = parse_quoted_ability_modifications(&quoted);
+    if !modifications.is_empty() {
+        out.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(modifications),
+        );
+    }
 }
 
 /// Locate a single-quoted ability span in `text`, returning the content
@@ -996,6 +1010,35 @@ mod tests {
     fn extract_static_empty_when_no_quoted_ability() {
         let statics = extract_token_static_abilities("with flying and haste", "");
         assert!(statics.is_empty());
+    }
+
+    #[test]
+    fn token_with_quoted_trigger_and_activated_ability_grants_both() {
+        let token = parse_token_description(
+            "a tapped colorless artifact token named Meteorite with \"When this token enters, it deals 2 damage to any target\" and \"{T}: Add one mana of any color.\"",
+        )
+        .expect("expected token description");
+
+        assert_eq!(token.name, "Meteorite");
+        let modifications: Vec<_> = token
+            .static_abilities
+            .iter()
+            .flat_map(|static_definition| static_definition.modifications.iter())
+            .collect();
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantTrigger { .. }
+            )),
+            "expected quoted ETB ability to become a granted trigger: {modifications:?}",
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantAbility { .. }
+            )),
+            "expected quoted tap ability to become a granted activated ability: {modifications:?}",
+        );
     }
 
     #[test]
