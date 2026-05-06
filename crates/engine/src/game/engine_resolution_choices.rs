@@ -978,7 +978,13 @@ pub(super) fn handle_resolution_choice(
 
             for &card_id in &chosen {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-                    effects::discard::discard_as_cost(state, card_id, player, events)
+                    effects::discard::discard_as_cost_with_source(
+                        state,
+                        card_id,
+                        player,
+                        Some(source_id),
+                        events,
+                    )
                 {
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(choice_player, state);

@@ -13,7 +13,9 @@ fn main() {
     let mut min_global: Option<f64> = None;
     let mut min_standard: Option<f64> = None;
     let mut run_audit = false;
+    let mut brief = false;
     let mut write_stats: Option<String> = None;
+    let mut write_warning_patterns: Option<String> = None;
 
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
@@ -21,7 +23,9 @@ fn main() {
             "--min-global" => min_global = args_iter.next().and_then(|v| v.parse().ok()),
             "--min-standard" => min_standard = args_iter.next().and_then(|v| v.parse().ok()),
             "--audit" => run_audit = true,
+            "--brief" => brief = true,
             "--write-stats" => write_stats = args_iter.next().cloned(),
+            "--write-warning-patterns" => write_warning_patterns = args_iter.next().cloned(),
             _ => {}
         }
     }
@@ -39,6 +43,9 @@ fn main() {
         eprintln!("  Or set PHASE_CARDS_PATH environment variable");
         eprintln!();
         eprintln!("Loads cards from <data-root>/card-data.json (pre-processed export).");
+        eprintln!("Options:");
+        eprintln!("  --brief                          Suppress detailed human report sections.");
+        eprintln!("  --write-warning-patterns <path>  Write full parser warning pattern report.");
         eprintln!();
         eprintln!("Outputs JSON coverage summary to stdout and human-readable summary to stderr.");
         let empty = CoverageSummary {
@@ -51,6 +58,7 @@ fn main() {
             cards: vec![],
             top_gaps: vec![],
             gap_bundles: vec![],
+            parse_warning_patterns: vec![],
             diagnostics: Default::default(),
         };
         println!("{}", serde_json::to_string_pretty(&empty).unwrap());
@@ -77,6 +85,7 @@ fn main() {
                 cards: vec![],
                 top_gaps: vec![],
                 gap_bundles: vec![],
+                parse_warning_patterns: vec![],
                 diagnostics: Default::default(),
             };
             println!("{}", serde_json::to_string_pretty(&empty).unwrap());
@@ -124,6 +133,20 @@ fn main() {
         eprintln!("Wrote coverage stats to {}", stats_path);
     }
 
+    if let Some(warning_patterns_path) = &write_warning_patterns {
+        std::fs::write(
+            warning_patterns_path,
+            serde_json::to_string_pretty(&summary.parse_warning_patterns).unwrap(),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "Warning: failed to write parser warning patterns to {}: {}",
+                warning_patterns_path, e
+            )
+        });
+        eprintln!("Wrote parser warning patterns to {}", warning_patterns_path);
+    }
+
     // Print human-readable summary to stderr
     eprintln!(
         "Coverage: {}/{} cards supported ({:.1}%)",
@@ -169,18 +192,32 @@ fn main() {
                     cards.len(),
                     unique.len()
                 );
-                for card in unique.iter().take(5) {
-                    eprintln!("    {}", card);
+            }
+
+            if !brief && !summary.parse_warning_patterns.is_empty() {
+                eprintln!();
+                eprintln!("Top parser warning patterns by otherwise-supported cards:");
+                for pattern in summary.parse_warning_patterns.iter().take(5) {
+                    eprintln!(
+                        "  {} — {} warnings, {} cards, {} otherwise-supported, {} single-gap",
+                        pattern.pattern,
+                        pattern.warning_count,
+                        pattern.card_count,
+                        pattern.otherwise_supported_cards,
+                        pattern.single_gap_cards
+                    );
                 }
-                if unique.len() > 5 {
-                    eprintln!("    ... and {} more", unique.len() - 5);
+                if write_warning_patterns.is_none() {
+                    eprintln!(
+                        "  Run with --write-warning-patterns <path> for the full parser warning pattern report."
+                    );
                 }
             }
         }
     }
 
     // Print top gaps with format breakdown, independence ratio, and oracle patterns
-    if !summary.top_gaps.is_empty() {
+    if !brief && !summary.top_gaps.is_empty() {
         eprintln!();
         eprintln!("Top gaps by single-gap card unlock potential:");
         for (i, gap) in summary.top_gaps.iter().take(15).enumerate() {
@@ -226,7 +263,7 @@ fn main() {
         .filter(|b| b.handlers.len() == 2)
         .take(5)
         .collect();
-    if !two_gap_bundles.is_empty() {
+    if !brief && !two_gap_bundles.is_empty() {
         eprintln!();
         eprintln!("Top 2-gap bundles (implementing both unlocks cards):");
         for bundle in two_gap_bundles {

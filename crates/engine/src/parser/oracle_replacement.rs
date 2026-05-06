@@ -144,6 +144,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If an opponent causes you to discard this card, put it onto the battlefield instead" ---
+    if let Some(def) =
+        parse_discard_self_to_battlefield_replacement(&norm_lower, &normalized, &text)
+    {
+        return Some(def);
+    }
+
     // --- "If ~ would die, {effect}" ---
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
@@ -350,6 +357,39 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     None
+}
+
+fn parse_discard_self_to_battlefield_replacement(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
+        value(
+            (),
+            tag("if a spell or ability an opponent controls causes you to discard this card, "),
+        )
+        .parse(i)
+    })?;
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (effect_text, tail) = split_once_on_lower(
+        after_prefix,
+        &after_prefix_lower,
+        " instead of putting it into your graveyard",
+    )?;
+    if !tail.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    let execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Discard)
+            .execute(execute)
+            .valid_card(TargetFilter::SelfRef)
+            .condition(ReplacementCondition::EventSourceControlledBy {
+                controller: ControllerRef::Opponent,
+            })
+            .description(original_text.to_string()),
+    )
 }
 
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
@@ -3878,6 +3918,55 @@ mod tests {
             .as_deref(),
             Some("You gain life equal to the damage prevented this way.")
         );
+    }
+
+    #[test]
+    fn discard_self_to_battlefield_replacement() {
+        let def = parse_replacement_line(
+            "If a spell or ability an opponent controls causes you to discard this card, put it onto the battlefield instead of putting it into your graveyard.",
+            "Loxodon Smiter",
+        )
+        .expect("discard self replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Discard);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::EventSourceControlledBy {
+                controller: ControllerRef::Opponent
+            })
+        );
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn discard_self_to_battlefield_replacement_preserves_counters() {
+        let def = parse_replacement_line(
+            "If a spell or ability an opponent controls causes you to discard this card, put it onto the battlefield with two +1/+1 counters on it instead of putting it into your graveyard.",
+            "Dodecapod",
+        )
+        .expect("discard self replacement should parse");
+        let execute = def.execute.as_ref().expect("execute present");
+        match &*execute.effect {
+            Effect::ChangeZone {
+                destination,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Battlefield);
+                assert_eq!(
+                    enter_with_counters,
+                    &vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
     }
 
     #[test]

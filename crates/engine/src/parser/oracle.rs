@@ -5384,6 +5384,24 @@ mod tests {
     }
 
     #[test]
+    fn discard_self_to_battlefield_instead_is_replacement_not_spell_ability() {
+        let result = parse(
+            "If a spell or ability an opponent controls causes you to discard this card, put it onto the battlefield instead of putting it into your graveyard.",
+            "Loxodon Smiter",
+            &[],
+            &["Creature"],
+            &["Elephant", "Soldier"],
+        );
+
+        assert_eq!(result.replacements.len(), 1);
+        assert!(result.abilities.is_empty());
+        assert!(result
+            .parse_warnings
+            .iter()
+            .all(|warning| warning.category_name() != "swallowed-clause"));
+    }
+
+    #[test]
     fn parse_saga_multi_chapter_line() {
         let oracle = "(Reminder text.)\nI, II — Draw a card.\nIII — Discard a card.";
         let result = parse_oracle_text(

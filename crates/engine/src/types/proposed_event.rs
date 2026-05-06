@@ -185,6 +185,8 @@ pub enum ProposedEvent {
     Discard {
         player_id: PlayerId,
         object_id: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<ObjectId>,
         applied: HashSet<ReplacementId>,
     },
     Tap {
@@ -506,6 +508,7 @@ mod tests {
             ProposedEvent::Discard {
                 player_id: PlayerId(0),
                 object_id: ObjectId(2),
+                source_id: None,
                 applied: HashSet::new(),
             },
             ProposedEvent::Tap {

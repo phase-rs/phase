@@ -1,0 +1,713 @@
+[
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn",
+    "warning_count": 60,
+    "card_count": 60,
+    "otherwise_supported_cards": 44,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Falkenrath Pit Fighter",
+      "Chandra's Incinerator",
+      "Swordsworn Cavalier"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Replacement_Instead: instead",
+    "warning_count": 44,
+    "card_count": 44,
+    "otherwise_supported_cards": 43,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Delaying Shield",
+      "Lotus Vale",
+      "Rain of Gore"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn if able",
+    "warning_count": 18,
+    "card_count": 18,
+    "otherwise_supported_cards": 18,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Hunt Down",
+      "Tangle Angler",
+      "Vortex Elemental"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_Unless: unless they pay {N}",
+    "warning_count": 14,
+    "card_count": 14,
+    "otherwise_supported_cards": 14,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Rishadan Brigand",
+      "Rishadan Footpad",
+      "Isolation Cell"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_UntilEndOfTurn: until end of turn, you don't lose this mana as steps and phases end",
+    "warning_count": 12,
+    "card_count": 12,
+    "otherwise_supported_cards": 12,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Branch of Vitu-Ghazi",
+      "Kessig Naturalist",
+      "Klauth, Unrivaled Ancient"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step",
+    "warning_count": 9,
+    "card_count": 9,
+    "otherwise_supported_cards": 9,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Mystic Veil",
+      "Ward of Lights",
+      "Armor of Thorns"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn, draw a card",
+    "warning_count": 9,
+    "card_count": 9,
+    "otherwise_supported_cards": 9,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Glimpse of Nature",
+      "Bennie Bracks, Zoologist",
+      "Recalibrate"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: equal to its mana value",
+    "warning_count": 9,
+    "card_count": 9,
+    "otherwise_supported_cards": 9,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Opalescence",
+      "The Eleventh Doctor",
+      "Starfield of Nyx"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if the player does, they may copy this spell and may choose a new target for that copy",
+    "warning_count": 6,
+    "card_count": 6,
+    "otherwise_supported_cards": 6,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Chain of Vapor",
+      "Chain of Silence",
+      "Chain Stasis"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: for each age counter on it",
+    "warning_count": 6,
+    "card_count": 6,
+    "otherwise_supported_cards": 6,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Elephant Grass",
+      "Heat Wave",
+      "Herald of Leshrac"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn, you may pay {M} rather than pay this spell's mana cost",
+    "warning_count": 6,
+    "card_count": 6,
+    "otherwise_supported_cards": 5,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Inferno Trap",
+      "Whiplash Trap",
+      "Permafrost Trap"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_AsLongAs: as long as it remains exiled, and mana of any type can be spent to cast that spell",
+    "warning_count": 5,
+    "card_count": 5,
+    "otherwise_supported_cards": 5,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Thought-String Analyst",
+      "The Magic Bandit",
+      "Thief of Sanity"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: the number of +N/+N counters on it",
+    "warning_count": 5,
+    "card_count": 5,
+    "otherwise_supported_cards": 5,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Byrke, Long Ear of the Law",
+      "Seismic Tutelage",
+      "Level Up"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: the number of +N/+N counters on that creature",
+    "warning_count": 5,
+    "card_count": 5,
+    "otherwise_supported_cards": 5,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Sazh Katzroy",
+      "Sword of Hours",
+      "Sage of the Fang"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Optional_YouMay: you may say \"gotcha!\" when you do, return this card from your graveyard to your hand",
+    "warning_count": 5,
+    "card_count": 5,
+    "otherwise_supported_cards": 5,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Stop That",
+      "Touch and Go",
+      "Cardpecker"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: equal to the difference",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 1,
+    "single_gap_by_format": {
+      "commander": 1,
+      "duel": 1,
+      "legacy": 1,
+      "vintage": 1
+    },
+    "example_cards": [
+      "Conformer Shuriken",
+      "Lolth, Spider Queen",
+      "Isildur's Fateful Strike"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if able",
+    "warning_count": 5,
+    "card_count": 5,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Illusionist's Gambit",
+      "Rotted Ones, Lay Siege",
+      "The Sentry, Golden Guardian"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if a spell cast this way would be put into your graveyard, exile it instead",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Kess, Dissident Mage",
+      "Finale of Promise",
+      "Jaya Ballard"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if the player does, untap those creatures",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Magnetic Mountain",
+      "Mudslide",
+      "Thelon's Curse"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_Unless: unless they pay N life",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Blood Clock",
+      "Tradewind Rider Avatar",
+      "Sirocco"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_Unless: unless they sacrifice a nonland permanent of their choice or discard a card",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Torment of Scarabs",
+      "Thornplate Intimidator",
+      "Tergrid's Lantern"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn as though they had flash",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Alchemist's Refuge",
+      "Winding Canyons",
+      "Borne Upon a Wind"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn would die, exile it instead",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Kumano's Blessing",
+      "Frostwielder",
+      "Kumano, Master Yamabushi"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn, put a +N/+N counter on it",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Wall of Resistance",
+      "Whirling Dervish",
+      "Dunerider Outlaw"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: for each creature chosen this way",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Magnetic Mountain",
+      "Mudslide",
+      "Thelon's Curse"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: the number of +N/+N counters on this creature",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Sisterhood of Karn",
+      "Mossborn Hydra",
+      "Evolution Vat"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Optional_YouMay: you may behold a dragon",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Osseous Exhale",
+      "Dispelling Exhale",
+      "Draconic Fealty"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Optional_YouMay: you may choose both instead",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 4,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "SOLDIER Military Program",
+      "Disciple of Perdition",
+      "Soul Transfer"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_Unless: unless its controller pays {N}",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 1,
+    "single_gap_by_format": {
+      "commander": 1,
+      "duel": 1,
+      "legacy": 1,
+      "modern": 1,
+      "vintage": 1
+    },
+    "example_cards": [
+      "Crystal Shard",
+      "Erratic Portal",
+      "Withdraw"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: twice instead",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Tekuthal, Inquiry Dominus",
+      "Sea Gate Stormcaller",
+      "Secrets of the Key"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Optional_YouMay: you may put it onto the battlefield",
+    "warning_count": 4,
+    "card_count": 4,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Tawnos Endures",
+      "Treasure Chest",
+      "Primal Surge"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if a nonland permanent left the battlefield this turn or a spell was warped this turn",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Temporal Intervention",
+      "Plasma Bolt",
+      "Tragic Trajectory"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if it's bargained",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Ice Out",
+      "Johann's Stopgap",
+      "Hamlet Glutton"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if the player does, they draw a card",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Skullknocker Ogre",
+      "Curse of Chaos",
+      "Unifying Theory"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if this spell was kicked, choose any number instead",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Inscription of Ruin",
+      "Inscription of Insight",
+      "Inscription of Abundance"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_If: if you or a teammate has cast another spell this turn",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Tyrant of Valakut",
+      "Reckless Bushwhacker",
+      "Crush of Tentacles"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_Unless: unless any player pays {N}",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Rhystic Cave",
+      "Icy Prison",
+      "Nakaya Shade"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_Unless: unless they discard a card",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Court of Ambition",
+      "Painful Quandary",
+      "The Long Reach of Night"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_Unless: unless you discard a creature card",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Mercenary Knight",
+      "Hidden Horror",
+      "Body Snatcher"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Condition_Unless: unless you discard a land card",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Thundering Wurm",
+      "Cursed Monstrosity",
+      "Fallow Wurm"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn by a source of your choice",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Consulate Surveillance",
+      "Healing Grace",
+      "Shieldmage Advocate"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn or a spell was warped this turn, put a +N/+N counter on this creature",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Kavaron Skywarden",
+      "Insatiable Skittermaw",
+      "Interceptor Mechan"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_ThisTurn: this turn, put a +N/+N counter on this creature",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Botanical Brawler",
+      "Fairgrounds Trumpeter",
+      "Ichor Shade"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Duration_UntilEndOfTurn: create a N/N green bird creature token with \"whenever a land you control enters, this token gets +N/+N until end of turn",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Gysahl Greens",
+      "Choco-Comet",
+      "Call the Mountain Chocobo"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: for each card in your hand",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Cowed by Wisdom",
+      "Extravagant Spirit",
+      "Megatherium"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: for each poison counter your opponents have",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Phyrexian Swarmlord",
+      "Vishgraz, the Doomhive",
+      "Mycosynth Fiend"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: the number of +N/+N counters on each creature you control",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Bristly Bill, Spine Sower",
+      "Kalonian Hydra",
+      "Court of Garenbrig"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: where x is the result",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Ancient Brass Dragon",
+      "Hammer Helper",
+      "Slight Malfunction"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "DynamicQty: where x is this creature's power",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Moorland Rescuer",
+      "The Dominion Bracelet",
+      "Cosmic Sovereign"
+    ]
+  },
+  {
+    "category": "swallowed-clause",
+    "pattern": "Optional_YouMay: you may put that card onto the battlefield",
+    "warning_count": 3,
+    "card_count": 3,
+    "otherwise_supported_cards": 3,
+    "single_gap_cards": 0,
+    "single_gap_by_format": {},
+    "example_cards": [
+      "Genesis Storm",
+      "Hei Bai, Forest Guardian",
+      "Songbirds' Blessing"
+    ]
+  }
+]

@@ -4,6 +4,7 @@ use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
 use crate::game::triggers::build_trigger_registry;
 use crate::parser::oracle::is_commander_permission_sentence;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
@@ -166,6 +167,58 @@ pub struct GapBundle {
     pub unlocked_by_format: BTreeMap<String, usize>,
 }
 
+/// Parser warning pattern ranked by how many cards share the same likely fix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParseWarningPattern {
+    pub category: String,
+    pub pattern: String,
+    pub warning_count: usize,
+    pub card_count: usize,
+    /// Cards that are currently considered supported apart from this warning.
+    pub otherwise_supported_cards: usize,
+    /// Existing unsupported cards where this warning is the only coverage gap.
+    pub single_gap_cards: usize,
+    pub single_gap_by_format: BTreeMap<String, usize>,
+    pub example_cards: Vec<String>,
+}
+
+#[derive(Default)]
+struct ParseWarningPatternAccumulator {
+    warning_count: usize,
+    cards: HashSet<String>,
+    otherwise_supported_cards: HashSet<String>,
+    single_gap_cards: HashSet<String>,
+    single_gap_by_format: BTreeMap<String, usize>,
+    example_cards: Vec<String>,
+}
+
+impl ParseWarningPatternAccumulator {
+    fn push(
+        &mut self,
+        card_name: &str,
+        supported: bool,
+        single_gap: bool,
+        legal_formats: &[&'static str],
+    ) {
+        self.warning_count += 1;
+        self.cards.insert(card_name.to_string());
+        if supported {
+            self.otherwise_supported_cards.insert(card_name.to_string());
+        }
+        if single_gap && self.single_gap_cards.insert(card_name.to_string()) {
+            for format in legal_formats {
+                *self
+                    .single_gap_by_format
+                    .entry((*format).to_string())
+                    .or_default() += 1;
+            }
+        }
+        if self.example_cards.len() < 3 && !self.example_cards.iter().any(|c| c == card_name) {
+            self.example_cards.push(card_name.to_string());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageSummary {
     pub total_cards: usize,
@@ -185,6 +238,9 @@ pub struct CoverageSummary {
     /// Top 2-gap and 3-gap exact-match bundles that would unlock cards if all handlers implemented.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gap_bundles: Vec<GapBundle>,
+    /// Parse warnings clustered by the specific Oracle phrase shape that likely shares a fix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_warning_patterns: Vec<ParseWarningPattern>,
     /// Per-category diagnostic counts for regression ratcheting (D-08).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub diagnostics: BTreeMap<String, usize>,
@@ -2470,6 +2526,101 @@ fn normalize_oracle_pattern(text: &str) -> String {
     result.trim().to_string()
 }
 
+fn parse_warning_pattern(
+    warning: &OracleDiagnostic,
+    oracle_text: Option<&str>,
+) -> (String, String) {
+    match warning {
+        OracleDiagnostic::SwallowedClause {
+            detector,
+            description,
+            ..
+        } => {
+            let excerpt = oracle_text
+                .and_then(|text| swallowed_clause_excerpt(detector, text))
+                .unwrap_or_else(|| description.as_str());
+            (
+                warning.category_name().to_string(),
+                format!("{detector}: {}", normalize_oracle_pattern(excerpt)),
+            )
+        }
+        OracleDiagnostic::TargetFallback { context, text, .. } => (
+            warning.category_name().to_string(),
+            format!("{context}: {}", normalize_oracle_pattern(text)),
+        ),
+        OracleDiagnostic::IgnoredRemainder { parser, text, .. } => (
+            warning.category_name().to_string(),
+            format!("{parser}: {}", normalize_oracle_pattern(text)),
+        ),
+        OracleDiagnostic::CascadeLoss {
+            slot, effect_name, ..
+        } => (
+            warning.category_name().to_string(),
+            format!("{slot:?}: {effect_name}"),
+        ),
+    }
+}
+
+fn swallowed_clause_excerpt<'a>(detector: &str, oracle_text: &'a str) -> Option<&'a str> {
+    let markers: &[&str] = match detector {
+        "Replacement_Instead" => &[" instead"],
+        "ActivateOnlyDuring" => &["activate only during", "activate this ability only during"],
+        "ActivateLimit" => &[
+            "activate this ability only once each",
+            "activate this ability only twice each",
+            "activate this ability no more than",
+            "activate only once each turn",
+            "activate only twice each turn",
+        ],
+        "Duration_UntilEndOfTurn" => &["until end of turn"],
+        "Optional_YouMay" => &["you may "],
+        "DynamicQty" => &[
+            " equal to ",
+            "for each ",
+            " twice ",
+            "where x is ",
+            "the number of ",
+            "half your ",
+            "half their ",
+            "half its ",
+            "half the ",
+        ],
+        "Condition_If" => &[" if ", "if "],
+        "Condition_Unless" => &[" unless "],
+        "Condition_AsLongAs" => &["as long as "],
+        "Duration_ThisTurn" => &[" this turn"],
+        "Duration_NextTurn" => &["until your next turn", "until that player's next turn"],
+        "Optional_MayHave" => &["may have ", "you may have "],
+        "APNAP" => &[
+            "starting with you",
+            "starting with the active player",
+            "starting with that player",
+            "in turn order",
+        ],
+        _ => return None,
+    };
+
+    let lower = oracle_text.to_ascii_lowercase();
+    let (marker_start, marker) = markers
+        .iter()
+        .filter_map(|marker| lower.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index)?;
+    let sentence_start = oracle_text[..marker_start]
+        .rfind(|c| matches!(c, '\n' | '.'))
+        .map_or(0, |index| index + 1);
+    let sentence_end = oracle_text[marker_start..]
+        .find(|c| matches!(c, '\n' | '.'))
+        .map_or(oracle_text.len(), |offset| marker_start + offset);
+    let clause_start = if marker.trim_start() != marker {
+        marker_start + (marker.len() - marker.trim_start().len())
+    } else if detector.starts_with("Duration_") {
+        sentence_start
+    } else {
+        marker_start
+    };
+    Some(oracle_text[clause_start..sentence_end].trim())
+}
+
 /// Match a p/t pattern like `+3/+1` or `-2/-2` at the start of `s`.
 /// Returns the byte length consumed, or `None` if no match.
 fn match_pt_pattern(s: &str) -> Option<usize> {
@@ -2625,6 +2776,8 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
 
     let mut cards = Vec::new();
     let mut freq: HashMap<String, usize> = HashMap::new();
+    let mut parse_warning_patterns: BTreeMap<(String, String), ParseWarningPatternAccumulator> =
+        BTreeMap::new();
     let mut coverage_by_format_accumulators: BTreeMap<String, (usize, usize)> = LegalityFormat::ALL
         .into_iter()
         .map(|format| (format.as_key().to_string(), (0, 0)))
@@ -2677,6 +2830,16 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             *freq.entry(m.clone()).or_default() += 1;
         }
 
+        let legal_formats: Vec<&'static str> = LegalityFormat::ALL
+            .into_iter()
+            .filter_map(|format| {
+                card_db
+                    .legality_status(key, format)
+                    .is_some_and(|status| status.is_legal())
+                    .then_some(format.as_key())
+            })
+            .collect();
+
         for format in LegalityFormat::ALL {
             if card_db
                 .legality_status(key, format)
@@ -2712,6 +2875,13 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             }
         }
         let gap_count = gap_details.len();
+        for warning in &face.parse_warnings {
+            let (category, pattern) = parse_warning_pattern(warning, face.oracle_text.as_deref());
+            parse_warning_patterns
+                .entry((category, pattern))
+                .or_default()
+                .push(&face.name, supported, gap_count == 1, &legal_formats);
+        }
 
         let printings = card_db
             .printings_for(key)
@@ -2977,6 +3147,30 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         })
         .collect();
 
+    let mut parse_warning_patterns: Vec<ParseWarningPattern> = parse_warning_patterns
+        .into_iter()
+        .map(|((category, pattern), acc)| ParseWarningPattern {
+            category,
+            pattern,
+            warning_count: acc.warning_count,
+            card_count: acc.cards.len(),
+            otherwise_supported_cards: acc.otherwise_supported_cards.len(),
+            single_gap_cards: acc.single_gap_cards.len(),
+            single_gap_by_format: acc.single_gap_by_format,
+            example_cards: acc.example_cards,
+        })
+        .collect();
+    parse_warning_patterns.sort_by(|left, right| {
+        right
+            .otherwise_supported_cards
+            .cmp(&left.otherwise_supported_cards)
+            .then_with(|| right.single_gap_cards.cmp(&left.single_gap_cards))
+            .then_with(|| right.warning_count.cmp(&left.warning_count))
+            .then_with(|| left.category.cmp(&right.category))
+            .then_with(|| left.pattern.cmp(&right.pattern))
+    });
+    parse_warning_patterns.truncate(50);
+
     CoverageSummary {
         total_cards,
         supported_cards,
@@ -2987,6 +3181,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         cards,
         top_gaps,
         gap_bundles,
+        parse_warning_patterns,
         diagnostics: BTreeMap::new(),
     }
 }

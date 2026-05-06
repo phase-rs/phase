@@ -12,6 +12,7 @@ OUTPUT="${OUTPUT_DIR}/card-data.json"
 NAMES_OUTPUT="${OUTPUT_DIR}/card-names.json"
 COVERAGE_OUTPUT="${OUTPUT_DIR}/coverage-data.json"
 COVERAGE_SUMMARY="${OUTPUT_DIR}/coverage-summary.json"
+WARNING_PATTERNS_OUTPUT="${OUTPUT_DIR}/parser-warning-patterns.json"
 META_OUTPUT="${OUTPUT_DIR}/card-data-meta.json"
 SET_LIST_OUTPUT="${OUTPUT_DIR}/set-list.json"
 DECKS_OUTPUT="${OUTPUT_DIR}/decks.json"
@@ -116,6 +117,7 @@ OUTPUT_TMP="${OUTPUT}.tmp"
 NAMES_OUTPUT_TMP="${NAMES_OUTPUT}.tmp"
 COVERAGE_OUTPUT_TMP="${COVERAGE_OUTPUT}.tmp"
 COVERAGE_SUMMARY_TMP="${COVERAGE_SUMMARY}.tmp"
+WARNING_PATTERNS_OUTPUT_TMP="${WARNING_PATTERNS_OUTPUT}.tmp"
 META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 
 # --- Group 1: card-data + card-names (expensive, independent of coverage) ---
@@ -186,13 +188,17 @@ echo "Wrote content-addressed $HASHED_OUTPUT"
 echo "Generating card coverage data..."
 track_tmp "$COVERAGE_OUTPUT_TMP"
 track_tmp "$COVERAGE_SUMMARY_TMP"
+track_tmp "$WARNING_PATTERNS_OUTPUT_TMP"
 coverage_ok=1
 if ! run_tool_with_recovery "$COVERAGE_OUTPUT_TMP" \
-      cargo run --profile tool --bin coverage-report -- "$DATA_DIR" --all; then
+      cargo run --profile tool --bin coverage-report -- "$DATA_DIR" --all --brief --write-warning-patterns "$WARNING_PATTERNS_OUTPUT_TMP"; then
   echo "WARNING: coverage-report failed; leaving existing $COVERAGE_OUTPUT in place." >&2
   coverage_ok=0
 elif [ ! -s "$COVERAGE_OUTPUT_TMP" ] || ! jq -e '.' "$COVERAGE_OUTPUT_TMP" >/dev/null 2>&1; then
   echo "WARNING: $COVERAGE_OUTPUT_TMP is empty or not valid JSON; leaving existing $COVERAGE_OUTPUT in place." >&2
+  coverage_ok=0
+elif [ ! -s "$WARNING_PATTERNS_OUTPUT_TMP" ] || ! jq -e '.' "$WARNING_PATTERNS_OUTPUT_TMP" >/dev/null 2>&1; then
+  echo "WARNING: $WARNING_PATTERNS_OUTPUT_TMP is empty or not valid JSON; leaving existing $WARNING_PATTERNS_OUTPUT in place." >&2
   coverage_ok=0
 fi
 if [ "$coverage_ok" = 1 ]; then
@@ -202,7 +208,8 @@ if [ "$coverage_ok" = 1 ]; then
   else
     promote_tmp "$COVERAGE_OUTPUT_TMP"  "$COVERAGE_OUTPUT"
     promote_tmp "$COVERAGE_SUMMARY_TMP" "$COVERAGE_SUMMARY"
-    echo "Promoted $COVERAGE_OUTPUT and $COVERAGE_SUMMARY"
+    promote_tmp "$WARNING_PATTERNS_OUTPUT_TMP" "$WARNING_PATTERNS_OUTPUT"
+    echo "Promoted $COVERAGE_OUTPUT, $COVERAGE_SUMMARY, and $WARNING_PATTERNS_OUTPUT"
     # Mirror to data/ for downstream tools that consume `<data-root>/coverage-data.json`.
     cp "$COVERAGE_OUTPUT" "$DATA_DIR/coverage-data.json"
   fi

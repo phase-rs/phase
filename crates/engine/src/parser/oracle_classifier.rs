@@ -378,6 +378,11 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     {
         return true;
     }
+    if scan_contains(lower, "causes you to discard this card")
+        && scan_contains(lower, "instead of putting it into your graveyard")
+    {
+        return true;
+    }
     false
 }
 

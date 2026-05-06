@@ -1762,6 +1762,32 @@ fn evaluate_replacement_condition(
                 false
             }
         }
+        ReplacementCondition::EventSourceControlledBy {
+            controller: ctrl_ref,
+        } => {
+            let event_source = match event {
+                ProposedEvent::Discard {
+                    source_id: Some(source_id),
+                    ..
+                } => *source_id,
+                _ => return false,
+            };
+            let event_source_controller = state
+                .objects
+                .get(&event_source)
+                .map(|o| o.controller)
+                .or_else(|| state.lki_cache.get(&event_source).map(|lki| lki.controller));
+            let Some(event_source_controller) = event_source_controller else {
+                return false;
+            };
+            match ctrl_ref {
+                ControllerRef::You => event_source_controller == controller,
+                ControllerRef::Opponent => event_source_controller != controller,
+                ControllerRef::ScopedPlayer
+                | ControllerRef::TargetPlayer
+                | ControllerRef::DefendingPlayer => false,
+            }
+        }
         // CR 500.7 + CR 614.10: Replacement applies only for extra turns.
         // Checks the event's `is_extra_turn` flag directly; returns `false` for
         // any non-`BeginTurn` event so a misattached `OnlyExtraTurn` doesn't
@@ -2188,6 +2214,29 @@ fn extract_etb_counters(
             };
             vec![(counter_type.clone(), n)]
         }
+        Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } => enter_with_counters
+            .iter()
+            .map(|(counter_type, count)| {
+                let controller = state
+                    .objects
+                    .get(&source_id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(PlayerId(0));
+                let ctx = crate::game::quantity::QuantityContext {
+                    entering: event.affected_object_id(),
+                    source: source_id,
+                    recipient: None,
+                    scoped_player: None,
+                };
+                let n =
+                    crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)
+                        .max(0) as u32;
+                (counter_type.clone(), n)
+            })
+            .collect(),
         _ => Vec::new(),
     };
     counters.extend(extract_etb_counters(

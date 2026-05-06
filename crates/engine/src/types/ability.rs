@@ -6917,6 +6917,10 @@ pub enum ReplacementCondition {
     /// only to objects that were dealt damage this turn by a source controlled by the specified
     /// player. Checks `damage_dealt_this_turn` records in game state.
     DealtDamageThisTurnBySourceControlledBy { controller: ControllerRef },
+    /// CR 109.5 + CR 614.1a: Replacement applies only when the event was caused by
+    /// a source controlled by the specified player relative to the replacement source.
+    /// Used by "an opponent controls causes you to discard this card" replacement effects.
+    EventSourceControlledBy { controller: ControllerRef },
     /// CR 500.7 + CR 614.10: Replacement applies only when the triggering
     /// event is an *extra* turn (granted by an effect, not a natural turn).
     /// Used by Stranglehold ("If a player would begin an extra turn...").

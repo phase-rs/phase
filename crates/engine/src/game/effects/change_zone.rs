@@ -28,6 +28,120 @@ pub(crate) enum ZoneMoveResult {
     NeedsChoice(PlayerId),
 }
 
+/// Deliver a zone-change event that has already passed through replacement.
+pub(crate) fn deliver_replaced_zone_change(
+    state: &mut GameState,
+    event: ProposedEvent,
+    source_id: Option<ObjectId>,
+    duration: Option<&Duration>,
+    events: &mut Vec<GameEvent>,
+) {
+    if let ProposedEvent::ZoneChange {
+        object_id,
+        from,
+        to,
+        cause,
+        enter_transformed: should_transform,
+        enter_tapped: should_tap,
+        enter_with_counters,
+        controller_override: ctrl_override,
+        ..
+    } = event
+    {
+        zones::move_to_zone(state, object_id, to, events);
+        if to == Zone::Battlefield || from == Zone::Battlefield {
+            state.layers_dirty = true;
+        }
+        // CR 712.14a: Apply transformation if entering the battlefield transformed.
+        if should_transform && to == Zone::Battlefield {
+            if let Some(obj) = state.objects.get(&object_id) {
+                if obj.back_face.is_some() && !obj.transformed {
+                    let _ = crate::game::transform::transform_permanent(state, object_id, events);
+                }
+            }
+        }
+        // CR 614.1: Apply enter-tapped if the effect or replacement set it.
+        if should_tap.resolve(false) && to == Zone::Battlefield {
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.tapped = true;
+            }
+        }
+        // CR 110.2a: Apply controller override if the effect specifies
+        // "under your control" — set before triggers fire.
+        if let Some(new_controller) = ctrl_override {
+            if to == Zone::Battlefield {
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    obj.controller = new_controller;
+                }
+            }
+        }
+        // CR 614.1c: Apply counters from replacement pipeline (e.g., saga lore counters,
+        // planeswalker intrinsic loyalty, battle intrinsic defense).
+        if to == Zone::Battlefield {
+            crate::game::engine_replacement::apply_etb_counters(
+                state,
+                object_id,
+                &enter_with_counters,
+                events,
+            );
+            // CR 614.1c: Apply pending ETB counters from delayed triggers
+            // (e.g., "that creature enters with an additional +1/+1 counter").
+            let pending: Vec<_> = state
+                .pending_etb_counters
+                .iter()
+                .filter(|(oid, _, _)| *oid == object_id)
+                .map(|(_, ct, n)| (ct.clone(), *n))
+                .collect();
+            if !pending.is_empty() {
+                crate::game::engine_replacement::apply_etb_counters(
+                    state, object_id, &pending, events,
+                );
+                state
+                    .pending_etb_counters
+                    .retain(|(oid, _, _)| *oid != object_id);
+            }
+        } else if !enter_with_counters.is_empty() {
+            // CR 122.1: Effect-driven counters for non-battlefield
+            // destinations — e.g., "exile it with three egg counters
+            // on it" (Darigaaz Reincarnated). Apply directly via the
+            // shared single-authority resolver so counter-doubling
+            // replacements (Doubling Season, Hardened Scales) and
+            // event emission stay consistent.
+            crate::game::engine_replacement::apply_etb_counters(
+                state,
+                object_id,
+                &enter_with_counters,
+                events,
+            );
+        }
+        // CR 401.3: If an object is put into a library (not at a specific
+        // position), that library is shuffled afterward.
+        if to == Zone::Library {
+            let owner = state.objects.get(&object_id).map(|o| o.owner);
+            if let Some(owner) = owner {
+                shuffle_library(state, owner);
+            }
+        }
+        // Track cards exiled by the source. Some linked exiles return when the
+        // source leaves; others are just remembered as "exiled with" the source.
+        if to == Zone::Exile {
+            if let Some(source_id) = cause.or(source_id) {
+                let kind = match duration {
+                    Some(Duration::UntilHostLeavesPlay) => {
+                        ExileLinkKind::UntilSourceLeaves { return_zone: from }
+                    }
+                    _ => ExileLinkKind::TrackedBySource,
+                };
+                state.exile_links.push(ExileLink {
+                    exiled_id: object_id,
+                    source_id,
+                    kind,
+                });
+            }
+        }
+    }
+}
+
 /// Execute a single object zone-change through the full pipeline:
 /// ProposedEvent → replacement → move → ExileLink → shuffle → layers_dirty.
 ///
@@ -134,108 +248,7 @@ pub(crate) fn execute_zone_move(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::ZoneChange {
-                object_id,
-                to,
-                enter_transformed: should_transform,
-                enter_tapped: should_tap,
-                enter_with_counters,
-                controller_override: ctrl_override,
-                ..
-            } = event
-            {
-                zones::move_to_zone(state, object_id, to, events);
-                if to == Zone::Battlefield || from_zone == Zone::Battlefield {
-                    state.layers_dirty = true;
-                }
-                // CR 712.14a: Apply transformation if entering the battlefield transformed.
-                if should_transform && to == Zone::Battlefield {
-                    if let Some(obj) = state.objects.get(&object_id) {
-                        if obj.back_face.is_some() && !obj.transformed {
-                            let _ = crate::game::transform::transform_permanent(
-                                state, object_id, events,
-                            );
-                        }
-                    }
-                }
-                // CR 614.1: Apply enter-tapped if the effect or replacement set it.
-                if should_tap.resolve(false) && to == Zone::Battlefield {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = true;
-                    }
-                }
-                // CR 110.2a: Apply controller override if the effect specifies
-                // "under your control" — set before triggers fire.
-                if let Some(new_controller) = ctrl_override {
-                    if to == Zone::Battlefield {
-                        if let Some(obj) = state.objects.get_mut(&object_id) {
-                            obj.controller = new_controller;
-                        }
-                    }
-                }
-                // CR 614.1c: Apply counters from replacement pipeline (e.g., saga lore counters,
-                // planeswalker intrinsic loyalty, battle intrinsic defense).
-                if to == Zone::Battlefield {
-                    crate::game::engine_replacement::apply_etb_counters(
-                        state,
-                        object_id,
-                        &enter_with_counters,
-                        events,
-                    );
-                    // CR 614.1c: Apply pending ETB counters from delayed triggers
-                    // (e.g., "that creature enters with an additional +1/+1 counter").
-                    let pending: Vec<_> = state
-                        .pending_etb_counters
-                        .iter()
-                        .filter(|(oid, _, _)| *oid == object_id)
-                        .map(|(_, ct, n)| (ct.clone(), *n))
-                        .collect();
-                    if !pending.is_empty() {
-                        crate::game::engine_replacement::apply_etb_counters(
-                            state, object_id, &pending, events,
-                        );
-                        state
-                            .pending_etb_counters
-                            .retain(|(oid, _, _)| *oid != object_id);
-                    }
-                } else if !enter_with_counters.is_empty() {
-                    // CR 122.1: Effect-driven counters for non-battlefield
-                    // destinations — e.g., "exile it with three egg counters
-                    // on it" (Darigaaz Reincarnated). Apply directly via the
-                    // shared single-authority resolver so counter-doubling
-                    // replacements (Doubling Season, Hardened Scales) and
-                    // event emission stay consistent.
-                    crate::game::engine_replacement::apply_etb_counters(
-                        state,
-                        object_id,
-                        &enter_with_counters,
-                        events,
-                    );
-                }
-                // CR 401.3: If an object is put into a library (not at a specific
-                // position), that library is shuffled afterward.
-                if to == Zone::Library {
-                    let owner = state.objects.get(&object_id).map(|o| o.owner);
-                    if let Some(owner) = owner {
-                        shuffle_library(state, owner);
-                    }
-                }
-                // Track cards exiled by the source. Some linked exiles return when the
-                // source leaves; others are just remembered as "exiled with" the source.
-                if to == Zone::Exile {
-                    let kind = match duration {
-                        Some(Duration::UntilHostLeavesPlay) => ExileLinkKind::UntilSourceLeaves {
-                            return_zone: from_zone,
-                        },
-                        _ => ExileLinkKind::TrackedBySource,
-                    };
-                    state.exile_links.push(ExileLink {
-                        exiled_id: object_id,
-                        source_id,
-                        kind,
-                    });
-                }
-            }
+            deliver_replaced_zone_change(state, event, Some(source_id), duration, events);
             ZoneMoveResult::Done
         }
         ReplacementResult::Prevented => ZoneMoveResult::Done,

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::effects::change_zone;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
@@ -81,6 +82,7 @@ pub fn resolve(
             let proposed = ProposedEvent::Discard {
                 player_id,
                 object_id: obj_id,
+                source_id: Some(ability.source_id),
                 applied: HashSet::new(),
             };
 
@@ -99,11 +101,11 @@ pub fn resolve(
                                 object_id: oid,
                             });
                         }
-                        ProposedEvent::ZoneChange {
-                            object_id: oid, to, ..
-                        } => {
+                        zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                             // Replacement redirected (e.g., Madness → exile instead of graveyard).
-                            zones::move_to_zone(state, oid, to, events);
+                            change_zone::deliver_replaced_zone_change(
+                                state, zone_event, None, None, events,
+                            );
                             // CR 702.35: The card was still discarded — record and emit event
                             // so "whenever you discard" triggers fire.
                             crate::game::restrictions::record_discard(state, player_id);
@@ -160,9 +162,13 @@ pub fn resolve(
             // Forced discard — no choice needed, discard all eligible cards.
             // When up_to=true, always present the choice (player may discard fewer).
             for obj_id in &hand_cards {
-                if let DiscardOutcome::NeedsReplacementChoice(player) =
-                    discard_as_cost(state, *obj_id, discard_player, events)
-                {
+                if let DiscardOutcome::NeedsReplacementChoice(player) = discard_as_cost_with_source(
+                    state,
+                    *obj_id,
+                    discard_player,
+                    Some(ability.source_id),
+                    events,
+                ) {
                     state.waiting_for =
                         crate::game::replacement::replacement_choice_waiting_for(player, state);
                     // Known limitation: EffectResolved is not emitted when replacement
@@ -202,9 +208,20 @@ pub(crate) fn discard_as_cost(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> DiscardOutcome {
+    discard_as_cost_with_source(state, object_id, player, None, events)
+}
+
+pub(crate) fn discard_as_cost_with_source(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> DiscardOutcome {
     let proposed = ProposedEvent::Discard {
         player_id: player,
         object_id,
+        source_id,
         applied: HashSet::new(),
     };
     match replacement::replace_event(state, proposed, events) {
@@ -221,13 +238,11 @@ pub(crate) fn discard_as_cost(
                     object_id: oid,
                 });
             }
-            ProposedEvent::ZoneChange {
-                object_id: oid, to, ..
-            } => {
+            zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                 // CR 614.1c: Replacement redirected destination (e.g., Madness → exile).
                 // CR 702.35: The card was still discarded — record and emit event
                 // so "whenever you discard" triggers fire.
-                zones::move_to_zone(state, oid, to, events);
+                change_zone::deliver_replaced_zone_change(state, zone_event, None, None, events);
                 crate::game::restrictions::record_discard(state, player);
                 events.push(GameEvent::Discarded {
                     player_id: player,
@@ -252,11 +267,37 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ReplacementDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, ReplacementCondition,
+        ReplacementDefinition, TargetFilter,
     };
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+
+    fn discard_to_battlefield_with_two_counters_replacement() -> ReplacementDefinition {
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Discard);
+        replacement.valid_card = Some(TargetFilter::SelfRef);
+        replacement.condition = Some(ReplacementCondition::EventSourceControlledBy {
+            controller: ControllerRef::Opponent,
+        });
+        replacement.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })],
+            },
+        )));
+        replacement
+    }
 
     #[test]
     fn discard_moves_card_from_hand_to_graveyard() {
@@ -362,6 +403,85 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, GameEvent::Discarded { object_id, .. } if *object_id == card)
         ));
+    }
+
+    #[test]
+    fn opponent_source_discard_replacement_enters_with_counters() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dodecapod".to_string(),
+            Zone::Hand,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Discard Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .replacement_definitions
+            .push(discard_to_battlefield_with_two_counters_replacement());
+
+        let mut events = Vec::new();
+        let outcome =
+            discard_as_cost_with_source(&mut state, card, PlayerId(0), Some(source), &mut events);
+
+        assert!(matches!(outcome, DiscardOutcome::Complete));
+        assert!(state.battlefield.contains(&card));
+        assert!(!state.players[0].graveyard.contains(&card));
+        assert_eq!(
+            state.objects[&card]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2)
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::Discarded { object_id, .. } if *object_id == card)
+        ));
+    }
+
+    #[test]
+    fn self_source_discard_replacement_condition_does_not_apply() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dodecapod".to_string(),
+            Zone::Hand,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Self Discard Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .replacement_definitions
+            .push(discard_to_battlefield_with_two_counters_replacement());
+
+        let mut events = Vec::new();
+        let outcome =
+            discard_as_cost_with_source(&mut state, card, PlayerId(0), Some(source), &mut events);
+
+        assert!(matches!(outcome, DiscardOutcome::Complete));
+        assert!(state.players[0].graveyard.contains(&card));
+        assert!(!state.battlefield.contains(&card));
+        assert!(!state.objects[&card]
+            .counters
+            .contains_key(&CounterType::Plus1Plus1));
     }
 
     #[test]
