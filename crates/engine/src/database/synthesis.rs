@@ -1897,6 +1897,7 @@ fn build_oracle_face_inner(
         parse_warnings: parsed.parse_warnings,
         brawl_commander: false,
         metadata: Default::default(),
+        rarities: Default::default(),
     };
 
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);

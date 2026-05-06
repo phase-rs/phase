@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process;
 
@@ -13,7 +13,7 @@ use engine::database::CardDatabase;
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
-use engine::types::card::{CardFace, CardLayout};
+use engine::types::card::{CardFace, CardLayout, Rarity};
 
 #[derive(Debug, Clone, Serialize)]
 struct CardExportEntry {
@@ -36,6 +36,10 @@ struct CardExportEntry {
     /// the card as a whole, not a specific face, so no information is lost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     rulings: Vec<Ruling>,
+    /// All rarities this card has been printed at across all sets.
+    /// Populated by scanning per-set MTGJSON files in `data/mtgjson/sets/`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    rarities: BTreeSet<Rarity>,
 }
 
 /// Insert a card face under its short-name key, resolving collisions when
@@ -118,6 +122,104 @@ fn build_export_layout(
     } else {
         CardLayout::Single(build_oracle_face(&faces[0], oracle_id))
     }
+}
+
+/// Minimal deserialization structs for MTGJSON set files — only reads card name + rarity.
+#[derive(Deserialize)]
+struct SetFile {
+    data: SetData,
+}
+
+#[derive(Deserialize)]
+struct SetData {
+    cards: Vec<SetCard>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetCard {
+    name: String,
+    #[serde(default)]
+    face_name: Option<String>,
+    rarity: String,
+}
+
+/// Scan all set files in `data/mtgjson/sets/` to build a map of lowercased card name
+/// to the set of all rarities that card has been printed at. If the sets directory
+/// doesn't exist, returns an empty map (graceful degradation).
+fn build_rarity_map(mtgjson_path: &std::path::Path) -> HashMap<String, BTreeSet<Rarity>> {
+    let sets_dir = mtgjson_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("sets");
+
+    if !sets_dir.exists() {
+        tracing::warn!(
+            "Sets directory {} not found — rarities will be empty",
+            sets_dir.display()
+        );
+        return HashMap::new();
+    }
+
+    let mut map: HashMap<String, BTreeSet<Rarity>> = HashMap::new();
+    let mut set_count: usize = 0;
+
+    let entries = match std::fs::read_dir(&sets_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("Failed to read sets directory {}: {e}", sets_dir.display());
+            return HashMap::new();
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("Failed to read {}: {e}", path.display());
+                continue;
+            }
+        };
+
+        let set_file: SetFile = match serde_json::from_str(&data) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to parse {}: {e}", path.display());
+                continue;
+            }
+        };
+
+        set_count += 1;
+        for card in set_file.data.cards {
+            let rarity = match card.rarity.as_str() {
+                "common" => Rarity::Common,
+                "uncommon" => Rarity::Uncommon,
+                "rare" => Rarity::Rare,
+                "mythic" => Rarity::Mythic,
+                "special" => Rarity::Special,
+                "bonus" => Rarity::Bonus,
+                _ => continue,
+            };
+            let key = card
+                .face_name
+                .as_deref()
+                .unwrap_or(&card.name)
+                .to_lowercase();
+            map.entry(key).or_default().insert(rarity);
+        }
+    }
+
+    tracing::info!(
+        "Scanned {set_count} set files, {} cards with rarity data",
+        map.len()
+    );
+
+    map
 }
 
 fn main() {
@@ -240,6 +342,9 @@ fn main() {
         }
     };
 
+    // Scan per-set MTGJSON files to build a card name → rarities map.
+    let rarity_map = build_rarity_map(&mtgjson_path);
+
     // Build Forge index: --forge flag > PHASE_FORGE_PATH env var > data/forge-cardsfolder/ default.
     #[cfg(feature = "forge")]
     let forge_index = {
@@ -336,6 +441,10 @@ fn main() {
                 } else {
                     Vec::new()
                 };
+                let rarities = rarity_map
+                    .get(&face.name.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
                 insert_face(
                     &mut face_index,
                     mtgjson_key.as_str(),
@@ -346,6 +455,7 @@ fn main() {
                         layout: layout_str,
                         printings: faces[0].printings.clone(),
                         rulings,
+                        rarities,
                     },
                 );
             }
@@ -362,6 +472,10 @@ fn main() {
                 cards_with_unimplemented += 1;
             }
 
+            let rarities = rarity_map
+                .get(&face.name.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
             insert_face(
                 &mut face_index,
                 mtgjson_key.as_str(),
@@ -372,6 +486,7 @@ fn main() {
                     layout: None,
                     printings: faces[0].printings.clone(),
                     rulings: faces[0].rulings.clone(),
+                    rarities,
                 },
             );
         }

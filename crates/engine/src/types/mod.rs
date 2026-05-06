@@ -29,7 +29,7 @@ pub use ability::{
     TriggerDefinition, TypeFilter, TypedFilter,
 };
 pub use actions::GameAction;
-pub use card::{CardFace, CardLayout, CardRules};
+pub use card::{CardFace, CardLayout, CardRules, Rarity};
 pub use card_type::{is_land_subtype, CardType, CoreType, Supertype};
 pub use counter::{parse_counter_type, CounterMatch, CounterType};
 pub use definitions::Definitions;

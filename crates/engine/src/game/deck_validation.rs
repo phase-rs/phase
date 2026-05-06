@@ -318,7 +318,7 @@ impl CommanderVariantRules {
         Self {
             eligible: is_pauper_commander_eligible,
             eligibility_error:
-                "Pauper Commander commander cards must be creatures, Vehicles, or Spacecraft",
+                "Pauper Commander commander must be an uncommon creature, Vehicle, or Spacecraft",
             skip_commander_legality: true,
         }
     }
@@ -329,11 +329,6 @@ impl CommanderVariantRules {
 /// the legality table, commander eligibility, and display label differ.
 /// DuelCommander's 30-life / 1v1-only rules are expressed in `FormatConfig`,
 /// not deck validation.
-///
-/// Known gap for Pauper Commander (PDH): the PDH community rule that the
-/// commander must be uncommon is not yet structurally enforced because exported
-/// `CardFace` data is rarity-agnostic. The card-pool check still relies on
-/// `LegalityFormat::PauperCommander` for non-commander slots.
 fn evaluate_commander_with_format(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -1091,10 +1086,14 @@ pub fn is_commander_eligible(face: &CardFace) -> bool {
 }
 
 fn is_pauper_commander_eligible(face: &CardFace) -> bool {
-    face.card_type.core_types.contains(&CoreType::Creature)
+    use crate::types::card::Rarity;
+
+    let is_creature_or_vehicle = face.card_type.core_types.contains(&CoreType::Creature)
         || face.card_type.subtypes.iter().any(|subtype| {
             subtype.eq_ignore_ascii_case("Vehicle") || subtype.eq_ignore_ascii_case("Spacecraft")
-        })
+        });
+    let has_uncommon_printing = face.rarities.contains(&Rarity::Uncommon);
+    is_creature_or_vehicle && has_uncommon_printing
 }
 
 /// CR 702.124: Check if two cards form a valid partner pair for co-commanders.
@@ -1638,6 +1637,7 @@ mod tests {
                 "replacements": [],
                 "color_override": null,
                 "scryfall_oracle_id": null,
+                "rarities": ["uncommon"],
                 "legalities": {}
             },
             "plains": {
@@ -1683,6 +1683,142 @@ mod tests {
             "{:?}",
             result.selected_format_reasons
         );
+    }
+
+    #[test]
+    fn pauper_commander_rejects_rare_only_creature() {
+        let db_json = serde_json::json!({
+            "rare creature": {
+                "name": "Rare Creature",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "rarities": ["rare"],
+                "legalities": {}
+            },
+            "plains": {
+                "name": "Plains",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Basic"],
+                    "core_types": ["Land"],
+                    "subtypes": ["Plains"]
+                },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": { "paupercommander": "legal" }
+            }
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 99),
+            sideboard: Vec::new(),
+            commander: vec!["Rare Creature".to_string()],
+            selected_format: Some(GameFormat::PauperCommander),
+            selected_match_type: None,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("uncommon creature")));
+    }
+
+    #[test]
+    fn pauper_commander_rejects_uncommon_noncreature() {
+        let db_json = serde_json::json!({
+            "uncommon sorcery": {
+                "name": "Uncommon Sorcery",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Sorcery"], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "rarities": ["uncommon"],
+                "legalities": { "paupercommander": "legal" }
+            },
+            "plains": {
+                "name": "Plains",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Basic"],
+                    "core_types": ["Land"],
+                    "subtypes": ["Plains"]
+                },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": { "paupercommander": "legal" }
+            }
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 99),
+            sideboard: Vec::new(),
+            commander: vec!["Uncommon Sorcery".to_string()],
+            selected_format: Some(GameFormat::PauperCommander),
+            selected_match_type: None,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("uncommon creature")));
     }
 
     #[test]
