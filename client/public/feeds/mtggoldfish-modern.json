@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-05-19T00:00:00Z",
+  "updated": "2026-05-20T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -754,18 +754,26 @@
       "name": "Goryo's Vengeance",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "W",
+        "U",
         "G",
-        "U"
+        "B",
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 4,
+          "name": "Psychic Frog"
+        },
+        {
           "count": 1,
-          "name": "Cephalid Coliseum"
+          "name": "Breeding Pool"
+        },
+        {
+          "count": 1,
+          "name": "Consign to Memory"
         },
         {
           "count": 4,
@@ -776,8 +784,44 @@
           "name": "Faithful Mending"
         },
         {
+          "count": 2,
+          "name": "Force of Negation"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 3,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Pest Control"
+        },
+        {
           "count": 1,
           "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Shadowy Backstreet"
+        },
+        {
+          "count": 1,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 4,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 4,
+          "name": "Atraxa, Grand Unifier"
         },
         {
           "count": 4,
@@ -785,23 +829,11 @@
         },
         {
           "count": 1,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 1,
-          "name": "Shadowy Backstreet"
-        },
-        {
-          "count": 4,
-          "name": "Psychic Frog"
-        },
-        {
-          "count": 1,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 1,
           "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Prismatic Ending"
         },
         {
           "count": 1,
@@ -816,8 +848,8 @@
           "name": "Island"
         },
         {
-          "count": 4,
-          "name": "Polluted Delta"
+          "count": 1,
+          "name": "Godless Shrine"
         },
         {
           "count": 1,
@@ -828,82 +860,158 @@
           "name": "Griselbrand"
         },
         {
-          "count": 1,
-          "name": "Quantum Riddler"
-        },
-        {
           "count": 4,
           "name": "Goryo's Vengeance"
-        },
-        {
-          "count": 3,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 2,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 1,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 4,
-          "name": "Atraxa, Grand Unifier"
-        },
-        {
-          "count": 3,
-          "name": "Thoughtseize"
         },
         {
           "count": 1,
           "name": "Undercity Sewers"
         },
         {
-          "count": 1,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 3,
-          "name": "Quantum Riddler"
-        },
-        {
           "count": 4,
-          "name": "Prismatic Ending"
+          "name": "Flooded Strand"
         }
       ],
       "sideboard": [
         {
+          "count": 1,
+          "name": "Ashiok, Dream Render"
+        },
+        {
           "count": 2,
-          "name": "Damping Sphere"
+          "name": "Consign to Memory"
         },
         {
           "count": 1,
-          "name": "Teferi, Time Raveler"
+          "name": "Nihil Spellbomb"
         },
         {
           "count": 3,
           "name": "Mystical Dispute"
         },
         {
-          "count": 2,
+          "count": 1,
+          "name": "Emperor of Bones"
+        },
+        {
+          "count": 1,
           "name": "Pest Control"
         },
         {
           "count": 1,
-          "name": "Teferi, Time Raveler"
+          "name": "Celestial Purge"
         },
         {
           "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
           "name": "Wrath of the Skies"
         },
         {
+          "count": 2,
+          "name": "Teferi, Time Raveler"
+        }
+      ]
+    },
+    {
+      "name": "Belcher",
+      "author": "MTGGoldfish",
+      "colors": [],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Orim's Chant"
+        },
+        {
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Legion Leadership"
+        },
+        {
+          "count": 4,
+          "name": "Goblin Charbelcher"
+        },
+        {
+          "count": 4,
+          "name": "Irencrag Feat"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        },
+        {
+          "count": 4,
+          "name": "Pinnacle Monk"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Talisman of Conviction"
+        },
+        {
+          "count": 4,
+          "name": "Shatterskull Smashing"
+        },
+        {
+          "count": 4,
+          "name": "Stormscale Scion"
+        },
+        {
+          "count": 4,
+          "name": "Strike It Rich"
+        },
+        {
+          "count": 4,
+          "name": "Sundering Eruption"
+        },
+        {
           "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
+          "name": "Razorgrass Ambush"
+        },
+        {
+          "count": 4,
+          "name": "Witch Enchanter"
+        },
+        {
+          "count": 3,
+          "name": "Vessel of Volatility"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 3,
+          "name": "Blood Moon"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Silence"
+        },
+        {
+          "count": 2,
+          "name": "Shatterstorm"
+        },
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 1,
+          "name": "March of Reckless Joy"
         }
       ]
     },
@@ -1216,114 +1324,11 @@
       ]
     },
     {
-      "name": "Belcher",
-      "author": "MTGGoldfish",
-      "colors": [],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Orim's Chant"
-        },
-        {
-          "count": 4,
-          "name": "Desperate Ritual"
-        },
-        {
-          "count": 4,
-          "name": "Legion Leadership"
-        },
-        {
-          "count": 4,
-          "name": "Goblin Charbelcher"
-        },
-        {
-          "count": 4,
-          "name": "Irencrag Feat"
-        },
-        {
-          "count": 4,
-          "name": "Manamorphose"
-        },
-        {
-          "count": 4,
-          "name": "Pinnacle Monk"
-        },
-        {
-          "count": 4,
-          "name": "Pyretic Ritual"
-        },
-        {
-          "count": 4,
-          "name": "Talisman of Conviction"
-        },
-        {
-          "count": 4,
-          "name": "Shatterskull Smashing"
-        },
-        {
-          "count": 4,
-          "name": "Stormscale Scion"
-        },
-        {
-          "count": 4,
-          "name": "Strike It Rich"
-        },
-        {
-          "count": 4,
-          "name": "Sundering Eruption"
-        },
-        {
-          "count": 1,
-          "name": "Razorgrass Ambush"
-        },
-        {
-          "count": 4,
-          "name": "Witch Enchanter"
-        },
-        {
-          "count": 3,
-          "name": "Vessel of Volatility"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Wear // Tear"
-        },
-        {
-          "count": 3,
-          "name": "Blood Moon"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Silence"
-        },
-        {
-          "count": 2,
-          "name": "Shatterstorm"
-        },
-        {
-          "count": 2,
-          "name": "Erode"
-        },
-        {
-          "count": 1,
-          "name": "March of Reckless Joy"
-        }
-      ]
-    },
-    {
-      "name": "Neobrand",
+      "name": "Living End",
       "author": "MTGGoldfish",
       "colors": [
         "U",
+        "B",
         "G"
       ],
       "tags": [
@@ -1332,153 +1337,173 @@
       "main": [
         {
           "count": 4,
-          "name": "Allosaurus Rider"
+          "name": "Wistfulness"
         },
         {
           "count": 1,
-          "name": "Xenagos, God of Revels"
+          "name": "Colossal Skyturtle"
+        },
+        {
+          "count": 2,
+          "name": "Curator of Mysteries"
         },
         {
           "count": 1,
-          "name": "Wooded Foothills"
+          "name": "Deceit"
         },
         {
           "count": 1,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 1,
-          "name": "Bridgeworks Battle"
-        },
-        {
-          "count": 1,
-          "name": "Ureni, the Song Unending"
+          "name": "Disciple of Freyalise"
         },
         {
           "count": 4,
-          "name": "Summoner's Pact"
-        },
-        {
-          "count": 4,
-          "name": "Eldritch Evolution"
+          "name": "Endurance"
         },
         {
           "count": 1,
-          "name": "Scalding Tarn"
+          "name": "Flare of Denial"
         },
         {
           "count": 1,
-          "name": "Polluted Delta"
+          "name": "Watery Grave"
+        },
+        {
+          "count": 1,
+          "name": "Underground Mortuary"
+        },
+        {
+          "count": 1,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 2,
+          "name": "Formidable Speaker"
         },
         {
           "count": 2,
           "name": "Generous Ent"
         },
         {
-          "count": 3,
-          "name": "Pact of Negation"
+          "count": 1,
+          "name": "Halo Forager"
         },
         {
           "count": 1,
-          "name": "Nourishing Shoal"
-        },
-        {
-          "count": 3,
           "name": "Hedge Maze"
         },
         {
           "count": 1,
-          "name": "Hooting Mandrills"
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Street Wraith"
+        },
+        {
+          "count": 4,
+          "name": "Shardless Agent"
+        },
+        {
+          "count": 1,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 1,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 4,
+          "name": "Overlord of the Balemurk"
         },
         {
           "count": 4,
           "name": "Misty Rainforest"
         },
         {
-          "count": 4,
-          "name": "Neoform"
+          "count": 1,
+          "name": "Mistrise Village"
         },
         {
           "count": 1,
-          "name": "Griselbrand"
+          "name": "Sink into Stupor"
         },
         {
           "count": 3,
-          "name": "Ghalta, Stampede Tyrant"
+          "name": "Living End"
         },
         {
           "count": 4,
-          "name": "Planar Genesis"
+          "name": "Subtlety"
         },
         {
           "count": 1,
-          "name": "Flooded Strand"
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Troll of Khazad-dum"
         },
         {
           "count": 1,
-          "name": "Endurance"
-        },
-        {
-          "count": 1,
-          "name": "Snow-Covered Forest"
-        },
-        {
-          "count": 1,
-          "name": "Snow-Covered Island"
+          "name": "Forest"
         },
         {
           "count": 4,
-          "name": "Disciple of Freyalise"
-        },
-        {
-          "count": 4,
-          "name": "Consign to Memory"
+          "name": "Force of Negation"
         },
         {
           "count": 1,
-          "name": "Veil of Summer"
+          "name": "Flooded Grove"
         },
         {
           "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 1,
-          "name": "Atraxa, Grand Unifier"
+          "name": "Breeding Pool"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Nature's Claim"
+          "name": "Inevitable Betrayal"
         },
         {
           "count": 2,
-          "name": "Hooting Mandrills"
+          "name": "Culling Ritual"
         },
         {
           "count": 1,
-          "name": "Into the Flood Maw"
+          "name": "Damping Sphere"
         },
         {
-          "count": 4,
+          "count": 1,
+          "name": "Harvester of Misery"
+        },
+        {
+          "count": 1,
+          "name": "Foundation Breaker"
+        },
+        {
+          "count": 1,
+          "name": "Fracturing Gust"
+        },
+        {
+          "count": 2,
+          "name": "Dismember"
+        },
+        {
+          "count": 1,
+          "name": "Commandeer"
+        },
+        {
+          "count": 1,
+          "name": "Mai, Scornful Striker"
+        },
+        {
+          "count": 3,
           "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Natural State"
-        },
-        {
-          "count": 1,
-          "name": "Elesh Norn, Grand Cenobite"
-        },
-        {
-          "count": 1,
-          "name": "Veil of Summer"
-        },
-        {
-          "count": 2,
-          "name": "Veil of Summer"
         }
       ]
     }
