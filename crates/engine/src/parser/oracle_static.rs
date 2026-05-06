@@ -8355,6 +8355,25 @@ mod tests {
     }
 
     #[test]
+    fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
+        let def = parse_static_line(
+            "This spell costs {1} less to cast for each creature you attacked with this turn.",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            def.mode,
+            StaticMode::ReduceCost {
+                amount: ManaCost::Cost { generic: 1, .. },
+                dynamic_count: Some(QuantityRef::AttackedThisTurn),
+                ..
+            }
+        ));
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+    }
+
+    #[test]
     fn self_cost_reduction_another_filtered_spell_requires_prior_matching_spell() {
         let def = parse_static_line(
             "This spell costs {2} less to cast if you've cast another instant or sorcery spell this turn.",

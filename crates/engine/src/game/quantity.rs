@@ -1262,14 +1262,13 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
-        // CR 508.1a: Whether the controller declared attackers this turn.
-        QuantityRef::AttackedThisTurn => {
-            if state.players_attacked_this_turn.contains(&controller) {
-                1
-            } else {
-                0
-            }
-        }
+        // CR 508.1a: Count creatures the controller attacked with this turn.
+        QuantityRef::AttackedThisTurn => state
+            .attacking_creatures_this_turn
+            .get(&controller)
+            .copied()
+            .map(u32_to_i32_saturating)
+            .unwrap_or(0),
         // CR 603.4: Whether the controller descended this turn.
         QuantityRef::DescendedThisTurn => {
             if player.is_some_and(|p| p.descended_this_turn) {
@@ -2054,6 +2053,18 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), spell), 2);
+    }
+
+    #[test]
+    fn resolve_attacked_this_turn_counts_creatures_attacked_with_by_controller() {
+        let mut state = GameState::new_two_player(42);
+        state.attacking_creatures_this_turn.insert(PlayerId(0), 3);
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn,
+        };
+
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(1)), 3);
     }
 
     #[test]

@@ -511,7 +511,7 @@ fn granted_spell_keywords(
     let mut keywords = Vec::new();
     // CR 702.26b + CR 604.1: Functioning gate owned by
     // `battlefield_active_statics`; inline `def.condition` check removed.
-    for (source_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
         let StaticMode::CastWithKeyword { keyword } = &def.mode else {
             continue;
         };

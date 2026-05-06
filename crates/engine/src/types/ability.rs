@@ -2254,8 +2254,9 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
-    /// CR 508.1a: Number of times the controller declared attackers this turn.
-    /// Used for "if you attacked this turn" conditions.
+    /// CR 508.1a: Number of creatures the controller attacked with this turn.
+    /// Used for "if you attacked this turn" and "for each creature you attacked
+    /// with this turn" patterns.
     AttackedThisTurn,
     /// CR 603.4: Whether the controller descended this turn (permanent card entered graveyard).
     DescendedThisTurn,

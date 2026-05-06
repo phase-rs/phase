@@ -97,6 +97,19 @@ pub fn battlefield_active_statics(
         .flat_map(move |obj| active_static_definitions(state, obj).map(move |def| (obj, def)))
 }
 
+/// Game-scope iteration of static abilities that function from normal public
+/// sources: battlefield permanents plus command-zone emblems.
+pub fn game_active_statics(
+    state: &GameState,
+) -> impl Iterator<Item = (&GameObject, &StaticDefinition)> {
+    state
+        .battlefield
+        .iter()
+        .chain(state.command_zone.iter())
+        .filter_map(move |id| state.objects.get(id))
+        .flat_map(move |obj| active_static_definitions(state, obj).map(move |def| (obj, def)))
+}
+
 /// Like `battlefield_active_statics` but WITHOUT condition filtering.
 ///
 /// Applies only the CR 702.26b phased-out gate and the CR 114.4

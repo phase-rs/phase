@@ -319,6 +319,15 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     }
 }
 
+fn storm_copy_count_before_cast(state: &GameState) -> i32 {
+    state
+        .spells_cast_this_turn_by_player
+        .values()
+        .map(Vec::len)
+        .sum::<usize>()
+        .saturating_sub(1) as i32
+}
+
 /// CR 603.2g + CR 603.6a + CR 700.4: Check whether an event's trigger-firing
 /// should be suppressed by any active `SuppressTriggers` static on the battlefield.
 ///
@@ -875,9 +884,46 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
         // is allocated.
         if let GameEvent::SpellCast {
             object_id: cast_obj_id,
+            controller: caster,
             ..
         } = event
         {
+            let storm_instances =
+                super::casting::effective_spell_keywords(state, *caster, *cast_obj_id)
+                    .iter()
+                    .filter(|keyword| matches!(keyword, Keyword::Storm))
+                    .count();
+            if storm_instances > 0 {
+                let copy_count = storm_copy_count_before_cast(state);
+                for _ in 0..storm_instances {
+                    let mut storm_ability = ResolvedAbility::new(
+                        Effect::CopySpell {
+                            target: TargetFilter::SelfRef,
+                        },
+                        Vec::new(),
+                        *cast_obj_id,
+                        *caster,
+                    );
+                    storm_ability.repeat_for = Some(QuantityExpr::Fixed { value: copy_count });
+                    let storm_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
+                        .description("Storm".to_string())
+                        .condition(TriggerCondition::WasCast);
+                    let timestamp = state.next_timestamp() as u32;
+                    pending.push(PendingTriggerContext::single(PendingTrigger {
+                        source_id: *cast_obj_id,
+                        controller: *caster,
+                        condition: storm_trig_def.condition,
+                        ability: storm_ability,
+                        timestamp,
+                        target_constraints: Vec::new(),
+                        trigger_event: Some(event.clone()),
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: storm_trig_def.description,
+                    }));
+                }
+            }
+
             let (instance_count, controller) = state
                 .objects
                 .get(cast_obj_id)
@@ -2465,12 +2511,14 @@ pub mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
         GainLifePlayer, KickerVariant, MultiTargetSpec, QuantityExpr, QuantityRef, SharedQuality,
-        SharedQualityRelation, TargetFilter, TriggerCondition, TriggerConstraint,
+        SharedQualityRelation, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
         TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
-    use crate::types::game_state::{GameState, SpellCastRecord, StackEntryKind, ZoneChangeRecord};
+    use crate::types::game_state::{
+        GameState, SpellCastRecord, StackEntry, StackEntryKind, ZoneChangeRecord,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
@@ -2559,6 +2607,107 @@ pub mod tests {
             &entry.kind,
             StackEntryKind::TriggeredAbility { ability, .. }
                 if matches!(ability.effect, Effect::Draw { .. })
+        )));
+    }
+
+    #[test]
+    fn command_emblem_cast_with_storm_creates_copies_for_prior_spells() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let opponent = PlayerId(1);
+        let emblem = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Ral Emblem".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&emblem).unwrap();
+            obj.is_emblem = true;
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::Storm,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ]))
+                .controller(ControllerRef::You),
+            ))]
+            .into();
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Ral Storm Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+        }
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: player,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: Some(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    spell,
+                    player,
+                )),
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 1,
+            },
+        });
+
+        let prior_record = SpellCastRecord {
+            core_types: vec![CoreType::Sorcery],
+            supertypes: Vec::new(),
+            subtypes: Vec::new(),
+            keywords: Vec::new(),
+            colors: Vec::new(),
+            mana_value: 1,
+            has_x_in_cost: false,
+        };
+        let current_record = SpellCastRecord {
+            core_types: vec![CoreType::Instant],
+            supertypes: Vec::new(),
+            subtypes: Vec::new(),
+            keywords: Vec::new(),
+            colors: Vec::new(),
+            mana_value: 1,
+            has_x_in_cost: false,
+        };
+        state
+            .spells_cast_this_turn_by_player
+            .insert(player, vec![prior_record.clone(), current_record]);
+        state
+            .spells_cast_this_turn_by_player
+            .insert(opponent, vec![prior_record]);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                card_id: CardId(2),
+                controller: player,
+                object_id: spell,
+            }],
+        );
+
+        assert!(state.stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { ability, .. }
+                if matches!(ability.effect, Effect::CopySpell { .. })
+                    && matches!(ability.repeat_for, Some(QuantityExpr::Fixed { value: 2 }))
         )));
     }
 
@@ -5533,7 +5682,6 @@ pub mod tests {
 
     // === CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers integration tests ===
 
-    use crate::types::ability::StaticDefinition;
     use crate::types::statics::{StaticMode, SuppressedTriggerEvent};
 
     /// Attach a `SuppressTriggers` static to a newly-created permanent in `state.battlefield`.

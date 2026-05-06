@@ -1053,6 +1053,23 @@ fn parse_for_each_clause_with_they_controller(
         return Some(qty);
     }
 
+    if let Ok((rest, _)) = terminated(
+        alt((
+            tag::<_, _, VerboseError<&str>>("creature"),
+            tag("creatures"),
+        )),
+        alt((
+            tag(" you attacked with this turn"),
+            tag(" you attacked with"),
+        )),
+    )
+    .parse(clause)
+    {
+        if rest.is_empty() {
+            return Some(QuantityRef::AttackedThisTurn);
+        }
+    }
+
     // "creature you control", "artifact you control", etc.
     // Use parse_type_phrase (not parse_target) to avoid generating spurious
     // target-fallback warnings for quantity text that isn't a target clause.
@@ -1266,6 +1283,12 @@ mod tests {
                 ),
             },
         );
+    }
+
+    #[test]
+    fn for_each_creature_you_attacked_with_this_turn_counts_attacking_creatures() {
+        let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
+        assert_eq!(qty, QuantityRef::AttackedThisTurn);
     }
 
     #[test]
