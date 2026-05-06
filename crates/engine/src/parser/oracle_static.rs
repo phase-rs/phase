@@ -684,6 +684,13 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
+    // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
+    // [in addition to its other types]" — type-changing aura effects.
+    // Must come before the basic-land-type handler which is a subset of this pattern.
+    if let Some(def) = parse_enchanted_is_type(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Enchanted creature gets +N/+M" or "has {keyword}" ---
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
@@ -700,13 +707,6 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
             return Some(def);
         }
-    }
-
-    // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
-    // [in addition to its other types]" — type-changing aura effects.
-    // Must come before the basic-land-type handler which is a subset of this pattern.
-    if let Some(def) = parse_enchanted_is_type(&tp, &text) {
-        return Some(def);
     }
 
     // CR 305.7: "Enchanted land is a [type]" — must be before general "enchanted land" handler.
