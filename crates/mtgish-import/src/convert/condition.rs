@@ -1006,6 +1006,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::SpecificPlayer { .. } => "SpecificPlayer",
         TargetFilter::AttachedTo => "AttachedTo",
         TargetFilter::LastCreated => "LastCreated",
+        TargetFilter::CostPaidObject => "CostPaidObject",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
         TargetFilter::TrackedSetFiltered { .. } => "TrackedSetFiltered",
         TargetFilter::ExiledBySource => "ExiledBySource",

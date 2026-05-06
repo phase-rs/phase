@@ -2538,7 +2538,7 @@ fn parse_warning_pattern(
         } => {
             let excerpt = oracle_text
                 .and_then(|text| swallowed_clause_excerpt(detector, text))
-                .unwrap_or_else(|| description.as_str());
+                .unwrap_or(description.as_str());
             (
                 warning.category_name().to_string(),
                 format!("{detector}: {}", normalize_oracle_pattern(excerpt)),
@@ -2606,10 +2606,10 @@ fn swallowed_clause_excerpt<'a>(detector: &str, oracle_text: &'a str) -> Option<
         .filter_map(|marker| lower.find(marker).map(|index| (index, *marker)))
         .min_by_key(|(index, _)| *index)?;
     let sentence_start = oracle_text[..marker_start]
-        .rfind(|c| matches!(c, '\n' | '.'))
+        .rfind(['\n', '.'])
         .map_or(0, |index| index + 1);
     let sentence_end = oracle_text[marker_start..]
-        .find(|c| matches!(c, '\n' | '.'))
+        .find(['\n', '.'])
         .map_or(oracle_text.len(), |offset| marker_start + offset);
     let clause_start = if marker.trim_start() != marker {
         marker_start + (marker.len() - marker.trim_start().len())

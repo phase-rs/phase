@@ -900,6 +900,7 @@ mod tests {
                     parse_warnings: vec![],
                     brawl_commander: false,
                     metadata: Default::default(),
+                    rarities: Default::default(),
                 },
                 count: 10,
             }],
