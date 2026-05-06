@@ -371,7 +371,6 @@ async fn main() {
     // replayed — skip the restore pass entirely and let SQLite ignore the
     // stale rows until operators clean them up manually.
     if matches!(mode, ServerMode::Full) {
-        let card_names = db.card_names();
         match game_db.load_all() {
             Ok(persisted_games) => {
                 let mut mgr = state.lock().await;
@@ -384,7 +383,7 @@ async fn main() {
                             let lobby_meta = ps.lobby_meta.clone();
                             let is_started = ps.game_started;
                             let session =
-                                server_core::session::GameSession::from_persisted(ps, &card_names);
+                                server_core::session::GameSession::from_persisted(ps, db.as_ref());
 
                             // Register all non-AI human players as disconnected
                             // to start the 120s grace period from now

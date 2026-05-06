@@ -196,15 +196,18 @@ describe("WasmAdapter", () => {
         priority_player: 0,
       } as unknown as GameState;
 
-      adapter.restoreState(mockState);
+      await adapter.restoreState(mockState);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
       expect(mockWorkerClient.restoreState).toHaveBeenCalledWith(
         JSON.stringify(mockState),
       );
+      expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
+        .toBeLessThan(mockWorkerClient.restoreState.mock.invocationCallOrder[0]);
     });
 
-    it("throws if not initialized", () => {
+    it("throws if not initialized", async () => {
       const mockState = {} as GameState;
-      expect(() => adapter.restoreState(mockState)).toThrow(AdapterError);
+      await expect(adapter.restoreState(mockState)).rejects.toThrow(AdapterError);
     });
   });
 

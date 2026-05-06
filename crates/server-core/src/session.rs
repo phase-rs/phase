@@ -6,7 +6,7 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::game::finalize_public_state;
-use engine::game::load_and_hydrate_decks;
+use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -389,15 +389,17 @@ impl GameSession {
     /// Reconstruct a GameSession from a persisted snapshot.
     ///
     /// Restores fields that are `#[serde(skip)]` in GameState:
-    /// - `all_card_names` from the provided card name list
+    /// - `all_card_names` from the card database
+    /// - card characteristics from the card database
     /// - `log_player_names` from the persisted display names
     /// - `rng` re-seeded with fresh randomness
-    pub fn from_persisted(ps: PersistedSession, card_names: &[String]) -> Self {
+    pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Self {
         let mut state = ps.state;
 
         // Restore #[serde(skip)] fields
-        state.all_card_names = card_names.to_vec().into();
+        state.all_card_names = db.card_names().into();
         state.log_player_names = ps.display_names.clone();
+        rehydrate_game_from_card_db(&mut state, db);
 
         // Re-seed RNG with fresh randomness (stale rng_seed would produce
         // deterministic sequences identical across all restored games)
