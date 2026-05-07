@@ -917,12 +917,12 @@ fn parse_you_dont_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     ))
 }
 
-/// CR 107.3e + CR 208.1 + CR 209.1 + CR 202.3: Parse
+/// CR 107.3e + CR 208.1 + CR 202.3: Parse
 /// "<filter> have total <property> N or {greater|more|less|fewer}" →
 /// `StaticCondition::QuantityComparison { lhs: Aggregate{Sum, property, filter}, comparator, rhs: N }`.
 ///
 /// Single combinator parameterized over `ObjectProperty` so it covers total
-/// power (CR 208.1), total toughness (CR 209.1), and total mana value (CR 202.3)
+/// power and toughness (CR 208.1), and total mana value (CR 202.3)
 /// uniformly — one parse path instead of three sibling combinators
 /// ("Parameterize, don't proliferate"). The motivating card is Betor, Kin to
 /// All ("if creatures you control have total toughness 10 or greater"), but
@@ -5159,7 +5159,7 @@ mod tests {
 
     // -- "have total {power|toughness|mana value} N or {greater|less}" predicate --
     //
-    // CR 107.3e + CR 208.1 + CR 209.1 + CR 202.3: Building-block predicate for
+    // CR 107.3e + CR 208.1 + CR 202.3: Building-block predicate for
     // aggregate-property thresholds across a filter (Sum function). Single
     // combinator parameterized over `ObjectProperty` so it covers total power,
     // total toughness, and total mana value uniformly. The motivating card is
@@ -5221,7 +5221,7 @@ mod tests {
     /// directly into the test surface.
     struct AggregateProperty(crate::types::ability::ObjectProperty);
 
-    /// CR 209.1 + CR 107.3e: Betor's first tier — "if creatures you control
+    /// CR 208.1 + CR 107.3e: Betor's first tier — "if creatures you control
     /// have total toughness 10 or greater" must parse to a Sum-Toughness
     /// QuantityComparison so the trigger-level intervening-if hoist works.
     #[test]
@@ -5233,7 +5233,7 @@ mod tests {
         );
     }
 
-    /// CR 209.1: Betor's second tier — same shape with threshold 20.
+    /// CR 208.1: Betor's second tier — same shape with threshold 20.
     #[test]
     fn test_creatures_you_control_have_total_toughness_ge_20() {
         assert_total_property_ge(
@@ -5243,7 +5243,7 @@ mod tests {
         );
     }
 
-    /// CR 209.1: Betor's third tier — same shape with threshold 40.
+    /// CR 208.1: Betor's third tier — same shape with threshold 40.
     #[test]
     fn test_creatures_you_control_have_total_toughness_ge_40() {
         assert_total_property_ge(

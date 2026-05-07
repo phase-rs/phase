@@ -7390,7 +7390,7 @@ mod tests {
         }
     }
 
-    /// CR 209.1 + CR 107.3e + CR 603.4: Betor, Kin to All — three-tier end-step
+    /// CR 208.1 + CR 107.3e + CR 603.4: Betor, Kin to All — three-tier end-step
     /// trigger where each tier is gated on a "creatures you control have total
     /// toughness N or greater" predicate. Before this regression test was
     /// added, all three gates dropped silently because no parser path

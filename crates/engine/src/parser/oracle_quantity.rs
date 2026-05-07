@@ -140,7 +140,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
             (AggregateFunction::Sum, ObjectProperty::Power),
             tag("the total power of "),
         ),
-        // CR 209.1: total toughness sum for "the total toughness of <filter>"
+        // CR 208.1: total toughness sum for "the total toughness of <filter>"
         // phrasing. Building-block companion to the trigger-condition predicate
         // "<filter> have total toughness N or greater" added in
         // `oracle_nom::condition::parse_filter_have_total_property`.
