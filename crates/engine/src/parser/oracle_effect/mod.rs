@@ -18677,6 +18677,7 @@ mod tests {
     fn seek_two_nonland_cards() {
         let details = parse_seek_details("seek two nonland cards", &mut ParseContext::default());
         assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(details.from_top, None);
         assert_eq!(details.destination, Zone::Hand);
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
@@ -18685,6 +18686,48 @@ mod tests {
             t,
             TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Land)
         )));
+    }
+
+    #[test]
+    fn seek_from_among_top_cards_carries_library_limit() {
+        let details = parse_seek_details(
+            "seek an artifact card from among the top ten cards of your library, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(details.from_top, Some(10));
+        let TargetFilter::Typed(tf) = &details.filter else {
+            panic!("Expected Typed filter, got {:?}", details.filter);
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+    }
+
+    #[test]
+    fn seek_with_opponent_cast_mana_value_condition_keeps_filter_clean() {
+        let def = parse_effect_chain(
+            "Seek a creature card if an opponent has cast a spell with mana value 3 or less this turn.",
+            AbilityKind::Spell,
+        );
+        let Effect::Seek { filter, .. } = &*def.effect else {
+            panic!("expected Seek, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Opponents,
+                        ..
+                    }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 }
+            })
+        ));
     }
 
     #[test]

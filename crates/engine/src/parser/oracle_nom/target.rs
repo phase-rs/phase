@@ -200,6 +200,7 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::SelfRef, tag("this enchantment")),
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
+        value(TargetFilter::SelfRef, tag("this attraction")),
     ))
     .parse(input)
 }

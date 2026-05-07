@@ -1646,8 +1646,8 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
 fn parse_opponent_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = alt((tag("an opponent has cast "), tag("an opponent cast "))).parse(input)?;
     let (rest, _) = parse_article(rest)?;
-    let (rest, type_text) = take_until(" spell this turn").parse(rest)?;
-    let (rest, _) = tag(" spell this turn").parse(rest)?;
+    let (rest, type_text) = take_until(" this turn").parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
     let Some(filter) = parse_spell_history_filter(type_text) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -1708,7 +1708,7 @@ fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, 
 }
 
 pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter> {
-    let type_text = type_text.trim();
+    let type_text = strip_spell_history_noun(type_text);
     let (filter, leftover) = parse_type_phrase(type_text);
     if leftover.trim().is_empty() && filter != TargetFilter::Any {
         return Some(filter);
@@ -1737,6 +1737,19 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     Some(TargetFilter::Typed(
         TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
     ))
+}
+
+fn strip_spell_history_noun(type_text: &str) -> &str {
+    let type_text = type_text.trim();
+    if let Ok((rest, before)) =
+        nom::sequence::terminated(take_until::<_, _, OracleError<'_>>(" spell"), tag(" spell"))
+            .parse(type_text)
+    {
+        if rest.trim().is_empty() {
+            return before.trim();
+        }
+    }
+    type_text
 }
 
 /// Parse "two or more spells were cast last turn" / "a player cast two or more spells last turn".
@@ -3749,6 +3762,36 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             } => assert_eq!(filters.len(), 2),
             other => panic!("expected opponent scoped filtered SpellsCastThisTurn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opponent_cast_spell_with_mana_value_this_turn_counts_opponents() {
+        let (rest, c) = parse_inner_condition(
+            "an opponent has cast a spell with mana value 3 or less this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Opponents,
+                                filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => assert!(properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }
+            ))),
+            other => panic!("expected opponent scoped mana-value spell condition, got {other:?}"),
         }
     }
 

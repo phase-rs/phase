@@ -1264,6 +1264,7 @@ pub(super) fn parse_search_and_creation_ast(
         return Some(SearchCreationImperativeAst::Seek {
             filter: details.filter,
             count: details.count,
+            from_top: details.from_top,
             destination: details.destination,
             enter_tapped: details.enter_tapped,
         });
@@ -1477,11 +1478,13 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         SearchCreationImperativeAst::Seek {
             filter,
             count,
+            from_top,
             destination,
             enter_tapped,
         } => Effect::Seek {
             filter,
             count,
+            from_top,
             destination,
             enter_tapped,
         },

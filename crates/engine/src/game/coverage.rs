@@ -490,6 +490,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("any of ({})", fmt_typed_filter(&inner_tf)));
             }
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
+            FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
             FilterProp::HasAnyCounter => parts.push("with one or more counters".into()),
         }
     }
@@ -1811,11 +1813,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Seek {
             filter,
             count,
+            from_top,
             destination,
             ..
         } => {
             d.push(("filter".into(), fmt_target(filter)));
             d.push(("count".into(), fmt_quantity(count)));
+            if let Some(from_top) = from_top {
+                d.push(("from_top".into(), from_top.to_string()));
+            }
             if *destination != Zone::Hand {
                 d.push(("to".into(), fmt_zone(destination)));
             }

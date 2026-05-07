@@ -37,7 +37,8 @@
     "overrides": {
       "serialize-javascript": ">=7.0.5",
       "picomatch": ">=4.0.4",
-      "lodash": ">=4.18.0"
+      "lodash": ">=4.18.0",
+      "postcss": ">=8.5.10"
     }
   },
   "devDependencies": {

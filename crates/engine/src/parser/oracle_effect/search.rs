@@ -17,10 +17,12 @@ use super::{capitalize, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,
-    SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
+use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
 /// Scan `lower` at word boundaries for `tag_prefix`, then apply `combinator` to the
@@ -376,6 +378,8 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
         }
     };
 
+    let (filter_text, from_top) = parse_seek_from_top_limit(filter_text);
+
     // Extract count: "two nonland cards" → (2, "nonland cards"); "x cards" → (X, "cards").
     // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
     let (count, remaining) =
@@ -396,9 +400,36 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
     SeekDetails {
         filter,
         count,
+        from_top,
         destination,
         enter_tapped,
     }
+}
+
+fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
+    fn parse_limit(input: &str) -> Result<(&str, (&str, usize)), nom::Err<OracleError<'_>>> {
+        let (rest, before) =
+            take_until::<_, _, OracleError<'_>>(" from among the top ").parse(input)?;
+        let (rest, _) = tag(" from among the top ").parse(rest)?;
+        let (rest, qty) = nom_quantity::parse_quantity_expr_number(rest)?;
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>(" cards of your library"),
+            tag(" card of your library"),
+        ))
+        .parse(rest)?;
+        let QuantityExpr::Fixed { value } = qty else {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                rest,
+                nom::error::ErrorKind::Fail,
+            )));
+        };
+        Ok((rest, (before, value.max(0) as usize)))
+    }
+
+    parse_limit(filter_text)
+        .ok()
+        .and_then(|(_, (before, count))| (count > 0).then_some((before, Some(count))))
+        .unwrap_or((filter_text, None))
 }
 
 /// Parse the card type filter from search text like "basic land card, ..."
@@ -417,7 +448,8 @@ pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
     if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
-        parse_search_filter_suffixes(remainder, &mut suffix, ctx);
+        let linked_reference = last_shared_quality_reference_in_filter(&parsed_filter);
+        parse_search_filter_suffixes(remainder, &mut suffix, ctx, linked_reference);
         return apply_search_suffix_constraints(normalize_search_filter(parsed_filter), &suffix);
     }
 
@@ -763,7 +795,7 @@ fn build_search_suffix_constraints(
             value: crate::types::card_type::Supertype::Basic,
         });
     }
-    parse_search_filter_suffixes(suffix_text, &mut suffix, ctx);
+    parse_search_filter_suffixes(suffix_text, &mut suffix, ctx, None);
     suffix
 }
 
@@ -917,6 +949,44 @@ fn parse_search_suffix_subtype_redeclaration(text: &str) -> Option<(&str, Vec<Ty
     Some((rest, filters))
 }
 
+fn parse_search_type_negation_suffix(
+    input: &str,
+) -> Result<(&str, TypeFilter), nom::Err<OracleError<'_>>> {
+    let (rest, _) = alt((
+        tag("that isn't a "),
+        tag("that isn't an "),
+        tag("that is not a "),
+        tag("that is not an "),
+        tag("that aren't "),
+        tag("that are not "),
+    ))
+    .parse(input)?;
+    let (filter, rest) = parse_type_phrase(rest);
+    let Some(negated_type) = single_search_type_filter(filter) else {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((rest, TypeFilter::Non(Box::new(negated_type))))
+}
+
+fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
+    let TargetFilter::Typed(TypedFilter {
+        mut type_filters,
+        controller: None,
+        properties,
+    }) = filter
+    else {
+        return None;
+    };
+    if properties.is_empty() && type_filters.len() == 1 {
+        type_filters.pop()
+    } else {
+        None
+    }
+}
+
 fn parse_search_name_reference_suffix(
     input: &str,
 ) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
@@ -956,6 +1026,18 @@ fn parse_search_name_reference_suffix(
         )));
     }
 
+    let (reference, after_reference) = parse_target(rest);
+    if !matches!(reference, TargetFilter::Any) {
+        return Ok((
+            after_reference,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(Box::new(name_reference_filter(reference))),
+                relation,
+            },
+        ));
+    }
+
     let (reference, rest) = parse_type_phrase(rest);
     if !search_filter_has_meaningful_content(&reference) {
         return Err(nom::Err::Error(OracleError::new(
@@ -972,6 +1054,98 @@ fn parse_search_name_reference_suffix(
             relation,
         },
     ))
+}
+
+fn parse_linked_reference_mana_value_suffix<'a>(
+    input: &'a str,
+    reference: &TargetFilter,
+) -> Result<(&'a str, FilterProp), nom::Err<OracleError<'a>>> {
+    let Some(scope) = object_scope_for_linked_reference(reference) else {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+
+    let (rest, _) = tag("has mana value equal to ").parse(input)?;
+    let (rest, offset) = alt((
+        value(
+            1,
+            nom::sequence::pair(tag("1 plus "), parse_that_object_mana_value),
+        ),
+        value(
+            1,
+            nom::sequence::pair(tag("one plus "), parse_that_object_mana_value),
+        ),
+        value(0, parse_that_object_mana_value),
+    ))
+    .parse(rest)?;
+    let value = if offset == 0 {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue { scope },
+        }
+    } else {
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue { scope },
+            }),
+            offset,
+        }
+    };
+
+    Ok((
+        rest,
+        FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value,
+        },
+    ))
+}
+
+fn parse_that_object_mana_value(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("that ").parse(input)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag("'s mana value").parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectScope> {
+    match reference {
+        TargetFilter::CostPaidObject => Some(ObjectScope::CostPaidObject),
+        TargetFilter::ParentTarget => Some(ObjectScope::Target),
+        TargetFilter::TriggeringSource => Some(ObjectScope::EventSource),
+        _ => None,
+    }
+}
+
+fn last_shared_quality_reference_in_filter(filter: &TargetFilter) -> Option<TargetFilter> {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().rev().find_map(|property| {
+            if let FilterProp::SharesQuality {
+                reference: Some(reference),
+                ..
+            } = property
+            {
+                Some(reference.as_ref().clone())
+            } else {
+                None
+            }
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .rev()
+            .find_map(last_shared_quality_reference_in_filter),
+        _ => None,
+    }
 }
 
 fn parse_zero_or_one_mana_cost_suffix(
@@ -1073,9 +1247,11 @@ fn parse_search_filter_suffixes(
     text: &str,
     suffix: &mut SearchSuffixConstraints,
     ctx: &mut ParseContext,
+    initial_shared_quality_reference: Option<TargetFilter>,
 ) {
     let lower = text.to_lowercase();
     let mut remaining = lower.as_str();
+    let mut last_shared_quality_reference = initial_shared_quality_reference;
 
     while !remaining.is_empty() {
         remaining = remaining.trim_start();
@@ -1192,6 +1368,13 @@ fn parse_search_filter_suffixes(
         }
 
         if let Ok((rest, prop)) = parse_shared_quality_clause(remaining) {
+            last_shared_quality_reference = match &prop {
+                FilterProp::SharesQuality {
+                    reference: Some(reference),
+                    ..
+                } => Some(reference.as_ref().clone()),
+                _ => None,
+            };
             suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
@@ -1224,10 +1407,35 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with a mana ability").parse(remaining)
+        {
+            suffix.properties.push(FilterProp::HasManaAbility);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with no abilities").parse(remaining) {
+            suffix.properties.push(FilterProp::HasNoAbilities);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Some((rest, type_filters)) = parse_search_suffix_subtype_redeclaration(remaining) {
             for type_filter in type_filters {
                 suffix.type_filters.push(type_filter);
             }
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, type_filter)) = parse_search_type_negation_suffix(remaining) {
+            suffix.type_filters.push(type_filter);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, prop)) = parse_search_enchant_keyword_suffix(remaining) {
+            suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
         }
@@ -1249,6 +1457,15 @@ fn parse_search_filter_suffixes(
             suffix.properties.push(prop);
             remaining = remaining[consumed..].trim_start();
             continue;
+        }
+
+        if let Some(reference) = &last_shared_quality_reference {
+            if let Ok((rest, prop)) = parse_linked_reference_mana_value_suffix(remaining, reference)
+            {
+                suffix.properties.push(prop);
+                remaining = rest.trim_start();
+                continue;
+            }
         }
 
         if let Ok((rest, prop)) = parse_zero_or_one_mana_cost_suffix(remaining) {
@@ -1310,6 +1527,27 @@ fn scan_same_name_reference_target(lower: &str) -> Option<TargetFilter> {
     })
     .map(|(target, _)| target)
     .filter(|target| !matches!(target, TargetFilter::Any))
+}
+
+fn parse_search_enchant_keyword_suffix(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("with enchant ").parse(input)?;
+    let (after_target, target_text) =
+        take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
+    let (target, remainder) = parse_type_phrase(target_text.trim());
+    if !remainder.trim().is_empty() || !search_filter_has_meaningful_content(&target) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        after_target,
+        FilterProp::WithKeyword {
+            value: Keyword::Enchant(target),
+        },
+    ))
 }
 
 /// Parse the destination zone from search Oracle text.
@@ -1460,6 +1698,7 @@ mod tests {
             " with unrecognized flibbertigibbet suffix",
             &mut suffix,
             &mut ctx,
+            None,
         );
         assert!(
             ctx.diagnostics
@@ -1559,6 +1798,68 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_handles_card_with_mana_ability() {
+        let filter = parse_search_filter(
+            "artifact card with a mana ability",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::HasManaAbility)));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_card_with_no_abilities() {
+        let filter = parse_search_filter(
+            "creature card with no abilities",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::HasNoAbilities)));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_negated_type_suffix() {
+        let filter = parse_search_filter(
+            "legendary artifact card that isn't a creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.type_filters.iter().any(
+            |type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Creature)
+        ));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_plural_negated_type_suffix() {
+        let filter = parse_search_filter(
+            "artifact cards that are not lands",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.type_filters.iter().any(
+            |type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)
+        ));
+    }
+
+    #[test]
     fn parse_search_filter_handles_shared_color_with_source() {
         let filter = parse_search_filter(
             "instant or sorcery card that shares a color with ~",
@@ -1621,6 +1922,27 @@ mod tests {
                 comparator: Comparator::EQ,
                 value: QuantityExpr::Fixed { value: 9 }
             }
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_enchant_keyword_suffix() {
+        let filter = parse_search_filter(
+            "aura card with enchant creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Enchantment));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Subtype("Aura".to_string())));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::WithKeyword {
+                value: Keyword::Enchant(TargetFilter::Typed(target))
+            } if target.type_filters.contains(&TypeFilter::Creature)
         )));
     }
 
@@ -2064,6 +2386,59 @@ mod tests {
                 )
             )));
         }
+    }
+
+    #[test]
+    fn parse_search_filter_same_name_as_cost_paid_object() {
+        let filter = parse_search_filter(
+            "card with the same name as the sacrificed creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_cost_paid_shared_type_and_mana_value() {
+        let filter = parse_search_filter(
+            "creature card that shares a creature type with the sacrificed creature and has mana value equal to 1 plus that creature's mana value",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+        )));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Offset { inner, offset: 1 },
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                }
+            )
+        )));
     }
 
     #[test]

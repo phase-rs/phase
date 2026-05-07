@@ -19,13 +19,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (filter, count_expr, destination, enter_tapped) = match &ability.effect {
+    let (filter, count_expr, from_top, destination, enter_tapped) = match &ability.effect {
         Effect::Seek {
             filter,
             count,
+            from_top,
             destination,
             enter_tapped,
-        } => (filter.clone(), count.clone(), *destination, *enter_tapped),
+        } => (
+            filter.clone(),
+            count.clone(),
+            *from_top,
+            *destination,
+            *enter_tapped,
+        ),
         _ => return Err(EffectError::InvalidParam("Expected Seek".to_string())),
     };
 
@@ -40,9 +47,11 @@ pub fn resolve(
     // Collect library objects that match the filter.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = FilterContext::from_ability(ability);
-    let mut matching: Vec<_> = player
+    let library_scope = player
         .library
         .iter()
+        .take(from_top.unwrap_or(player.library.len()));
+    let mut matching: Vec<_> = library_scope
         .filter(|&&obj_id| matches_target_filter(state, obj_id, &filter, &ctx))
         .copied()
         .collect();
@@ -96,7 +105,9 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ChoiceValue, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
+    use crate::types::ability::{
+        ChoiceValue, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -108,6 +119,7 @@ mod tests {
                 count: QuantityExpr::Fixed {
                     value: count as i32,
                 },
+                from_top: None,
                 destination: Zone::Hand,
                 enter_tapped: false,
             },
@@ -122,8 +134,24 @@ mod tests {
             Effect::Seek {
                 filter,
                 count: QuantityExpr::Fixed { value: 1 },
+                from_top: None,
                 destination: Zone::Battlefield,
                 enter_tapped: tapped,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn make_seek_from_top(filter: TargetFilter, from_top: usize) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Seek {
+                filter,
+                count: QuantityExpr::Fixed { value: 1 },
+                from_top: Some(from_top),
+                destination: Zone::Hand,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -174,6 +202,29 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Land);
+        id
+    }
+
+    fn add_library_artifact(
+        state: &mut GameState,
+        card_id: u64,
+        owner: PlayerId,
+        name: &str,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card_id),
+            owner,
+            name.to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
         id
     }
 
@@ -268,6 +319,42 @@ mod tests {
         let player = &state.players[0];
         assert!(player.hand.contains(&bear1) && player.hand.contains(&bear2));
         assert_eq!(player.hand.len(), 2);
+    }
+
+    #[test]
+    fn seek_from_top_limits_candidate_pool_before_filtering() {
+        let mut state = GameState::new_two_player(42);
+        add_library_land(&mut state, 1, PlayerId(0), "Forest");
+        add_library_creature(&mut state, 2, PlayerId(0), "Bear");
+        let artifact = add_library_artifact(&mut state, 3, PlayerId(0), "Key");
+
+        let ability = make_seek_from_top(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            2,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let player = &state.players[0];
+        assert!(!player.hand.contains(&artifact));
+        assert!(player.library.contains(&artifact));
+    }
+
+    #[test]
+    fn seek_from_top_can_find_matching_card_inside_limit() {
+        let mut state = GameState::new_two_player(42);
+        add_library_land(&mut state, 1, PlayerId(0), "Forest");
+        let artifact = add_library_artifact(&mut state, 2, PlayerId(0), "Key");
+        add_library_creature(&mut state, 3, PlayerId(0), "Bear");
+
+        let ability = make_seek_from_top(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            2,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[0].hand.contains(&artifact));
     }
 
     #[test]

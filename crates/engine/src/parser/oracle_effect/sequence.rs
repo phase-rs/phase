@@ -434,8 +434,8 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("that ")),
         value((), tag("this ")),
         value((), tag("those ")),
-        value((), tag("they ")),
     )))
+    .or(value((), tag("open ")))
     .or(alt((
         value((), tag("conjure ")),
         value((), tag("target ")),
@@ -453,6 +453,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("remove ")),
         value((), tag("seek ")),
         value((), tag("connive")),
+        value((), tag("they ")),
     )))
     .parse(s)
     .is_ok()
@@ -515,6 +516,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("have ")),
         value((), tag("manifest ")),
         value((), tag("mill ")),
+        value((), tag("open ")),
         value((), tag("put ")),
         value((), tag("return ")),
         value((), tag("sacrifice ")),
@@ -2135,6 +2137,15 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], "sacrifice ~");
         assert!(chunks[1].starts_with("it deals 3 damage"));
+    }
+
+    #[test]
+    fn bare_and_splits_sacrifice_and_open_attraction() {
+        let chunks = clause_texts("sacrifice this Attraction and open an Attraction");
+        assert_eq!(
+            chunks,
+            vec!["sacrifice this Attraction", "open an Attraction"]
+        );
     }
 
     #[test]

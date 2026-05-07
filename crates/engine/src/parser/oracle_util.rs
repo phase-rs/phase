@@ -487,6 +487,7 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
     "this artifact",
     "this land",
     "this enchantment",
+    "this attraction",
     "this equipment",
     "this aura",
     "this vehicle",

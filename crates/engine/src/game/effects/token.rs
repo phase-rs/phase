@@ -1479,6 +1479,26 @@ mod tests {
     }
 
     #[test]
+    fn controller_owned_token_ignores_scoped_player() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = token_ability("b_3_3_a_dalek_menace");
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+        ability.set_scoped_player_recursive(PlayerId(1));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|object| object.is_token)
+            .expect("expected Dalek token");
+        assert_eq!(token.controller, PlayerId(0));
+        assert_eq!(token.owner, PlayerId(0));
+    }
+
+    #[test]
     fn creates_creature_with_correct_types() {
         let (state, _) = resolve_token("w_1_1_soldier");
         let obj = &state.objects[&state.battlefield[0]];

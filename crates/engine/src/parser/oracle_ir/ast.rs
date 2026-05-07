@@ -114,6 +114,7 @@ pub(crate) struct SearchLibraryDetails {
 pub(crate) struct SeekDetails {
     pub(crate) filter: TargetFilter,
     pub(crate) count: QuantityExpr,
+    pub(crate) from_top: Option<usize>,
     pub(crate) destination: Zone,
     pub(crate) enter_tapped: bool,
 }
@@ -653,6 +654,7 @@ pub(crate) enum SearchCreationImperativeAst {
     Seek {
         filter: TargetFilter,
         count: QuantityExpr,
+        from_top: Option<usize>,
         destination: Zone,
         enter_tapped: bool,
     },

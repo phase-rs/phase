@@ -242,6 +242,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     }
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
+            parse_cost_paid_object_reference,
             value(
                 TargetFilter::TriggeringSource,
                 (
@@ -2232,6 +2233,23 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
                 },
                 a,
             )
+        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or ").parse(after_num) {
+            let (after, second_value) = nom_quantity::parse_quantity_expr_number(a).ok()?;
+            (
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value,
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: second_value,
+                        },
+                    ],
+                },
+                after,
+            )
         } else {
             // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
             (
@@ -2279,9 +2297,55 @@ fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
 }
 
 fn parse_mana_value_reference_expr(text: &str) -> Option<(QuantityExpr, &str)> {
+    if let Ok((after, expr)) = parse_mana_value_of_reference_expr(text) {
+        return Some((expr, after));
+    }
+
     parse_mana_value_reference_qty(text)
-        .map(|(after, qty)| (QuantityExpr::Ref { qty }, after))
+        .map(|(after, qty)| {
+            (
+                apply_mana_value_reference_offset(QuantityExpr::Ref { qty }, after),
+                after,
+            )
+        })
         .ok()
+        .map(|(expr, after)| (expr, consume_mana_value_reference_offset(after)))
+}
+
+fn parse_mana_value_of_reference_expr(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    let (rest, _) = tag("the mana value of ").parse(input)?;
+    let (rest, qty) = parse_mana_value_reference_qty(rest)?;
+    let expr = apply_mana_value_reference_offset(QuantityExpr::Ref { qty }, rest);
+    Ok((consume_mana_value_reference_offset(rest), expr))
+}
+
+fn apply_mana_value_reference_offset(expr: QuantityExpr, rest: &str) -> QuantityExpr {
+    if parse_mana_value_reference_plus_one(rest).is_ok() {
+        QuantityExpr::Offset {
+            inner: Box::new(expr),
+            offset: 1,
+        }
+    } else {
+        expr
+    }
+}
+
+fn consume_mana_value_reference_offset(rest: &str) -> &str {
+    parse_mana_value_reference_plus_one(rest)
+        .map(|(after, _)| after)
+        .unwrap_or(rest)
+}
+
+fn parse_mana_value_reference_plus_one(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        nom::sequence::pair(tag(" plus "), alt((tag("one"), tag("1")))),
+    )
+    .parse(input)
 }
 
 fn parse_mana_value_reference_qty(
@@ -2298,10 +2362,18 @@ fn parse_mana_value_reference_qty(
                 tag("that card's mana value"),
                 tag("that permanent's mana value"),
                 tag("that creature's mana value"),
+                tag("the chosen spell's mana value"),
+                tag("the chosen card's mana value"),
+                tag("the chosen permanent's mana value"),
+                tag("the chosen creature's mana value"),
                 tag("that spell"),
                 tag("that card"),
                 tag("that permanent"),
                 tag("that creature"),
+                tag("the chosen spell"),
+                tag("the chosen card"),
+                tag("the chosen permanent"),
+                tag("the chosen creature"),
             )),
         ),
         value(
@@ -2670,6 +2742,10 @@ fn parse_shared_quality(input: &str) -> nom::IResult<&str, SharedQuality, Oracle
 fn parse_shared_quality_reference(
     input: &str,
 ) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input) {
+        return Ok((rest, filter));
+    }
+
     if let Ok((rest, filter)) = value(
         TargetFilter::TriggeringSource,
         tag::<_, _, OracleError<'_>>("one of the discarded cards"),
@@ -2697,6 +2773,24 @@ fn parse_shared_quality_reference(
     } else {
         Ok((rest, filter))
     }
+}
+
+fn parse_cost_paid_object_reference(
+    input: &str,
+) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = tag("sacrificed ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    Ok((rest, TargetFilter::CostPaidObject))
 }
 
 pub(crate) fn parse_shared_quality_clause(
@@ -3838,6 +3932,13 @@ mod tests {
     }
 
     #[test]
+    fn this_attraction_is_self_ref() {
+        let (f, rest) = parse_target("this attraction");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn white_creature_you_control() {
         let (f, _) = parse_type_phrase("white creature you control");
         assert_eq!(
@@ -4030,6 +4131,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn artifact_card_with_mana_value_4_or_5() {
+        let (f, rest) = parse_type_phrase("artifact card with mana value 4 or 5, reveal it");
+        assert_eq!(rest, ", reveal it");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 5 },
+                        },
+                    ],
+                },
+            ]))
+        );
+    }
+
     /// CR 107.3a + CR 601.2b: Nature's Rhythm — "creature card with mana value X
     /// or less". The literal X must produce a `QuantityRef::Variable { "X" }`,
     /// resolved at effect time against the spell's announced X.
@@ -4175,6 +4299,24 @@ mod tests {
     }
 
     #[test]
+    fn card_with_same_mana_value_as_chosen_spell_uses_parent_target() {
+        let (f, rest) =
+            parse_type_phrase("creature card with the same mana value as the chosen spell");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    },
+                },
+            }]))
+        );
+    }
+
+    #[test]
     fn card_with_mana_value_equal_to_that_cards_mana_value() {
         let (f, rest) = parse_type_phrase("card with mana value equal to that card's mana value");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -4186,6 +4328,28 @@ mod tests {
                     qty: QuantityRef::ObjectManaValue {
                         scope: ObjectScope::Target,
                     },
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_of_that_card_plus_one_uses_offset_target() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the mana value of that card plus one",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Target,
+                        },
+                    }),
+                    offset: 1,
                 },
             }]))
         );
@@ -4890,6 +5054,13 @@ mod tests {
     fn unrecognized_bare_text_stays_any() {
         let (f, _) = parse_target("foobar");
         assert_eq!(f, TargetFilter::Any);
+    }
+
+    #[test]
+    fn parse_cost_paid_object_reference() {
+        let (filter, rest) = parse_target("the sacrificed creature");
+        assert_eq!(filter, TargetFilter::CostPaidObject);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
     }
 
     #[test]

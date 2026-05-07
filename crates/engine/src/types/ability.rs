@@ -1624,6 +1624,14 @@ pub enum FilterProp {
     /// Evaluated against `SpellCastRecord.has_x_in_cost` in the spell-history
     /// filter path and against `cost_has_x(&obj.mana_cost)` for live objects.
     HasXInManaCost,
+    /// CR 605.1: Matches objects that have at least one ability classified as a
+    /// mana ability by the engine's authoritative mana-ability classifier.
+    /// Used for library filters such as "artifact card with a mana ability".
+    HasManaAbility,
+    /// CR 113.1 + CR 113.3: Matches objects that currently have no abilities:
+    /// no keyword, activated, triggered, replacement, or static abilities.
+    /// Used for library filters such as "creature card with no abilities".
+    HasNoAbilities,
     /// CR 201.2: Matches objects whose card name equals the given name.
     /// Used for "cards named [X]" and "named [X]" filter patterns.
     /// Name comparison is exact per CR 201.2a (case-insensitive at evaluation).
@@ -4786,6 +4794,10 @@ pub enum Effect {
         filter: TargetFilter,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// Alchemy digital-only: restrict the random selection pool to the
+        /// top N cards of the controller's library before applying `filter`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_top: Option<usize>,
         /// Where the sought card goes. Usually Hand, but some cards put onto Battlefield.
         #[serde(default = "default_zone_hand")]
         destination: Zone,

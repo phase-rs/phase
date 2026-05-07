@@ -11269,6 +11269,69 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source_id = ObjectId(100);
+        let sacrifice_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let token_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "b_3_3_a_dalek_menace".to_string(),
+                power: crate::types::ability::PtValue::Fixed(0),
+                toughness: crate::types::ability::PtValue::Fixed(0),
+                types: vec![],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Opponent,
+                branches: vec![sacrifice_branch, token_branch],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 }).unwrap();
+
+        let token = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|object| object.is_token)
+            .expect("expected Dalek token");
+        assert_eq!(token.controller, PlayerId(0));
+        assert_eq!(token.owner, PlayerId(0));
+    }
+
+    #[test]
     fn player_scope_all_uses_apnap_order_and_resumes_remaining_players() {
         let mut state = setup_game_at_main_phase();
         state.active_player = PlayerId(1);

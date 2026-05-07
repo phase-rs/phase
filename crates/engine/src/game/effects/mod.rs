@@ -907,6 +907,7 @@ pub(crate) fn controller_for_relative_filter(
     target_filter: &TargetFilter,
 ) -> PlayerId {
     if filter_uses_relative_controller_you(target_filter)
+        && ability.scoped_player.is_none()
         && ability
             .targets
             .iter()
@@ -971,7 +972,7 @@ pub(crate) fn resolve_player_for_context_ref(
         };
     }
     if matches!(target_filter, TargetFilter::Controller) {
-        return ability.scoped_player.unwrap_or(ability.controller);
+        return ability.controller;
     }
     // CR 115.1d: `ParentTargetController` resolves the controller of the parent
     // ability's targeted object. In a spell-resolution chain (no

@@ -1898,6 +1898,55 @@ mod tests {
     }
 
     #[test]
+    fn scoped_player_target_does_not_rebind_your_hand_change_zone() {
+        let mut state = GameState::new_two_player(42);
+        let controller_card = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Controller Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let opponent_card = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Opponent Hand Card".to_string(),
+            Zone::Hand,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(
+                    TypedFilter::card().controller(crate::types::ability::ControllerRef::You),
+                ),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(200),
+            PlayerId(0),
+        );
+        ability.set_scoped_player_recursive(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&controller_card).unwrap().zone,
+            Zone::Battlefield
+        );
+        assert_eq!(state.objects.get(&opponent_card).unwrap().zone, Zone::Hand);
+    }
+
+    #[test]
     fn optional_targeting_with_zero_targets_resolves_as_noop() {
         // CR 115.6: "up to one target" with 0 chosen should not fall through
         // to the untargeted zone-scan path.
