@@ -7536,18 +7536,20 @@ mod tests {
         }
         match &*lose_sub.effect {
             Effect::LoseLife { amount, target } => {
-                // CR 107.1a: amount must be HalfRounded(_, Up). The inner ref
-                // resolves per the active player binding (CR 608.2c) when the
-                // outer player_scope iterates over each opponent.
+                // CR 107.1a: amount must be DivideRounded by 2, rounding Up
+                // ("half ... rounded up"). The inner ref resolves per the
+                // active player binding (CR 608.2c) when the outer
+                // player_scope iterates over each opponent.
                 assert!(
                     matches!(
                         amount,
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
+                            divisor: 2,
                             rounding: RoundingMode::Up,
                             ..
                         }
                     ),
-                    "amount must be HalfRounded(Up), got {amount:?}",
+                    "amount must be DivideRounded(2, Up), got {amount:?}",
                 );
 
                 // Critical regression: the third clause's "each opponent" subject
