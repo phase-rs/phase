@@ -13868,4 +13868,94 @@ mod mdfc_land_tests {
             "CR 712.8a: MDFC Creature/Land in graveyard should not be offered as PlayLand"
         );
     }
+
+    // CR 402.3: Hand order has no game-rules significance — ReorderHand is a
+    // display-preference update only.
+    #[test]
+    fn reorder_hand_replaces_hand_order() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+
+        let a = ObjectId(100);
+        let b = ObjectId(101);
+        let c = ObjectId(102);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b, c]);
+
+        let result = apply(
+            &mut state,
+            p0,
+            GameAction::ReorderHand {
+                order: vec![c, a, b],
+            },
+        )
+        .expect("reorder should succeed");
+
+        assert!(result.events.is_empty(), "reorder must emit no events");
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![c, a, b],
+        );
+    }
+
+    #[test]
+    fn reorder_hand_rejects_non_permutation() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+        let a = ObjectId(100);
+        let b = ObjectId(101);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+
+        // Wrong length.
+        let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
+            .expect_err("wrong length must error");
+        assert!(matches!(err, EngineError::InvalidAction(_)));
+
+        // Right length, wrong contents.
+        let stranger = ObjectId(999);
+        let err = apply(
+            &mut state,
+            p0,
+            GameAction::ReorderHand {
+                order: vec![a, stranger],
+            },
+        )
+        .expect_err("stranger id must error");
+        assert!(matches!(err, EngineError::InvalidAction(_)));
+
+        // Hand unchanged after rejected calls.
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![a, b],
+        );
+    }
+
+    #[test]
+    fn reorder_hand_succeeds_while_opponent_holds_priority() {
+        // Verifies the `check_actor_authorization` whitelist: P0 must be able
+        // to reorder their own hand even though P1 is the priority player and
+        // holds the WaitingFor::Priority slot.
+        let mut state = setup_game_at_main_phase();
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let a = ObjectId(200);
+        let b = ObjectId(201);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ReorderHand { order: vec![b, a] },
+        )
+        .expect("non-priority actor reordering own hand must succeed");
+
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![b, a],
+        );
+        // Priority hasn't moved — reorder doesn't transition WaitingFor.
+        assert_eq!(state.priority_player, PlayerId(1));
+    }
 }
