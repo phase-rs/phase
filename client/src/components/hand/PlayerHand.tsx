@@ -75,6 +75,37 @@ export function PlayerHand() {
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
   );
 
+  const hoveredSlotRef = useRef<number | null>(null);
+
+  const computeSlotFromX = useCallback((clientX: number): number | null => {
+    const container = handContainerRef.current;
+    if (!container) return null;
+    const cards = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-card-hover]"),
+    );
+    if (cards.length === 0) return null;
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    cards.forEach((el, idx) => {
+      const r = el.getBoundingClientRect();
+      const center = r.left + r.width / 2;
+      const dist = Math.abs(clientX - center);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = idx;
+      }
+    });
+    return bestIdx;
+  }, []);
+
+  const handleDrag = useCallback(
+    (_objectId: number, info: PanInfo) => {
+      const slot = computeSlotFromX(info.point.x);
+      hoveredSlotRef.current = slot;
+    },
+    [computeSlotFromX],
+  );
+
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
   // Commander-zone single-cast path): release above DRAG_PLAY_THRESHOLD
   // while holding priority and outside the source zone. A React hook cannot
@@ -83,7 +114,6 @@ export function PlayerHand() {
   // definition of "how far up counts as a play."
   const handleDragEnd = useCallback(
     (objectId: number, _event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
-      if (!hasPriority) return false;
       const bounds = handContainerRef.current?.getBoundingClientRect();
       const releasedInsideHand =
         bounds != null
@@ -91,12 +121,28 @@ export function PlayerHand() {
         && info.point.x <= bounds.right
         && info.point.y >= bounds.top
         && info.point.y <= bounds.bottom;
-      if (releasedInsideHand) return false;
+
+      // Reorder branch: released inside the hand, a different slot is hovered.
+      if (releasedInsideHand) {
+        const targetSlot = hoveredSlotRef.current;
+        hoveredSlotRef.current = null;
+        if (targetSlot == null || !player) return false;
+        const currentOrder = player.hand.slice();
+        const fromIdx = currentOrder.indexOf(objectId as ObjectId);
+        if (fromIdx === -1 || fromIdx === targetSlot) return false;
+        const [moved] = currentOrder.splice(fromIdx, 1);
+        currentOrder.splice(targetSlot, 0, moved);
+        dispatchAction({ type: "ReorderHand", data: { order: currentOrder } });
+        return false;
+      }
+
+      // Play branch (unchanged from the existing implementation).
+      if (!hasPriority) return false;
       if (info.offset.y >= DRAG_PLAY_THRESHOLD) return false;
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard],
+    [hasPriority, playCard, player],
   );
 
   const handleCardClick = useCallback(
@@ -190,6 +236,7 @@ export function PlayerHand() {
               hasPriority={hasPriority}
               isMobile={isMobile}
               onDragEnd={handleDragEnd}
+              onDrag={handleDrag}
               onClick={handleCardClick}
               onDoubleClick={handleCardDoubleClick}
               isDragging={draggingCardId === obj.id}
@@ -222,6 +269,7 @@ interface HandCardProps {
   onDragStart: (id: number) => void;
   onDragStop: () => void;
   onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => boolean;
+  onDrag: (objectId: number, info: PanInfo) => void;
   onClick: (objectId: number, e?: React.MouseEvent) => void;
   onDoubleClick: (objectId: number) => void;
   onMouseEnter: (id: number) => void;
@@ -245,6 +293,7 @@ const HandCard = memo(function HandCard({
   onDragStart: onDragStartProp,
   onDragStop,
   onDragEnd,
+  onDrag,
   onClick,
   onDoubleClick,
   onMouseEnter,
@@ -281,6 +330,7 @@ const HandCard = memo(function HandCard({
   return (
     <motion.div
       data-card-hover
+      layout
       initial={{ opacity: 0, y: 40 }}
       animate={{
         opacity: 1,
@@ -301,6 +351,7 @@ const HandCard = memo(function HandCard({
         inspectObject(null);
         onDragStartProp(objectId);
       }}
+      onDrag={(_event, info) => onDrag(objectId, info)}
       onDragEnd={(event, info) => {
         setDragging(false);
         onDragStop();
