@@ -21,6 +21,29 @@ function getHandOverlap(handSize: number): string {
   return "calc(var(--card-w) * -0.6)";
 }
 
+interface HandSlotRect {
+  objectId: number;
+  left: number;
+  width: number;
+}
+
+export function computeHandInsertionSlot(
+  cards: HandSlotRect[],
+  clientX: number,
+  draggingId: number,
+): number | null {
+  if (cards.length === 0) return null;
+
+  const remaining = cards.filter((card) => card.objectId !== draggingId);
+  for (let slot = 0; slot < remaining.length; slot++) {
+    const card = remaining[slot];
+    const center = card.left + card.width / 2;
+    if (clientX < center) return slot;
+  }
+
+  return remaining.length;
+}
+
 export function PlayerHand() {
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
@@ -84,22 +107,18 @@ export function PlayerHand() {
       const cards = Array.from(
         container.querySelectorAll<HTMLElement>("[data-card-hover]"),
       );
-      if (cards.length === 0) return null;
-      let bestIdx = 0;
-      let bestDist = Infinity;
-      let filteredIdx = 0;
-      cards.forEach((el) => {
-        if (Number(el.dataset.objectId) === draggingId) return;
-        const r = el.getBoundingClientRect();
-        const center = r.left + r.width / 2;
-        const dist = Math.abs(clientX - center);
-        if (dist < bestDist) {
-          bestDist = dist;
-          bestIdx = filteredIdx;
-        }
-        filteredIdx++;
-      });
-      return bestIdx;
+      return computeHandInsertionSlot(
+        cards.map((el) => {
+          const r = el.getBoundingClientRect();
+          return {
+            objectId: Number(el.dataset.objectId),
+            left: r.left,
+            width: r.width,
+          };
+        }),
+        clientX,
+        draggingId,
+      );
     },
     [],
   );

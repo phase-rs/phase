@@ -705,37 +705,26 @@ impl SessionManager {
 
         // ReorderHand: per-player display-preference update keyed to the
         // authenticated player, not the priority holder. Mirrors
-        // CancelAutoPass / SetPhaseStops — bypasses engine `apply()` because
-        // the server is the authoritative state owner and no WaitingFor
-        // transition occurs.
+        // CancelAutoPass / SetPhaseStops by bypassing the turn/legal-action
+        // prechecks, but still delegates validation and mutation to the engine
+        // so all adapters share one authoritative contract.
         //
         // CR 402.3: The order of cards in a player's hand is not defined by
         // the rules; players may arrange them as they choose. Hand reordering
         // has no game-rules consequence.
-        if let GameAction::ReorderHand { order } = &action {
-            let p = player.0 as usize;
-            if p < session.state.players.len() {
-                let hand = &session.state.players[p].hand;
-                if order.len() == hand.len() {
-                    let mut current: Vec<ObjectId> = hand.iter().copied().collect();
-                    let mut requested = order.clone();
-                    current.sort_unstable_by_key(|id| id.0);
-                    requested.sort_unstable_by_key(|id| id.0);
-                    // Silently no-op if the order is not a valid permutation of
-                    // the player's hand (malicious / buggy adapter).
-                    if current == requested {
-                        session.state.players[p].hand = order.iter().copied().collect();
-                    }
-                }
-            }
+        if matches!(action, GameAction::ReorderHand { .. }) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
             let (new_legal_actions, spell_costs, by_object) =
                 engine_legal_actions_full(&session.state);
             let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
             return Ok((
                 session.state.clone(),
-                vec![],
+                result.events,
                 new_legal_actions,
-                vec![],
+                result.log_entries,
                 auto_pass,
                 spell_costs,
                 by_object,
@@ -1153,10 +1142,10 @@ mod tests {
         assert_eq!(hand, vec![id_b, id_a]);
     }
 
-    /// `ReorderHand` with a non-permutation (wrong element) silently no-ops —
-    /// the hand is unchanged and no error is returned.
+    /// `ReorderHand` with a non-permutation (wrong element) is rejected by the
+    /// engine-owned validation path and leaves the hand unchanged.
     #[test]
-    fn reorder_hand_invalid_permutation_is_silent_noop() {
+    fn reorder_hand_invalid_permutation_is_rejected() {
         let (mut mgr, code, token0, token1) = setup_two_player_game();
 
         let (off_priority_token, off_priority_id) = {
@@ -1185,12 +1174,8 @@ mod tests {
                 order: vec![id_a, id_bogus],
             },
         );
-        // Should still return Ok (no error), but hand is unchanged.
-        assert!(
-            result.is_ok(),
-            "Invalid ReorderHand should not error: {:?}",
-            result.err()
-        );
+        // Should return an error from the engine-owned permutation validator.
+        assert!(result.is_err(), "Invalid ReorderHand should be rejected");
         let session = mgr.sessions.get(&code).unwrap();
         let hand: Vec<ObjectId> = session.state.players[off_priority_id]
             .hand
