@@ -7390,6 +7390,201 @@ mod tests {
         }
     }
 
+    /// CR 209.1 + CR 107.3e + CR 603.4: Betor, Kin to All — three-tier end-step
+    /// trigger where each tier is gated on a "creatures you control have total
+    /// toughness N or greater" predicate. Before this regression test was
+    /// added, all three gates dropped silently because no parser path
+    /// recognized `Aggregate{Sum, Toughness, creatures-you-control}` in
+    /// condition position; the trigger fired unconditionally and the third
+    /// clause's "each opponent" subject collapsed onto the controller (so
+    /// "each opponent loses half their life, rounded up" hit the source
+    /// player instead).
+    ///
+    /// Asserted shape:
+    /// - Trigger-level intervening-if at `total toughness ≥ 10` (CR 603.4 —
+    ///   checked at trigger creation AND at resolution per the published
+    ///   ruling).
+    /// - First effect (Draw) is unconditional under the trigger gate.
+    /// - Second sub_ability (UntapAll) carries `QuantityCheck ≥ 20`.
+    /// - Third sub_ability (LoseLife) carries `QuantityCheck ≥ 40` and its
+    ///   target is NOT the controller — it must address each opponent.
+    #[test]
+    fn parse_betor_kin_to_all_trigger_structure() {
+        use crate::types::ability::{
+            AbilityCondition, AggregateFunction, Effect, ObjectProperty, RoundingMode,
+        };
+
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if creatures you control have total toughness 10 or greater, draw a card. Then if creatures you control have total toughness 20 or greater, untap each creature you control. Then if creatures you control have total toughness 40 or greater, each opponent loses half their life, rounded up.",
+            "Betor, Kin to All",
+        );
+
+        // -- Trigger-level: intervening-if `Aggregate{Sum, Toughness, creatures-you-control} >= 10`.
+        let trigger_cond = def
+            .condition
+            .as_ref()
+            .expect("trigger.condition must be Some (intervening-if hoisted)");
+        match trigger_cond {
+            TriggerCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(*comparator, Comparator::GE);
+                assert_eq!(*rhs, QuantityExpr::Fixed { value: 10 });
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                function,
+                                property,
+                                filter,
+                            },
+                    } => {
+                        assert_eq!(*function, AggregateFunction::Sum);
+                        assert_eq!(*property, ObjectProperty::Toughness);
+                        match filter {
+                            TargetFilter::Typed(t) => {
+                                assert_eq!(t.controller, Some(ControllerRef::You));
+                                assert!(t.type_filters.contains(&TypeFilter::Creature));
+                            }
+                            other => panic!("expected Typed(Creature, you) filter, got {other:?}"),
+                        }
+                    }
+                    other => panic!("trigger lhs must be Aggregate Ref, got {other:?}"),
+                }
+            }
+            other => panic!("trigger.condition must be QuantityComparison, got {other:?}"),
+        }
+
+        // -- Walk the sub_ability chain.
+        let execute = def.execute.as_ref().expect("execute must be Some");
+
+        // First effect: Draw (no per-clause condition; gate is the trigger-level intervening-if).
+        assert!(
+            matches!(*execute.effect, Effect::Draw { .. }),
+            "first effect must be Draw, got {:?}",
+            execute.effect,
+        );
+
+        // Second tier: UntapAll under "Then if ... ≥ 20".
+        let untap_sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("first sub_ability (UntapAll) must be Some");
+        match &untap_sub.condition {
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 20 },
+                lhs,
+            }) => {
+                assert!(
+                    matches!(
+                        lhs,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate {
+                                function: AggregateFunction::Sum,
+                                property: ObjectProperty::Toughness,
+                                ..
+                            },
+                        }
+                    ),
+                    "untap sub_ability lhs must be Aggregate Sum/Toughness, got {lhs:?}",
+                );
+            }
+            other => panic!(
+                "untap sub_ability.condition must be QuantityCheck >= 20 over Aggregate Sum/Toughness, got {other:?}",
+            ),
+        }
+        assert!(
+            matches!(
+                *untap_sub.effect,
+                Effect::UntapAll { .. } | Effect::Untap { .. }
+            ),
+            "second tier effect must be UntapAll/Untap, got {:?}",
+            untap_sub.effect,
+        );
+
+        // Third tier: LoseLife under "Then if ... ≥ 40", targeting each opponent.
+        let lose_sub = untap_sub
+            .sub_ability
+            .as_deref()
+            .expect("second sub_ability (LoseLife) must be Some");
+        match &lose_sub.condition {
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 40 },
+                lhs,
+            }) => {
+                assert!(
+                    matches!(
+                        lhs,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate {
+                                function: AggregateFunction::Sum,
+                                property: ObjectProperty::Toughness,
+                                ..
+                            },
+                        }
+                    ),
+                    "lose-life sub_ability lhs must be Aggregate Sum/Toughness, got {lhs:?}",
+                );
+            }
+            other => panic!(
+                "lose-life sub_ability.condition must be QuantityCheck >= 40 over Aggregate Sum/Toughness, got {other:?}",
+            ),
+        }
+        match &*lose_sub.effect {
+            Effect::LoseLife { amount, target } => {
+                // CR 107.1a: amount must be HalfRounded(_, Up). The inner ref
+                // resolves per the active player binding (CR 608.2c) when the
+                // outer player_scope iterates over each opponent.
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::HalfRounded {
+                            rounding: RoundingMode::Up,
+                            ..
+                        }
+                    ),
+                    "amount must be HalfRounded(Up), got {amount:?}",
+                );
+
+                // Critical regression: the third clause's "each opponent" subject
+                // must NOT collapse onto the controller. The bug before the fix
+                // produced a degenerate empty Typed filter (`type_filters: []`,
+                // `controller: null`, `properties: []`) that the runtime resolved
+                // to the controller, draining the source player's own life. Any
+                // such empty filter must be rejected outright.
+                if let Some(TargetFilter::Typed(t)) = target {
+                    let degenerate_empty = t.type_filters.is_empty()
+                        && t.controller.is_none()
+                        && t.properties.is_empty();
+                    assert!(
+                        !degenerate_empty,
+                        "regression: LoseLife.target collapsed to the bug-shape degenerate Typed filter (would drain the controller): {t:?}",
+                    );
+                }
+            }
+            other => {
+                panic!("third tier effect must be LoseLife addressing each opponent, got {other:?}",)
+            }
+        }
+
+        // The each-opponent dispatch lives on the sub_ability's `player_scope`,
+        // not on `LoseLife.target`. The parser's `strip_each_player_subject`
+        // strips the "each opponent " prefix and lifts `PlayerFilter::Opponent`
+        // onto the surrounding spell-execute wrapper; the runtime iterates the
+        // life-loss across opponents (CR 608.2c). This is the same encoding
+        // emitted today by Night Market Lookout's "each opponent loses 1 life"
+        // trigger.
+        assert_eq!(
+            lose_sub.player_scope,
+            Some(PlayerFilter::Opponent),
+            "third tier sub_ability.player_scope must be Some(Opponent) — each-opponent dispatch must be lifted to the wrapper, not collapsed onto the controller",
+        );
+    }
+
     /// CR 608.2k: "that player discards a card" in a trigger effect must target
     /// the triggering player (damaged player), not surface a fresh target prompt.
     /// Abyssal-Specter-class regression test.
