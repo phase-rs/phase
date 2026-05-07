@@ -954,7 +954,10 @@ fn apply_action(
         // `len()` rather than swapping to `.get_mut()`, to stay idiomatic with
         // the rest of the file.
         if (actor.0 as usize) >= state.players.len() {
-            return Err(EngineError::WrongPlayer);
+            return Err(EngineError::InvalidAction(format!(
+                "ReorderHand: actor {:?} is not a valid player index",
+                actor
+            )));
         }
         let player = &mut state.players[actor.0 as usize];
 
