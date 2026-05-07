@@ -126,6 +126,11 @@ export function PlayerHand() {
       if (releasedInsideHand) {
         const targetSlot = hoveredSlotRef.current;
         hoveredSlotRef.current = null;
+        // Reorder is disabled while a cast is in progress: handObjects filters
+        // out `pendingObjectId`, so the DOM has N-1 slots but `player.hand`
+        // has N entries. The slot index from `computeSlotFromX` would map to
+        // the wrong position in the unfiltered hand.
+        if (pendingObjectId != null) return false;
         if (targetSlot == null || !player) return false;
         const currentOrder = player.hand.slice();
         const fromIdx = currentOrder.indexOf(objectId as ObjectId);
@@ -142,7 +147,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player],
+    [hasPriority, playCard, player, pendingObjectId],
   );
 
   const handleCardClick = useCallback(
@@ -340,7 +345,11 @@ const HandCard = memo(function HandCard({
       exit={{ opacity: 0, scale: 0.8 }}
       whileHover={{ y: -30 + arcOffset, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 9999 }}
-      transition={{ delay: index * 0.03, duration: 0.25 }}
+      transition={{
+        delay: index * 0.03,
+        duration: 0.25,
+        layout: { duration: 0.15, delay: 0 },
+      }}
       drag
       dragConstraints={false}
       dragElastic={0}
