@@ -10,6 +10,7 @@ use crate::types::ability::{
     ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, PtValue, QuantityExpr,
     ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
     StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessCost, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -1168,6 +1169,71 @@ pub fn synthesize_evoke(face: &mut CardFace) {
     face.triggers.push(trigger);
 }
 
+/// CR 702.30a: Echo is a triggered ability. "Echo [cost]" means "At the
+/// beginning of your upkeep, if this permanent came under your control since
+/// the beginning of your last upkeep, sacrifice it unless you pay [cost]."
+///
+/// The runtime marks each new echo permanent `echo_due` when it enters and
+/// clears the marker when the unless-payment is handled.
+pub fn synthesize_echo(face: &mut CardFace) {
+    let echo_costs: Vec<ManaCost> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            if let Keyword::Echo(cost) = kw {
+                Some(cost.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if echo_costs.is_empty() {
+        return;
+    }
+
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::PayEcho)
+            && t.phase == Some(Phase::Upkeep)
+            && matches!(t.valid_target, Some(TargetFilter::Controller))
+            && matches!(t.condition, Some(TriggerCondition::EchoDue))
+            && t.unless_pay.is_some()
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    for cost in echo_costs {
+        let sac = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::PayEcho)
+            .phase(Phase::Upkeep)
+            .valid_target(TargetFilter::Controller)
+            .condition(TriggerCondition::EchoDue)
+            .execute(sac)
+            .description(
+                "CR 702.30a: At the beginning of your upkeep, sacrifice this permanent unless you pay its echo cost."
+                    .to_string(),
+            );
+        trigger.unless_pay = Some(UnlessPayModifier {
+            cost: UnlessCost::Fixed { cost },
+            payer: TargetFilter::Controller,
+        });
+        face.triggers.push(trigger);
+    }
+}
+
 /// CR 702.175a: Offspring represents two abilities:
 ///   1. "You may pay an additional [cost] as you cast this spell" — modeled as
 ///      `AdditionalCost::Optional(AbilityCost::Mana { cost })`.
@@ -1549,6 +1615,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
     synthesize_evoke(face);
+    synthesize_echo(face);
     // CR 702.175a: Offspring — optional additional cost + ETB 1/1 copy trigger.
     synthesize_offspring(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
@@ -2521,6 +2588,78 @@ mod evoke_synthesis_tests {
         let mut face = CardFace::default();
         face.keywords.push(Keyword::Flying);
         synthesize_evoke(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod echo_synthesis_tests {
+    use super::*;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    fn echo_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Echo(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 3,
+        }));
+        face
+    }
+
+    #[test]
+    fn synthesize_echo_adds_upkeep_pay_or_sac_trigger() {
+        let mut face = echo_face();
+        synthesize_echo(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::PayEcho))
+            .expect("echo should add an upkeep trigger");
+        assert_eq!(trigger.phase, Some(Phase::Upkeep));
+        assert!(matches!(
+            trigger.valid_target,
+            Some(TargetFilter::Controller)
+        ));
+        assert!(matches!(trigger.condition, Some(TriggerCondition::EchoDue)));
+        assert!(matches!(
+            trigger.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+        assert!(matches!(
+            trigger.unless_pay.as_ref(),
+            Some(UnlessPayModifier {
+                cost: UnlessCost::Fixed {
+                    cost: ManaCost::Cost { generic: 3, .. },
+                },
+                payer: TargetFilter::Controller,
+            })
+        ));
+    }
+
+    #[test]
+    fn synthesize_echo_is_idempotent() {
+        let mut face = echo_face();
+        synthesize_echo(&mut face);
+        synthesize_echo(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| matches!(t.mode, TriggerMode::PayEcho))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_echo_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_echo(&mut face);
+
         assert!(face.triggers.is_empty());
     }
 }

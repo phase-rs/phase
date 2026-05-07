@@ -2191,7 +2191,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityKind, CounterTransferMode, Duration, Effect, ModalChoice, ModalSelectionConstraint,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
+        PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
         UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
@@ -2461,6 +2461,41 @@ mod tests {
             vec![p_b],
             "DamageAll should get target 1 (the second player slot)"
         );
+    }
+
+    #[test]
+    fn build_target_slots_token_owner_target_opponent_is_opponent_only() {
+        // CR 111.2 + CR 115.1: Forbidden Orchard-shape effects encode
+        // "target opponent creates ..." as Token{owner: Typed(Opponent)}, so
+        // target-slot construction must offer only legal opponent players.
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Spirit".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string(), "Spirit".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let state = GameState::new_two_player(42);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
     }
 
     #[test]

@@ -6240,8 +6240,8 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
-        DamageModification, Duration, Effect, FilterProp, PlayerFilter, PlayerScope, PtValue,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
+        DamageModification, Duration, Effect, FilterProp, ObjectScope, PlayerFilter, PlayerScope,
+        PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -6779,6 +6779,36 @@ mod tests {
         assert_eq!(
             def.valid_card,
             Some(TargetFilter::Typed(TypedFilter::creature()))
+        );
+    }
+
+    #[test]
+    fn trigger_gain_life_and_get_energy_chains_both_effects() {
+        let def = parse_trigger_line(
+            "Whenever another creature you control enters, you gain 1 life and get {E} (an energy counter).",
+            "Guide of Souls",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another])
+            ))
+        );
+
+        let execute = def.execute.expect("trigger should have execute ability");
+        assert!(matches!(*execute.effect, Effect::GainLife { .. }));
+        let sub_ability = execute
+            .sub_ability
+            .expect("energy gain should be chained after life gain");
+        assert_eq!(
+            *sub_ability.effect,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
         );
     }
 
@@ -8086,6 +8116,36 @@ mod tests {
     }
 
     #[test]
+    fn trigger_mana_cannons_uses_triggering_spell_color_count() {
+        let def = parse_trigger_line(
+            "Whenever you cast a multicolored spell, this enchantment deals X damage to any target, where X is the number of colors that spell is.",
+            "Mana Cannons",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::Multicolored])
+            ))
+        );
+        let execute = def.execute.as_deref().expect("trigger should execute");
+        match execute.effect.as_ref() {
+            Effect::DealDamage { amount, target, .. } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectColorCount {
+                            scope: ObjectScope::EventSource
+                        }
+                    }
+                );
+            }
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn trigger_you_cast_aura_spell() {
         let def = parse_trigger_line(
             "Whenever you cast an Aura spell, you may draw a card.",
@@ -8748,6 +8808,26 @@ mod tests {
             Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)))
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_forbidden_orchard_targets_opponent_token_owner() {
+        let def = parse_trigger_line(
+            "Whenever you tap Forbidden Orchard for mana, target opponent creates a 1/1 colorless Spirit creature token.",
+            "Forbidden Orchard",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+
+        let execute = def.execute.as_deref().expect("trigger should execute");
+        let Effect::Token { owner, .. } = execute.effect.as_ref() else {
+            panic!("expected Token effect, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *owner,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
     }
 
     #[test]
@@ -10603,6 +10683,67 @@ mod tests {
                 );
             }
             other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grave_pact_scopes_sacrifice_to_other_players() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control dies, each other player sacrifices a creature of their choice.",
+            "Grave Pact",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+
+        let execute = def.execute.as_deref().expect("execute ability");
+        match &*execute.effect {
+            Effect::Sacrifice { target, count } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn balefire_dragon_damages_creatures_controlled_by_damaged_player() {
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a player, it deals that much damage to each creature controlled by that player.",
+            "Balefire Dragon",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        let execute = def.execute.as_deref().expect("execute ability");
+        match &*execute.effect {
+            Effect::DamageAll { amount, target, .. } => {
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }
+                );
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetPlayer)
+                    )
+                );
+            }
+            other => panic!("expected DamageAll, got {other:?}"),
         }
     }
 

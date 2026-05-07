@@ -3508,6 +3508,30 @@ mod tests {
     }
 
     #[test]
+    fn harrow_parses_required_sacrifice_land_additional_cost() {
+        let r = parse(
+            "As an additional cost to cast this spell, sacrifice a land.\nSearch your library for up to two basic land cards, put them onto the battlefield, then shuffle.",
+            "Harrow",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) => {
+                assert_eq!(count, 1);
+                assert_eq!(
+                    target,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))
+                );
+            }
+            other => panic!("expected required sacrifice-land cost, got {other:?}"),
+        }
+        assert_eq!(r.abilities.len(), 1);
+        assert!(r.abilities[0].cost.is_none());
+    }
+
+    #[test]
     fn llanowar_elves_mana_ability() {
         let r = parse(
             "{T}: Add {G}.",

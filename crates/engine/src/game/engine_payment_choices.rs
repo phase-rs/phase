@@ -1,10 +1,13 @@
 use crate::game::filter;
-use crate::types::ability::{AbilityCondition, Effect, EffectKind, TargetRef, UnlessCost};
+use crate::types::ability::{
+    AbilityCondition, Effect, EffectKind, TargetFilter, TargetRef, UnlessCost,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, GameState, PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
 use super::casting;
@@ -354,6 +357,7 @@ pub(super) fn handle_unless_payment(
         }
 
         if !payment_failed {
+            clear_echo_due_for_echo_payment(state, &pending_effect);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&pending_effect.effect),
                 source_id: pending_effect.source_id,
@@ -363,6 +367,7 @@ pub(super) fn handle_unless_payment(
 
     if !pay || payment_failed {
         let mut ability = pending_effect.as_ref().clone();
+        clear_echo_due_for_echo_payment(state, &ability);
         if let Effect::Counter {
             ref mut unless_payment,
             ..
@@ -382,6 +387,28 @@ pub(super) fn handle_unless_payment(
     }
     resume_pending_continuation_if_priority(state, events)?;
     Ok(action_result(events, state.waiting_for.clone()))
+}
+
+fn clear_echo_due_for_echo_payment(
+    state: &mut GameState,
+    pending_effect: &crate::types::ability::ResolvedAbility,
+) {
+    let is_echo_sacrifice = matches!(
+        &pending_effect.effect,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    );
+    if !is_echo_sacrifice {
+        return;
+    }
+
+    if let Some(obj) = state.objects.get_mut(&pending_effect.source_id) {
+        if obj.echo_due && obj.keywords.iter().any(|kw| matches!(kw, Keyword::Echo(_))) {
+            obj.echo_due = false;
+        }
+    }
 }
 
 pub(super) fn handle_unless_payment_tap_land_for_mana(

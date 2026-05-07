@@ -134,6 +134,35 @@ describe("buildLegalAiDeckCatalog", () => {
     expect(ids).not.toContain("feed:starter:Illegal Starter");
   });
 
+  it("checks legality for same-format Starter Decks before adding them to the AI pool", async () => {
+    vi.mocked(listSubscriptions).mockReturnValue([
+      { sourceId: "starter-decks", url: "/feeds/starter-decks.json", type: "bundled", subscribedAt: 0, lastRefreshedAt: 0, lastVersion: 1 },
+    ]);
+    vi.mocked(getCachedFeed).mockReturnValue({
+      id: "starter-decks",
+      name: "Starter Decks",
+      format: "standard",
+      version: 1,
+      updated: "2026-05-06T00:00:00Z",
+      decks: [
+        { name: "Illegal Starter", colors: [], main: deck("Illegal Starter").main, sideboard: [] },
+      ],
+    });
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Standard",
+      selectedMatchType: "Bo1",
+    });
+
+    expect(catalog.candidates.map((candidate) => candidate.id)).not.toContain(
+      "feed:starter-decks:Illegal Starter",
+    );
+    expect(evaluateDeckCompatibility).toHaveBeenCalledWith(
+      expect.objectContaining({ main: [{ count: 1, name: "Illegal Starter" }] }),
+      { selectedFormat: "Standard", selectedMatchType: "Bo1", summaryOnly: true },
+    );
+  });
+
   it("exposes Commander precons from shared catalog metadata without engine compatibility", async () => {
     vi.mocked(loadPreconDeckMap).mockResolvedValue({
       secrets: {

@@ -46,7 +46,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Destroyed => match_destroyed,
         TriggerMode::TokenCreated | TriggerMode::TokenCreatedOnce => match_token_created,
         TriggerMode::TurnBegin => match_turn_begin,
-        TriggerMode::Phase => match_phase,
+        TriggerMode::Phase | TriggerMode::PayEcho => match_phase,
         TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce => match_becomes_target,
         TriggerMode::LandPlayed => match_land_played,
         TriggerMode::ManaAdded => match_mana_added,
@@ -123,7 +123,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
         | TriggerMode::PayCumulativeUpkeep
-        | TriggerMode::PayEcho
         | TriggerMode::PhaseIn
         | TriggerMode::PhaseOut
         | TriggerMode::PhaseOutAll
@@ -220,6 +219,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::TokenCreatedOnce, match_token_created);
     r.insert(TriggerMode::TurnBegin, match_turn_begin);
     r.insert(TriggerMode::Phase, match_phase);
+    r.insert(TriggerMode::PayEcho, match_phase);
     r.insert(TriggerMode::BecomesTarget, match_becomes_target);
     r.insert(TriggerMode::BecomesTargetOnce, match_becomes_target);
     r.insert(TriggerMode::LandPlayed, match_land_played);
@@ -344,7 +344,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
         TriggerMode::PayCumulativeUpkeep,
-        TriggerMode::PayEcho,
         TriggerMode::PhaseIn,
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
@@ -3618,6 +3617,13 @@ mod tests {
             ObjectId(1),
             &state
         ));
+    }
+
+    #[test]
+    fn pay_echo_is_promoted_to_real_matcher() {
+        let registry = build_trigger_registry();
+        assert!(trigger_matcher(TriggerMode::PayEcho).is_some());
+        assert!(registry.contains_key(&TriggerMode::PayEcho));
     }
 
     #[test]

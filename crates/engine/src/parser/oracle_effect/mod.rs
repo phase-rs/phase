@@ -9671,6 +9671,7 @@ fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
 /// Strip "each player/opponent [verb]s" subject prefix.
 /// Returns the PlayerFilter scope and the predicate with deconjugated verb.
 /// "Each opponent discards a card" → (Some(Opponent), "discard a card")
+/// "Each other player sacrifices a creature" → (Some(Opponent), "sacrifice a creature")
 /// "Each player draws a card" → (Some(All), "draw a card")
 fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let (scope, stripped) = strip_linked_exile_owner_subject(text);
@@ -9688,6 +9689,7 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
                 PlayerFilter::HighestSpeed,
                 tag("each player with the highest speed among players "),
             ),
+            value(PlayerFilter::Opponent, tag("each other player ")),
             value(PlayerFilter::Opponent, tag("each opponent ")),
             value(PlayerFilter::All, tag("each player ")),
         ))
@@ -10838,7 +10840,7 @@ fn try_parse_damage_with_remainder<'a>(
                             "",
                         ));
                     }
-                    let (filter, remainder) = parse_target(target_phrase);
+                    let (filter, remainder) = parse_target_with_ctx(target_phrase, ctx);
                     let (filter, remainder) = refine_damage_target_remainder(filter, remainder);
                     // CR 119.5 + CR 700.4: "[N] damage to each creature and each
                     // player" — composite scope. The "each creature" parse
@@ -10964,7 +10966,7 @@ fn try_parse_damage_with_remainder<'a>(
                 "",
             ));
         }
-        let (target, rem) = parse_target(after_to_for_classification);
+        let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
         return Some((
             Effect::DamageAll {
                 amount,
@@ -12509,6 +12511,36 @@ mod tests {
             ),
             "expected DamageEachPlayer{{OpponentOtherThanTriggering}}, got {e:?}"
         );
+    }
+
+    #[test]
+    fn effect_damage_all_that_player_controls_uses_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let ability = parse_effect_chain_with_context(
+            "~ deals that much damage to each creature controlled by that player",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::DamageAll {
+                amount:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                target: TargetFilter::Typed(tf),
+                player_filter: None,
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::TargetPlayer));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+            }
+            other => panic!("expected DamageAll against target player's creatures, got {other:?}"),
+        }
     }
 
     /// CR 120.3: Composite "each opponent and each [type] you don't control"
@@ -19005,19 +19037,23 @@ mod tests {
     fn strip_each_player_subject_still_strips_imperatives() {
         // These should still be stripped (imperative effects, not static restrictions)
         let (scope, result) = strip_each_player_subject("each opponent discards a card");
-        assert!(scope.is_some());
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
         assert_eq!(result, "discard a card");
 
+        let (scope, result) = strip_each_player_subject("each other player sacrifices a creature");
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
+        assert_eq!(result, "sacrifice a creature");
+
         let (scope, result) = strip_each_player_subject("each player draws a card");
-        assert!(scope.is_some());
+        assert_eq!(scope, Some(PlayerFilter::All));
         assert_eq!(result, "draw a card");
 
         let (scope, result) = strip_each_player_subject("each player mills three cards");
-        assert!(scope.is_some());
+        assert_eq!(scope, Some(PlayerFilter::All));
         assert_eq!(result, "mill three cards");
 
         let (scope, result) = strip_each_player_subject("each opponent loses 2 life");
-        assert!(scope.is_some());
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
         assert_eq!(result, "lose 2 life");
     }
 
@@ -23411,6 +23447,26 @@ mod tests {
                     tf.controller,
                     Some(ControllerRef::You),
                     "actor=You must be applied as default Sacrifice target controller, got {tf:?}"
+                ),
+                other => panic!("expected Typed Sacrifice target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_effect_chain_each_other_player_defaults_sacrifice_to_opponent() {
+        let ability = parse_effect_chain(
+            "each other player sacrifices a creature of their choice",
+            AbilityKind::Spell,
+        );
+        assert_eq!(ability.player_scope, Some(PlayerFilter::Opponent));
+        match &*ability.effect {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::Opponent),
+                    "each other player must restrict sacrifice choices to that opponent's creatures"
                 ),
                 other => panic!("expected Typed Sacrifice target, got {other:?}"),
             },

@@ -339,6 +339,11 @@ pub struct GameObject {
     #[serde(default)]
     pub summoning_sick: bool,
 
+    /// CR 702.30a: Echo triggers at the controller's next upkeep after this
+    /// permanent came under their control, then never again for the same object.
+    #[serde(default)]
+    pub echo_due: bool,
+
     /// CR 702.49 + CR 702.190a: Which alt-cost cast/activation variant was paid to put this
     /// permanent onto the battlefield, and on which turn. Used by trigger conditions and
     /// ability conditions that check "if its sneak/ninjutsu cost was paid this turn."
@@ -726,6 +731,7 @@ impl GameObject {
             timestamp: 0,
             entered_battlefield_turn: None,
             summoning_sick: false,
+            echo_due: false,
             cast_variant_paid: None,
             cost_x_paid: None,
             kickers_paid: Vec::new(),
@@ -804,6 +810,10 @@ impl GameObject {
         // by `combat::has_summoning_sickness`, so the flag is set
         // unconditionally here; the query short-circuits for non-creatures.
         self.summoning_sick = true;
+        self.echo_due = self
+            .keywords
+            .iter()
+            .any(|kw| matches!(kw, Keyword::Echo(_)));
         self.tapped = false;
         self.damage_marked = 0;
         self.dealt_deathtouch_damage = false;

@@ -1870,6 +1870,12 @@ pub(crate) fn check_trigger_condition(
             player_field(state, controller, |p| p.life_lost_this_turn > 0)
         }
         TriggerCondition::Descended => player_field(state, controller, |p| p.descended_this_turn),
+        TriggerCondition::SourceEnteredThisTurn => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number)),
+        TriggerCondition::EchoDue => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.echo_due),
         TriggerCondition::ControlCreatures { minimum } => {
             let count = state
                 .battlefield

@@ -6784,6 +6784,12 @@ pub enum TriggerCondition {
     TwoOrMoreSpellsCastLastTurn,
     /// CR 603.4: "if it's your turn" — intervening-if requiring the controller's turn.
     DuringYourTurn,
+    /// CR 400.7 + CR 603.4: True when the source permanent entered the
+    /// battlefield this turn.
+    SourceEnteredThisTurn,
+    /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
+    /// its next-controller-upkeep echo payment handled.
+    EchoDue,
     /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
