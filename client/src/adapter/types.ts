@@ -869,6 +869,7 @@ export type GameAction =
   | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][] } }
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "MulliganDecision"; data: { keep: boolean } }
+  | { type: "ReorderHand"; data: { order: ObjectId[] } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
