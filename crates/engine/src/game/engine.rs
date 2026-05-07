@@ -1019,7 +1019,9 @@ fn apply_action(
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass
     if let Some(player) = turn_control::authorized_submitter(state) {
         match &action {
-            GameAction::SetAutoPass { .. } | GameAction::PassPriority => {}
+            GameAction::SetAutoPass { .. }
+            | GameAction::PassPriority
+            | GameAction::ReorderHand { .. } => {}
             _ => {
                 state.auto_pass.remove(&player);
             }
