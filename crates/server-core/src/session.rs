@@ -1093,7 +1093,8 @@ mod tests {
                     } else {
                         token1.clone()
                     };
-                    let _ = mgr.handle_action(&code, &tok, GameAction::MulliganDecision { keep: true });
+                    let _ =
+                        mgr.handle_action(&code, &tok, GameAction::MulliganDecision { keep: true });
                 }
                 WaitingFor::Priority { .. } => break,
                 _ => break,
@@ -1137,7 +1138,11 @@ mod tests {
                 order: vec![id_b, id_a],
             },
         );
-        assert!(result.is_ok(), "ReorderHand should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "ReorderHand should succeed: {:?}",
+            result.err()
+        );
 
         let session = mgr.sessions.get(&code).unwrap();
         let hand: Vec<ObjectId> = session.state.players[off_priority_id]
@@ -1192,6 +1197,10 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        assert_eq!(hand, vec![id_a, id_b], "Hand should be unchanged after invalid reorder");
+        assert_eq!(
+            hand,
+            vec![id_a, id_b],
+            "Hand should be unchanged after invalid reorder"
+        );
     }
 }
