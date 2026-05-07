@@ -101,6 +101,7 @@ export function DeckList({
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("dck");
   const [copied, setCopied] = useState(false);
+  const [viewMode, setViewMode] = useState<"main" | "sideboard">("main");
   const mainTotal = totalCards(deck.main);
   const sideTotal = totalCards(deck.sideboard);
   const mainGroups = groupByType(deck.main);
@@ -152,6 +153,10 @@ export function DeckList({
     }
   }, [sideboardPolicy, sideTotal]);
 
+  useEffect(() => {
+    if (hideSideboard && viewMode === "sideboard") setViewMode("main");
+  }, [hideSideboard, viewMode]);
+
   const unsupportedMap = useMemo(() => {
     const map = new Map<string, UnsupportedCard>();
     for (const card of compatibility?.coverage?.unsupported_cards ?? []) {
@@ -198,14 +203,11 @@ export function DeckList({
 
   return (
     <div className="flex flex-col">
-      <div className="mb-2 flex items-center justify-between border-b border-white/8 pb-2">
-        <div>
+      <div className="mb-2 flex items-center justify-between gap-2 border-b border-white/8 pb-2">
+        <div className="min-w-0">
           <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Current List</div>
-          <h3 className="mt-1 text-sm font-bold text-white">
-            Main Deck ({mainTotal} cards)
-          </h3>
         </div>
-        <div className="flex gap-1">
+        <div className="flex shrink-0 gap-1">
           <button
             onClick={() => setShowPasteModal(true)}
             className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6"
@@ -230,6 +232,39 @@ export function DeckList({
           />
         </div>
       </div>
+
+      {/* Section selector: tab pair for Main / Sideboard. Full-width and
+          prominent so the sideboard view is discoverable even on the
+          narrow 256px right panel. Hidden when the format forbids a
+          sideboard (Commander/Brawl). */}
+      {!hideSideboard ? (
+        <div className="mb-2 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-black/18 p-1">
+          <button
+            onClick={() => setViewMode("main")}
+            className={
+              viewMode === "main"
+                ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
+                : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
+            }
+          >
+            Main ({mainTotal})
+          </button>
+          <button
+            onClick={() => setViewMode("sideboard")}
+            className={
+              viewMode === "sideboard"
+                ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
+                : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
+            }
+          >
+            Sideboard ({sideTotal})
+          </button>
+        </div>
+      ) : (
+        <h3 className="mb-2 text-sm font-bold text-white">
+          Main Deck ({mainTotal} cards)
+        </h3>
+      )}
 
       {/* Warnings */}
       {warnings.length > 0 && (
@@ -297,43 +332,40 @@ export function DeckList({
         </div>
       )}
 
-      {/* Main deck grouped by type */}
+      {/* Main and sideboard share this column; the header toggle (mirroring
+          the "Show Browser" pattern) flips between them so the sideboard
+          can't be pushed off-screen by a long main deck. The sideboard
+          toggle itself is hidden for Commander/Brawl (SideboardPolicy::Forbidden). */}
       <div>
-        {(["Creatures", "Spells", "Lands"] as const).map((group) => (
-          <MoveList
-            key={group}
-            title={group}
-            entries={mainGroups[group]}
-            section="main"
-            onRemove={onRemoveCard}
-            onMove={onMoveCard}
-            onCardHover={onCardHover}
-            unsupportedMap={unsupportedMap}
-            onChooseArt={onChooseArt}
-          />
-        ))}
-
-        {/* Sideboard — always visible when the format permits one, so users
-            can discover and target it. Hidden entirely for Commander/Brawl
-            (SideboardPolicy::Forbidden) since those formats don't have a
-            sideboard concept. */}
-        {!hideSideboard && (
-          <div className="mt-3 border-t border-white/8 pt-2">
-            <MoveList
-              title={sideboardTitle}
-              entries={deck.sideboard}
-              section="sideboard"
-              onRemove={onRemoveCard}
-              onMove={onMoveCard}
-              onCardHover={onCardHover}
-              unsupportedMap={unsupportedMap}
-              alwaysShow
-              emptyHint="Hover a main-deck card and click → to move it here."
-              warning={sideboardWarning}
-              onChooseArt={onChooseArt}
-            />
-          </div>
-        )}
+        {viewMode === "main"
+          ? (["Creatures", "Spells", "Lands"] as const).map((group) => (
+              <MoveList
+                key={group}
+                title={group}
+                entries={mainGroups[group]}
+                section="main"
+                onRemove={onRemoveCard}
+                onMove={onMoveCard}
+                onCardHover={onCardHover}
+                unsupportedMap={unsupportedMap}
+                onChooseArt={onChooseArt}
+              />
+            ))
+          : !hideSideboard && (
+              <MoveList
+                title={sideboardTitle}
+                entries={deck.sideboard}
+                section="sideboard"
+                onRemove={onRemoveCard}
+                onMove={onMoveCard}
+                onCardHover={onCardHover}
+                unsupportedMap={unsupportedMap}
+                alwaysShow
+                emptyHint="Hover a main-deck card and click → to move it here."
+                warning={sideboardWarning}
+                onChooseArt={onChooseArt}
+              />
+            )}
       </div>
 
       {/* Paste import modal */}

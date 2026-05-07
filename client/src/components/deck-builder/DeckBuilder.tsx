@@ -79,6 +79,7 @@ export function DeckBuilder({
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
   const [deckName, setDeckName] = useState("");
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
+  const [justSaved, setJustSaved] = useState(false);
   const [commanders, setCommanders] = useState<string[]>([]);
   const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(initialDeckName !== null);
   const { cardDataCache, cacheCards } = useDeckCardData([
@@ -280,7 +281,14 @@ export function DeckBuilder({
     localStorage.setItem(STORAGE_KEY_PREFIX + deckName.trim(), data);
     stampDeckMeta(deckName.trim());
     setSavedDecks(listSavedDecks());
+    setJustSaved(true);
   };
+
+  useEffect(() => {
+    if (!justSaved) return;
+    const timer = setTimeout(() => setJustSaved(false), 1500);
+    return () => clearTimeout(timer);
+  }, [justSaved]);
 
   const handleLoad = useCallback(async (name: string) => {
     const parsed = loadSavedDeck(name);
@@ -430,16 +438,23 @@ export function DeckBuilder({
           <input
             type="text"
             value={deckName}
-            onChange={(e) => setDeckName(e.target.value)}
+            onChange={(e) => {
+              setDeckName(e.target.value);
+              if (justSaved) setJustSaved(false);
+            }}
             placeholder="Deck name..."
             className="w-40 rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
           />
           <button
             onClick={handleSave}
             disabled={!deckName.trim()}
-            className="rounded-xl border border-white/10 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/14 disabled:opacity-40"
+            className={
+              justSaved
+                ? "rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-sm text-emerald-200 disabled:opacity-40"
+                : "rounded-xl border border-white/10 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/14 disabled:opacity-40"
+            }
           >
-            Save
+            {justSaved ? "Saved ✓" : "Save"}
           </button>
           {savedDecks.length > 0 && (
             <select

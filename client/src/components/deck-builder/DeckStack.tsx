@@ -271,6 +271,7 @@ function DeckStackSectionLane({
   entries,
   emptyLabel,
   showTypeSections = false,
+  extraGroups,
   onAddCard,
   canAddCard,
   onRemoveCard,
@@ -283,6 +284,9 @@ function DeckStackSectionLane({
   entries: DeckStackItem[];
   emptyLabel: string;
   showTypeSections?: boolean;
+  /** Extra groups rendered after the type groups (e.g. Sideboard appended
+   *  to the Main Deck lane below the Lands subsection). */
+  extraGroups?: DeckStackTypeGroup[];
   onAddCard: (name: string) => void;
   canAddCard: (item: DeckStackItem) => boolean;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
@@ -290,10 +294,13 @@ function DeckStackSectionLane({
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
-  const typeGroups = useMemo(
-    () => showTypeSections ? buildTypeGroups(entries) : [{ key: "all", title: "", entries }],
-    [entries, showTypeSections],
-  );
+  const typeGroups = useMemo(() => {
+    const base = showTypeSections
+      ? buildTypeGroups(entries)
+      : [{ key: "all", title: "", entries }];
+    return extraGroups && extraGroups.length > 0 ? [...base, ...extraGroups] : base;
+  }, [entries, showTypeSections, extraGroups]);
+  const showGroupHeaders = showTypeSections || (extraGroups?.length ?? 0) > 0;
 
   return (
     <section className="flex min-w-0 flex-col rounded-[20px] border border-white/8 bg-black/14 px-3 py-3">
@@ -309,11 +316,11 @@ function DeckStackSectionLane({
           {emptyLabel}
         </div>
       ) : (
-        <div className="overflow-auto pb-1">
+        <div className="pb-1">
           <div className="flex min-w-0 flex-col gap-6">
             {typeGroups.map((group, groupIndex) => (
               <div key={group.key} className={groupIndex > 0 ? "pt-1" : undefined}>
-                {showTypeSections && (
+                {showGroupHeaders && (
                   <div className="mb-3 flex items-center gap-3">
                     <div className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-slate-500">
                       {group.title}
@@ -383,6 +390,17 @@ export function DeckStack({
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const clearArtOverride = usePreferencesStore((s) => s.clearArtOverride);
 
+  // Sideboard renders as a "Sideboard" subsection appended to the Main Deck
+  // lane below the Lands subsection, so it shows up naturally as you scroll
+  // the visual stack.
+  const sideboardGroups = useMemo<DeckStackTypeGroup[]>(
+    () =>
+      sections.sideboard.length > 0
+        ? [{ key: "sideboard", title: "Sideboard", entries: sections.sideboard }]
+        : [],
+    [sections.sideboard],
+  );
+
   const [contextMenu, setContextMenu] = useState<{ cardName: string; x: number; y: number } | null>(null);
   const [pickerCard, setPickerCard] = useState<{ cardName: string; oracleId: string } | null>(null);
 
@@ -446,10 +464,15 @@ export function DeckStack({
             )}
             <DeckStackSectionLane
               title="Main Deck"
-              badge={`${mainDeckCount} cards`}
+              badge={
+                sideboardCount > 0
+                  ? `${mainDeckCount} main + ${sideboardCount} side`
+                  : `${mainDeckCount} cards`
+              }
               entries={sections.main}
               emptyLabel="Main deck cards will appear here."
               showTypeSections
+              extraGroups={sideboardGroups}
               onAddCard={onAddCard}
               canAddCard={canAddCard}
               onRemoveCard={onRemoveCard}
@@ -457,20 +480,6 @@ export function DeckStack({
               onCardHover={onCardHover}
               onContextMenu={handleContextMenu}
             />
-            {sideboardCount > 0 && (
-              <DeckStackSectionLane
-                title="Sideboard"
-                badge={`${sideboardCount} cards`}
-                entries={sections.sideboard}
-                emptyLabel="No sideboard cards."
-                onAddCard={onAddCard}
-                canAddCard={canAddCard}
-                onRemoveCard={onRemoveCard}
-                onRemoveCommander={onRemoveCommander}
-                onCardHover={onCardHover}
-                onContextMenu={handleContextMenu}
-              />
-            )}
           </div>
         )}
       </div>
