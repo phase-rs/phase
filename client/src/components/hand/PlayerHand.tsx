@@ -77,30 +77,36 @@ export function PlayerHand() {
 
   const hoveredSlotRef = useRef<number | null>(null);
 
-  const computeSlotFromX = useCallback((clientX: number): number | null => {
-    const container = handContainerRef.current;
-    if (!container) return null;
-    const cards = Array.from(
-      container.querySelectorAll<HTMLElement>("[data-card-hover]"),
-    );
-    if (cards.length === 0) return null;
-    let bestIdx = 0;
-    let bestDist = Infinity;
-    cards.forEach((el, idx) => {
-      const r = el.getBoundingClientRect();
-      const center = r.left + r.width / 2;
-      const dist = Math.abs(clientX - center);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestIdx = idx;
-      }
-    });
-    return bestIdx;
-  }, []);
+  const computeSlotFromX = useCallback(
+    (clientX: number, draggingId: number): number | null => {
+      const container = handContainerRef.current;
+      if (!container) return null;
+      const cards = Array.from(
+        container.querySelectorAll<HTMLElement>("[data-card-hover]"),
+      );
+      if (cards.length === 0) return null;
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      let filteredIdx = 0;
+      cards.forEach((el) => {
+        if (Number(el.dataset.objectId) === draggingId) return;
+        const r = el.getBoundingClientRect();
+        const center = r.left + r.width / 2;
+        const dist = Math.abs(clientX - center);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = filteredIdx;
+        }
+        filteredIdx++;
+      });
+      return bestIdx;
+    },
+    [],
+  );
 
   const handleDrag = useCallback(
-    (_objectId: number, info: PanInfo) => {
-      const slot = computeSlotFromX(info.point.x);
+    (objectId: number, info: PanInfo) => {
+      const slot = computeSlotFromX(info.point.x, objectId);
       hoveredSlotRef.current = slot;
     },
     [computeSlotFromX],
@@ -335,6 +341,7 @@ const HandCard = memo(function HandCard({
   return (
     <motion.div
       data-card-hover
+      data-object-id={objectId}
       layout
       initial={{ opacity: 0, y: 40 }}
       animate={{
