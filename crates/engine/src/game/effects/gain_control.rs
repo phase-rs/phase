@@ -4,6 +4,8 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 
 /// CR 613.3: GainControl creates a transient continuous effect that changes the
 /// target permanent's controller through the layer system (Layer 2).
@@ -36,6 +38,7 @@ pub fn resolve(
                 vec![ContinuousModification::ChangeController],
                 None,
             );
+            mark_echo_due_for_new_controller(state, *obj_id);
         }
     }
 
@@ -86,6 +89,7 @@ pub fn resolve_give(
                 vec![ContinuousModification::ChangeController],
                 None,
             );
+            mark_echo_due_for_new_controller(state, *obj_id);
         }
     }
 
@@ -95,6 +99,14 @@ pub fn resolve_give(
     });
 
     Ok(())
+}
+
+fn mark_echo_due_for_new_controller(state: &mut GameState, obj_id: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&obj_id) {
+        if obj.keywords.iter().any(|kw| matches!(kw, Keyword::Echo(_))) {
+            obj.echo_due = true;
+        }
+    }
 }
 
 #[cfg(test)]

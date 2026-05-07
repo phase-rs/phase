@@ -196,6 +196,25 @@ pub fn validate_deck_for_format(
     }
 }
 
+pub fn validate_name_deck_for_format(
+    db: &CardDatabase,
+    main_deck: &[String],
+    sideboard: &[String],
+    commander: &[String],
+    selected_format: GameFormat,
+    selected_match_type: Option<MatchType>,
+) -> Result<(), Vec<String>> {
+    let request = DeckCompatibilityRequest {
+        main_deck: main_deck.to_vec(),
+        sideboard: sideboard.to_vec(),
+        commander: commander.to_vec(),
+        selected_format: Some(selected_format),
+        selected_match_type,
+        summary_only: false,
+    };
+    validate_deck_for_format(db, &request)
+}
+
 fn evaluate_standard(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -2694,6 +2713,17 @@ mod tests {
         let result = validate_deck_for_format(&db, &request);
         assert!(result.is_err());
         let reasons = result.unwrap_err();
+        assert!(reasons.iter().any(|r| r.contains("Not Standard legal")));
+    }
+
+    #[test]
+    fn validate_name_deck_for_format_rejects_non_standard_cards() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let main_deck = vec!["Not Standard".to_string(); 60];
+        let result =
+            validate_name_deck_for_format(&db, &main_deck, &[], &[], GameFormat::Standard, None);
+
+        let reasons = result.expect_err("name-list validation must reject illegal AI decks");
         assert!(reasons.iter().any(|r| r.contains("Not Standard legal")));
     }
 

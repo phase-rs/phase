@@ -1,6 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::multispace1;
 use nom::combinator::{eof, opt, value};
 use nom::Parser;
 
@@ -587,6 +588,19 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         let conjugated = tag::<_, _, OracleError<'_>>("gains ").parse(s).is_ok()
             || tag::<_, _, OracleError<'_>>("loses ").parse(s).is_ok();
         if !conjugated && next_token_is_count(rest) {
+            return true;
+        }
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("get ").parse(s) {
+        let rest = rest.trim_start();
+        if alt((
+            value((), tag::<_, _, OracleError<'_>>("{e}")),
+            value((), (nom_primitives::parse_number, multispace1, tag("{e}"))),
+            value((), (tag("x"), multispace1, tag("{e}"))),
+        ))
+        .parse(rest)
+        .is_ok()
+        {
             return true;
         }
     }
@@ -2195,6 +2209,15 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], "you gain 1 life");
         assert!(chunks[1].starts_with("~ deals 1 damage"));
+    }
+
+    #[test]
+    fn bare_and_splits_gain_life_and_get_energy() {
+        let chunks = clause_texts("you gain 1 life and get {E} (an energy counter)");
+        assert_eq!(
+            chunks,
+            vec!["you gain 1 life", "get {E} (an energy counter)"]
+        );
     }
 
     #[test]

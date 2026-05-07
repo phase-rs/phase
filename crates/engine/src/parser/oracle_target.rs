@@ -1904,6 +1904,14 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
             .unwrap_or(ControllerRef::You);
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("controlled by that player").parse(trimmed)
+    {
+        let ctrl = ctx
+            .relative_player_scope
+            .clone()
+            .unwrap_or(ControllerRef::You);
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+    }
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they control").parse(trimmed) {
         // "They control" is an anaphoric player reference when the surrounding
         // parser supplies a relative player scope; otherwise keep the legacy

@@ -41,7 +41,7 @@ async function legalCandidate(
 ): Promise<AiDeckCandidate | null> {
   const { knownFormat, ...base } = candidate;
   if (knownFormat && options.selectedFormat && knownFormat !== options.selectedFormat) return null;
-  if (knownFormat) return base;
+  if (candidate.source.type === "precon" && knownFormat) return base;
 
   const result = await evaluateDeckCompatibility(candidate.deck, {
     selectedFormat: options.selectedFormat,

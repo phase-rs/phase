@@ -81,8 +81,35 @@ tilt logs card-data --tail 20 --since 1m       # Card data gen output
 tilt logs check-frontend --tail 30 --since 2m  # TS type-check + lint
 ```
 
+**How to wait for current results without dumping logs:**
+```bash
+resources=(clippy test-engine card-data)
+deadline=$((SECONDS + 900))
+until [[ $SECONDS -ge $deadline ]]; do
+  all_done=1
+  for r in $resources; do
+    json=$(tilt get uiresource "$r" -o json)
+    st=$(jq -r '.status.updateStatus // "unknown"' <<< "$json")
+    current=$(jq -r '.status.currentBuild.spanID // "none"' <<< "$json")
+    last=$(jq -r '.status.buildHistory[0].finishTime // "none"' <<< "$json")
+    err=$(jq -r '.status.buildHistory[0].error // ""' <<< "$json")
+    printf '%s status=%s current=%s last=%s\n' "$r" "$st" "$current" "$last"
+    if [[ "$st" == "error" ]]; then
+      printf '%s error=%s\n' "$r" "$err"
+      exit 1
+    fi
+    [[ "$st" == "ok" ]] || all_done=0
+  done
+  [[ $all_done -eq 1 ]] && exit 0
+  sleep 20
+done
+echo "Timed out waiting for Tilt resources" >&2
+exit 124
+```
+
 **Rules:**
 - After saving files, wait ~10-30s for Tilt to detect changes and rebuild, then check logs.
+- Prefer the `tilt get uiresource` polling loop when waiting on multiple resources; use logs after a resource reports `error` or when you need detailed output.
 - Use `--follow` only when you need to stream live output (e.g., waiting for a build in progress).
 - Use `--since` to limit output — don't dump entire build history.
 - If a resource shows errors, fix your code and Tilt will automatically rebuild.

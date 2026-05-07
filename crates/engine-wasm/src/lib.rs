@@ -11,8 +11,8 @@ use engine::game::engine::apply;
 use engine::game::{
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
     is_commander_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
-    start_game, start_game_with_starting_player, validate_deck_for_format,
-    DeckCompatibilityRequest, DeckList,
+    start_game, start_game_with_starting_player, validate_name_deck_for_format,
+    DeckCompatibilityRequest, DeckList, PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
@@ -21,7 +21,7 @@ use engine::types::match_config::MatchConfig;
 use engine::types::{GameAction, GameState, PlayerId};
 
 use engine::game::deck_loading::PlayerDeckPayload;
-use engine::game::{resolve_player_deck_list, PlayerDeckList};
+use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
@@ -439,17 +439,43 @@ pub fn initialize_game(
                 let borrow = cell.borrow();
                 let db = borrow.as_ref()?;
 
-                // Validate player deck against the selected format before loading
-                let validation_request = DeckCompatibilityRequest {
-                    main_deck: deck_list.player.main_deck.clone(),
-                    sideboard: deck_list.player.sideboard.clone(),
-                    commander: deck_list.player.commander.clone(),
-                    selected_format: Some(game_format),
-                    selected_match_type: None,
-                    summary_only: false,
-                };
-                if let Err(reasons) = validate_deck_for_format(db, &validation_request) {
-                    return Some(reasons);
+                for (seat, deck) in [
+                    ("Player".to_string(), &deck_list.player),
+                    ("AI opponent".to_string(), &deck_list.opponent),
+                ] {
+                    if let Err(reasons) = validate_name_deck_for_format(
+                        db,
+                        &deck.main_deck,
+                        &deck.sideboard,
+                        &deck.commander,
+                        game_format,
+                        Some(state.match_config.match_type),
+                    ) {
+                        return Some(
+                            reasons
+                                .into_iter()
+                                .map(|reason| format!("{seat} deck: {reason}"))
+                                .collect(),
+                        );
+                    }
+                }
+                for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
+                    let seat = format!("AI player {}", idx + 2);
+                    if let Err(reasons) = validate_name_deck_for_format(
+                        db,
+                        &deck.main_deck,
+                        &deck.sideboard,
+                        &deck.commander,
+                        game_format,
+                        Some(state.match_config.match_type),
+                    ) {
+                        return Some(
+                            reasons
+                                .into_iter()
+                                .map(|reason| format!("{seat} deck: {reason}"))
+                                .collect(),
+                        );
+                    }
                 }
 
                 let mut payload = resolve_deck_list(db, &deck_list);

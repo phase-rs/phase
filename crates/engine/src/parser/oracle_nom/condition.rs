@@ -16,8 +16,8 @@ use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
-    CountScope, FilterProp, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter, ZoneRef,
+    CountScope, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::DayNight;
@@ -46,6 +46,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_player_state_conditions,
         parse_you_have_conditions,
         parse_compound_control_presence,
+        parse_filter_have_total_property,
         parse_control_conditions,
         parse_opponent_poison_conditions,
         parse_defending_player_comparison_conditions,
@@ -912,6 +913,82 @@ fn parse_you_dont_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
             condition: Box::new(StaticCondition::IsPresent {
                 filter: Some(filter),
             }),
+        },
+    ))
+}
+
+/// CR 107.3e + CR 208.1 + CR 202.3: Parse
+/// "<filter> have total <property> N or {greater|more|less|fewer}" →
+/// `StaticCondition::QuantityComparison { lhs: Aggregate{Sum, property, filter}, comparator, rhs: N }`.
+///
+/// Single combinator parameterized over `ObjectProperty` so it covers total
+/// power and toughness (CR 208.1), and total mana value (CR 202.3)
+/// uniformly — one parse path instead of three sibling combinators
+/// ("Parameterize, don't proliferate"). The motivating card is Betor, Kin to
+/// All ("if creatures you control have total toughness 10 or greater"), but
+/// the building block extends to any "<filter> have total <property> N or X"
+/// phrase.
+///
+/// The `filter` subject reuses `parse_type_phrase`, so any subject-controller
+/// combination it understands ("creatures you control", "creatures an opponent
+/// controls", etc.) flows through automatically.
+///
+/// The result composes with both gating sites:
+/// - Trigger-level intervening-if (`oracle_trigger::extract_if_condition` →
+///   `static_condition_to_trigger_condition`).
+/// - Per-clause "Then if X" sub-ability conditions
+///   (`oracle_effect::conditions::strip_leading_general_conditional` →
+///   `static_condition_to_ability_condition`).
+fn parse_filter_have_total_property(input: &str) -> OracleResult<'_, StaticCondition> {
+    // 1. Filter subject. parse_type_phrase consumes the noun phrase plus its
+    //    trailing controller suffix ("creatures you control") and returns the
+    //    typed filter with controller already injected. Reject `Any` so a bare
+    //    "have total ..." prefix cannot accidentally match without a subject.
+    let (filter, remainder) = parse_type_phrase(input);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    // 2. " have total " connective.
+    let (rest, _) = tag(" have total ").parse(remainder)?;
+
+    // 3. Property keyword. Tags include the trailing space so the number that
+    //    follows can be parsed without an extra trim_start.
+    let (rest, property) = alt((
+        value(ObjectProperty::Toughness, tag("toughness ")),
+        value(ObjectProperty::Power, tag("power ")),
+        value(ObjectProperty::ManaValue, tag("mana value ")),
+    ))
+    .parse(rest)?;
+
+    // 4. Threshold number.
+    let (rest, n) = parse_number(rest)?;
+
+    // 5. Comparator suffix. "or greater" / "or more" both denote `>=`;
+    //    "or less" / "or fewer" both denote `<=`. The leading space is part
+    //    of the suffix because `parse_number` consumes the digits but not the
+    //    trailing whitespace.
+    let (rest, comparator) = alt((
+        value(Comparator::GE, alt((tag(" or greater"), tag(" or more")))),
+        value(Comparator::LE, alt((tag(" or less"), tag(" or fewer")))),
+    ))
+    .parse(rest)?;
+
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Sum,
+                    property,
+                    filter,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
 }
@@ -5078,5 +5155,133 @@ mod tests {
                 maximum: Some(0),
             }
         ));
+    }
+
+    // -- "have total {power|toughness|mana value} N or {greater|less}" predicate --
+    //
+    // CR 107.3e + CR 208.1 + CR 202.3: Building-block predicate for
+    // aggregate-property thresholds across a filter (Sum function). Single
+    // combinator parameterized over `ObjectProperty` so it covers total power,
+    // total toughness, and total mana value uniformly. The motivating card is
+    // Betor, Kin to All ("if creatures you control have total toughness 10 or
+    // greater"), but the building block extends to any "<filter> have total
+    // <property> <comparator> N" phrase.
+    fn assert_total_property_ge(
+        text: &str,
+        expected_property: AggregateProperty,
+        expected_threshold: i32,
+    ) {
+        let (rest, c) = parse_inner_condition(text).unwrap_or_else(|e| {
+            panic!("parse_inner_condition({text:?}) failed: {e:?}");
+        });
+        assert_eq!(rest, "", "input fully consumed for {text:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(
+                    rhs,
+                    QuantityExpr::Fixed {
+                        value: expected_threshold
+                    }
+                );
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                function,
+                                property,
+                                filter,
+                            },
+                    } => {
+                        assert_eq!(function, AggregateFunction::Sum);
+                        assert_eq!(property, expected_property.0);
+                        match filter {
+                            TargetFilter::Typed(t) => {
+                                assert_eq!(t.controller, Some(ControllerRef::You));
+                                assert!(t.type_filters.contains(&TypeFilter::Creature));
+                            }
+                            other => panic!(
+                                "expected Typed(Creature, controller=You) filter, got {other:?}"
+                            ),
+                        }
+                    }
+                    other => panic!("expected QuantityRef::Aggregate, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// Tiny newtype to avoid importing `ObjectProperty` at every call site of
+    /// the helper without leaking `crate::types::ability::ObjectProperty`
+    /// directly into the test surface.
+    struct AggregateProperty(crate::types::ability::ObjectProperty);
+
+    /// CR 208.1 + CR 107.3e: Betor's first tier — "if creatures you control
+    /// have total toughness 10 or greater" must parse to a Sum-Toughness
+    /// QuantityComparison so the trigger-level intervening-if hoist works.
+    #[test]
+    fn test_creatures_you_control_have_total_toughness_ge() {
+        assert_total_property_ge(
+            "creatures you control have total toughness 10 or greater",
+            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
+            10,
+        );
+    }
+
+    /// CR 208.1: Betor's second tier — same shape with threshold 20.
+    #[test]
+    fn test_creatures_you_control_have_total_toughness_ge_20() {
+        assert_total_property_ge(
+            "creatures you control have total toughness 20 or greater",
+            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
+            20,
+        );
+    }
+
+    /// CR 208.1: Betor's third tier — same shape with threshold 40.
+    #[test]
+    fn test_creatures_you_control_have_total_toughness_ge_40() {
+        assert_total_property_ge(
+            "creatures you control have total toughness 40 or greater",
+            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
+            40,
+        );
+    }
+
+    /// CR 208.1: Building-block coverage — total power must parse via the same
+    /// combinator (parameterization, not proliferation).
+    #[test]
+    fn test_creatures_you_control_have_total_power_ge() {
+        assert_total_property_ge(
+            "creatures you control have total power 7 or greater",
+            AggregateProperty(crate::types::ability::ObjectProperty::Power),
+            7,
+        );
+    }
+
+    /// CR 202.3: Building-block coverage — total mana value via the same combinator.
+    #[test]
+    fn test_creatures_you_control_have_total_mana_value_ge() {
+        assert_total_property_ge(
+            "creatures you control have total mana value 12 or greater",
+            AggregateProperty(crate::types::ability::ObjectProperty::ManaValue),
+            12,
+        );
+    }
+
+    /// "or more" alias for the GE comparator must parse identically — Oracle
+    /// uses both "or greater" and "or more" interchangeably for thresholds.
+    #[test]
+    fn test_creatures_you_control_have_total_toughness_or_more_alias() {
+        assert_total_property_ge(
+            "creatures you control have total toughness 10 or more",
+            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
+            10,
+        );
     }
 }
