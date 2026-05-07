@@ -182,7 +182,10 @@ fn check_actor_authorization(
     }
     if matches!(
         action,
-        GameAction::SetPhaseStops { .. } | GameAction::CancelAutoPass | GameAction::Debug(_)
+        GameAction::SetPhaseStops { .. }
+            | GameAction::CancelAutoPass
+            | GameAction::Debug(_)
+            | GameAction::ReorderHand { .. }
     ) {
         return Ok(());
     }
@@ -932,6 +935,53 @@ fn apply_action(
         } else {
             state.phase_stops.insert(actor, stops.clone());
         }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
+    // CR 402.3: Hand order has no game-rules significance — ReorderHand is a
+    // display-preference update on the actor's own hand. Validated as a strict
+    // permutation of the current hand and applied with no event emission, no
+    // WaitingFor transition, and no auto-pass / lands-tapped clearing. Mirrors
+    // the SetPhaseStops / CancelAutoPass pattern: any-state, routed by `actor`.
+    if let GameAction::ReorderHand { order } = &action {
+        // Canonical accessor in this crate is direct indexing — see
+        // `state.players[player.0 as usize]` throughout `ai_support/candidates.rs`,
+        // `game/companion.rs`, and the existing test module. Bounds-check via
+        // `len()` rather than swapping to `.get_mut()`, to stay idiomatic with
+        // the rest of the file.
+        if (actor.0 as usize) >= state.players.len() {
+            return Err(EngineError::WrongPlayer);
+        }
+        let player = &mut state.players[actor.0 as usize];
+
+        if order.len() != player.hand.len() {
+            return Err(EngineError::InvalidAction(format!(
+                "ReorderHand: expected {} ids, got {}",
+                player.hand.len(),
+                order.len()
+            )));
+        }
+
+        // Permutation check: same multiset. Sort copies and compare — O(n log n)
+        // is fine for hand sizes (typically <= 7, capped well under any realistic
+        // limit by CR 402.2 and our zone semantics). ObjectId is not Ord, so
+        // sort by the inner u64 key directly.
+        let mut current: Vec<ObjectId> = player.hand.iter().copied().collect();
+        let mut requested = order.clone();
+        current.sort_unstable_by_key(|id| id.0);
+        requested.sort_unstable_by_key(|id| id.0);
+        if current != requested {
+            return Err(EngineError::InvalidAction(
+                "ReorderHand: order is not a permutation of the current hand".into(),
+            ));
+        }
+
+        player.hand = order.iter().copied().collect();
+
         return Ok(ActionResult {
             events: vec![],
             waiting_for: state.waiting_for.clone(),
