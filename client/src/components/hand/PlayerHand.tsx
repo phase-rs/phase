@@ -21,6 +21,29 @@ function getHandOverlap(handSize: number): string {
   return "calc(var(--card-w) * -0.6)";
 }
 
+interface HandSlotRect {
+  objectId: number;
+  left: number;
+  width: number;
+}
+
+export function computeHandInsertionSlot(
+  cards: HandSlotRect[],
+  clientX: number,
+  draggingId: number,
+): number | null {
+  if (cards.length === 0) return null;
+
+  const remaining = cards.filter((card) => card.objectId !== draggingId);
+  for (let slot = 0; slot < remaining.length; slot++) {
+    const card = remaining[slot];
+    const center = card.left + card.width / 2;
+    if (clientX < center) return slot;
+  }
+
+  return remaining.length;
+}
+
 export function PlayerHand() {
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
@@ -75,6 +98,39 @@ export function PlayerHand() {
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
   );
 
+  const hoveredSlotRef = useRef<number | null>(null);
+
+  const computeSlotFromX = useCallback(
+    (clientX: number, draggingId: number): number | null => {
+      const container = handContainerRef.current;
+      if (!container) return null;
+      const cards = Array.from(
+        container.querySelectorAll<HTMLElement>("[data-card-hover]"),
+      );
+      return computeHandInsertionSlot(
+        cards.map((el) => {
+          const r = el.getBoundingClientRect();
+          return {
+            objectId: Number(el.dataset.objectId),
+            left: r.left,
+            width: r.width,
+          };
+        }),
+        clientX,
+        draggingId,
+      );
+    },
+    [],
+  );
+
+  const handleDrag = useCallback(
+    (objectId: number, info: PanInfo) => {
+      const slot = computeSlotFromX(info.point.x, objectId);
+      hoveredSlotRef.current = slot;
+    },
+    [computeSlotFromX],
+  );
+
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
   // Commander-zone single-cast path): release above DRAG_PLAY_THRESHOLD
   // while holding priority and outside the source zone. A React hook cannot
@@ -83,7 +139,6 @@ export function PlayerHand() {
   // definition of "how far up counts as a play."
   const handleDragEnd = useCallback(
     (objectId: number, _event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
-      if (!hasPriority) return false;
       const bounds = handContainerRef.current?.getBoundingClientRect();
       const releasedInsideHand =
         bounds != null
@@ -91,12 +146,33 @@ export function PlayerHand() {
         && info.point.x <= bounds.right
         && info.point.y >= bounds.top
         && info.point.y <= bounds.bottom;
-      if (releasedInsideHand) return false;
+
+      // Reorder branch: released inside the hand, a different slot is hovered.
+      if (releasedInsideHand) {
+        const targetSlot = hoveredSlotRef.current;
+        hoveredSlotRef.current = null;
+        // Reorder is disabled while a cast is in progress: handObjects filters
+        // out `pendingObjectId`, so the DOM has N-1 slots but `player.hand`
+        // has N entries. The slot index from `computeSlotFromX` would map to
+        // the wrong position in the unfiltered hand.
+        if (pendingObjectId != null) return false;
+        if (targetSlot == null || !player) return false;
+        const currentOrder = player.hand.slice();
+        const fromIdx = currentOrder.indexOf(objectId as ObjectId);
+        if (fromIdx === -1 || fromIdx === targetSlot) return false;
+        const [moved] = currentOrder.splice(fromIdx, 1);
+        currentOrder.splice(targetSlot, 0, moved);
+        dispatchAction({ type: "ReorderHand", data: { order: currentOrder } });
+        return false;
+      }
+
+      // Play branch (unchanged from the existing implementation).
+      if (!hasPriority) return false;
       if (info.offset.y >= DRAG_PLAY_THRESHOLD) return false;
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard],
+    [hasPriority, playCard, player, pendingObjectId],
   );
 
   const handleCardClick = useCallback(
@@ -190,6 +266,7 @@ export function PlayerHand() {
               hasPriority={hasPriority}
               isMobile={isMobile}
               onDragEnd={handleDragEnd}
+              onDrag={handleDrag}
               onClick={handleCardClick}
               onDoubleClick={handleCardDoubleClick}
               isDragging={draggingCardId === obj.id}
@@ -222,6 +299,7 @@ interface HandCardProps {
   onDragStart: (id: number) => void;
   onDragStop: () => void;
   onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => boolean;
+  onDrag: (objectId: number, info: PanInfo) => void;
   onClick: (objectId: number, e?: React.MouseEvent) => void;
   onDoubleClick: (objectId: number) => void;
   onMouseEnter: (id: number) => void;
@@ -245,6 +323,7 @@ const HandCard = memo(function HandCard({
   onDragStart: onDragStartProp,
   onDragStop,
   onDragEnd,
+  onDrag,
   onClick,
   onDoubleClick,
   onMouseEnter,
@@ -281,6 +360,8 @@ const HandCard = memo(function HandCard({
   return (
     <motion.div
       data-card-hover
+      data-object-id={objectId}
+      layout
       initial={{ opacity: 0, y: 40 }}
       animate={{
         opacity: 1,
@@ -290,7 +371,11 @@ const HandCard = memo(function HandCard({
       exit={{ opacity: 0, scale: 0.8 }}
       whileHover={{ y: -30 + arcOffset, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 9999 }}
-      transition={{ delay: index * 0.03, duration: 0.25 }}
+      transition={{
+        delay: index * 0.03,
+        duration: 0.25,
+        layout: { duration: 0.15, delay: 0 },
+      }}
       drag
       dragConstraints={false}
       dragElastic={0}
@@ -301,6 +386,7 @@ const HandCard = memo(function HandCard({
         inspectObject(null);
         onDragStartProp(objectId);
       }}
+      onDrag={(_event, info) => onDrag(objectId, info)}
       onDragEnd={(event, info) => {
         setDragging(false);
         onDragStop();

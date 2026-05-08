@@ -79,14 +79,12 @@ function setupRandomAvatars(playerCount: number) {
   }
 }
 
-function setupCommanderAvatars(gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }>; command_zone?: number[] }) {
+function setupCommanderAvatars(gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> }) {
   const generation = ++avatarGeneration;
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
 
-  const czIds = gameState.command_zone ?? [];
-  for (const id of czIds) {
-    const obj = gameState.objects[id];
+  for (const obj of Object.values(gameState.objects)) {
     if (!obj?.is_commander) continue;
     if (commanderNames.has(obj.owner)) continue;
     commanderNames.set(obj.owner, obj.name);

@@ -3845,6 +3845,21 @@ mod tests {
             ),
             3
         );
+
+        state.current_trigger_event = Some(crate::types::events::GameEvent::SpellCast {
+            card_id: CardId(2),
+            controller: PlayerId(0),
+            object_id: target,
+        });
+        let event_source_expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectColorCount {
+                scope: ObjectScope::EventSource,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &event_source_expr, PlayerId(0), source),
+            2
+        );
     }
 
     #[test]

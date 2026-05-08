@@ -19,7 +19,7 @@ use engine::ai_support::{
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_views;
-use engine::game::{validate_deck_for_format, DeckCompatibilityRequest};
+use engine::game::validate_name_deck_for_format;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use http::HeaderValue;
@@ -2360,15 +2360,14 @@ async fn handle_client_message(
 
             // Validate player deck against the selected format
             if let Some(ref fc) = format_config {
-                let validation_request = DeckCompatibilityRequest {
-                    main_deck: deck.main_deck.clone(),
-                    sideboard: deck.sideboard.clone(),
-                    commander: deck.commander.clone(),
-                    selected_format: Some(fc.format),
-                    selected_match_type: None,
-                    summary_only: false,
-                };
-                if let Err(reasons) = validate_deck_for_format(db, &validation_request) {
+                if let Err(reasons) = validate_name_deck_for_format(
+                    db,
+                    &deck.main_deck,
+                    &deck.sideboard,
+                    &deck.commander,
+                    fc.format,
+                    Some(match_config.match_type),
+                ) {
                     let msg = ServerMessage::Error {
                         message: format!(
                             "Deck not legal for {}: {}",
@@ -2398,6 +2397,29 @@ async fn handle_client_message(
                             }),
                         None => server_core::starter_decks::random_starter_deck(),
                     };
+                    if let Some(ref fc) = format_config {
+                        if let Err(reasons) = validate_name_deck_for_format(
+                            db,
+                            &ai_deck_data.main_deck,
+                            &ai_deck_data.sideboard,
+                            &ai_deck_data.commander,
+                            fc.format,
+                            Some(match_config.match_type),
+                        ) {
+                            let msg = ServerMessage::Error {
+                                message: format!(
+                                    "AI deck for seat {} not legal for {}: {}",
+                                    seat.seat_index,
+                                    fc.format.label(),
+                                    reasons.join("; ")
+                                ),
+                            };
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                let _ = socket.send(Message::text(json)).await;
+                            }
+                            return;
+                        }
+                    }
                     let ai_resolved = match resolve_deck(db, &ai_deck_data) {
                         Ok(d) => d,
                         Err(e) => {

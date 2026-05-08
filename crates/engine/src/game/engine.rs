@@ -182,7 +182,10 @@ fn check_actor_authorization(
     }
     if matches!(
         action,
-        GameAction::SetPhaseStops { .. } | GameAction::CancelAutoPass | GameAction::Debug(_)
+        GameAction::SetPhaseStops { .. }
+            | GameAction::CancelAutoPass
+            | GameAction::Debug(_)
+            | GameAction::ReorderHand { .. }
     ) {
         return Ok(());
     }
@@ -939,6 +942,56 @@ fn apply_action(
         });
     }
 
+    // CR 402.3: Hand order has no game-rules significance — ReorderHand is a
+    // display-preference update on the actor's own hand. Validated as a strict
+    // permutation of the current hand and applied with no event emission, no
+    // WaitingFor transition, and no auto-pass / lands-tapped clearing. Mirrors
+    // the SetPhaseStops / CancelAutoPass pattern: any-state, routed by `actor`.
+    if let GameAction::ReorderHand { order } = &action {
+        // Canonical accessor in this crate is direct indexing — see
+        // `state.players[player.0 as usize]` throughout `ai_support/candidates.rs`,
+        // `game/companion.rs`, and the existing test module. Bounds-check via
+        // `len()` rather than swapping to `.get_mut()`, to stay idiomatic with
+        // the rest of the file.
+        if (actor.0 as usize) >= state.players.len() {
+            return Err(EngineError::InvalidAction(format!(
+                "ReorderHand: actor {:?} is not a valid player index",
+                actor
+            )));
+        }
+        let player = &mut state.players[actor.0 as usize];
+
+        if order.len() != player.hand.len() {
+            return Err(EngineError::InvalidAction(format!(
+                "ReorderHand: expected {} ids, got {}",
+                player.hand.len(),
+                order.len()
+            )));
+        }
+
+        // Permutation check: same multiset. Sort copies and compare — O(n log n)
+        // is fine for hand sizes (typically <= 7, capped well under any realistic
+        // limit by CR 402.2 and our zone semantics). ObjectId is not Ord, so
+        // sort by the inner u64 key directly.
+        let mut current: Vec<ObjectId> = player.hand.iter().copied().collect();
+        let mut requested = order.clone();
+        current.sort_unstable_by_key(|id| id.0);
+        requested.sort_unstable_by_key(|id| id.0);
+        if current != requested {
+            return Err(EngineError::InvalidAction(
+                "ReorderHand: order is not a permutation of the current hand".into(),
+            ));
+        }
+
+        player.hand = order.iter().copied().collect();
+
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
     // CR 104.3a: A player may concede at any time. Concede bypasses the WaitingFor
     // dispatch entirely — there is no priority/state check. Eliminating the player
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
@@ -966,7 +1019,9 @@ fn apply_action(
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass
     if let Some(player) = turn_control::authorized_submitter(state) {
         match &action {
-            GameAction::SetAutoPass { .. } | GameAction::PassPriority => {}
+            GameAction::SetAutoPass { .. }
+            | GameAction::PassPriority
+            | GameAction::ReorderHand { .. } => {}
             _ => {
                 state.auto_pass.remove(&player);
             }
@@ -8235,6 +8290,96 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    // CR 402.3: Hand order has no game-rules significance — ReorderHand is a
+    // display-preference update only.
+    #[test]
+    fn reorder_hand_replaces_hand_order() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+
+        let a = ObjectId(100);
+        let b = ObjectId(101);
+        let c = ObjectId(102);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b, c]);
+
+        let result = apply(
+            &mut state,
+            p0,
+            GameAction::ReorderHand {
+                order: vec![c, a, b],
+            },
+        )
+        .expect("reorder should succeed");
+
+        assert!(result.events.is_empty(), "reorder must emit no events");
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![c, a, b],
+        );
+    }
+
+    #[test]
+    fn reorder_hand_rejects_non_permutation() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+        let a = ObjectId(100);
+        let b = ObjectId(101);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+
+        // Wrong length.
+        let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
+            .expect_err("wrong length must error");
+        assert!(matches!(err, EngineError::InvalidAction(_)));
+
+        // Right length, wrong contents.
+        let stranger = ObjectId(999);
+        let err = apply(
+            &mut state,
+            p0,
+            GameAction::ReorderHand {
+                order: vec![a, stranger],
+            },
+        )
+        .expect_err("stranger id must error");
+        assert!(matches!(err, EngineError::InvalidAction(_)));
+
+        // Hand unchanged after rejected calls.
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![a, b],
+        );
+    }
+
+    #[test]
+    fn reorder_hand_succeeds_while_opponent_holds_priority() {
+        // Verifies the `check_actor_authorization` whitelist: P0 must be able
+        // to reorder their own hand even though P1 is the priority player and
+        // holds the WaitingFor::Priority slot.
+        let mut state = setup_game_at_main_phase();
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let a = ObjectId(200);
+        let b = ObjectId(201);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ReorderHand { order: vec![b, a] },
+        )
+        .expect("non-priority actor reordering own hand must succeed");
+
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![b, a],
+        );
+        // Priority hasn't moved — reorder doesn't transition WaitingFor.
+        assert_eq!(state.priority_player, PlayerId(1));
     }
 }
 

@@ -703,6 +703,34 @@ impl SessionManager {
             ));
         }
 
+        // ReorderHand: per-player display-preference update keyed to the
+        // authenticated player, not the priority holder. Mirrors
+        // CancelAutoPass / SetPhaseStops by bypassing the turn/legal-action
+        // prechecks, but still delegates validation and mutation to the engine
+        // so all adapters share one authoritative contract.
+        //
+        // CR 402.3: The order of cards in a player's hand is not defined by
+        // the rules; players may arrange them as they choose. Hand reordering
+        // has no game-rules consequence.
+        if matches!(action, GameAction::ReorderHand { .. }) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
+            let (new_legal_actions, spell_costs, by_object) =
+                engine_legal_actions_full(&session.state);
+            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
+            return Ok((
+                session.state.clone(),
+                result.events,
+                new_legal_actions,
+                result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ));
+        }
+
         // Validate it's this player's turn to act
         let current_actor = acting_player(&session.state);
         match current_actor {
@@ -1035,5 +1063,129 @@ mod tests {
     fn player_token_is_hex() {
         let token = generate_player_token();
         assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // Helper: create a two-player game and advance past mulligans so both players
+    // have Priority-phase waiting state. Returns (mgr, code, token0, token1).
+    fn setup_two_player_game() -> (SessionManager, String, String, String) {
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        // Advance through mulligan decisions until both players have kept hands.
+        // We loop at most 20 times to avoid infinite loops in unexpected states.
+        for _ in 0..20 {
+            let session = mgr.sessions.get(&code).unwrap();
+            match &session.state.waiting_for.clone() {
+                WaitingFor::MulliganDecision { player, .. } => {
+                    let tok = if *player == PlayerId(0) {
+                        token0.clone()
+                    } else {
+                        token1.clone()
+                    };
+                    let _ =
+                        mgr.handle_action(&code, &tok, GameAction::MulliganDecision { keep: true });
+                }
+                WaitingFor::Priority { .. } => break,
+                _ => break,
+            }
+        }
+        (mgr, code, token0, token1)
+    }
+
+    /// `ReorderHand` succeeds even when the sender is not the priority holder.
+    /// The hand is reordered to the requested permutation.
+    #[test]
+    fn reorder_hand_succeeds_while_opponent_has_priority() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+
+        // Determine which player has priority; inject two ObjectIds into the
+        // *other* player's hand so we can test off-priority reordering.
+        let (priority_player, off_priority_token, off_priority_id) = {
+            let session = mgr.sessions.get(&code).unwrap();
+            match &session.state.waiting_for {
+                WaitingFor::Priority { player } if *player == PlayerId(0) => {
+                    (PlayerId(0), token1.clone(), 1usize)
+                }
+                _ => (PlayerId(1), token0.clone(), 0usize),
+            }
+        };
+        let _ = priority_player; // acknowledged
+
+        // Inject two synthetic ObjectIds directly into the off-priority player's hand.
+        let id_a = ObjectId(900);
+        let id_b = ObjectId(901);
+        {
+            let session = mgr.sessions.get_mut(&code).unwrap();
+            session.state.players[off_priority_id].hand = engine::im::vector![id_a, id_b];
+        }
+
+        // Request reverse order [b, a].
+        let result = mgr.handle_action(
+            &code,
+            &off_priority_token,
+            GameAction::ReorderHand {
+                order: vec![id_b, id_a],
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "ReorderHand should succeed: {:?}",
+            result.err()
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        let hand: Vec<ObjectId> = session.state.players[off_priority_id]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(hand, vec![id_b, id_a]);
+    }
+
+    /// `ReorderHand` with a non-permutation (wrong element) is rejected by the
+    /// engine-owned validation path and leaves the hand unchanged.
+    #[test]
+    fn reorder_hand_invalid_permutation_is_rejected() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+
+        let (off_priority_token, off_priority_id) = {
+            let session = mgr.sessions.get(&code).unwrap();
+            match &session.state.waiting_for {
+                WaitingFor::Priority { player } if *player == PlayerId(0) => {
+                    (token1.clone(), 1usize)
+                }
+                _ => (token0.clone(), 0usize),
+            }
+        };
+
+        let id_a = ObjectId(902);
+        let id_b = ObjectId(903);
+        let id_bogus = ObjectId(999);
+        {
+            let session = mgr.sessions.get_mut(&code).unwrap();
+            session.state.players[off_priority_id].hand = engine::im::vector![id_a, id_b];
+        }
+
+        // Send [a, bogus] — not a permutation of [a, b].
+        let result = mgr.handle_action(
+            &code,
+            &off_priority_token,
+            GameAction::ReorderHand {
+                order: vec![id_a, id_bogus],
+            },
+        );
+        // Should return an error from the engine-owned permutation validator.
+        assert!(result.is_err(), "Invalid ReorderHand should be rejected");
+        let session = mgr.sessions.get(&code).unwrap();
+        let hand: Vec<ObjectId> = session.state.players[off_priority_id]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            hand,
+            vec![id_a, id_b],
+            "Hand should be unchanged after invalid reorder"
+        );
     }
 }

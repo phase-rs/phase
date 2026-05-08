@@ -1765,8 +1765,15 @@ fn parse_number_of_object_name_words_tail(input: &str) -> OracleResult<'_, Quant
 }
 
 fn parse_number_of_object_colors_tail(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("colors of ").parse(input)?;
-    let (rest, scope) = parse_object_color_of_scope(rest)?;
+    let (rest, scope) = alt((
+        value(ObjectScope::EventSource, tag("colors that spell is")),
+        |i| {
+            let (rest, _) = tag("colors of ").parse(i)?;
+            let (rest, scope) = parse_object_color_of_scope(rest)?;
+            Ok((rest, scope))
+        },
+    ))
+    .parse(input)?;
     Ok((rest, QuantityRef::ObjectColorCount { scope }))
 }
 
@@ -2712,6 +2719,15 @@ mod tests {
             q,
             QuantityRef::ObjectColorCount {
                 scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_quantity_ref("the number of colors that spell is").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::EventSource
             }
         );
         assert_eq!(rest, "");

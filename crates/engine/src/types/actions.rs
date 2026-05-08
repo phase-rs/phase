@@ -66,6 +66,18 @@ pub enum GameAction {
     MulliganDecision {
         keep: bool,
     },
+    /// CR 402.3: A player may arrange their hand in any convenient fashion at any time.
+    /// Hand order has no game-rules significance for mainline gameplay, so
+    /// this action is purely a display-preference update on the actor's own
+    /// hand. `order` MUST be a permutation of the actor's current hand —
+    /// same multiset of ObjectIds, no additions or removals. Like
+    /// `SetPhaseStops` and `CancelAutoPass`, it bypasses the WaitingFor
+    /// dispatch and the priority/turn checks: a player can rearrange their
+    /// hand whenever they want, including while the opponent holds priority
+    /// or while another interactive choice is open.
+    ReorderHand {
+        order: Vec<ObjectId>,
+    },
     TapLandForMana {
         object_id: ObjectId,
     },
@@ -619,6 +631,7 @@ impl GameAction {
             | GameAction::DeclareAttackers { .. }
             | GameAction::DeclareBlockers { .. }
             | GameAction::MulliganDecision { .. }
+            | GameAction::ReorderHand { .. }
             | GameAction::SelectCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
