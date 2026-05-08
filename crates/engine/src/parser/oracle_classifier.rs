@@ -54,6 +54,15 @@ pub(crate) fn is_defiler_cost_pattern(lower: &str) -> bool {
         && scan_contains(lower, "life")
 }
 
+pub(crate) fn is_enters_tapped_cant_untap_compound(lower: &str) -> bool {
+    let has_enters_tapped = scan_contains(lower, "enters tapped")
+        || scan_contains(lower, "enters the battlefield tapped");
+    let has_cant_untap = scan_contains(lower, "doesn't untap during")
+        || scan_contains(lower, "doesn’t untap during");
+
+    has_enters_tapped && has_cant_untap
+}
+
 pub(crate) fn is_compound_turn_limit(lower: &str) -> bool {
     scan_contains(lower, "only during your turn")
         && scan_contains(lower, "and ")

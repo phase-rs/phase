@@ -30,9 +30,9 @@ use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
     is_cant_win_lose_compound, is_compound_turn_limit, is_defiler_cost_pattern,
-    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
-    is_opening_hand_begin_game, is_replacement_pattern, is_static_pattern, is_vehicle_tier_line,
-    lower_starts_with, should_defer_spell_to_effect,
+    is_enters_tapped_cant_untap_compound, is_flashback_equal_mana_cost, is_granted_static_line,
+    is_instead_replacement_line, is_opening_hand_begin_game, is_replacement_pattern,
+    is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -1640,10 +1640,7 @@ pub(crate) fn parse_oracle_ir(
         // fire and consume the line, dropping the ETB-tapped half. Decompose so
         // both parsers run.
         // Corpus: Traxos, Scourge of Kroog; Grimgrin, Corpse-Born; Leviathan.
-        if (scan_contains(&lower, "enters tapped")
-            || scan_contains(&lower, "enters the battlefield tapped"))
-            && scan_contains(&lower, "doesn't untap during")
-        {
+        if is_enters_tapped_cant_untap_compound(&lower) {
             let mut consumed = false;
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                 result.replacements.push(rep_def);
@@ -10847,6 +10844,8 @@ mod tests {
 #[cfg(test)]
 mod pipeline_snapshot_tests {
     use super::*;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
 
     fn pipeline_parse(
         oracle_text: &str,
@@ -10933,8 +10932,6 @@ mod pipeline_snapshot_tests {
     /// Grimgrin, Corpse-Born; Leviathan.
     #[test]
     fn pipeline_etb_tapped_and_cant_untap_compound_emits_both() {
-        use crate::types::replacements::ReplacementEvent;
-        use crate::types::statics::StaticMode;
         let result = pipeline_parse(
             "Trample\nTraxos enters tapped and doesn't untap during your untap step.\nWhenever you cast a historic spell, untap Traxos.",
             "Traxos, Scourge of Kroog",
