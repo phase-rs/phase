@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-05-21T00:00:00Z",
+  "updated": "2026-05-22T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -1065,7 +1065,7 @@
       ]
     },
     {
-      "name": "Selesnya Ouroboroid",
+      "name": "Selesnya Landfall",
       "author": "MTGGoldfish",
       "colors": [
         "W",
@@ -1076,24 +1076,44 @@
       ],
       "main": [
         {
+          "count": 4,
+          "name": "Erode"
+        },
+        {
           "count": 1,
-          "name": "Craterhoof Behemoth"
-        },
-        {
-          "count": 4,
-          "name": "Starting Town"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 8,
-          "name": "Forest"
+          "name": "Surrak, Elusive Hunter"
         },
         {
           "count": 2,
-          "name": "Seam Rip"
+          "name": "Lumbering Worldwagon"
+        },
+        {
+          "count": 2,
+          "name": "Bushwhack"
+        },
+        {
+          "count": 4,
+          "name": "Earthbender Ascension"
+        },
+        {
+          "count": 2,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 7,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Sazh's Chocobo"
+        },
+        {
+          "count": 2,
+          "name": "Icetill Explorer"
+        },
+        {
+          "count": 1,
+          "name": "Keen-Eyed Curator"
         },
         {
           "count": 4,
@@ -1105,55 +1125,35 @@
         },
         {
           "count": 4,
-          "name": "Gene Pollinator"
+          "name": "Fabled Passage"
         },
         {
-          "count": 4,
-          "name": "Brightglass Gearhulk"
-        },
-        {
-          "count": 4,
-          "name": "Nature's Rhythm"
+          "count": 2,
+          "name": "Dyadrine, Synthesis Amalgam"
         },
         {
           "count": 4,
           "name": "Hushwood Verge"
         },
         {
-          "count": 2,
-          "name": "Abandoned Air Temple"
+          "count": 4,
+          "name": "Mightform Harmonizer"
+        },
+        {
+          "count": 3,
+          "name": "Escape Tunnel"
         },
         {
           "count": 2,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 1,
-          "name": "Goldvein Hydra"
-        },
-        {
-          "count": 1,
           "name": "Plains"
         },
         {
-          "count": 4,
-          "name": "Spider Manifestation"
+          "count": 3,
+          "name": "Ba Sing Se"
         },
         {
           "count": 1,
-          "name": "Insidious Fungus"
-        },
-        {
-          "count": 1,
-          "name": "Nurturing Pixie"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 4,
-          "name": "Ouroboroid"
+          "name": "Mossborn Hydra"
         }
       ],
       "sideboard": [
@@ -1162,32 +1162,32 @@
           "name": "Surrak, Elusive Hunter"
         },
         {
-          "count": 1,
-          "name": "Pyrrhic Strike"
-        },
-        {
-          "count": 1,
-          "name": "Seam Rip"
-        },
-        {
           "count": 3,
-          "name": "Get Lost"
+          "name": "Sheltered by Ghosts"
         },
         {
           "count": 1,
-          "name": "Meltstrider's Resolve"
+          "name": "Restoration Magic"
         },
         {
-          "count": 4,
-          "name": "Sage of the Skies"
+          "count": 1,
+          "name": "Kutzil, Malamet Exemplar"
         },
         {
           "count": 2,
-          "name": "Leatherhead, Swamp Stalker"
+          "name": "Mossborn Hydra"
+        },
+        {
+          "count": 3,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 2,
+          "name": "Snakeskin Veil"
         },
         {
           "count": 1,
-          "name": "Authority of the Consuls"
+          "name": "Voice of Victory"
         }
       ]
     },
