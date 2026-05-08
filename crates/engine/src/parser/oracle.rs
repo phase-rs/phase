@@ -1633,6 +1633,33 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
+        // Priority 6d: Compound "[~] enters tapped and doesn't untap during your
+        // untap step." carries TWO independent rules in one sentence — an
+        // ETB-tapped replacement (CR 614.1c) and a CantUntap static (CR 502.3).
+        // The "doesn't untap" substring makes Priority 7's `is_static_pattern`
+        // fire and consume the line, dropping the ETB-tapped half. Decompose so
+        // both parsers run.
+        // Corpus: Traxos, Scourge of Kroog; Grimgrin, Corpse-Born; Leviathan.
+        if (scan_contains(&lower, "enters tapped")
+            || scan_contains(&lower, "enters the battlefield tapped"))
+            && scan_contains(&lower, "doesn't untap during")
+        {
+            let mut consumed = false;
+            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
+                result.replacements.push(rep_def);
+                consumed = true;
+            }
+            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            if !defs.is_empty() {
+                result.statics.extend(defs);
+                consumed = true;
+            }
+            if consumed {
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 7: Static/continuous patterns
         // CR 611.2a + CR 611.3a: On permanents, "creatures you control get +1/+1"
         // is a static ability (CR 611.3a). On instants/sorceries, lines with an
@@ -10896,5 +10923,45 @@ mod pipeline_snapshot_tests {
             &[],
         );
         insta::assert_json_snapshot!(result);
+    }
+
+    /// CR 614.1c + CR 502.3: Same-line compound "[~] enters tapped and doesn't
+    /// untap during your untap step." must emit BOTH an ETB-tapped replacement
+    /// (CR 614.1c) and a CantUntap static (CR 502.3). Regression guard against
+    /// the prior bug where the static-pattern classifier consumed the line and
+    /// silently dropped the replacement half. Corpus: Traxos, Scourge of Kroog;
+    /// Grimgrin, Corpse-Born; Leviathan.
+    #[test]
+    fn pipeline_etb_tapped_and_cant_untap_compound_emits_both() {
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::statics::StaticMode;
+        let result = pipeline_parse(
+            "Trample\nTraxos enters tapped and doesn't untap during your untap step.\nWhenever you cast a historic spell, untap Traxos.",
+            "Traxos, Scourge of Kroog",
+            &["Artifact", "Creature"],
+            &["Construct"],
+        );
+        assert_eq!(
+            result.replacements.len(),
+            1,
+            "expected one ETB-tapped replacement, got {:?}",
+            result.replacements
+        );
+        assert!(
+            matches!(result.replacements[0].event, ReplacementEvent::Moved),
+            "replacement event must be Moved (ETB), got {:?}",
+            result.replacements[0].event
+        );
+        assert_eq!(
+            result.statics.len(),
+            1,
+            "expected one CantUntap static, got {:?}",
+            result.statics
+        );
+        assert_eq!(
+            result.statics[0].mode,
+            StaticMode::CantUntap,
+            "static mode must be CantUntap"
+        );
     }
 }
