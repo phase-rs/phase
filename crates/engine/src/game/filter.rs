@@ -435,8 +435,10 @@ fn filter_inner_for_object(
     match filter {
         TargetFilter::None => false,
         TargetFilter::Any => true,
-        TargetFilter::Player => false,       // Players are not objects
-        TargetFilter::Controller => false,   // Controller is a player, not an object
+        TargetFilter::Player => false,     // Players are not objects
+        TargetFilter::Controller => false, // Controller is a player, not an object
+        // CR 109.5: OriginalController is a player reference, not an object.
+        TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
         TargetFilter::Typed(TypedFilter {
@@ -714,6 +716,8 @@ fn zone_change_filter_inner(
         TargetFilter::Any => true,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        // CR 109.5: OriginalController is a player reference, not an object.
+        TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
         TargetFilter::Typed(TypedFilter {
@@ -1045,6 +1049,7 @@ pub fn spell_record_matches_filter(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
@@ -1248,6 +1253,7 @@ fn spell_object_matches_filter_inner(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
@@ -2886,6 +2892,9 @@ pub fn player_matches_target_filter(
         TargetFilter::Any | TargetFilter::Player => true,
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
         TargetFilter::Controller => source_controller == Some(player_id),
+        // CR 109.5: Without ability context, OriginalController is indistinguishable
+        // from Controller — both refer to the source controller in this matcher.
+        TargetFilter::OriginalController => source_controller == Some(player_id),
         TargetFilter::ScopedPlayer => false,
         TargetFilter::Typed(ref tf) if tf.type_filters.is_empty() => match &tf.controller {
             Some(ControllerRef::You) => source_controller == Some(player_id),

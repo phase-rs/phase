@@ -1813,6 +1813,14 @@ pub enum WaitingFor {
         /// Vote tallies indexed parallel to `options`. `tallies[i]` is the
         /// number of votes cast for `options[i]` so far.
         tallies: Vec<u32>,
+        /// CR 608.2c + CR 701.38: Per-vote ballot ledger. Each entry is
+        /// `(voter, choice_index)` recorded when the voter casts that vote.
+        /// Mirrors `tallies` aggregation but preserves voter identity so the
+        /// per-choice sub-effect can route to `PlayerFilter::VotedFor` against
+        /// `state.last_vote_ballots`. Append-only; the lifecycle matches
+        /// `last_zone_changed_ids` (cleared at chain depth 0).
+        #[serde(default)]
+        ballots: im::Vector<(PlayerId, u8)>,
         /// CR 701.38: Per-choice sub-effects. `per_choice_effect[i]` resolves
         /// once for each vote tallied against `options[i]`. Carried on the
         /// WaitingFor so the resolver chain doesn't need to re-find the source
@@ -3042,6 +3050,19 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_zone_changed_ids: Vec<ObjectId>,
 
+    /// CR 608.2c + CR 701.38: Per-vote ballots from the most recent
+    /// `Effect::Vote` resolution within the current top-level ability
+    /// resolution. Each entry is `(voter, choice_index)`; populated by
+    /// `vote::resolve_tally` immediately before per-choice sub-effects fan
+    /// out, and read by `PlayerFilter::VotedFor` to route per-choice
+    /// `player_scope` sub-effects ("for each player who chose money,
+    /// you and that player each ...").
+    ///
+    /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0
+    /// in `resolve_ability_chain` so cross-resolution leakage is impossible.
+    #[serde(default)]
+    pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
+
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like
     /// `players_who_searched_library_this_turn`: this set accumulates only
@@ -3389,6 +3410,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             last_zone_changed_ids: Vec::new(),
+            last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
             last_effect_count: None,
@@ -3598,6 +3620,7 @@ impl PartialEq for GameState {
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
             && self.last_zone_changed_ids == other.last_zone_changed_ids
+            && self.last_vote_ballots == other.last_vote_ballots
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
             && self.last_effect_counts_by_player == other.last_effect_counts_by_player

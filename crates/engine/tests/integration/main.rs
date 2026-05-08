@@ -17,6 +17,7 @@ mod integration_landfall;
 mod json_smoke_test;
 mod kaito_integration;
 mod madame_null_integration;
+mod master_of_ceremonies;
 mod oracle_parser;
 mod rules;
 mod swans_prevention_followup;

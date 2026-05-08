@@ -1914,6 +1914,27 @@ pub enum TargetFilter {
     /// Used for "its controller" in compound effects (e.g., "counter target spell. Its controller
     /// loses 2 life."). At resolution time, looks up the controller of the first parent target.
     ParentTargetController,
+    /// CR 109.5 + CR 608.2c: Resolves to the ability's *original* controller — the
+    /// player who put the spell or ability on the stack — even when a surrounding
+    /// `player_scope` iteration has rebound `ResolvedAbility::controller` to a
+    /// different player for the current per-player iteration.
+    ///
+    /// At resolution time, returns `ability.original_controller.unwrap_or(ability.controller)`.
+    /// This mirrors the quantity-layer behavior in `resolve_quantity_with_targets`,
+    /// where "you" / "your" quantities always read the original controller.
+    ///
+    /// Used by parser-level distribution of compound subjects like
+    /// "you and that player each Y" — the first half ("you") MUST resolve to the
+    /// printed ability controller, not the iterated voter, even when the parent
+    /// ability has `player_scope: PlayerFilter::VotedFor` (Master of Ceremonies
+    /// pattern, CR 800.4g).
+    ///
+    /// Distinct from `Controller` (which resolves to `ability.controller` and
+    /// is rebound per-iteration by the player_scope driver in
+    /// `resolve_ability_chain`). Distinct from `ParentTargetController`
+    /// (parent's target's controller) and `PostReplacementSourceController`
+    /// (replacement-context source's controller).
+    OriginalController,
     /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
     /// damage source. Used by prevention follow-up sentences such as "the source's
     /// controller draws cards equal to the damage prevented this way" (Swans of
@@ -2531,6 +2552,22 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
+    /// CR 608.2c + CR 701.38: Each player who cast a vote for `choices[choice_index]`
+    /// in the most recent vote within the current top-level ability resolution.
+    /// Mirrors `PerformedActionThisWay` — backed by a transient ledger
+    /// (`state.last_vote_ballots`) that resets at chain depth 0.
+    ///
+    /// Used by Master of Ceremonies's "for each player who chose money,
+    /// you and that player each create a Treasure token": the per-choice
+    /// sub-effect's `player_scope` is set to `VotedFor { choice_index: 0 }`,
+    /// which expands at resolution time into the controller plus each voter
+    /// who chose that option.
+    VotedFor {
+        /// Index into the parent `Effect::Vote.choices` list (and parallel
+        /// `WaitingFor::VoteChoice.options`). The voter ledger encodes choices
+        /// as `u8` — vote sessions never exceed 255 choices in practice.
+        choice_index: u8,
+    },
 }
 
 /// An expression that produces an integer for quantity comparisons.
@@ -4039,6 +4076,15 @@ pub enum Effect {
         /// your left" / "the affected player" if those phrasings ever land.
         #[serde(default = "default_controller_ref_you")]
         starting_with: ControllerRef,
+        /// CR 701.38a + CR 800.4g: Which players cast votes. Council's-dilemma
+        /// classics ("starting with you, each player votes...") use
+        /// `VoterScope::AllPlayers`; "each opponent chooses..." patterns
+        /// (Master of Ceremonies) use `VoterScope::EachOpponent`, which
+        /// excludes the controller from the voter queue. CR 800.4g handles the
+        /// edge case where every opponent has been eliminated — the resolver
+        /// emits `EffectResolved` with no tally and the chain continues.
+        #[serde(default = "default_voter_scope_all")]
+        voter_scope: VoterScope,
     },
     /// CR 613.4d: Switch a creature's power and toughness. Applied in layer 7d.
     SwitchPT {
@@ -5241,6 +5287,39 @@ fn default_controller_ref_you() -> ControllerRef {
     ControllerRef::You
 }
 
+/// CR 701.38a: Default voter scope for `Effect::Vote` is "every player"
+/// (the canonical Council's-dilemma shape). Pre-existing serialized vote
+/// effects without a `voter_scope` field deserialize as
+/// `VoterScope::AllPlayers`, preserving Tivit / Capital Punishment / Coercive
+/// Portal behavior across the schema upgrade.
+fn default_voter_scope_all() -> VoterScope {
+    VoterScope::AllPlayers
+}
+
+/// CR 701.38a + CR 800.4g: Which players cast votes for an `Effect::Vote`.
+///
+/// `AllPlayers` is the classic Council's-dilemma shape ("starting with you,
+/// each player votes for..."). `EachOpponent` covers "each opponent
+/// chooses..." patterns (Master of Ceremonies, etc.) where the source's
+/// controller does NOT vote — they instead receive a per-choice effect via
+/// `PlayerFilter::VotedFor` ("you and that player each ...").
+///
+/// Per CR 800.4g, when every opponent has left the game in a multiplayer
+/// session, an `EachOpponent` vote produces an empty voter queue and the
+/// resolver emits `EffectResolved` with no tally instead of waiting forever
+/// on a non-existent voter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum VoterScope {
+    /// Every non-eliminated player votes, in APNAP order from `starting_with`.
+    /// CR 701.38a — the canonical Council's-dilemma voter set.
+    AllPlayers,
+    /// CR 800.4g: Every non-eliminated opponent of the ability controller
+    /// votes. The controller does not vote — they receive per-choice
+    /// sub-effects via `PlayerFilter::VotedFor` against the recorded ballots.
+    EachOpponent,
+}
+
 impl TargetFilter {
     pub fn normalized(self) -> Self {
         match self {
@@ -5270,6 +5349,7 @@ impl TargetFilter {
             TargetFilter::None
                 | TargetFilter::SelfRef
                 | TargetFilter::Controller
+                | TargetFilter::OriginalController
                 | TargetFilter::ScopedPlayer
                 | TargetFilter::TriggeringSpellController
                 | TargetFilter::TriggeringSpellOwner

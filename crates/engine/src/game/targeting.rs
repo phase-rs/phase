@@ -376,6 +376,11 @@ pub fn resolve_effect_player_ref(
 ) -> Option<PlayerId> {
     match filter {
         TargetFilter::Controller => Some(ability.scoped_player.unwrap_or(ability.controller)),
+        // CR 109.5: The ability's original controller — fixed even when
+        // `player_scope` iteration has rebound `ability.controller`.
+        TargetFilter::OriginalController => {
+            Some(ability.original_controller.unwrap_or(ability.controller))
+        }
         TargetFilter::ScopedPlayer => ability.scoped_player,
         TargetFilter::Player => ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),

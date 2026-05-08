@@ -753,6 +753,14 @@ fn collect_matching_players(
                         });
                         triggering != Some(p.id)
                     }
+                    // CR 608.2c + CR 701.38: Match each player who cast a vote
+                    // for the recorded choice index. Mirrors the
+                    // `ZoneChangedThisWay` arm — consults the transient
+                    // `last_vote_ballots` ledger.
+                    PlayerFilter::VotedFor { choice_index } => state
+                        .last_vote_ballots
+                        .iter()
+                        .any(|(voter, idx)| *voter == p.id && *idx == choice_index),
                 }
         })
         .map(|p| p.id)
@@ -850,6 +858,12 @@ pub fn resolve_each_player(
                         });
                         triggering != Some(p.id)
                     }
+                    // CR 608.2c + CR 701.38: Match each player who cast a vote
+                    // for the recorded choice index in the most recent vote.
+                    PlayerFilter::VotedFor { choice_index } => state
+                        .last_vote_ballots
+                        .iter()
+                        .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
                 }
         })
         .map(|p| p.id)

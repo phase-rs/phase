@@ -282,6 +282,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Any => "any target".into(),
         TargetFilter::Player => "player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::StackAbility => "ability on stack".into(),
@@ -996,6 +997,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
+        PlayerFilter::VotedFor { .. } => "each player who voted for this option",
     }
     .into()
 }
@@ -4804,6 +4806,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
+        PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
     }
 }
 

@@ -2226,6 +2226,13 @@ pub(crate) fn resolve_player_count(
                                 triggering.is_none_or(|pid| pid != p.id)
                             }
                         }
+                        // CR 608.2c + CR 701.38: Match each player who cast a
+                        // vote for the recorded choice index in the most
+                        // recent vote within the current top-level resolution.
+                        PlayerFilter::VotedFor { choice_index } => state
+                            .last_vote_ballots
+                            .iter()
+                            .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
                     }
             })
             .count(),

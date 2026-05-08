@@ -392,6 +392,7 @@ pub(super) fn handle_resolution_choice(
                 option_labels,
                 remaining_voters,
                 tallies,
+                ballots,
                 per_choice_effect,
                 controller,
                 source_id,
@@ -409,6 +410,12 @@ pub(super) fn handle_resolution_choice(
             };
             let mut new_tallies = tallies.clone();
             new_tallies[idx] += 1;
+            // CR 608.2c + CR 701.38: Append the per-vote ballot. `idx` is
+            // guaranteed to fit in `u8` because `parse_vote_block` rejects
+            // any vote AST with more than a few choices (no Magic card has
+            // ever exceeded ~3-5 vote options).
+            let mut new_ballots = ballots.clone();
+            new_ballots.push_back((player, idx as u8));
             events.push(GameEvent::VoteCast {
                 voter: player,
                 choice: lower,
@@ -424,6 +431,7 @@ pub(super) fn handle_resolution_choice(
                     option_labels,
                     remaining_voters,
                     tallies: new_tallies,
+                    ballots: new_ballots,
                     per_choice_effect,
                     controller,
                     source_id,
@@ -438,6 +446,7 @@ pub(super) fn handle_resolution_choice(
                     option_labels,
                     remaining_voters: rest.to_vec(),
                     tallies: new_tallies,
+                    ballots: new_ballots,
                     per_choice_effect,
                     controller,
                     source_id,
@@ -462,6 +471,7 @@ pub(super) fn handle_resolution_choice(
                     &options,
                     &per_choice_effect,
                     &new_tallies,
+                    &new_ballots,
                     events,
                 );
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(

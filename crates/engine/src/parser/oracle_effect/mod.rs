@@ -2081,6 +2081,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parse_effect_clause(rest.original, ctx);
     }
 
+    // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>" —
+    // distribute the body across two recipients (the original ability
+    // controller and the iterated voter). Used by Council's-dilemma vote
+    // bodies (Master of Ceremonies pattern). MUST run before the imperative
+    // dispatch in `parse_clause_ast` so the bare "you" first word is not
+    // matched by the imperative "you may" arm or fall through to
+    // `Effect::Unimplemented`.
+    if let Some(clause) = try_parse_compound_subject_each(text, ctx) {
+        return clause;
+    }
+
     if let Some(clause) = try_parse_distinct_card_types_from_revealed(tp) {
         return clause;
     }
@@ -5420,6 +5431,126 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
     })
+}
+
+/// CR 109.5 + CR 608.2c + CR 800.4g: Distribute "<player-noun-A> and <player-noun-B>
+/// each <body>" into a 2-element AbilityDefinition chain whose halves apply
+/// `<body>` to two different players.
+///
+/// Currently restricted to the form "you and that player each Y" — produced by
+/// "For each player who chose <choice>, you and that player each <body>"
+/// patterns inside Council's-dilemma vote effects (Master of Ceremonies). The
+/// first half is targeted at `OriginalController` (the printed ability
+/// controller, fixed even when `player_scope` iteration rebinds the acting
+/// controller per-voter); the second half is targeted at `ScopedPlayer` (the
+/// iterated voter for `PlayerFilter::VotedFor`). The two halves resolve in
+/// printed order via the `sub_ability` chain.
+///
+/// Generality: the parser shape is parameterized to accept any single-effect
+/// body that has a `TargetFilter`-typed recipient slot (Token's `owner`,
+/// Draw's `target`, etc.). Effects without a recipient slot in the AST are
+/// not supported here — return `None` and let the caller fall through.
+///
+/// Other compound-subject forms ("you and target opponent", "you and an
+/// opponent of your choice") are deliberately out of scope for this entry
+/// point and will produce `None`.
+fn try_parse_compound_subject_each(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // Compose the prefix from independent dimensions:
+    //   first-subject × " and " × second-subject × " each " × <body>
+    // Today only "you" / "that player" are recognized; the alt() arms expand
+    // when we add other compound forms (target opponent, an opponent of your
+    // choice, etc.). Each axis is one alt() call; we never enumerate the
+    // permutations.
+    let parser: nom::IResult<&str, (TargetFilter, TargetFilter), OracleError<'_>> = (
+        alt((value(TargetFilter::OriginalController, tag("you and ")),)),
+        alt((value(TargetFilter::ScopedPlayer, tag("that player ")),)),
+        value((), tag("each ")),
+    )
+        .parse(lower.as_str())
+        .map(|(rest, (first, second, ()))| (rest, (first, second)));
+    let (lower_rest, (first_filter, second_filter)) = parser.ok()?;
+
+    // Slice the original-case body text using the consumed offset.
+    let consumed = lower.len() - lower_rest.len();
+    let body_text = text[consumed..].trim();
+    if body_text.is_empty() {
+        return None;
+    }
+
+    // Parse the body once. Re-using `parse_effect_chain_with_context`
+    // composes the existing body parser surface (Token, Draw, etc.).
+    let mut body_ctx = ctx.clone();
+    let parsed_body = parse_effect_chain_with_context(body_text, AbilityKind::Spell, &mut body_ctx);
+
+    // Reject Unimplemented bodies — distribution is meaningless when the body
+    // didn't parse, and the caller's fallback (Unimplemented + diagnostic)
+    // is more informative than silently emitting two Unimplemented halves.
+    if matches!(*parsed_body.effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+
+    // Build the two halves. Each half is a clone of the parsed body with its
+    // recipient field rewritten. Effects without a `TargetFilter`-typed
+    // recipient are unsupported — return None to fall through to Unimplemented.
+    let mut half_a = parsed_body.clone();
+    if !rewrite_player_recipient(&mut half_a, &first_filter) {
+        return None;
+    }
+    let mut half_b = parsed_body;
+    if !rewrite_player_recipient(&mut half_b, &second_filter) {
+        return None;
+    }
+
+    // Compose: Half A is the top-level effect; Half B is its sub_ability.
+    // The runtime `resolve_ability_chain` walks parent → sub_ability in
+    // printed order, matching the "you ..., then that player ..." reading.
+    half_a.sub_ability = Some(Box::new(half_b));
+
+    Some(ParsedEffectClause {
+        effect: *half_a.effect,
+        duration: half_a.duration,
+        sub_ability: half_a.sub_ability,
+        distribute: None,
+        multi_target: None,
+        condition: half_a.condition,
+        optional: false,
+    })
+}
+
+/// CR 109.5 + CR 115.1: Rewrite an `AbilityDefinition`'s recipient
+/// (`TargetFilter`-typed slot on the top-level effect) to the supplied
+/// filter. Returns `true` when the rewrite was applied; `false` when the
+/// effect has no recognized recipient slot (caller should treat as
+/// non-distributable and fall through).
+///
+/// Covers the recipient-bearing effects produced by parsing "you and that
+/// player each Y" bodies — Token (`owner`), Draw (`target`), Discard
+/// (`target`), Mill (`target`), Tap/Untap (`target`), Investigate (no
+/// recipient → false). Extending to a new effect family is one match arm
+/// per family.
+fn rewrite_player_recipient(def: &mut AbilityDefinition, filter: &TargetFilter) -> bool {
+    match def.effect.as_mut() {
+        Effect::Token { owner, .. } => {
+            *owner = filter.clone();
+            true
+        }
+        Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. } => {
+            *target = filter.clone();
+            true
+        }
+        // Any other effect family is out of scope for compound-subject
+        // distribution at this entry point. Returning false keeps the
+        // detector tight and prevents silent misparse on bodies whose
+        // recipient binding is encoded differently (GainLifePlayer enum,
+        // optional Option<TargetFilter>, etc.).
+        _ => false,
+    }
 }
 
 /// Check if text contains anaphoric pronouns referencing a previously mentioned object.
