@@ -6843,34 +6843,78 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     } else if tag::<_, _, E>("an artist").parse(rest).is_ok() {
         Some(ChoiceType::Artist)
     } else {
-        // Generic "X or Y" pattern — must come AFTER all specific patterns above
-        try_parse_binary_choice(rest).map(|options| ChoiceType::Labeled { options })
+        // Generic "X or Y" / "X, Y, or Z" / "W, X, Y, or Z" labeled choice —
+        // must come AFTER all specific patterns above.
+        try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
 }
 
-/// Try to parse "X or Y" as a binary labeled choice.
-/// Only matches simple one-or-two-word labels separated by " or ".
-/// Returns capitalized labels.
-/// This must come AFTER all specific patterns in try_parse_named_choice to avoid
-/// accidentally matching "choose left or right" against targeting patterns.
-fn try_parse_binary_choice(rest: &str) -> Option<Vec<String>> {
+/// Try to parse a labeled choice ("X or Y", "X, Y, or Z", "W, X, Y, or Z", ...) into
+/// its option list. The Oxford-comma form is canonical in MTG Oracle text — every
+/// printed N≥3 labeled choice (Master of Ceremonies, Storage Matrix, Turnabout,
+/// Teferi's Realm, A Killer Among Us) uses ", or " before the last item.
+///
+/// Each label must be ≤2 whitespace-delimited words and must not contain
+/// "target", "more", or "both" — these gates filter out clausal disjunctions
+/// ("destroy target creature or land you control") that aren't real labeled
+/// choices.
+///
+/// This must come AFTER all specific patterns in `try_parse_named_choice` to
+/// avoid accidentally matching "choose left or right" against targeting
+/// patterns.
+fn try_parse_labeled_choice(rest: &str) -> Option<Vec<String>> {
+    // N-ary Oxford-comma form first: split on the LAST ", or " (which `split_once_on`
+    // finds as the first occurrence of the separator — there's only one in well-formed
+    // Oracle text since middle items are joined by ", ").
+    if let Ok((_, (head, tail))) = nom_primitives::split_once_on(rest, ", or ") {
+        let mut labels: Vec<&str> = Vec::new();
+        let mut remaining = head.trim();
+        // Walk the comma-separated middle labels via the same nom combinator.
+        while let Ok((_, (middle, next))) = nom_primitives::split_once_on(remaining, ", ") {
+            labels.push(middle.trim());
+            remaining = next.trim();
+        }
+        // Whatever's left of `remaining` after the loop is the last middle label
+        // (or the only middle label if there were no inner commas — i.e. "X, or Y").
+        if !remaining.is_empty() {
+            labels.push(remaining);
+        }
+        labels.push(tail.trim());
+        return validate_and_capitalize_labels(&labels);
+    }
+
+    // Binary form: "X or Y" with no comma before "or".
     let (_, (left, right)) = nom_primitives::split_once_on(rest, " or ").ok()?;
-    let left = left.trim();
-    let right = right.trim();
+    validate_and_capitalize_labels(&[left.trim(), right.trim()])
+}
 
-    // Labels must be short (≤2 words) — longer phrases are likely clauses, not choices
-    if left.split_whitespace().count() > 2 || right.split_whitespace().count() > 2 {
+/// Apply the per-label validation gates uniformly across all labels in a labeled
+/// choice and return the capitalized result.
+///
+/// Gates:
+/// - At least 2 labels (a single-element "list" isn't a choice).
+/// - Each label is ≤2 whitespace-delimited words. Longer phrases are clauses,
+///   not labels.
+/// - No label contains "target" — distinguishes labeled choices from object
+///   disjunctions like "creature or planeswalker".
+/// - No label is "more" or "both" — these are quantifier/conjunction words,
+///   not choice labels (e.g. "five or more", "one or both").
+fn validate_and_capitalize_labels(labels: &[&str]) -> Option<Vec<String>> {
+    if labels.len() < 2 {
         return None;
     }
-    // Reject known non-choice patterns
-    if scan_contains_phrase(left, "target") || scan_contains_phrase(right, "target") {
-        return None;
+    for label in labels {
+        if label.is_empty() || label.split_whitespace().count() > 2 {
+            return None;
+        }
+        if scan_contains_phrase(label, "target") {
+            return None;
+        }
+        if *label == "more" || *label == "both" {
+            return None;
+        }
     }
-    if right == "more" || left == "both" || right == "both" {
-        return None;
-    }
-
-    Some(vec![capitalize(left), capitalize(right)])
+    Some(labels.iter().map(|l| capitalize(l)).collect())
 }
 
 /// Refine a damage target based on remainder text left after `parse_target`.
@@ -23814,6 +23858,136 @@ mod tests {
                 options: vec!["Land".to_string(), "Nonland".to_string()]
             })
         );
+    }
+
+    /// Binary "X or Y" labeled choice — the legacy shape must keep working
+    /// after the rename / N-ary generalization.
+    #[test]
+    fn labeled_choice_binary_form_still_parses() {
+        assert_eq!(
+            super::try_parse_named_choice("choose left or right"),
+            Some(ChoiceType::Labeled {
+                options: vec!["Left".to_string(), "Right".to_string()]
+            })
+        );
+    }
+
+    /// Master of Ceremonies — the original bug repro. Ternary Oxford-comma
+    /// labeled choice ("X, Y, or Z") must produce three distinct options
+    /// with no embedded commas in any label.
+    #[test]
+    fn labeled_choice_ternary_oxford_comma_money_friends_secrets() {
+        assert_eq!(
+            super::try_parse_named_choice("choose money, friends, or secrets"),
+            Some(ChoiceType::Labeled {
+                options: vec![
+                    "Money".to_string(),
+                    "Friends".to_string(),
+                    "Secrets".to_string(),
+                ]
+            })
+        );
+    }
+
+    /// Sibling card (Turnabout, Storage Matrix, A Killer Among Us): same
+    /// ternary Oxford-comma shape, type-noun labels.
+    #[test]
+    fn labeled_choice_ternary_artifact_creature_land() {
+        assert_eq!(
+            super::try_parse_named_choice("choose artifact, creature, or land"),
+            Some(ChoiceType::Labeled {
+                options: vec![
+                    "Artifact".to_string(),
+                    "Creature".to_string(),
+                    "Land".to_string(),
+                ]
+            })
+        );
+    }
+
+    /// Teferi's Realm — 4-option Oxford-comma labeled choice. Confirms the
+    /// generalization is N-ary, not capped at 3.
+    #[test]
+    fn labeled_choice_quaternary_oxford_comma_teferis_realm() {
+        // After lowercasing in the production path, "non-Aura" becomes
+        // "non-aura"; the helper only sees the lowercase form.
+        assert_eq!(
+            super::try_parse_named_choice(
+                "choose artifact, creature, land, or non-aura enchantment"
+            ),
+            Some(ChoiceType::Labeled {
+                options: vec![
+                    "Artifact".to_string(),
+                    "Creature".to_string(),
+                    "Land".to_string(),
+                    "Non-aura enchantment".to_string(),
+                ]
+            })
+        );
+    }
+
+    /// Per-label ≤2-words gate must apply to every position in the list, not
+    /// just left/right of the binary form. Three multi-word "labels" must
+    /// reject as a whole.
+    #[test]
+    fn labeled_choice_rejects_long_labels_in_ternary() {
+        assert_eq!(
+            super::try_parse_named_choice(
+                "choose do this thing, do that thing, or do something else"
+            ),
+            None
+        );
+    }
+
+    /// "target" rejection still applies anywhere in the option list — covers
+    /// "target creature or planeswalker"-style disjunctions that must NOT
+    /// be reinterpreted as labeled choices in the ternary path.
+    #[test]
+    fn labeled_choice_rejects_target_anywhere_in_ternary() {
+        assert_eq!(
+            super::try_parse_named_choice(
+                "choose target creature, target planeswalker, or target player"
+            ),
+            None
+        );
+    }
+
+    /// The "more"/"both" rejection guards against quantifier phrases ("five
+    /// or more") that share the binary " or " shape but aren't labeled
+    /// choices. Verify these still reject post-rename.
+    #[test]
+    fn labeled_choice_rejects_more_and_both() {
+        assert_eq!(super::try_parse_named_choice("choose five or more"), None);
+        assert_eq!(super::try_parse_named_choice("choose one or both"), None);
+        assert_eq!(super::try_parse_named_choice("choose both or one"), None);
+    }
+
+    /// End-to-end: real-card Oracle text dispatches through
+    /// `parse_effect_chain` and produces the correct
+    /// `Effect::Choose { choice_type: Labeled { options: [..] } }`.
+    /// This catches regressions in the dispatcher → helper handoff that a
+    /// helper-only test would miss.
+    #[test]
+    fn labeled_choice_parses_master_of_ceremonies_choose_clause() {
+        // Isolate just the choose clause; trigger routing is exercised by
+        // the full-card snapshot tests elsewhere.
+        let def = parse_effect_chain("Choose money, friends, or secrets.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled { options },
+                ..
+            } => {
+                assert_eq!(
+                    options,
+                    &vec![
+                        "Money".to_string(),
+                        "Friends".to_string(),
+                        "Secrets".to_string()
+                    ]
+                );
+            }
+            other => panic!("Expected Effect::Choose(Labeled), got {other:?}"),
+        }
     }
 
     /// CR 705 + CR 614.10: Ral Zarek, Guest Lecturer [-7] — "Flip five coins.
