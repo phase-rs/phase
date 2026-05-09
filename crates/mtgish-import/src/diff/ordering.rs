@@ -157,6 +157,12 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("ChooseFromZoneConstraint", "categories"),
         OrderingClass::SetEquivalent,
     ),
+    // Search selection qualities are conjunctive constraints on the chosen set;
+    // their order does not change legality.
+    (
+        ("SearchSelectionConstraint", "qualities"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- ChoiceType / mana production -----
     // Player-facing string options. The player picks one; order is the
     // display order in the prompt UI. Treat as positional so the diff

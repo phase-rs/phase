@@ -743,6 +743,7 @@ export type WaitingFor =
       player: PlayerId;
       cards: ObjectId[];
       count: number;
+      min_count?: number;
       up_to?: boolean;
       source_id: ObjectId;
       effect_kind: string;

@@ -128,6 +128,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantUntap, handle_rule_mod);
     // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
     registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
+    // CR 701.15b: Goaded — this creature must attack and avoid the goading
+    // player if able. Runtime enforcement lives in combat.rs.
+    registry.insert(StaticMode::Goaded, handle_rule_mod);
     registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
     registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
@@ -734,6 +737,7 @@ pub(crate) fn static_filter_matches(
                         // parser never emits this variant for static filters.
                         crate::types::ability::ControllerRef::ScopedPlayer => false,
                         crate::types::ability::ControllerRef::TargetPlayer => false,
+                        crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
                     };
                 }

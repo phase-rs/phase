@@ -350,10 +350,24 @@ pub fn resolve(
         vec![]
     };
 
-    let effective_targets = if self_ref_targets.is_empty() {
-        &ability.targets
+    let event_context_targets = if self_ref_targets.is_empty() {
+        crate::game::targeting::resolve_event_context_target(
+            state,
+            target_filter,
+            ability.source_id,
+        )
+        .into_iter()
+        .collect()
     } else {
+        vec![]
+    };
+
+    let effective_targets = if !self_ref_targets.is_empty() {
         &self_ref_targets
+    } else if !event_context_targets.is_empty() {
+        &event_context_targets
+    } else {
+        &ability.targets
     };
     let targeted_objects =
         crate::game::effects::effect_object_targets(target_filter, effective_targets);
@@ -485,6 +499,7 @@ pub fn resolve(
             player: filter_controller,
             cards: eligible,
             count: 1,
+            min_count: 0,
             up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::ChangeZone,
@@ -787,6 +802,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -843,6 +859,55 @@ mod tests {
 
         assert!(state.battlefield.contains(&obj_id));
         assert!(!state.players[0].hand.contains(&obj_id));
+    }
+
+    #[test]
+    fn change_zone_resolves_triggering_source_from_zone_change_event() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Earthbent Land".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&obj_id).unwrap().controller = PlayerId(1);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: obj_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                obj_id,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: true,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&obj_id));
+        assert!(!state.players[1].graveyard.contains(&obj_id));
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert!(obj.tapped);
+        assert_eq!(obj.controller, PlayerId(0));
     }
 
     /// CR 122.1 + CR 614.1c — `Effect::ChangeZone.enter_with_counters` drives
@@ -2001,6 +2066,7 @@ mod tests {
                 Effect::Sacrifice {
                     target: TargetFilter::ParentTargetSlot { index: 0 },
                     count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
                 },
                 vec![],
                 ObjectId(200),

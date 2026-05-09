@@ -2698,6 +2698,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::SacrificeAPermanent(filter) => Effect::Sacrifice {
             target: convert_permanents(filter)?,
             count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
         },
         // CR 701.21a: "Sacrifice N <filter>" — N may be a literal or any
         // dynamic quantity (Variable, ObjectCount, etc.). Lowers onto the
@@ -2705,6 +2706,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::SacrificeNumberPermanents(n, filter) => Effect::Sacrifice {
             target: convert_permanents(filter)?,
             count: quantity::convert(n)?,
+            min_count: 0,
         },
 
         // CR 701.27: Counter spell.
@@ -3013,6 +3015,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::SacrificePermanent(p) => Effect::Sacrifice {
             target: convert_permanent(p)?,
             count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
         },
 
         // CR 701.13 + CR 400.7: Exile a single targeted card from a
@@ -5128,9 +5131,14 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
         // Keep the existing sacrifice effect and bind the permanent filter's
         // controller axis to `ControllerRef::TargetPlayer`; runtime sacrifice
         // resolution reads the announced player from `ability.targets`.
-        Effect::Sacrifice { target, count } => Effect::Sacrifice {
+        Effect::Sacrifice {
+            target,
+            count,
+            min_count,
+        } => Effect::Sacrifice {
             target: bind_sacrifice_filter_to_target_player(target, target_filter)?,
             count,
+            min_count,
         },
         // CR 701.20a + CR 115.2: "Target player reveals the top N cards
         // of their library."
@@ -6839,7 +6847,7 @@ mod tests {
         ))
         .unwrap();
 
-        let Effect::Sacrifice { target, count } = effect else {
+        let Effect::Sacrifice { target, count, .. } = effect else {
             panic!("expected Sacrifice");
         };
         assert_eq!(count, QuantityExpr::Fixed { value: 1 });

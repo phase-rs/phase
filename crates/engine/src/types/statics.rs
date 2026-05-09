@@ -585,6 +585,10 @@ pub enum StaticMode {
     CantUntap,
     /// CR 509.1c: This creature must be blocked if able.
     MustBeBlocked,
+    /// CR 701.15b: This creature is goaded for as long as the static applies.
+    /// The source controller is the goading player for the "attack another
+    /// player if able" requirement.
+    Goaded,
     CantAttackAlone,
     CantBlockAlone,
     MayLookAtTopOfLibrary,
@@ -832,6 +836,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
+            StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
@@ -1033,6 +1038,7 @@ impl FromStr for StaticMode {
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
             "MustBeBlocked" => StaticMode::MustBeBlocked,
+            "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,

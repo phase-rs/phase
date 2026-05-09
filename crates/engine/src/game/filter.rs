@@ -193,6 +193,12 @@ fn controller_ref_player(
                 TargetRef::Object(_) => None,
             })
         }),
+        ControllerRef::ParentTargetController => ability.and_then(|a| {
+            a.targets.iter().find_map(|t| match t {
+                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                TargetRef::Player(pid) => Some(*pid),
+            })
+        }),
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, source_id)
         }
@@ -429,8 +435,10 @@ fn filter_inner_for_object(
     match filter {
         TargetFilter::None => false,
         TargetFilter::Any => true,
-        TargetFilter::Player => false,       // Players are not objects
-        TargetFilter::Controller => false,   // Controller is a player, not an object
+        TargetFilter::Player => false,     // Players are not objects
+        TargetFilter::Controller => false, // Controller is a player, not an object
+        // CR 109.5: OriginalController is a player reference, not an object.
+        TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
         TargetFilter::Typed(TypedFilter {
@@ -474,6 +482,20 @@ fn filter_inner_for_object(
                             a.targets.iter().find_map(|t| match t {
                                 TargetRef::Player(pid) => Some(*pid),
                                 TargetRef::Object(_) => None,
+                            })
+                        });
+                        match target_player {
+                            Some(pid) if pid == obj.controller => {}
+                            _ => return false,
+                        }
+                    }
+                    ControllerRef::ParentTargetController => {
+                        let target_player = ability.and_then(|a| {
+                            a.targets.iter().find_map(|t| match t {
+                                TargetRef::Object(id) => {
+                                    state.objects.get(id).map(|obj| obj.controller)
+                                }
+                                TargetRef::Player(pid) => Some(*pid),
                             })
                         });
                         match target_player {
@@ -694,6 +716,8 @@ fn zone_change_filter_inner(
         TargetFilter::Any => true,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        // CR 109.5: OriginalController is a player reference, not an object.
+        TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
         TargetFilter::Typed(TypedFilter {
@@ -728,6 +752,20 @@ fn zone_change_filter_inner(
                             a.targets.iter().find_map(|t| match t {
                                 TargetRef::Player(pid) => Some(*pid),
                                 TargetRef::Object(_) => None,
+                            })
+                        });
+                        match target_player {
+                            Some(pid) if pid == record.controller => {}
+                            _ => return false,
+                        }
+                    }
+                    ControllerRef::ParentTargetController => {
+                        let target_player = ability.and_then(|a| {
+                            a.targets.iter().find_map(|t| match t {
+                                TargetRef::Object(id) => {
+                                    state.objects.get(id).map(|obj| obj.controller)
+                                }
+                                TargetRef::Player(pid) => Some(*pid),
                             })
                         });
                         match target_player {
@@ -987,6 +1025,7 @@ pub fn spell_record_matches_filter(
                     // target). Fail closed — this combination should not be
                     // produced by the parser.
                     ControllerRef::TargetPlayer => return false,
+                    ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                 }
             }
@@ -1010,6 +1049,7 @@ pub fn spell_record_matches_filter(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
@@ -1132,6 +1172,7 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
         colors: spell_obj.color.clone(),
         mana_value: spell_obj.mana_cost.mana_value(),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
+        from_zone: Some(spell_obj.zone),
     }
 }
 
@@ -1166,6 +1207,7 @@ fn spell_object_matches_filter_inner(
                     // CR 109.4: Target-player scope is undefined for spell-cast
                     // history (no ability context). Fail closed.
                     ControllerRef::TargetPlayer => return false,
+                    ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     _ => {}
                 }
@@ -1211,6 +1253,7 @@ fn spell_object_matches_filter_inner(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
@@ -1410,6 +1453,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // for this snapshot shape.
         FilterProp::Token => false,
         FilterProp::NonToken => true,
+        FilterProp::InZone { zone: required } => record.from_zone == Some(*required),
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Attacking
         | FilterProp::AttackingController
@@ -1420,7 +1464,6 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Untapped
         | FilterProp::CountersGE { .. }
         | FilterProp::HasAnyCounter
-        | FilterProp::InZone { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
         | FilterProp::EnchantedBy
@@ -1749,6 +1792,9 @@ fn matches_filter_prop(
                     }
                     (Some(ControllerRef::ScopedPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::TargetPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::ParentTargetController), Some(pid)) => {
+                        perm.controller == pid
+                    }
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
                     (None, _) => true,
@@ -1774,6 +1820,15 @@ fn matches_filter_prop(
                     a.targets.iter().find_map(|t| match t {
                         TargetRef::Player(pid) => Some(*pid),
                         TargetRef::Object(_) => None,
+                    })
+                })
+                .is_some_and(|pid| pid == obj.owner),
+            ControllerRef::ParentTargetController => source
+                .ability
+                .and_then(|a| {
+                    a.targets.iter().find_map(|t| match t {
+                        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                        TargetRef::Player(pid) => Some(*pid),
                     })
                 })
                 .is_some_and(|pid| pid == obj.owner),
@@ -2241,6 +2296,15 @@ fn zone_change_record_matches_property(
                     })
                 })
                 .is_some_and(|pid| pid == record.owner),
+            ControllerRef::ParentTargetController => source
+                .ability
+                .and_then(|a| {
+                    a.targets.iter().find_map(|t| match t {
+                        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                        TargetRef::Player(pid) => Some(*pid),
+                    })
+                })
+                .is_some_and(|pid| pid == record.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
@@ -2404,6 +2468,15 @@ fn attachment_controller_matches(
                 a.targets.iter().find_map(|t| match t {
                     TargetRef::Player(pid) => Some(*pid),
                     TargetRef::Object(_) => None,
+                })
+            })
+            .is_some_and(|pid| pid == attachment_controller),
+        Some(ControllerRef::ParentTargetController) => source
+            .ability
+            .and_then(|a| {
+                a.targets.iter().find_map(|t| match t {
+                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                    TargetRef::Player(pid) => Some(*pid),
                 })
             })
             .is_some_and(|pid| pid == attachment_controller),
@@ -2819,6 +2892,9 @@ pub fn player_matches_target_filter(
         TargetFilter::Any | TargetFilter::Player => true,
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
         TargetFilter::Controller => source_controller == Some(player_id),
+        // CR 109.5: Without ability context, OriginalController is indistinguishable
+        // from Controller — both refer to the source controller in this matcher.
+        TargetFilter::OriginalController => source_controller == Some(player_id),
         TargetFilter::ScopedPlayer => false,
         TargetFilter::Typed(ref tf) if tf.type_filters.is_empty() => match &tf.controller {
             Some(ControllerRef::You) => source_controller == Some(player_id),
@@ -2828,6 +2904,7 @@ pub fn player_matches_target_filter(
             // a filter without ability context. Fail closed (mirrors the pattern
             // established at filter.rs:526–569 for spell-record filters).
             Some(ControllerRef::TargetPlayer) => false,
+            Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             None => true,
         },
@@ -3023,6 +3100,7 @@ mod tests {
             colors: vec![ManaColor::Blue],
             mana_value: 3,
             has_x_in_cost: false,
+            from_zone: None,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -3061,9 +3139,11 @@ mod tests {
             colors: vec![],
             mana_value: 3,
             has_x_in_cost: true,
+            from_zone: None,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
+            from_zone: None,
             ..x_record.clone()
         };
         let filter = TargetFilter::Typed(
@@ -3077,6 +3157,39 @@ mod tests {
             !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
         );
+    }
+
+    #[test]
+    fn spell_record_matches_cast_origin_zone_filter() {
+        let hand_record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            supertypes: vec![],
+            subtypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            mana_value: 2,
+            has_x_in_cost: false,
+            from_zone: Some(Zone::Hand),
+        };
+        let exile_record = SpellCastRecord {
+            from_zone: Some(Zone::Exile),
+            ..hand_record.clone()
+        };
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+        );
+        assert!(spell_record_matches_filter(
+            &hand_record,
+            &filter,
+            PlayerId(0),
+            &[]
+        ));
+        assert!(!spell_record_matches_filter(
+            &exile_record,
+            &filter,
+            PlayerId(0),
+            &[]
+        ));
     }
 
     #[test]
@@ -5791,6 +5904,7 @@ mod tests {
                 colors: Vec::new(),
                 mana_value: 0,
                 has_x_in_cost: false,
+                from_zone: None,
             }
         };
 
@@ -6186,6 +6300,7 @@ mod tests {
             colors: vec![],
             mana_value: 7,
             has_x_in_cost: false,
+            from_zone: None,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

@@ -341,6 +341,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .get(&entry.id)
                 .map(|obj| obj.convoked_creatures.clone())
                 .unwrap_or_default();
+            let cast_timing_permission = state
+                .objects
+                .get(&entry.id)
+                .and_then(|obj| obj.cast_timing_permission.map(|(permission, _)| permission));
 
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
@@ -416,6 +420,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             // abilities) can evaluate.
                             obj.kickers_paid.clone_from(&ability.context.kickers_paid);
                         }
+                        if let Some(permission) = cast_timing_permission {
+                            obj.cast_timing_permission = Some((permission, state.turn_number));
+                        }
                         obj.convoked_creatures = convoked_creatures;
                     }
                     super::room::unlock_door_designation(
@@ -431,13 +438,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Sets `state.waiting_for` to the resulting prompt, if any — the
                     // caller's post-stack resolution checks waiting_for before returning
                     // priority. Without this drain the choice would be silently dropped.
-                    if let Some(effect_def) = state.post_replacement_effect.take() {
+                    if state.post_replacement_effect.is_some()
+                        || state.post_replacement_resolved_effect.is_some()
+                    {
                         state.post_replacement_source = None;
-                        state.post_replacement_event_source = None;
-                        state.post_replacement_event_target = None;
-                        let _ = super::engine_replacement::apply_post_replacement_effect(
+                        let _ = super::engine_replacement::apply_pending_post_replacement_effect(
                             state,
-                            &effect_def,
                             Some(entry.id),
                             None,
                             events,
@@ -466,6 +472,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             controller: entry.controller,
                             casting_variant,
                             cast_from_zone,
+                            cast_timing_permission,
                             spell_targets: spell_targets.clone(),
                             actual_mana_spent,
                             kickers_paid,

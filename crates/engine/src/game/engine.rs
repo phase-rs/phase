@@ -3066,6 +3066,7 @@ fn apply_action(
                     pending.ability,
                     &pending.cost,
                     pending.casting_variant,
+                    pending.cast_timing_permission,
                     pending.origin_zone,
                     &mut events,
                 )?
@@ -3525,17 +3526,18 @@ fn handle_play_land(
             // execute ability is non-modifier work (Choose, etc.). Without this,
             // the choice prompt would fire at a random later resolution point with
             // the wrong controller context.
-            if let Some(effect_def) = state.post_replacement_effect.take() {
+            if state.post_replacement_effect.is_some()
+                || state.post_replacement_resolved_effect.is_some()
+            {
                 state.post_replacement_source = None;
-                state.post_replacement_event_source = None;
-                state.post_replacement_event_target = None;
-                if let Some(next_waiting_for) = engine_replacement::apply_post_replacement_effect(
-                    state,
-                    &effect_def,
-                    Some(object_id),
-                    None,
-                    events,
-                ) {
+                if let Some(next_waiting_for) =
+                    engine_replacement::apply_pending_post_replacement_effect(
+                        state,
+                        Some(object_id),
+                        None,
+                        events,
+                    )
+                {
                     state.lands_played_this_turn += 1;
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
@@ -7257,6 +7259,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: vec![],
             casting_variant: crate::types::game_state::CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
@@ -11073,6 +11076,7 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
             vec![],
             source_id,
@@ -11196,6 +11200,40 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn unless_energy_payment_deducts_energy_and_skips_effect() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Energy Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.players[0].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: UnlessCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::GainLifePlayer::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].energy, 0);
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    #[test]
     fn unless_discard_payment_filters_eligible_hand_cards() {
         let mut state = setup_game_at_main_phase();
         let source_id = create_object(
@@ -11307,6 +11345,7 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
             vec![TargetRef::Player(PlayerId(0))],
             source_id,
@@ -11357,6 +11396,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             cards: vec![obj_id],
             count: 1,
+            min_count: 0,
             up_to: false,
             source_id,
             effect_kind: EffectKind::Sacrifice,
@@ -11392,6 +11432,40 @@ mod phase_trigger_regression_tests {
         assert!(state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn effect_zone_choice_up_to_respects_min_count() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![obj_id],
+            count: 1,
+            min_count: 1,
+            up_to: true,
+            source_id,
+            effect_kind: EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+        };
+
+        let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });
+
+        assert!(result.is_err());
+        assert!(state.battlefield.contains(&obj_id));
     }
 
     #[test]
@@ -11568,6 +11642,7 @@ mod phase_trigger_regression_tests {
                     TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
                 ),
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
         );
         let ability = ResolvedAbility::new(
@@ -11612,6 +11687,7 @@ mod phase_trigger_regression_tests {
                     TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
                 ),
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
         );
         let token_branch = AbilityDefinition::new(
@@ -11709,6 +11785,7 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
             vec![],
             source_id,

@@ -136,6 +136,22 @@ pub enum ProposedEvent {
         count: u32,
         applied: HashSet<ReplacementId>,
     },
+    /// CR 701.22a + CR 614.1a: A player is about to scry cards. Replacement
+    /// effects can modify the count or replace the scry with another action.
+    Scry {
+        player_id: PlayerId,
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
+    /// CR 701.17a + CR 614.1a: A player is about to mill cards. Count-level
+    /// replacement effects such as "mill twice that many cards instead" must
+    /// see the event before individual library cards move zones.
+    Mill {
+        player_id: PlayerId,
+        count: u32,
+        destination: Zone,
+        applied: HashSet<ReplacementId>,
+    },
     LifeGain {
         player_id: PlayerId,
         amount: u32,
@@ -332,6 +348,8 @@ impl ProposedEvent {
             ProposedEvent::ZoneChange { applied, .. }
             | ProposedEvent::Damage { applied, .. }
             | ProposedEvent::Draw { applied, .. }
+            | ProposedEvent::Scry { applied, .. }
+            | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
@@ -353,6 +371,8 @@ impl ProposedEvent {
             ProposedEvent::ZoneChange { applied, .. }
             | ProposedEvent::Damage { applied, .. }
             | ProposedEvent::Draw { applied, .. }
+            | ProposedEvent::Scry { applied, .. }
+            | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
@@ -398,6 +418,8 @@ impl ProposedEvent {
                     .unwrap_or(PlayerId(0)),
             },
             ProposedEvent::Draw { player_id, .. }
+            | ProposedEvent::Scry { player_id, .. }
+            | ProposedEvent::Mill { player_id, .. }
             | ProposedEvent::LifeGain { player_id, .. }
             | ProposedEvent::LifeLoss { player_id, .. }
             | ProposedEvent::Discard { player_id, .. }
@@ -428,6 +450,8 @@ impl ProposedEvent {
                 TargetRef::Player(_) => None,
             },
             ProposedEvent::Draw { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
             | ProposedEvent::LifeGain { .. }
             | ProposedEvent::LifeLoss { .. }
             | ProposedEvent::CreateToken { .. }
@@ -442,8 +466,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proposed_event_has_16_variants() {
-        // Verify all 16 variants compile
+    fn proposed_event_has_18_variants() {
+        // Verify all 18 variants compile
         let events: Vec<ProposedEvent> = vec![
             ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
             ProposedEvent::Damage {
@@ -456,6 +480,17 @@ mod tests {
             ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::Scry {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::Mill {
+                player_id: PlayerId(0),
+                count: 1,
+                destination: Zone::Graveyard,
                 applied: HashSet::new(),
             },
             ProposedEvent::LifeGain {
@@ -534,7 +569,7 @@ mod tests {
             ProposedEvent::begin_phase(PlayerId(0), Phase::Untap),
             ProposedEvent::produce_mana(ObjectId(1), PlayerId(0), ManaType::Green),
         ];
-        assert_eq!(events.len(), 16);
+        assert_eq!(events.len(), 18);
     }
 
     #[test]

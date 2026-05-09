@@ -270,6 +270,7 @@ fn static_affects_player(
             // against a player. Fail closed.
             Some(ControllerRef::ScopedPlayer) => false,
             Some(ControllerRef::TargetPlayer) => false,
+            Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             None => true,
         },

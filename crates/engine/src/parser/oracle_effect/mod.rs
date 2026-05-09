@@ -2081,6 +2081,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parse_effect_clause(rest.original, ctx);
     }
 
+    // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>" —
+    // distribute the body across two recipients (the original ability
+    // controller and the iterated voter). Used by Council's-dilemma vote
+    // bodies (Master of Ceremonies pattern). MUST run before the imperative
+    // dispatch in `parse_clause_ast` so the bare "you" first word is not
+    // matched by the imperative "you may" arm or fall through to
+    // `Effect::Unimplemented`.
+    if let Some(clause) = try_parse_compound_subject_each(text, ctx) {
+        return clause;
+    }
+
     if let Some(clause) = try_parse_distinct_card_types_from_revealed(tp) {
         return clause;
     }
@@ -4449,7 +4460,14 @@ fn try_parse_verb_and_target<'a>(
         ));
         let (target_text, _) = strip_optional_target_prefix(after_count.trim_start());
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
-        return Some((TargetedImperativeAst::Sacrifice { target, count }, rem));
+        return Some((
+            TargetedImperativeAst::Sacrifice {
+                target,
+                count,
+                min_count: 0,
+            },
+            rem,
+        ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("fight ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
@@ -5415,6 +5433,126 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
     })
 }
 
+/// CR 109.5 + CR 608.2c + CR 800.4g: Distribute "<player-noun-A> and <player-noun-B>
+/// each <body>" into a 2-element AbilityDefinition chain whose halves apply
+/// `<body>` to two different players.
+///
+/// Currently restricted to the form "you and that player each Y" — produced by
+/// "For each player who chose <choice>, you and that player each <body>"
+/// patterns inside Council's-dilemma vote effects (Master of Ceremonies). The
+/// first half is targeted at `OriginalController` (the printed ability
+/// controller, fixed even when `player_scope` iteration rebinds the acting
+/// controller per-voter); the second half is targeted at `ScopedPlayer` (the
+/// iterated voter for `PlayerFilter::VotedFor`). The two halves resolve in
+/// printed order via the `sub_ability` chain.
+///
+/// Generality: the parser shape is parameterized to accept any single-effect
+/// body that has a `TargetFilter`-typed recipient slot (Token's `owner`,
+/// Draw's `target`, etc.). Effects without a recipient slot in the AST are
+/// not supported here — return `None` and let the caller fall through.
+///
+/// Other compound-subject forms ("you and target opponent", "you and an
+/// opponent of your choice") are deliberately out of scope for this entry
+/// point and will produce `None`.
+fn try_parse_compound_subject_each(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // Compose the prefix from independent dimensions:
+    //   first-subject × " and " × second-subject × " each " × <body>
+    // Today only "you" / "that player" are recognized; the alt() arms expand
+    // when we add other compound forms (target opponent, an opponent of your
+    // choice, etc.). Each axis is one alt() call; we never enumerate the
+    // permutations.
+    let parser: nom::IResult<&str, (TargetFilter, TargetFilter), OracleError<'_>> = (
+        alt((value(TargetFilter::OriginalController, tag("you and ")),)),
+        alt((value(TargetFilter::ScopedPlayer, tag("that player ")),)),
+        value((), tag("each ")),
+    )
+        .parse(lower.as_str())
+        .map(|(rest, (first, second, ()))| (rest, (first, second)));
+    let (lower_rest, (first_filter, second_filter)) = parser.ok()?;
+
+    // Slice the original-case body text using the consumed offset.
+    let consumed = lower.len() - lower_rest.len();
+    let body_text = text[consumed..].trim();
+    if body_text.is_empty() {
+        return None;
+    }
+
+    // Parse the body once. Re-using `parse_effect_chain_with_context`
+    // composes the existing body parser surface (Token, Draw, etc.).
+    let mut body_ctx = ctx.clone();
+    let parsed_body = parse_effect_chain_with_context(body_text, AbilityKind::Spell, &mut body_ctx);
+
+    // Reject Unimplemented bodies — distribution is meaningless when the body
+    // didn't parse, and the caller's fallback (Unimplemented + diagnostic)
+    // is more informative than silently emitting two Unimplemented halves.
+    if matches!(*parsed_body.effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+
+    // Build the two halves. Each half is a clone of the parsed body with its
+    // recipient field rewritten. Effects without a `TargetFilter`-typed
+    // recipient are unsupported — return None to fall through to Unimplemented.
+    let mut half_a = parsed_body.clone();
+    if !rewrite_player_recipient(&mut half_a, &first_filter) {
+        return None;
+    }
+    let mut half_b = parsed_body;
+    if !rewrite_player_recipient(&mut half_b, &second_filter) {
+        return None;
+    }
+
+    // Compose: Half A is the top-level effect; Half B is its sub_ability.
+    // The runtime `resolve_ability_chain` walks parent → sub_ability in
+    // printed order, matching the "you ..., then that player ..." reading.
+    half_a.sub_ability = Some(Box::new(half_b));
+
+    Some(ParsedEffectClause {
+        effect: *half_a.effect,
+        duration: half_a.duration,
+        sub_ability: half_a.sub_ability,
+        distribute: None,
+        multi_target: None,
+        condition: half_a.condition,
+        optional: false,
+    })
+}
+
+/// CR 109.5 + CR 115.1: Rewrite an `AbilityDefinition`'s recipient
+/// (`TargetFilter`-typed slot on the top-level effect) to the supplied
+/// filter. Returns `true` when the rewrite was applied; `false` when the
+/// effect has no recognized recipient slot (caller should treat as
+/// non-distributable and fall through).
+///
+/// Covers the recipient-bearing effects produced by parsing "you and that
+/// player each Y" bodies — Token (`owner`), Draw (`target`), Discard
+/// (`target`), Mill (`target`), Tap/Untap (`target`), Investigate (no
+/// recipient → false). Extending to a new effect family is one match arm
+/// per family.
+fn rewrite_player_recipient(def: &mut AbilityDefinition, filter: &TargetFilter) -> bool {
+    match def.effect.as_mut() {
+        Effect::Token { owner, .. } => {
+            *owner = filter.clone();
+            true
+        }
+        Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. } => {
+            *target = filter.clone();
+            true
+        }
+        // Any other effect family is out of scope for compound-subject
+        // distribution at this entry point. Returning false keeps the
+        // detector tight and prevents silent misparse on bodies whose
+        // recipient binding is encoded differently (GainLifePlayer enum,
+        // optional Option<TargetFilter>, etc.).
+        _ => false,
+    }
+}
+
 /// Check if text contains anaphoric pronouns referencing a previously mentioned object.
 /// Unlike `contains_object_pronoun`, this handles word boundaries at end-of-string
 /// (e.g., "counter on it" where "it" is the last word).
@@ -5448,10 +5586,12 @@ fn has_anaphoric_reference(lower: &str) -> bool {
 /// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 fn replace_target_with_parent(effect: &mut Effect) {
     match effect {
+        Effect::Sacrifice { target, .. }
+            if target_filter_controller_ref(target)
+                == Some(ControllerRef::ParentTargetController) => {}
         Effect::Tap { target }
         | Effect::Untap { target }
         | Effect::Destroy { target, .. }
-        | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
@@ -5546,6 +5686,12 @@ fn has_typed_target(effect: &Effect) -> bool {
             target: TargetFilter::Typed(_),
             ..
         } | Effect::Attach {
+            target: TargetFilter::Typed(_),
+            ..
+        } | Effect::ChangeZone {
+            target: TargetFilter::Typed(_),
+            ..
+        } | Effect::ChangeZoneAll {
             target: TargetFilter::Typed(_),
             ..
         } | Effect::GenericEffect {
@@ -5911,6 +6057,11 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
     match filter {
         TargetFilter::ScopedPlayer => Some(ControllerRef::ScopedPlayer),
         TargetFilter::TriggeringPlayer => Some(ControllerRef::ScopedPlayer),
+        TargetFilter::ParentTargetController => Some(ControllerRef::ParentTargetController),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(player_filter_as_controller_ref)
+        }
+        TargetFilter::Not { filter } => player_filter_as_controller_ref(filter),
         TargetFilter::Typed(tf)
             if tf.type_filters.is_empty()
                 && tf.controller.is_some()
@@ -5918,6 +6069,17 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         {
             tf.controller.clone()
         }
+        _ => None,
+    }
+}
+
+fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.clone(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(target_filter_controller_ref)
+        }
+        TargetFilter::Not { filter } => target_filter_controller_ref(filter),
         _ => None,
     }
 }
@@ -6236,7 +6398,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // reads the chosen player from ability.targets at resolution time.
         // Also rewrite "they control" refs inside the count expression so
         // the dynamic count resolves against the targeted player's board.
-        Effect::Sacrifice { target, count }
+        Effect::Sacrifice { target, count, .. }
             if player_filter_as_controller_ref(&subject_filter).is_some() =>
         {
             if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
@@ -6818,34 +6980,78 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     } else if tag::<_, _, E>("an artist").parse(rest).is_ok() {
         Some(ChoiceType::Artist)
     } else {
-        // Generic "X or Y" pattern — must come AFTER all specific patterns above
-        try_parse_binary_choice(rest).map(|options| ChoiceType::Labeled { options })
+        // Generic "X or Y" / "X, Y, or Z" / "W, X, Y, or Z" labeled choice —
+        // must come AFTER all specific patterns above.
+        try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
 }
 
-/// Try to parse "X or Y" as a binary labeled choice.
-/// Only matches simple one-or-two-word labels separated by " or ".
-/// Returns capitalized labels.
-/// This must come AFTER all specific patterns in try_parse_named_choice to avoid
-/// accidentally matching "choose left or right" against targeting patterns.
-fn try_parse_binary_choice(rest: &str) -> Option<Vec<String>> {
+/// Try to parse a labeled choice ("X or Y", "X, Y, or Z", "W, X, Y, or Z", ...) into
+/// its option list. The Oxford-comma form is canonical in MTG Oracle text — every
+/// printed N≥3 labeled choice (Master of Ceremonies, Storage Matrix, Turnabout,
+/// Teferi's Realm, A Killer Among Us) uses ", or " before the last item.
+///
+/// Each label must be ≤2 whitespace-delimited words and must not contain
+/// "target", "more", or "both" — these gates filter out clausal disjunctions
+/// ("destroy target creature or land you control") that aren't real labeled
+/// choices.
+///
+/// This must come AFTER all specific patterns in `try_parse_named_choice` to
+/// avoid accidentally matching "choose left or right" against targeting
+/// patterns.
+fn try_parse_labeled_choice(rest: &str) -> Option<Vec<String>> {
+    // N-ary Oxford-comma form first: split on the LAST ", or " (which `split_once_on`
+    // finds as the first occurrence of the separator — there's only one in well-formed
+    // Oracle text since middle items are joined by ", ").
+    if let Ok((_, (head, tail))) = nom_primitives::split_once_on(rest, ", or ") {
+        let mut labels: Vec<&str> = Vec::new();
+        let mut remaining = head.trim();
+        // Walk the comma-separated middle labels via the same nom combinator.
+        while let Ok((_, (middle, next))) = nom_primitives::split_once_on(remaining, ", ") {
+            labels.push(middle.trim());
+            remaining = next.trim();
+        }
+        // Whatever's left of `remaining` after the loop is the last middle label
+        // (or the only middle label if there were no inner commas — i.e. "X, or Y").
+        if !remaining.is_empty() {
+            labels.push(remaining);
+        }
+        labels.push(tail.trim());
+        return validate_and_capitalize_labels(&labels);
+    }
+
+    // Binary form: "X or Y" with no comma before "or".
     let (_, (left, right)) = nom_primitives::split_once_on(rest, " or ").ok()?;
-    let left = left.trim();
-    let right = right.trim();
+    validate_and_capitalize_labels(&[left.trim(), right.trim()])
+}
 
-    // Labels must be short (≤2 words) — longer phrases are likely clauses, not choices
-    if left.split_whitespace().count() > 2 || right.split_whitespace().count() > 2 {
+/// Apply the per-label validation gates uniformly across all labels in a labeled
+/// choice and return the capitalized result.
+///
+/// Gates:
+/// - At least 2 labels (a single-element "list" isn't a choice).
+/// - Each label is ≤2 whitespace-delimited words. Longer phrases are clauses,
+///   not labels.
+/// - No label contains "target" — distinguishes labeled choices from object
+///   disjunctions like "creature or planeswalker".
+/// - No label is "more" or "both" — these are quantifier/conjunction words,
+///   not choice labels (e.g. "five or more", "one or both").
+fn validate_and_capitalize_labels(labels: &[&str]) -> Option<Vec<String>> {
+    if labels.len() < 2 {
         return None;
     }
-    // Reject known non-choice patterns
-    if scan_contains_phrase(left, "target") || scan_contains_phrase(right, "target") {
-        return None;
+    for label in labels {
+        if label.is_empty() || label.split_whitespace().count() > 2 {
+            return None;
+        }
+        if scan_contains_phrase(label, "target") {
+            return None;
+        }
+        if *label == "more" || *label == "both" {
+            return None;
+        }
     }
-    if right == "more" || left == "both" || right == "both" {
-        return None;
-    }
-
-    Some(vec![capitalize(left), capitalize(right)])
+    Some(labels.iter().map(|l| capitalize(l)).collect())
 }
 
 /// Refine a damage target based on remainder text left after `parse_target`.
@@ -12017,6 +12223,11 @@ fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
     if cost_text.is_empty() || !cost_text.contains('{') {
         return None;
     }
+    if let Some((amount, rest)) = parse_fixed_energy_unless_cost(cost_text) {
+        if rest.trim().is_empty() {
+            return Some(UnlessCost::PayEnergy { amount });
+        }
+    }
     // Check for dynamic {X} with "where X is" clause
     if cost_text == "{X}" || cost_text == "{x}" {
         let after_cost = &cost_str[cost_end..];
@@ -12082,6 +12293,12 @@ fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> 
 }
 
 fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
+    if let Some((amount, rest)) = parse_fixed_energy_unless_cost(cost_text.trim_start()) {
+        if rest.trim().is_empty() {
+            return Some(UnlessCost::PayEnergy { amount });
+        }
+    }
+
     if let Ok((rest, cost)) = nom_primitives::parse_mana_cost(cost_text.trim_start()) {
         if let Some(unless_cost) = parse_unless_for_each_payment(rest, &cost) {
             return Some(unless_cost);
@@ -12104,7 +12321,17 @@ fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
     None
 }
 
-fn parse_unless_for_each_payment(after_cost: &str, cost: &ManaCost) -> Option<UnlessCost> {
+pub(crate) fn parse_fixed_energy_unless_cost(input: &str) -> Option<(u32, &str)> {
+    let (rest, symbols) = many1(tag::<_, _, OracleError<'_>>("{e}"))
+        .parse(input)
+        .ok()?;
+    Some((u32::try_from(symbols.len()).ok()?, rest))
+}
+
+pub(crate) fn parse_unless_for_each_payment(
+    after_cost: &str,
+    cost: &ManaCost,
+) -> Option<UnlessCost> {
     let ManaCost::Cost { shards, generic } = cost else {
         return None;
     };
@@ -14363,12 +14590,52 @@ mod tests {
             Effect::BounceAll {
                 target: TargetFilter::Typed(filter),
                 destination,
+                count,
             } => {
                 assert!(destination.is_none(), "default destination = owner's hand");
+                assert!(count.is_none(), "all/each bounce is uncounted");
                 assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
                 assert!(filter.controller.is_none(), "no controller scoping");
             }
             other => panic!("expected BounceAll, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_bounce_counted_half_target_player_creatures() {
+        let e = parse_effect(
+            "Return half the creatures they control to their owner's hand, rounded up",
+        );
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                destination,
+                count:
+                    Some(QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    }),
+            } => {
+                assert!(destination.is_none(), "default destination = owner's hand");
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(filter.controller, Some(ControllerRef::ScopedPlayer));
+                assert_eq!(divisor, 2);
+                assert_eq!(rounding, crate::types::ability::RoundingMode::Up);
+                match *inner {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(count_filter),
+                            },
+                    } => {
+                        assert_eq!(count_filter.type_filters, vec![TypeFilter::Creature]);
+                        assert_eq!(count_filter.controller, Some(ControllerRef::ScopedPlayer));
+                    }
+                    other => panic!("expected ObjectCount inner quantity, got {other:?}"),
+                }
+            }
+            other => panic!("expected counted BounceAll, got {other:?}"),
         }
     }
 
@@ -16021,6 +16288,43 @@ mod tests {
     }
 
     #[test]
+    fn effect_target_enchantment_becomes_creature_with_dynamic_base_pt() {
+        let e = parse_effect(
+            "Target non-Aura enchantment you control becomes a creature in addition to its other types and has base power and base toughness each equal to its mana value",
+        );
+        let Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(tf)),
+            static_abilities,
+            duration: Some(Duration::Permanent),
+        } = e
+        else {
+            panic!("expected permanent GenericEffect, got {e:?}");
+        };
+
+        assert!(tf.type_filters.contains(&TypeFilter::Enchantment));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Aura".into()
+            )))));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert_eq!(static_abilities.len(), 1);
+        let mods = &static_abilities[0].modifications;
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::SetPowerDynamic {
+            value: expected.clone(),
+        }));
+        assert!(mods.contains(&ContinuousModification::SetToughnessDynamic { value: expected }));
+    }
+
+    #[test]
     fn effect_becomes_color_and_attacks_if_able_chains_requirement() {
         let def = parse_effect_chain(
             "Target creature becomes red until end of turn and attacks this turn if able.",
@@ -16494,6 +16798,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn effect_pay_mana_and_life_cost() {
+        let e = parse_effect("pay {1} and 3 life");
+        match e {
+            Effect::PayCost {
+                cost:
+                    PaymentCost::AbilityCost {
+                        cost: crate::types::ability::AbilityCost::Composite { costs },
+                    },
+                ..
+            } => {
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(
+                    &costs[0],
+                    crate::types::ability::AbilityCost::Mana {
+                        cost: crate::types::mana::ManaCost::Cost { generic: 1, .. }
+                    }
+                ));
+                assert!(matches!(
+                    &costs[1],
+                    crate::types::ability::AbilityCost::PayLife {
+                        amount: crate::types::ability::QuantityExpr::Fixed { value: 3 }
+                    }
+                ));
+            }
+            other => panic!("expected composite PayCost, got {other:?}"),
+        }
     }
 
     /// CR 118.8 + CR 603.2: "pay life equal to its power" resolves against the
@@ -19300,6 +19633,27 @@ mod tests {
     }
 
     #[test]
+    fn seek_for_each_card_exiled_from_your_hand_uses_dynamic_count() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek an instant or sorcery card for each card exiled from your hand this way",
+            &mut ctx,
+        );
+        assert!(matches!(
+            details.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ExiledFromHandThisResolution
+            }
+        ));
+        assert!(matches!(details.filter, TargetFilter::Or { .. }));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
     fn seek_land_and_nonland_cards_splits_filters() {
         let details = parse_seek_details(
             "seek a land card and a nonland card",
@@ -20400,6 +20754,35 @@ mod tests {
         assert!(def.optional);
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
         assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+    }
+
+    #[test]
+    fn parent_controller_may_sacrifice_if_player_does_gates_copy() {
+        let def = parse_effect_chain(
+            "return target nonland permanent to its owner's hand. Then that permanent's controller may sacrifice a land of their choice. If the player does, they may copy this spell and may choose a new target for that copy",
+            AbilityKind::Spell,
+        );
+        let sacrifice = def
+            .sub_ability
+            .as_ref()
+            .expect("bounce should chain to optional sacrifice");
+        assert!(sacrifice.optional);
+        match &*sacrifice.effect {
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(tf),
+                ..
+            } => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::ParentTargetController));
+            }
+            other => panic!("expected Sacrifice land, got {other:?}"),
+        }
+        let copy = sacrifice
+            .sub_ability
+            .as_ref()
+            .expect("sacrifice should chain to copy spell");
+        assert_eq!(copy.condition, Some(AbilityCondition::IfYouDo));
+        assert!(matches!(*copy.effect, Effect::CopySpell { .. }));
     }
 
     /// CR 608.2d + CR 603.2: "each opponent may X" — each opponent independently
@@ -23614,6 +23997,136 @@ mod tests {
         );
     }
 
+    /// Binary "X or Y" labeled choice — the legacy shape must keep working
+    /// after the rename / N-ary generalization.
+    #[test]
+    fn labeled_choice_binary_form_still_parses() {
+        assert_eq!(
+            super::try_parse_named_choice("choose left or right"),
+            Some(ChoiceType::Labeled {
+                options: vec!["Left".to_string(), "Right".to_string()]
+            })
+        );
+    }
+
+    /// Master of Ceremonies — the original bug repro. Ternary Oxford-comma
+    /// labeled choice ("X, Y, or Z") must produce three distinct options
+    /// with no embedded commas in any label.
+    #[test]
+    fn labeled_choice_ternary_oxford_comma_money_friends_secrets() {
+        assert_eq!(
+            super::try_parse_named_choice("choose money, friends, or secrets"),
+            Some(ChoiceType::Labeled {
+                options: vec![
+                    "Money".to_string(),
+                    "Friends".to_string(),
+                    "Secrets".to_string(),
+                ]
+            })
+        );
+    }
+
+    /// Sibling card (Turnabout, Storage Matrix, A Killer Among Us): same
+    /// ternary Oxford-comma shape, type-noun labels.
+    #[test]
+    fn labeled_choice_ternary_artifact_creature_land() {
+        assert_eq!(
+            super::try_parse_named_choice("choose artifact, creature, or land"),
+            Some(ChoiceType::Labeled {
+                options: vec![
+                    "Artifact".to_string(),
+                    "Creature".to_string(),
+                    "Land".to_string(),
+                ]
+            })
+        );
+    }
+
+    /// Teferi's Realm — 4-option Oxford-comma labeled choice. Confirms the
+    /// generalization is N-ary, not capped at 3.
+    #[test]
+    fn labeled_choice_quaternary_oxford_comma_teferis_realm() {
+        // After lowercasing in the production path, "non-Aura" becomes
+        // "non-aura"; the helper only sees the lowercase form.
+        assert_eq!(
+            super::try_parse_named_choice(
+                "choose artifact, creature, land, or non-aura enchantment"
+            ),
+            Some(ChoiceType::Labeled {
+                options: vec![
+                    "Artifact".to_string(),
+                    "Creature".to_string(),
+                    "Land".to_string(),
+                    "Non-aura enchantment".to_string(),
+                ]
+            })
+        );
+    }
+
+    /// Per-label ≤2-words gate must apply to every position in the list, not
+    /// just left/right of the binary form. Three multi-word "labels" must
+    /// reject as a whole.
+    #[test]
+    fn labeled_choice_rejects_long_labels_in_ternary() {
+        assert_eq!(
+            super::try_parse_named_choice(
+                "choose do this thing, do that thing, or do something else"
+            ),
+            None
+        );
+    }
+
+    /// "target" rejection still applies anywhere in the option list — covers
+    /// "target creature or planeswalker"-style disjunctions that must NOT
+    /// be reinterpreted as labeled choices in the ternary path.
+    #[test]
+    fn labeled_choice_rejects_target_anywhere_in_ternary() {
+        assert_eq!(
+            super::try_parse_named_choice(
+                "choose target creature, target planeswalker, or target player"
+            ),
+            None
+        );
+    }
+
+    /// The "more"/"both" rejection guards against quantifier phrases ("five
+    /// or more") that share the binary " or " shape but aren't labeled
+    /// choices. Verify these still reject post-rename.
+    #[test]
+    fn labeled_choice_rejects_more_and_both() {
+        assert_eq!(super::try_parse_named_choice("choose five or more"), None);
+        assert_eq!(super::try_parse_named_choice("choose one or both"), None);
+        assert_eq!(super::try_parse_named_choice("choose both or one"), None);
+    }
+
+    /// End-to-end: real-card Oracle text dispatches through
+    /// `parse_effect_chain` and produces the correct
+    /// `Effect::Choose { choice_type: Labeled { options: [..] } }`.
+    /// This catches regressions in the dispatcher → helper handoff that a
+    /// helper-only test would miss.
+    #[test]
+    fn labeled_choice_parses_master_of_ceremonies_choose_clause() {
+        // Isolate just the choose clause; trigger routing is exercised by
+        // the full-card snapshot tests elsewhere.
+        let def = parse_effect_chain("Choose money, friends, or secrets.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled { options },
+                ..
+            } => {
+                assert_eq!(
+                    options,
+                    &vec![
+                        "Money".to_string(),
+                        "Friends".to_string(),
+                        "Secrets".to_string()
+                    ]
+                );
+            }
+            other => panic!("Expected Effect::Choose(Labeled), got {other:?}"),
+        }
+    }
+
     /// CR 705 + CR 614.10: Ral Zarek, Guest Lecturer [-7] — "Flip five coins.
     /// Target opponent skips their next X turns, where X is the number of coins
     /// that came up heads." parses into a single `FlipCoins { count: 5,
@@ -25684,6 +26197,41 @@ mod snapshot_tests {
                 matches!(
                     modification,
                     ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn returned_target_can_receive_contracted_additive_type_followup() {
+        let def = parse_effect_chain(
+            "Return target creature card from a graveyard to the battlefield under your control. It's a Phyrexian in addition to its other types.",
+            AbilityKind::Activated,
+        );
+
+        assert!(
+            matches!(&*def.effect, Effect::ChangeZone { .. }),
+            "expected ChangeZone, got {:?}",
+            def.effect
+        );
+
+        let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
+        assert_eq!(subtype_followup.duration, Some(Duration::Permanent));
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*subtype_followup.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
+        };
+        assert_eq!(*duration, Some(Duration::Permanent));
+        assert_eq!(*target, Some(TargetFilter::ParentTarget));
+        assert!(static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddSubtype { subtype } if subtype == "Phyrexian"
                 )
             })
         }));

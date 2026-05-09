@@ -626,6 +626,7 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
         let (rest, _) = tag::<_, _, OracleError<'_>>("exiled from ").parse(input)?;
         let (rest, _) = alt((
             value((), tag::<_, _, OracleError<'_>>("their hand")),
+            value((), tag("your hand")),
             value((), tag("its owner's hand")),
             value((), tag("that player's hand")),
         ))
@@ -1244,6 +1245,12 @@ mod tests {
     fn for_each_this_way_produces_tracked_set_size() {
         let qty = parse_for_each_clause("card put into a graveyard this way").unwrap();
         assert_eq!(qty, QuantityRef::TrackedSetSize);
+    }
+
+    #[test]
+    fn for_each_card_exiled_from_your_hand_this_way_tracks_hand_exiles() {
+        let qty = parse_for_each_clause("card exiled from your hand this way").unwrap();
+        assert_eq!(qty, QuantityRef::ExiledFromHandThisResolution);
     }
 
     /// CR 609.3 + CR 122.1: "[type] counter[s] removed this way" must dispatch

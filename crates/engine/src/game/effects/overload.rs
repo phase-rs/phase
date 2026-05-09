@@ -98,6 +98,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
         } => Effect::BounceAll {
             target,
             destination,
+            count: None,
         },
         // CR 702.96b + CR 701.13a: Winds of Abandon overload — promote the
         // single-target `ChangeZone` to its mass counterpart so "exile target
@@ -218,8 +219,10 @@ mod tests {
             Effect::BounceAll {
                 destination,
                 ref target,
+                count,
             } => {
                 assert!(destination.is_none(), "default destination preserved");
+                assert!(count.is_none(), "overload does not add counted bounce");
                 assert!(matches!(target, TargetFilter::Typed(_)));
             }
             ref other => panic!("expected BounceAll, got {other:?}"),

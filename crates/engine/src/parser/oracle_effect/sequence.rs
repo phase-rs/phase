@@ -340,12 +340,29 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && (opt(tag::<_, _, OracleError<'_>>("put ")), tag("the rest"))
                                 .parse(remainder_trimmed)
                                 .is_ok();
+                    // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>"
+                    // (and analogous "you and <player-noun> each <body>" compound
+                    // subjects) is a SINGLE compound subject distributing the body
+                    // across two recipients — not two separate clauses.
+                    // `try_parse_compound_subject_each` in the effect parser owns the
+                    // distribution logic; here we must keep the text as one chunk so
+                    // the combinator sees the full prefix.
+                    //
+                    // The detection is tight: the chunk-so-far must be exactly "you"
+                    // (so we do not suppress mid-sentence "you draw a card and that
+                    // player draws a card" — those are two clauses). The remainder
+                    // must start with a compound-subject noun phrase followed by
+                    // " each " — distinguishing it from the standard clause-starter
+                    // "that player <verb>" (which is a separate clause).
+                    let compound_subject_each = before_lower.trim_end() == "you"
+                        && remainder_trimmed_starts_with_compound_subject_each(remainder_trimmed);
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
                         || search_with_that_name
                         || inside_except_clause
-                        || choice_partition_remainder;
+                        || choice_partition_remainder
+                        || compound_subject_each;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -606,6 +623,27 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
     ))
     .parse(trimmed)
     .is_ok()
+}
+
+/// CR 109.5 + CR 608.2c + CR 800.4g: Detect that the remainder after "you and"
+/// starts a compound-subject distribution clause: "<player-noun> each <body>".
+///
+/// Used by the chunk splitter to suppress " and " splitting when the entire
+/// phrase is a single compound subject ("you and that player each Y") rather
+/// than two clauses joined by "and". The recognized noun phrases mirror the
+/// expansion axis in `try_parse_compound_subject_each`; new compound forms
+/// are added by extending both sites in lockstep.
+///
+/// Currently restricted to "that player each" — the only form produced by
+/// the Council's-dilemma "for each player who chose <choice>" body. Other
+/// compound forms ("target opponent each", "an opponent each") are noted
+/// follow-ups; until they parse on the body side, the chunk splitter can
+/// safely suppress them too.
+fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
+    let lower = remainder.to_ascii_lowercase();
+    let result: nom::IResult<&str, (), OracleError<'_>> =
+        alt((value((), tag("that player each ")),)).parse(lower.as_str());
+    result.is_ok()
 }
 
 /// Restricted clause-start check for bare " and " splitting (not after comma).

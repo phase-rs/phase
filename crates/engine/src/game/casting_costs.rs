@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, CostPaidObjectSnapshot, Effect, KickerVariant, ResolvedAbility,
-    SpellCastingOptionKind,
+    AbilityCost, AdditionalCost, CastTimingPermission, CostPaidObjectSnapshot, Effect,
+    KickerVariant, QuantityExpr, ResolvedAbility, SpellCastingOptionKind, TargetFilter,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -296,6 +297,7 @@ fn finish_pending_cost_or_cast(
         pending.ability,
         &pending.cost,
         pending.casting_variant,
+        pending.cast_timing_permission,
         pending.distribute,
         pending.origin_zone,
         events,
@@ -752,6 +754,7 @@ pub(super) fn check_additional_cost_or_pay(
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     origin_zone: Zone,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -763,6 +766,7 @@ pub(super) fn check_additional_cost_or_pay(
         ability,
         cost,
         casting_variant,
+        cast_timing_permission,
         None,
         origin_zone,
         events,
@@ -785,6 +789,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     let object_id = pending.object_id;
     let card_id = pending.card_id;
     let casting_variant = pending.casting_variant;
+    let cast_timing_permission = pending.cast_timing_permission;
     let distribute = pending.distribute;
     let origin_zone = pending.origin_zone;
     let cost = pending.cost;
@@ -797,6 +802,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         ability,
         &cost,
         casting_variant,
+        cast_timing_permission,
         distribute,
         origin_zone,
         events,
@@ -812,6 +818,7 @@ pub(super) fn begin_modal_additional_cost_declaration(
     ability: ResolvedAbility,
     cost: ManaCost,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     modal: crate::types::ability::ModalChoice,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
@@ -827,6 +834,7 @@ pub(super) fn begin_modal_additional_cost_declaration(
         capped.max_choices = capped.max_choices.min(capped.mode_count);
         let mut pending = PendingCast::new(object_id, card_id, ability, cost);
         pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.target_constraints = target_constraints_from_modal(&capped);
@@ -839,6 +847,7 @@ pub(super) fn begin_modal_additional_cost_declaration(
 
     let mut pending = PendingCast::new(object_id, card_id, ability, cost);
     pending.casting_variant = casting_variant;
+    pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
     pending.origin_zone = origin_zone;
     pending.deferred_modal_choice = Some(modal);
@@ -855,6 +864,7 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
     ability: ResolvedAbility,
     cost: ManaCost,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     events: &mut Vec<GameEvent>,
@@ -872,6 +882,7 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
             ability,
             &cost,
             casting_variant,
+            cast_timing_permission,
             distribute,
             origin_zone,
             events,
@@ -880,6 +891,7 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
 
     let mut pending = PendingCast::new(object_id, card_id, ability, cost);
     pending.casting_variant = casting_variant;
+    pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
     pending.origin_zone = origin_zone;
     pending.deferred_target_selection = true;
@@ -899,6 +911,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     events: &mut Vec<GameEvent>,
@@ -945,7 +958,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     let additional = state
         .objects
         .get(&object_id)
-        .and_then(|obj| obj.additional_cost.clone());
+        .and_then(|obj| obj.additional_cost.clone())
+        .or_else(|| effective_casualty_additional_cost(state, player, object_id));
 
     // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
     // before total cost determination and paid rather than the spell's mana
@@ -956,6 +970,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         if let Some(alt_cost) = payable_spell_alternative_cost(state, player, object_id) {
             let mut pending = PendingCast::new(object_id, card_id, ability, ManaCost::NoCost);
             pending.casting_variant = casting_variant;
+            pending.cast_timing_permission = cast_timing_permission;
             pending.distribute = distribute.clone();
             pending.origin_zone = origin_zone;
             return Ok(WaitingFor::OptionalCostChoice {
@@ -979,12 +994,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 // Required additional costs bypass the choice prompt — pay directly.
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
+                pending.cast_timing_permission = cast_timing_permission;
                 pending.origin_zone = origin_zone;
                 return pay_additional_cost(state, player, req_cost.clone(), pending, events);
             }
             AdditionalCost::Kicker { costs, repeatable } => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
+                pending.cast_timing_permission = cast_timing_permission;
                 pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
                 if costs.is_empty() {
@@ -1009,6 +1026,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             AdditionalCost::Optional(opt_cost) => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
+                pending.cast_timing_permission = cast_timing_permission;
                 pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
                 // CR 601.2b: If the optional additional cost requires a choice
@@ -1023,6 +1041,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                         pending.ability,
                         &pending.cost,
                         casting_variant,
+                        cast_timing_permission,
                         distribute,
                         origin_zone,
                         events,
@@ -1037,6 +1056,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             AdditionalCost::Choice(preferred, fallback) => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
+                pending.cast_timing_permission = cast_timing_permission;
                 pending.distribute = distribute;
                 pending.origin_zone = origin_zone;
                 // CR 601.2b: If the preferred branch is unpayable, fall through
@@ -1077,6 +1097,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     if let Some(energy_mv) = energy_cost {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
         pending.origin_zone = origin_zone;
         return pay_additional_cost(
             state,
@@ -1122,6 +1143,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     if let Some(alt_cost) = alt_ability_cost {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         return pay_additional_cost(state, player, alt_cost, pending, events);
@@ -1132,6 +1154,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         if let Some((_, exile_count)) = super::keywords::effective_escape_data(state, object_id) {
             let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
             pending.casting_variant = casting_variant;
+            pending.cast_timing_permission = cast_timing_permission;
             pending.origin_zone = origin_zone;
             return pay_additional_cost(
                 state,
@@ -1160,6 +1183,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         if let Some(non_mana_cost) = residual {
             let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
             pending.casting_variant = casting_variant;
+            pending.cast_timing_permission = cast_timing_permission;
             pending.distribute = distribute;
             pending.origin_zone = origin_zone;
             return pay_additional_cost(state, player, non_mana_cost, pending, events);
@@ -1171,6 +1195,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     if let Some((life_cost, mana_reduction)) = find_defiler_reduction(state, player, object_id) {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         return Ok(WaitingFor::DefilerPayment {
@@ -1189,6 +1214,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         ability,
         cost,
         casting_variant,
+        cast_timing_permission,
         distribute,
         origin_zone,
         events,
@@ -1291,6 +1317,7 @@ pub(crate) fn handle_defiler_payment(
                 pending.ability,
                 &cost,
                 pending.casting_variant,
+                pending.cast_timing_permission,
                 pending.distribute,
                 pending.origin_zone,
                 events,
@@ -1334,6 +1361,7 @@ pub(crate) fn handle_defiler_payment(
         pending.ability,
         &cost,
         pending.casting_variant,
+        pending.cast_timing_permission,
         pending.distribute,
         pending.origin_zone,
         events,
@@ -1583,6 +1611,29 @@ fn pay_additional_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+fn effective_casualty_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AdditionalCost> {
+    let threshold = super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Casualty(n) => Some(n),
+            _ => None,
+        })?;
+    Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
+        target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            crate::types::ability::FilterProp::PowerGE {
+                value: QuantityExpr::Fixed {
+                    value: threshold as i32,
+                },
+            },
+        ])),
+        count: 1,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pay_and_push(
     state: &mut GameState,
@@ -1592,6 +1643,7 @@ pub(super) fn pay_and_push(
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     events: &mut Vec<GameEvent>,
@@ -1620,6 +1672,7 @@ pub(super) fn pay_and_push(
             if !eligible.is_empty() {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
+                pending.cast_timing_permission = cast_timing_permission;
                 pending.origin_zone = origin_zone;
                 return Ok(WaitingFor::HarmonizeTapChoice {
                     player,
@@ -1638,6 +1691,7 @@ pub(super) fn pay_and_push(
         ability,
         cost,
         casting_variant,
+        cast_timing_permission,
         distribute,
         origin_zone,
         events,
@@ -1653,6 +1707,7 @@ pub(super) fn pay_and_push_adventure(
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     events: &mut Vec<GameEvent>,
@@ -1690,6 +1745,7 @@ pub(super) fn pay_and_push_adventure(
     if has_x || convoke_mode.is_some() {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         state.pending_cast = Some(Box::new(pending));
@@ -1703,6 +1759,7 @@ pub(super) fn pay_and_push_adventure(
     {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         state.pending_cast = Some(Box::new(pending));
@@ -1717,6 +1774,7 @@ pub(super) fn pay_and_push_adventure(
         ability,
         cost,
         casting_variant,
+        cast_timing_permission,
         origin_zone,
         events,
     )
@@ -1751,6 +1809,7 @@ pub(super) fn finalize_cast(
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     origin_zone: Zone,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -1762,6 +1821,7 @@ pub(super) fn finalize_cast(
         ability,
         cost,
         casting_variant,
+        cast_timing_permission,
         origin_zone,
         None,
         events,
@@ -1780,6 +1840,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     origin_zone: Zone,
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
@@ -1932,6 +1993,11 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             obj.convoked_creatures = convoked_creatures;
         }
     }
+    if let Some(permission) = cast_timing_permission {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.cast_timing_permission = Some((permission, state.turn_number));
+        }
+    }
 
     // CR 601.2a + CR 601.2i: The spell was announced onto the stack earlier,
     // but the object's `zone` field stayed at its origin through cost payment
@@ -2029,7 +2095,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .get(&object_id)
         .expect("spell object still exists after stack push")
         .clone();
-    restrictions::record_spell_cast(state, player, &obj);
+    restrictions::record_spell_cast_from_zone(state, player, &obj, Some(source_zone));
 
     // CR 601.2f: Consume any one-shot pending cost reductions now that the spell is finalized.
     super::casting::consume_pending_spell_cost_reduction(state, player);
@@ -2851,6 +2917,7 @@ pub fn finalize_mana_payment(
                 pending.ability,
                 &pending.cost,
                 pending.casting_variant,
+                pending.cast_timing_permission,
                 pending.origin_zone,
                 events,
             );
@@ -2874,6 +2941,7 @@ pub fn finalize_mana_payment(
         pending.ability,
         &pending.cost,
         pending.casting_variant,
+        pending.cast_timing_permission,
         pending.origin_zone,
         events,
     )
@@ -2992,6 +3060,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.ability,
                 &pending.cost,
                 pending.casting_variant,
+                pending.cast_timing_permission,
                 pending.origin_zone,
                 events,
             );
@@ -3015,6 +3084,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         pending.ability,
         &pending.cost,
         pending.casting_variant,
+        pending.cast_timing_permission,
         pending.origin_zone,
         Some(phyrexian_choices),
         events,
@@ -3148,11 +3218,13 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
+        QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+    use crate::types::statics::StaticMode;
 
     fn make_pending(source_id: ObjectId) -> PendingCast {
         PendingCast {
@@ -3172,6 +3244,7 @@ mod tests {
             activation_ability_index: Some(0),
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -3254,6 +3327,103 @@ mod tests {
             next_kicker_option(&state, PlayerId(0), &pending).expect("repeatable kicker option");
         assert_eq!(variant, KickerVariant::First);
         assert!(repeatable);
+    }
+
+    #[test]
+    fn granted_casualty_additional_cost_prompts_for_matching_spell() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Silverquill Source".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = crate::types::ability::StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Casualty(1),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Test Instant".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let sacrifice = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Power One Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&sacrifice).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+        }
+
+        let mut events = Vec::new();
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(2),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            &mut events,
+        )
+        .expect("granted casualty should be castable");
+
+        match waiting {
+            WaitingFor::OptionalCostChoice { cost, .. } => match cost {
+                AdditionalCost::Optional(AbilityCost::Sacrifice { target, count }) => {
+                    assert_eq!(count, 1);
+                    match target {
+                        TargetFilter::Typed(tf) => {
+                            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                            assert!(tf.properties.contains(&FilterProp::PowerGE {
+                                value: QuantityExpr::Fixed { value: 1 },
+                            }));
+                        }
+                        other => panic!("expected typed casualty sacrifice filter, got {other:?}"),
+                    }
+                }
+                other => panic!("expected optional casualty sacrifice cost, got {other:?}"),
+            },
+            other => panic!("expected OptionalCostChoice, got {other:?}"),
+        }
     }
 
     fn create_starting_town(state: &mut GameState, card_id: CardId) -> ObjectId {
@@ -5189,6 +5359,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -5304,6 +5475,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -5388,6 +5560,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -5461,6 +5634,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -5567,6 +5741,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Graveyard,
             additional_cost_flow: None,

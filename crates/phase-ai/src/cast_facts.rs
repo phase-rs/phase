@@ -444,6 +444,7 @@ mod tests {
                     target: TargetFilter::SelfRef,
                 },
             ))),
+            runtime_execute: None,
             mode: engine::types::ability::ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: None,

@@ -1153,6 +1153,7 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
             count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
         },
     );
     let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
@@ -1215,6 +1216,7 @@ pub fn synthesize_echo(face: &mut CardFace) {
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
         );
         let mut trigger = TriggerDefinition::new(TriggerMode::PayEcho)

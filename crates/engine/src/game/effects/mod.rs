@@ -155,6 +155,17 @@ pub(crate) fn effect_object_targets(
     }
 }
 
+pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.clone(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(target_filter_controller_scope)
+        }
+        TargetFilter::Not { filter } => target_filter_controller_scope(filter),
+        _ => None,
+    }
+}
+
 fn matches_player_scope(
     state: &GameState,
     player: PlayerId,
@@ -203,6 +214,15 @@ fn matches_player_scope(
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    // CR 608.2c + CR 701.38: Match each player who cast a
+                    // vote for `choices[choice_index]` in the most recent
+                    // vote of the current top-level resolution. Mirrors the
+                    // `ZoneChangedThisWay` arm — a transient ledger
+                    // (`last_vote_ballots`) is consulted directly.
+                    PlayerFilter::VotedFor { choice_index } => state
+                        .last_vote_ballots
+                        .iter()
+                        .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
                     PlayerFilter::PerformedActionThisWay { relation, action } => {
                         crate::game::players::matches_relation(p.id, controller, *relation)
                             && crate::game::players::performed_action_this_way(state, p.id, *action)
@@ -454,6 +474,17 @@ pub(super) fn resolve_optional_effect_decision(
 }
 
 fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
+    // CR 109.5 + CR 608.2c: Compound-subject distribution — when the parent
+    // and child effects of a player_scope-tagged ability both reference an
+    // iteration-bound recipient (`OriginalController` or `ScopedPlayer`), the
+    // pair is the parser-emitted "you and that player each <body>" chain
+    // (Master of Ceremonies). Both halves must run inside the SAME scoped
+    // iteration (so their recipients rebind together) — never detached as the
+    // unscoped tail. Detecting via recipient filter rather than effect kind
+    // keeps the rule generic across body families (Token, Draw, etc.).
+    if effect_has_iteration_bound_recipient(parent) && effect_has_iteration_bound_recipient(child) {
+        return true;
+    }
     matches!(
         (parent, child),
         (
@@ -470,6 +501,25 @@ fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
                 },
                 Effect::Shuffle { .. }
             )
+    )
+}
+
+/// CR 109.5 + CR 115.10: Detect that an effect's recipient is bound to the
+/// surrounding `player_scope` iteration — either `OriginalController` (CR
+/// 109.5: the printed ability controller, fixed) or `ScopedPlayer` (CR
+/// 115.10: the per-iteration acting player). Used to keep parser-distributed
+/// compound-subject chains inside the scoped template.
+fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
+    let recipient = match effect {
+        Effect::Token { owner, .. } => owner,
+        Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. } => target,
+        _ => return false,
+    };
+    matches!(
+        recipient,
+        TargetFilter::OriginalController | TargetFilter::ScopedPlayer
     )
 }
 
@@ -1004,6 +1054,16 @@ pub(crate) fn resolve_player_for_context_ref(
     if matches!(target_filter, TargetFilter::Controller) {
         return ability.controller;
     }
+    // CR 109.5: `OriginalController` resolves the player who put the spell or
+    // ability on the stack, even when a surrounding `player_scope` iteration
+    // (e.g., `PlayerFilter::VotedFor` for Master of Ceremonies) has rebound
+    // `ability.controller` to an iterated voter. Mirrors the quantity-layer
+    // behavior in `resolve_quantity_with_targets`. Used by parser-level
+    // distribution of compound subjects ("you and that player each Y") so the
+    // first half ("you") consistently fires for the printed ability controller.
+    if matches!(target_filter, TargetFilter::OriginalController) {
+        return ability.original_controller.unwrap_or(ability.controller);
+    }
     // CR 115.1d: `ParentTargetController` resolves the controller of the parent
     // ability's targeted object. In a spell-resolution chain (no
     // `current_trigger_event` set, so `resolve_event_context_target` returns
@@ -1039,6 +1099,17 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         {
             return player;
+        }
+    }
+    if let Effect::Sacrifice { target, .. } = &ability.effect {
+        if target_filter_controller_scope(target) == Some(ControllerRef::ParentTargetController) {
+            if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
+                state,
+                ability,
+                &TargetFilter::ParentTargetController,
+            ) {
+                return player;
+            }
         }
     }
 
@@ -1259,6 +1330,11 @@ pub fn resolve_ability_chain(
     if depth == 0 {
         state.last_revealed_ids.clear();
         state.last_zone_changed_ids.clear();
+        // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
+        // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
+        // alongside `last_zone_changed_ids` so cross-resolution leakage is
+        // impossible.
+        state.last_vote_ballots = crate::im::Vector::new();
         state.last_effect_amount = None;
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
@@ -1500,6 +1576,7 @@ pub fn resolve_ability_chain(
             // mana resolution — pass through to UnlessPayment directly.
             match &unless_pay.cost {
                 UnlessCost::PayLife { .. }
+                | UnlessCost::PayEnergy { .. }
                 | UnlessCost::DiscardCard { .. }
                 | UnlessCost::Sacrifice { .. }
                 | UnlessCost::ReturnToHand { .. } => {
@@ -1529,6 +1606,7 @@ pub fn resolve_ability_chain(
                 }
                 // Non-mana costs handled above.
                 UnlessCost::PayLife { .. }
+                | UnlessCost::PayEnergy { .. }
                 | UnlessCost::DiscardCard { .. }
                 | UnlessCost::Sacrifice { .. }
                 | UnlessCost::ReturnToHand { .. } => unreachable!(),
@@ -2206,6 +2284,11 @@ fn evaluate_condition(
             .context
             .cast_phase
             .is_some_and(|cast_phase| phases.contains(&cast_phase)),
+        AbilityCondition::CastTimingPermission { permission } => state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.cast_timing_permission == Some((*permission, state.turn_number)))
+            .unwrap_or(false),
         // CR 601.2h + CR 608.2c: Spend-color riders read the resolving spell
         // object's recorded mana payment. Spell copies with no mana paid
         // naturally fail because their tally is empty.
@@ -5220,6 +5303,114 @@ mod tests {
         // Both players owned zone-changed objects, so both draw
         assert_eq!(state.players[0].hand.len(), 1, "player 0 should have drawn");
         assert_eq!(state.players[1].hand.len(), 1, "player 1 should have drawn");
+    }
+
+    /// CR 608.2c + CR 701.38: `PlayerFilter::VotedFor { choice_index }`
+    /// matches only players whose ballot in `state.last_vote_ballots`
+    /// has the recorded choice index. Mirrors the ZoneChangedThisWay shape.
+    #[test]
+    fn voted_for_filter_matches_only_recorded_choosers() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library cards for both players so Draw has something to do.
+        create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Lib A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Lib B".to_string(),
+            Zone::Library,
+        );
+
+        // Seed the ballot ledger: P0 voted for choice 0, P1 voted for choice 1.
+        state.last_vote_ballots = crate::im::Vector::new();
+        state.last_vote_ballots.push_back((PlayerId(0), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 1));
+
+        // Effect with player_scope = VotedFor { 0 } — only P0 should resolve.
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::VotedFor { choice_index: 0 });
+
+        let mut events = Vec::new();
+        // depth=1 so the chain entry doesn't clear last_vote_ballots.
+        resolve_ability_chain(&mut state, &ability, &mut events, 1).unwrap();
+
+        assert_eq!(state.players[0].hand.len(), 1, "P0 voted for 0 — draws");
+        assert_eq!(
+            state.players[1].hand.len(),
+            0,
+            "P1 voted for 1 — does NOT draw under VotedFor {{ 0 }}"
+        );
+    }
+
+    /// CR 608.2c + CR 701.38: `last_vote_ballots` is cleared at chain depth 0,
+    /// so a `VotedFor` filter evaluated in a fresh top-level resolution
+    /// matches no players (no ballots recorded yet).
+    #[test]
+    fn voted_for_filter_clears_at_chain_boundary() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library cards so Draw can resolve.
+        create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Lib A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Lib B".to_string(),
+            Zone::Library,
+        );
+
+        // Seed ballot ledger from a "previous" vote.
+        state.last_vote_ballots = crate::im::Vector::new();
+        state.last_vote_ballots.push_back((PlayerId(0), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 0));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::VotedFor { choice_index: 0 });
+
+        let mut events = Vec::new();
+        // depth=0 — top-level resolution clears last_vote_ballots before the
+        // player_scope expansion runs, so no player matches.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "P0 should not draw — ledger cleared at chain depth 0"
+        );
+        assert_eq!(
+            state.players[1].hand.len(),
+            0,
+            "P1 should not draw — ledger cleared at chain depth 0"
+        );
     }
 
     /// CR 608.2c + CR 109.5: "for each opponent who searched their library

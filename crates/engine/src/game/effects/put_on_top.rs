@@ -95,6 +95,7 @@ pub fn resolve(
                     player: ability.controller,
                     cards: eligible,
                     count: expected.min(eligible_count),
+                    min_count: 0,
                     up_to: false,
                     source_id: ability.source_id,
                     effect_kind: EffectKind::PutAtLibraryPosition,

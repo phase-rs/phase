@@ -21,8 +21,21 @@ pub fn build_resolved_from_def(
     source_id: ObjectId,
     controller: PlayerId,
 ) -> ResolvedAbility {
+    build_resolved_from_def_with_targets(def, source_id, controller, Vec::new())
+}
+
+/// CR 113.1a + CR 608.2c: Build a resolved ability from its definition while
+/// supplying the already selected root targets. Sub-abilities intentionally
+/// start without targets so `resolve_ability_chain` can apply the standard
+/// parent-target propagation rules.
+pub fn build_resolved_from_def_with_targets(
+    def: &AbilityDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+    targets: Vec<TargetRef>,
+) -> ResolvedAbility {
     let mut resolved =
-        ResolvedAbility::new(*def.effect.clone(), Vec::new(), source_id, controller).kind(def.kind);
+        ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }

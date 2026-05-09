@@ -153,6 +153,9 @@ pub enum KeywordKind {
     Champion,
     Training,
     Assist,
+    /// Acorn/Un-set keyword: Augment. Not present in the main Comprehensive
+    /// Rules file, but it is still a keyword characteristic for card filters.
+    Augment,
     /// CR 702.127: Aftermath — see `Keyword::Aftermath`.
     Aftermath,
     JumpStart,
@@ -637,6 +640,10 @@ pub enum Keyword {
     Training,
     /// CR 702.132a: Assist — another player can help pay the generic mana cost of this spell.
     Assist,
+    /// Acorn/Un-set keyword: Augment. Runtime host-combine semantics are not
+    /// implemented; the keyword identity is used for characteristic filters
+    /// such as "a card with augment".
+    Augment,
     /// CR 702.127a: Aftermath allows casting this half of a split card only
     /// from a graveyard, and exiles the spell any time it leaves the stack if
     /// it was cast from a graveyard.
@@ -903,6 +910,7 @@ impl Keyword {
             Keyword::Champion(_) => KeywordKind::Champion,
             Keyword::Training => KeywordKind::Training,
             Keyword::Assist => KeywordKind::Assist,
+            Keyword::Augment => KeywordKind::Augment,
             Keyword::Aftermath => KeywordKind::Aftermath,
             Keyword::JumpStart => KeywordKind::JumpStart,
             Keyword::Cipher => KeywordKind::Cipher,
@@ -1524,6 +1532,7 @@ impl FromStr for Keyword {
             "sunburst" => Ok(Keyword::Sunburst),
             "training" => Ok(Keyword::Training),
             "assist" => Ok(Keyword::Assist),
+            "augment" => Ok(Keyword::Augment),
             "aftermath" => Ok(Keyword::Aftermath),
             "jump-start" | "jumpstart" => Ok(Keyword::JumpStart),
             "cipher" => Ok(Keyword::Cipher),
@@ -1910,6 +1919,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Champion" => Ok(Keyword::Champion(data.as_str().unwrap_or("").to_string())),
         "Training" => Ok(Keyword::Training),
         "Assist" => Ok(Keyword::Assist),
+        "Augment" => Ok(Keyword::Augment),
         "JumpStart" => Ok(Keyword::JumpStart),
         "Cipher" => Ok(Keyword::Cipher),
         "Transmute" => Ok(Keyword::Transmute(mana(data)?)),

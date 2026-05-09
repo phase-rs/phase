@@ -1,4 +1,4 @@
-use crate::game::life_costs::{pay_life_as_cost, PayLifeCostResult};
+use crate::game::life_costs::{can_pay_life_cost, pay_life_as_cost, PayLifeCostResult};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{effective_speed, set_speed};
 use crate::game::targeting::resolve_effect_player_ref;
@@ -166,6 +166,39 @@ fn resolve_ability_cost_payment(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     match cost {
+        AbilityCost::Mana { cost: mana_cost } => {
+            if !casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, mana_cost) {
+                state.cost_payment_failed_flag = true;
+                return Ok(());
+            }
+            let _ = casting::pay_unless_cost(state, payer, mana_cost, events);
+        }
+        AbilityCost::PayLife { amount } => {
+            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            match pay_life_as_cost(state, payer, amount, events) {
+                PayLifeCostResult::Paid { .. } => {}
+                PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
+                    state.cost_payment_failed_flag = true;
+                }
+            }
+        }
+        AbilityCost::Composite { costs } => {
+            if !costs
+                .iter()
+                .all(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost))
+            {
+                state.cost_payment_failed_flag = true;
+                return Ok(());
+            }
+            for cost in costs {
+                let prior_waiting_for = state.waiting_for.clone();
+                resolve_ability_cost_payment(state, ability, payer, cost, events)?;
+                if state.cost_payment_failed_flag || state.waiting_for != prior_waiting_for {
+                    break;
+                }
+            }
+        }
         AbilityCost::Discard {
             count,
             filter,
@@ -220,6 +253,28 @@ fn resolve_ability_cost_payment(
         }
     }
     Ok(())
+}
+
+fn can_pay_resolution_ability_cost(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    cost: &AbilityCost,
+) -> bool {
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => {
+            casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, mana_cost)
+        }
+        AbilityCost::PayLife { amount } => {
+            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            can_pay_life_cost(state, payer, amount)
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .all(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost)),
+        _ => false,
+    }
 }
 
 fn mana_x_shard_count(cost: &ManaCost) -> u32 {
@@ -335,6 +390,82 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.cost_payment_failed_flag);
         assert_eq!(state.players[0].life, 2); // No change
+    }
+
+    #[test]
+    fn composite_mana_and_life_payment_pays_both_costs() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        });
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic: 1,
+                            },
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ],
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert_eq!(state.players[0].life, 17);
+    }
+
+    #[test]
+    fn composite_mana_and_life_payment_prechecks_before_mutating() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 2;
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        });
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic: 1,
+                            },
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ],
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+        assert_eq!(state.players[0].life, 2);
     }
 
     #[test]

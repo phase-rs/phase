@@ -1301,6 +1301,10 @@ pub enum ControllerRef {
     /// surfaces a companion `TargetFilter::Player` slot so the player is chosen
     /// as part of CR 601.2c / CR 603.3d target declaration.
     TargetPlayer,
+    /// CR 608.2c + CR 109.4: Filter controller is the controller of the parent
+    /// object target inherited by this chained effect ("that permanent's
+    /// controller may sacrifice a land").
+    ParentTargetController,
     /// CR 508.1b + CR 603.4: Filter controller is the defending player for the
     /// source attacking creature in the current combat. Used by intervening-if
     /// quantity checks such as "defending player controls more lands than you."
@@ -1910,6 +1914,27 @@ pub enum TargetFilter {
     /// Used for "its controller" in compound effects (e.g., "counter target spell. Its controller
     /// loses 2 life."). At resolution time, looks up the controller of the first parent target.
     ParentTargetController,
+    /// CR 109.5 + CR 608.2c: Resolves to the ability's *original* controller — the
+    /// player who put the spell or ability on the stack — even when a surrounding
+    /// `player_scope` iteration has rebound `ResolvedAbility::controller` to a
+    /// different player for the current per-player iteration.
+    ///
+    /// At resolution time, returns `ability.original_controller.unwrap_or(ability.controller)`.
+    /// This mirrors the quantity-layer behavior in `resolve_quantity_with_targets`,
+    /// where "you" / "your" quantities always read the original controller.
+    ///
+    /// Used by parser-level distribution of compound subjects like
+    /// "you and that player each Y" — the first half ("you") MUST resolve to the
+    /// printed ability controller, not the iterated voter, even when the parent
+    /// ability has `player_scope: PlayerFilter::VotedFor` (Master of Ceremonies
+    /// pattern, CR 800.4g).
+    ///
+    /// Distinct from `Controller` (which resolves to `ability.controller` and
+    /// is rebound per-iteration by the player_scope driver in
+    /// `resolve_ability_chain`). Distinct from `ParentTargetController`
+    /// (parent's target's controller) and `PostReplacementSourceController`
+    /// (replacement-context source's controller).
+    OriginalController,
     /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
     /// damage source. Used by prevention follow-up sentences such as "the source's
     /// controller draws cards equal to the damage prevented this way" (Swans of
@@ -2527,6 +2552,22 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
+    /// CR 608.2c + CR 701.38: Each player who cast a vote for `choices[choice_index]`
+    /// in the most recent vote within the current top-level ability resolution.
+    /// Mirrors `PerformedActionThisWay` — backed by a transient ledger
+    /// (`state.last_vote_ballots`) that resets at chain depth 0.
+    ///
+    /// Used by Master of Ceremonies's "for each player who chose money,
+    /// you and that player each create a Treasure token": the per-choice
+    /// sub-effect's `player_scope` is set to `VotedFor { choice_index: 0 }`,
+    /// which expands at resolution time into the controller plus each voter
+    /// who chose that option.
+    VotedFor {
+        /// Index into the parent `Effect::Vote.choices` list (and parallel
+        /// `WaitingFor::VoteChoice.options`). The voter ledger encodes choices
+        /// as `u8` — vote sessions never exceed 255 choices in practice.
+        choice_index: u8,
+    },
 }
 
 /// An expression that produces an integer for quantity comparisons.
@@ -3181,6 +3222,16 @@ pub enum CastVariantPaid {
     Bestow,
 }
 
+/// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
+/// This is separate from `CastVariantPaid`: no alternative cost was paid, but
+/// later abilities may care that normal sorcery timing was bypassed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CastTimingPermission {
+    /// The spell was cast using an effect that allowed it to be cast as though
+    /// it had flash.
+    AsThoughHadFlash,
+}
+
 impl From<NinjutsuVariant> for CastVariantPaid {
     /// CR 702.49: Lift an activation-family variant into the cast-variant-paid tag
     /// used by trigger conditions. Cast alt-costs are intentionally NOT in
@@ -3495,6 +3546,8 @@ pub enum UnlessCost {
     DynamicGeneric { quantity: QuantityExpr },
     /// CR 702.21a: Pay life as ward cost (e.g., "Ward—Pay 2 life")
     PayLife { amount: i32 },
+    /// CR 107.14 + CR 118.12: Remove fixed energy counters as an unless cost.
+    PayEnergy { amount: u32 },
     /// CR 701.9 + CR 702.21a: The resolved `UnlessPayModifier::payer`
     /// discards a card as an unless/ward cost. `filter: None` means any card
     /// in that payer's hand is eligible; `Some` restricts the eligible hand
@@ -3757,6 +3810,11 @@ pub enum Effect {
         /// from `optional: true` on the ability ("you may sacrifice").
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 107.1c: Minimum number of permanents to choose for ranged
+        /// sacrifice effects. Defaults to 0 for ordinary "up to" choices; set
+        /// to 1 for "one or more" choices.
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        min_count: usize,
     },
     DiscardCard {
         #[serde(default = "default_one")]
@@ -3956,6 +4014,8 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         destination: Option<Zone>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<QuantityExpr>,
     },
     Explore,
     /// CR 701.44d: Simultaneous multi-permanent explore instruction.
@@ -4016,6 +4076,15 @@ pub enum Effect {
         /// your left" / "the affected player" if those phrasings ever land.
         #[serde(default = "default_controller_ref_you")]
         starting_with: ControllerRef,
+        /// CR 701.38a + CR 800.4g: Which players cast votes. Council's-dilemma
+        /// classics ("starting with you, each player votes...") use
+        /// `VoterScope::AllPlayers`; "each opponent chooses..." patterns
+        /// (Master of Ceremonies) use `VoterScope::EachOpponent`, which
+        /// excludes the controller from the voter queue. CR 800.4g handles the
+        /// edge case where every opponent has been eliminated — the resolver
+        /// emits `EffectResolved` with no tally and the chain continues.
+        #[serde(default = "default_voter_scope_all")]
+        voter_scope: VoterScope,
     },
     /// CR 613.4d: Switch a creature's power and toughness. Applied in layer 7d.
     SwitchPT {
@@ -4988,6 +5057,10 @@ fn default_one_i32() -> i32 {
     1
 }
 
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
 fn default_player_filter_controller() -> PlayerFilter {
     PlayerFilter::Controller
 }
@@ -5214,6 +5287,39 @@ fn default_controller_ref_you() -> ControllerRef {
     ControllerRef::You
 }
 
+/// CR 701.38a: Default voter scope for `Effect::Vote` is "every player"
+/// (the canonical Council's-dilemma shape). Pre-existing serialized vote
+/// effects without a `voter_scope` field deserialize as
+/// `VoterScope::AllPlayers`, preserving Tivit / Capital Punishment / Coercive
+/// Portal behavior across the schema upgrade.
+fn default_voter_scope_all() -> VoterScope {
+    VoterScope::AllPlayers
+}
+
+/// CR 701.38a + CR 800.4g: Which players cast votes for an `Effect::Vote`.
+///
+/// `AllPlayers` is the classic Council's-dilemma shape ("starting with you,
+/// each player votes for..."). `EachOpponent` covers "each opponent
+/// chooses..." patterns (Master of Ceremonies, etc.) where the source's
+/// controller does NOT vote — they instead receive a per-choice effect via
+/// `PlayerFilter::VotedFor` ("you and that player each ...").
+///
+/// Per CR 800.4g, when every opponent has left the game in a multiplayer
+/// session, an `EachOpponent` vote produces an empty voter queue and the
+/// resolver emits `EffectResolved` with no tally instead of waiting forever
+/// on a non-existent voter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum VoterScope {
+    /// Every non-eliminated player votes, in APNAP order from `starting_with`.
+    /// CR 701.38a — the canonical Council's-dilemma voter set.
+    AllPlayers,
+    /// CR 800.4g: Every non-eliminated opponent of the ability controller
+    /// votes. The controller does not vote — they receive per-choice
+    /// sub-effects via `PlayerFilter::VotedFor` against the recorded ballots.
+    EachOpponent,
+}
+
 impl TargetFilter {
     pub fn normalized(self) -> Self {
         match self {
@@ -5243,6 +5349,7 @@ impl TargetFilter {
             TargetFilter::None
                 | TargetFilter::SelfRef
                 | TargetFilter::Controller
+                | TargetFilter::OriginalController
                 | TargetFilter::ScopedPlayer
                 | TargetFilter::TriggeringSpellController
                 | TargetFilter::TriggeringSpellOwner
@@ -6594,6 +6701,9 @@ pub enum AbilityCondition {
     /// `phases` is parameterized so grouped phrases like "main phase" can map to
     /// both concrete main phases without proliferating condition variants.
     CastDuringPhase { phases: Vec<Phase> },
+    /// CR 601.3b + CR 702.8a: The source permanent came from a spell cast using
+    /// a specific timing permission this turn.
+    CastTimingPermission { permission: CastTimingPermission },
     /// CR 601.2h + CR 608.2c: "if {C} was spent to cast this spell" gates
     /// resolution on the source object's recorded paid-mana colors.
     ManaColorSpent { color: ManaColor, minimum: u32 },
@@ -7059,6 +7169,9 @@ pub enum TriggerCondition {
     /// `phases` is parameterized so grouped phrases like "main phase" can map to
     /// both concrete main phases without proliferating condition variants.
     CastDuringPhase { phases: Vec<Phase> },
+    /// CR 601.3b + CR 702.8a: The source permanent came from a spell cast using
+    /// a specific timing permission this turn.
+    CastTimingPermission { permission: CastTimingPermission },
     /// CR 207.2c: "if at least N mana of [color] was spent to cast this spell" — Adamant.
     ManaColorSpent { color: ManaColor, minimum: u32 },
     /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"
@@ -7715,6 +7828,11 @@ pub struct ReplacementDefinition {
     pub event: ReplacementEvent,
     #[serde(default)]
     pub execute: Option<Box<AbilityDefinition>>,
+    /// CR 615.5: Runtime continuation captured while resolving an effect that
+    /// creates a replacement shield. Unlike `execute`, this preserves selected
+    /// targets and other resolution-time context for the delayed follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_execute: Option<Box<ResolvedAbility>>,
     #[serde(default)]
     pub mode: ReplacementMode,
     #[serde(default)]
@@ -7821,6 +7939,7 @@ impl ReplacementDefinition {
         Self {
             event,
             execute: None,
+            runtime_execute: None,
             mode: ReplacementMode::Mandatory,
             valid_card: None,
             description: None,
@@ -7847,6 +7966,11 @@ impl ReplacementDefinition {
 
     pub fn execute(mut self, ability: AbilityDefinition) -> Self {
         self.execute = Some(Box::new(ability));
+        self
+    }
+
+    pub fn runtime_execute(mut self, ability: ResolvedAbility) -> Self {
+        self.runtime_execute = Some(Box::new(ability));
         self
     }
 

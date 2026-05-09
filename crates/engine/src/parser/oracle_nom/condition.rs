@@ -13,7 +13,7 @@ use nom::Parser;
 use super::error::{OracleError, OracleResult};
 use super::primitives::{parse_article, parse_color, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
-use crate::parser::oracle_target::parse_type_phrase;
+use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
     CountScope, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
@@ -77,6 +77,7 @@ fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticConditi
     alt((
         parse_damage_dealt_this_turn_conditions,
         parse_source_damage_threshold_this_turn,
+        parse_source_didnt_this_turn,
         parse_entered_this_turn,
         parse_opponent_cast_spell_this_turn,
         parse_youve_this_turn,
@@ -2242,26 +2243,35 @@ fn parse_cast_one_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
 }
 
 fn parse_one_spell_this_turn_after_cast(input: &str) -> OracleResult<'_, StaticCondition> {
-    let rest = input;
-    let (rest, _) = parse_article(rest)?;
+    let (rest, filter) = parse_one_spell_this_turn_filter(input)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter,
+            },
+            1,
+        ),
+    ))
+}
+
+fn parse_one_spell_this_turn_filter(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    let (rest, _) = parse_article(input)?;
     let (rest, type_text) = take_until(" this turn").parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
+    if let Ok((empty, _)) = tag::<_, _, OracleError<'_>>("spell").parse(type_text) {
+        if empty.trim().is_empty() {
+            return Ok((rest, None));
+        }
+    }
     let Some(filter) = parse_spell_history_filter(type_text) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     };
-    Ok((
-        rest,
-        make_quantity_ge(
-            QuantityRef::SpellsCastThisTurn {
-                scope: CountScope::Controller,
-                filter: Some(filter),
-            },
-            1,
-        ),
-    ))
+    Ok((rest, Some(filter)))
 }
 
 fn parse_you_cast_both_spell_kinds_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -2542,6 +2552,9 @@ fn parse_spell_history_filter_with_optional_article(type_text: &str) -> Option<T
 }
 
 pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter> {
+    if let Some(filter) = parse_spell_history_filter_with_zone_suffix(type_text) {
+        return Some(filter);
+    }
     let type_text = strip_spell_history_noun(type_text);
     if let Ok((rest, filter)) = value(
         TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Historic])),
@@ -2581,6 +2594,52 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     Some(TargetFilter::Typed(
         TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
     ))
+}
+
+fn parse_spell_history_filter_with_zone_suffix(type_text: &str) -> Option<TargetFilter> {
+    let (suffix, base_text) = take_until::<_, _, OracleError<'_>>(" from ")
+        .parse(type_text)
+        .ok()?;
+    let (props, _controller, consumed) = parse_zone_suffix(suffix)?;
+    if !suffix[consumed..].trim().is_empty() {
+        return None;
+    }
+
+    let base_filter = parse_spell_history_base_filter(base_text.trim())?;
+    Some(add_spell_history_filter_qualifiers(base_filter, props))
+}
+
+fn parse_spell_history_base_filter(type_text: &str) -> Option<TargetFilter> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell").parse(type_text) {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Any);
+        }
+    }
+    parse_spell_history_filter(type_text)
+}
+
+fn add_spell_history_filter_qualifiers(
+    filter: TargetFilter,
+    props: Vec<FilterProp>,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            for prop in props {
+                if !typed.properties.contains(&prop) {
+                    typed.properties.push(prop);
+                }
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Any => TargetFilter::Typed(TypedFilter::default().properties(props)),
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|inner| add_spell_history_filter_qualifiers(inner, props.clone()))
+                .collect(),
+        },
+        other => other,
+    }
 }
 
 fn strip_spell_history_noun(type_text: &str) -> &str {
@@ -2627,21 +2686,41 @@ fn parse_counter_added_this_turn(input: &str) -> OracleResult<'_, StaticConditio
 /// Composed as `QuantityComparison(ref EQ 0)` rather than `Not(ref >= 1)`.
 fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you haven't ").parse(input) {
-        return value(
-            make_quantity_comparison(
-                QuantityRef::SpellsCastThisTurn {
-                    scope: CountScope::Controller,
-                    filter: None,
+        let (rest, _) = tag("cast ").parse(rest)?;
+        let (rest, filter) = parse_one_spell_this_turn_filter(rest)?;
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
-                Comparator::EQ,
-                0,
-            ),
-            tag("cast a spell this turn"),
-        )
-        .parse(rest);
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
     }
 
     let (rest, _) = tag("you didn't ").parse(input)?;
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cast ").parse(rest) {
+        let (rest, filter) = parse_one_spell_this_turn_filter(rest)?;
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
+    }
+
     alt((
         value(
             make_quantity_comparison(
@@ -2670,6 +2749,38 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         ),
     ))
     .parse(rest)
+}
+
+fn parse_source_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("~ didn't "), tag("this creature didn't "))).parse(input)?;
+    alt((
+        value(
+            make_source_history_absence(FilterProp::AttackedThisTurn),
+            tag("attack this turn"),
+        ),
+        value(
+            make_source_history_absence(FilterProp::EnteredThisTurn),
+            tag("enter the battlefield this turn"),
+        ),
+    ))
+    .parse(rest)
+}
+
+fn make_source_history_absence(prop: FilterProp) -> StaticCondition {
+    StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::SelfRef,
+                        TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
+                    ],
+                },
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    }
 }
 
 /// Parse "no [type] are on the battlefield" → ObjectCount EQ 0.
@@ -5174,6 +5285,28 @@ mod tests {
     }
 
     #[test]
+    fn you_havent_cast_spell_from_hand_this_turn_keeps_origin_filter() {
+        let (rest, c) =
+            parse_inner_condition("you haven't cast a spell from your hand this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => assert!(properties.contains(&FilterProp::InZone { zone: Zone::Hand })),
+            other => panic!("expected origin-filtered zero spell count, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn sacrificed_artifact_this_turn_counts_controller_sacrifices() {
         let (rest, c) =
             parse_condition("as long as you've sacrificed an artifact this turn").unwrap();
@@ -5528,6 +5661,46 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    #[test]
+    fn source_didnt_attack_this_turn_counts_self_with_history_filter() {
+        let (rest, c) = parse_inner_condition("~ didn't attack this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_source_history_absence(c, FilterProp::AttackedThisTurn);
+    }
+
+    #[test]
+    fn source_didnt_enter_this_turn_counts_self_with_history_filter() {
+        let (rest, c) =
+            parse_inner_condition("this creature didn't enter the battlefield this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_source_history_absence(c, FilterProp::EnteredThisTurn);
+    }
+
+    fn assert_source_history_absence(c: StaticCondition, prop: FilterProp) {
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::And { filters },
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {
+                assert!(filters
+                    .iter()
+                    .any(|filter| matches!(filter, TargetFilter::SelfRef)));
+                assert!(filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { properties, .. }) if properties.contains(&prop)
+                )));
+            }
+            other => panic!("expected source history absence condition, got {other:?}"),
         }
     }
 

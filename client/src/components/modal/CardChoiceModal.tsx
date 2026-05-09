@@ -878,6 +878,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const isSacrifice = data.zone === "Battlefield";
   const isUpTo = data.up_to === true;
+  const minCount = data.min_count ?? 0;
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -903,16 +904,22 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
 
   if (!objects) return null;
 
-  const isReady = isUpTo ? selected.size <= data.count : selected.size === data.count;
+  const isReady = isUpTo
+    ? selected.size >= minCount && selected.size <= data.count
+    : selected.size === data.count;
   const title = isSacrifice ? "Sacrifice" : "Put onto Battlefield";
   const subtitle = isSacrifice
     ? isUpTo
-      ? `Choose up to ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
+      ? minCount > 0
+        ? `Choose ${minCount}-${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
+        : `Choose up to ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
       : `Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
     : isUpTo
-      ? `Choose up to ${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`
+      ? minCount > 0
+        ? `Choose ${minCount}-${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`
+        : `Choose up to ${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`
       : `Choose ${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`;
-  const actionLabel = selected.size === 0 && isUpTo
+  const actionLabel = selected.size === 0 && isUpTo && minCount === 0
     ? (isSacrifice ? "Skip" : "Decline")
     : `${isSacrifice ? "Confirm" : "Put"} (${selected.size}/${data.count})`;
   const ringClass = isSacrifice ? "ring-red-400/80" : "ring-emerald-400/80";

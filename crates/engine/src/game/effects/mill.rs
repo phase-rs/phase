@@ -1,8 +1,10 @@
 use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// CR 701.17a: Mill N — put the top N cards of a player's library into their graveyard.
@@ -33,25 +35,36 @@ pub fn resolve(
         _ => (1, Zone::Graveyard, ability.controller),
     };
 
-    let player = state
-        .players
-        .iter()
-        .find(|p| p.id == target_player)
-        .ok_or(EffectError::PlayerNotFound)?;
+    if destination == Zone::Graveyard {
+        let proposed = ProposedEvent::Mill {
+            player_id: target_player,
+            count: num_cards as u32,
+            destination,
+            applied: Default::default(),
+        };
 
-    // CR 701.17b: A player can't mill more cards than are in their library;
-    // if instructed to, they mill as many as possible.
-    let count = num_cards.min(player.library.len());
-    let cards_to_mill: Vec<_> = player
-        .library
-        .iter()
-        .take(count)
-        .copied()
-        .collect::<Vec<_>>();
-
-    // Move each card from library to destination zone
-    for obj_id in cards_to_mill {
-        zones::move_to_zone(state, obj_id, destination, events);
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                apply_mill_after_replacement(state, event, events)?;
+            }
+            ReplacementResult::Prevented => {}
+            ReplacementResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
+            }
+        }
+    } else {
+        apply_mill_after_replacement(
+            state,
+            ProposedEvent::Mill {
+                player_id: target_player,
+                count: num_cards as u32,
+                destination,
+                applied: Default::default(),
+            },
+            events,
+        )?;
     }
 
     events.push(GameEvent::EffectResolved {
@@ -62,13 +75,53 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 701.17a-b: Apply an accepted mill event after replacement effects have
+/// had a chance to modify the count.
+pub fn apply_mill_after_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let ProposedEvent::Mill {
+        player_id,
+        count,
+        destination,
+        ..
+    } = event
+    else {
+        return Ok(());
+    };
+
+    let player = state
+        .players
+        .iter()
+        .find(|p| p.id == player_id)
+        .ok_or(EffectError::PlayerNotFound)?;
+
+    // CR 701.17b: A player can't mill more cards than are in their library;
+    // if instructed to, they mill as many as possible.
+    let count = (count as usize).min(player.library.len());
+    let cards_to_mill: Vec<_> = player.library.iter().take(count).copied().collect();
+    state.last_effect_count = Some(cards_to_mill.len() as i32);
+
+    for obj_id in cards_to_mill {
+        zones::move_to_zone(state, obj_id, destination, events);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TargetFilter, TargetRef};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, QuantityRef,
+        ReplacementDefinition, TargetFilter, TargetRef,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
 
     fn make_mill_ability(num_cards: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
@@ -150,5 +203,101 @@ mod tests {
 
         assert!(state.players[1].library.is_empty());
         assert_eq!(state.players[1].graveyard.len(), 2);
+    }
+
+    #[test]
+    fn opponent_mill_replacement_doubles_resolved_mill_count() {
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Mill Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement =
+            ReplacementDefinition::new(ReplacementEvent::Mill).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mill {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }),
+                    },
+                    target: TargetFilter::Controller,
+                    destination: Zone::Graveyard,
+                },
+            ));
+        replacement.valid_player = Some(ControllerRef::Opponent);
+        state
+            .objects
+            .get_mut(&replacement_source)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+        for i in 0..8 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(1),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        let ability = make_mill_ability(3, vec![TargetRef::Player(PlayerId(1))]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].library.len(), 2);
+        assert_eq!(state.players[1].graveyard.len(), 6);
+    }
+
+    #[test]
+    fn opponent_mill_replacement_does_not_apply_to_controller_mill() {
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Mill Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement =
+            ReplacementDefinition::new(ReplacementEvent::Mill).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mill {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }),
+                    },
+                    target: TargetFilter::Controller,
+                    destination: Zone::Graveyard,
+                },
+            ));
+        replacement.valid_player = Some(ControllerRef::Opponent);
+        state
+            .objects
+            .get_mut(&replacement_source)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+        for i in 0..8 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        let ability = make_mill_ability(3, vec![TargetRef::Player(PlayerId(0))]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].library.len(), 5);
+        assert_eq!(state.players[0].graveyard.len(), 3);
     }
 }

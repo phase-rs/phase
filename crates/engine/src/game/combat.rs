@@ -1091,7 +1091,8 @@ pub fn declare_attackers(
                 },
             );
         // CR 701.15b: Goaded creatures must attack each combat if able.
-        let is_goaded = !obj.goaded_by.is_empty();
+        let goading_players = goading_players_for_creature(state, obj_id);
+        let is_goaded = !goading_players.is_empty();
         if !has_must_attack && !is_goaded {
             continue;
         }
@@ -1207,18 +1208,16 @@ pub fn declare_attackers(
 
     for (attacker_id, target) in attacks {
         if let AttackTarget::Player(defending_pid) = target {
-            let Some(obj) = state.objects.get(attacker_id) else {
-                continue;
-            };
-            if obj.goaded_by.is_empty() {
+            let goading_players = goading_players_for_creature(state, *attacker_id);
+            if goading_players.is_empty() {
                 continue;
             }
             // Check if this creature is attacking a goading player
-            if obj.goaded_by.contains(defending_pid) {
+            if goading_players.contains(defending_pid) {
                 // CR 701.15b: Check if there's at least one non-goading opponent
                 let has_non_goading_target = non_eliminated_opponents
                     .iter()
-                    .any(|pid| !obj.goaded_by.contains(pid));
+                    .any(|pid| !goading_players.contains(pid));
                 if has_non_goading_target {
                     return Err(format!(
                         "{:?} is goaded by {:?} and must attack a different player if able (CR 701.15b)",
@@ -1315,6 +1314,29 @@ pub fn declare_attackers(
     super::restrictions::record_attackers_declared(state, attacker_count);
 
     Ok(())
+}
+
+fn goading_players_for_creature(state: &GameState, creature_id: ObjectId) -> HashSet<PlayerId> {
+    let mut players = state
+        .objects
+        .get(&creature_id)
+        .map(|obj| obj.goaded_by.clone())
+        .unwrap_or_default();
+
+    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        if def.mode != StaticMode::Goaded {
+            continue;
+        }
+        let Some(affected) = &def.affected else {
+            continue;
+        };
+        let ctx = FilterContext::from_source(state, source.id);
+        if matches_target_filter(state, creature_id, affected, &ctx) {
+            players.insert(source.controller);
+        }
+    }
+
+    players
 }
 
 /// Declare blockers: validate, populate CombatState, emit event, auto-order by ObjectId.
@@ -3462,6 +3484,50 @@ mod tests {
             &mut vec![],
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn static_goaded_enforces_source_controller_attack_restriction() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        let goaded = create_creature(&mut state, PlayerId(0), "Goaded Bear", 2, 2);
+        let source = create_creature(&mut state, PlayerId(1), "Goad Aura", 0, 1);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::Goaded).affected(
+                    crate::types::ability::TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::creature()
+                            .controller(crate::types::ability::ControllerRef::Opponent),
+                    ),
+                ),
+            );
+
+        let omitted = declare_attackers(&mut state, &[], &mut vec![]);
+        assert!(omitted.is_err());
+        assert!(omitted.unwrap_err().contains("goaded"));
+
+        let attacks_goading_player = declare_attackers(
+            &mut state,
+            &[(goaded, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(attacks_goading_player.is_err());
+        assert!(attacks_goading_player
+            .unwrap_err()
+            .contains("must attack a different player"));
+
+        let attacks_other_player = declare_attackers(
+            &mut state,
+            &[(goaded, AttackTarget::Player(PlayerId(2)))],
+            &mut vec![],
+        );
+        assert!(attacks_other_player.is_ok());
     }
 
     #[test]

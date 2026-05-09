@@ -233,11 +233,15 @@ fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32)> {
 }
 
 fn parse_dynamic_pt_clause(input: &str) -> OracleResult<'_, (&str, QuantityExpr)> {
-    let (rest, descriptor) = take_until(" with ").parse(input)?;
-    let (rest, _) = tag(" with ").parse(rest)?;
+    let (rest, descriptor) = alt((take_until(" with "), take_until(" and has "))).parse(input)?;
+    let (rest, _) = alt((tag(" with "), tag(" and has "))).parse(rest)?;
     let (rest, _) = alt((
         tag("power and toughness each equal to "),
+        tag("power and toughness are each equal to "),
+        tag("base power and base toughness each equal to "),
+        tag("base power and base toughness are each equal to "),
         tag("base power and toughness each equal to "),
+        tag("base power and toughness are each equal to "),
     ))
     .parse(rest)?;
     let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
@@ -686,6 +690,31 @@ mod test_den_bugbear {
                 core_type: crate::types::card_type::CoreType::Creature,
             })
         );
+        assert!(mods.contains(
+            &crate::types::ability::ContinuousModification::SetPowerDynamic {
+                value: expected.clone(),
+            }
+        ));
+        assert!(mods.contains(
+            &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
+        ));
+    }
+
+    #[test]
+    fn animation_and_has_base_pt_equal_to_recipient_mana_value() {
+        let spec = parse_animation_spec(
+            "a creature in addition to its other types and has base power and base toughness each equal to its mana value",
+            &mut ParseContext::default(),
+        )
+        .expect("Zur-style animation phrase should parse");
+        assert_eq!(spec.types, vec!["Creature"]);
+
+        let mods = animation_modifications(&spec);
+        let expected = crate::types::ability::QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Recipient,
+            },
+        };
         assert!(mods.contains(
             &crate::types::ability::ContinuousModification::SetPowerDynamic {
                 value: expected.clone(),

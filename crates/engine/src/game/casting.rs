@@ -1,8 +1,8 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
-    CastingPermission, ChoiceType, ContinuousModification, Duration, Effect, GameRestriction,
-    ModalSelectionCondition, QuantityExpr, ResolvedAbility, RestrictionPlayerScope,
-    StaticDefinition, TargetFilter, TargetRef,
+    CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, Duration, Effect,
+    GameRestriction, ModalSelectionCondition, QuantityExpr, ResolvedAbility,
+    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
@@ -130,6 +130,7 @@ struct PreparedSpellCast {
     mana_cost: crate::types::mana::ManaCost,
     modal: Option<crate::types::ability::ModalChoice>,
     casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
     /// CR 601.2a: Zone the card was in before announcement (hand / command /
     /// graveyard / exile). Threaded onto `PendingCast.origin_zone` so that
     /// CancelCast (CR 601.2i) can return the object to its origin zone.
@@ -1497,8 +1498,10 @@ fn prepare_spell_cast_with_variant_override(
     };
     let has_granted_flash =
         effective_spell_keyword_kinds(state, player, object_id).contains(&KeywordKind::Flash);
+    let cast_outside_sorcery_timing = !restrictions::is_sorcery_speed_window(state, player);
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
+    let mut cast_timing_permission = None;
     if let Err(base_timing_error) = restrictions::check_spell_timing(
         state,
         player,
@@ -1520,6 +1523,11 @@ fn prepare_spell_cast_with_variant_override(
             casting_variant,
         )?;
         mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
+        if cast_outside_sorcery_timing {
+            cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+        }
+    } else if cast_outside_sorcery_timing && has_granted_flash {
+        cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
     }
     restrictions::check_casting_restrictions(state, player, object_id, &obj.casting_restrictions)?;
 
@@ -1589,6 +1597,7 @@ fn prepare_spell_cast_with_variant_override(
         mana_cost,
         modal: obj.modal.clone(),
         casting_variant,
+        cast_timing_permission,
         origin_zone,
     })
 }
@@ -3242,6 +3251,7 @@ fn continue_with_prepared(
                     placeholder,
                     prepared.mana_cost.clone(),
                     prepared.casting_variant,
+                    prepared.cast_timing_permission,
                     modal_choice.clone(),
                     ability_def.distribute.clone(),
                     prepared.origin_zone,
@@ -3267,6 +3277,7 @@ fn continue_with_prepared(
                 prepared.mana_cost.clone(),
             );
             pending_modal.casting_variant = prepared.casting_variant;
+            pending_modal.cast_timing_permission = prepared.cast_timing_permission;
             pending_modal.distribute = ability_def.distribute.clone();
             pending_modal.target_constraints = target_constraints;
             pending_modal.origin_zone = prepared.origin_zone;
@@ -3342,6 +3353,7 @@ fn continue_with_prepared(
                     resolved,
                     &prepared.mana_cost,
                     prepared.casting_variant,
+                    prepared.cast_timing_permission,
                     prepared.origin_zone,
                     events,
                 );
@@ -3354,6 +3366,7 @@ fn continue_with_prepared(
                     prepared.mana_cost.clone(),
                 );
                 pending_aura.casting_variant = prepared.casting_variant;
+                pending_aura.cast_timing_permission = prepared.cast_timing_permission;
                 pending_aura.distribute = prepared
                     .ability_def
                     .as_ref()
@@ -3385,6 +3398,7 @@ fn continue_with_prepared(
                 resolved,
                 prepared.mana_cost,
                 prepared.casting_variant,
+                prepared.cast_timing_permission,
                 prepared
                     .ability_def
                     .as_ref()
@@ -3407,6 +3421,7 @@ fn continue_with_prepared(
                 resolved,
                 &prepared.mana_cost,
                 prepared.casting_variant,
+                prepared.cast_timing_permission,
                 prepared.origin_zone,
                 events,
             );
@@ -3420,6 +3435,7 @@ fn continue_with_prepared(
             prepared.mana_cost.clone(),
         );
         pending_targets.casting_variant = prepared.casting_variant;
+        pending_targets.cast_timing_permission = prepared.cast_timing_permission;
         pending_targets.distribute = prepared
             .ability_def
             .as_ref()
@@ -3442,6 +3458,7 @@ fn continue_with_prepared(
         resolved,
         &prepared.mana_cost,
         prepared.casting_variant,
+        prepared.cast_timing_permission,
         prepared.origin_zone,
         events,
     )
@@ -3504,6 +3521,7 @@ fn continue_with_no_ability(
         placeholder,
         &prepared.mana_cost,
         prepared.casting_variant,
+        prepared.cast_timing_permission,
         prepared.origin_zone,
         events,
     )
@@ -4137,8 +4155,9 @@ fn apply_mana_spell_grants(
     }
 }
 
-/// Pay an activated ability's cost. Handles `Tap`, `Mana`, `Composite` (recursive),
-/// and passes through other cost types that require interactive resolution.
+/// Pay an activated ability's cost. Handles auto-payable cost components
+/// (`Tap`, `Mana`, `PayLife`, `Composite`, and self-referential zone costs)
+/// and passes through cost types that require interactive resolution.
 pub fn pay_ability_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -4178,6 +4197,19 @@ pub fn pay_ability_cost(
         AbilityCost::Composite { costs } => {
             for sub_cost in costs {
                 pay_ability_cost(state, player, source_id, sub_cost, events)?;
+            }
+        }
+        AbilityCost::PayLife { amount } => {
+            let amount = resolve_quantity(state, amount, player, source_id);
+            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            match super::life_costs::pay_life_as_cost(state, player, amount, events) {
+                super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                super::life_costs::PayLifeCostResult::InsufficientLife
+                | super::life_costs::PayLifeCostResult::LockedCantLoseLife => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay life cost".to_string(),
+                    ));
+                }
             }
         }
         // CR 118.3: Sacrifice as a cost — sacrifice the source (SelfRef) or a chosen permanent.
@@ -4396,10 +4428,9 @@ pub fn pay_ability_cost(
                 None,
             );
         }
-        // Other cost types (Exile, PayLife, etc.) require interactive resolution
-        // and are intercepted before reaching pay_ability_cost, or are not yet auto-payable.
+        // Other cost types require interactive resolution and are intercepted
+        // before reaching pay_ability_cost, or are not yet auto-payable.
         AbilityCost::Untap
-        | AbilityCost::PayLife { .. }
         | AbilityCost::Discard { .. }
         | AbilityCost::Exile { .. }
         | AbilityCost::CollectEvidence { .. }
@@ -4735,10 +4766,9 @@ fn can_pay_ability_cost_now(
             return false;
         }
     }
-    // CR 118.3 + CR 119.4b + CR 119.8: Pay-life is paid interactively (or via
-    // the effect resolver); `pay_ability_cost`'s `PayLife` arm is a no-op.
-    // Pre-check both insufficient-life and CantLoseLife so locked or underfunded
-    // activated abilities never appear as legal actions.
+    // CR 118.3 + CR 119.4b + CR 119.8: Pre-check both insufficient-life and
+    // CantLoseLife so locked or underfunded activated abilities never appear
+    // as legal actions. The real payment is applied by `pay_ability_cost`.
     if let Some(amount) = find_pay_life_cost(cost, state, player, source_id) {
         if !super::life_costs::can_pay_life_cost(state, player, amount) {
             return false;
@@ -5653,6 +5683,7 @@ fn cant_cast_filter_matches(
                 colors: spell_obj.color.clone(),
                 mana_value: spell_obj.mana_cost.mana_value(),
                 has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
+                from_zone: Some(spell_obj.zone),
             };
             super::filter::spell_record_matches_filter(
                 &record,
@@ -5702,6 +5733,7 @@ fn is_blocked_by_per_turn_cast_limit(
                     colors: spell_obj.color.clone(),
                     mana_value: spell_obj.mana_cost.mana_value(),
                     has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
+                    from_zone: Some(spell_obj.zone),
                 };
                 if !super::filter::spell_record_matches_filter(
                     &current_record,
@@ -8057,6 +8089,10 @@ mod tests {
 
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number))
+        );
     }
 
     #[test]
@@ -8081,6 +8117,10 @@ mod tests {
         handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(20), &mut Vec::new())
             .expect("normal-timing cast should not require flash surcharge");
         assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().cast_timing_permission,
+            None
+        );
     }
 
     #[test]
@@ -8216,6 +8256,10 @@ mod tests {
 
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number))
+        );
     }
 
     #[test]
@@ -9444,6 +9488,7 @@ mod tests {
                 generic: 0,
             },
             CastingVariant::Normal,
+            None,
             None,
             Zone::Hand,
             &mut events,
@@ -11990,6 +12035,7 @@ mod tests {
                 colors: vec![],
                 mana_value: 1,
                 has_x_in_cost: false,
+                from_zone: None,
             }],
         );
 
@@ -13534,6 +13580,55 @@ mod tests {
         assert!(
             !can_activate_ability_now(&state, PlayerId(0), greed, 0),
             "can_activate_ability_now must reject PayLife activation with insufficient life"
+        );
+    }
+
+    /// CR 118.3 + CR 119.4: Composite activated costs such as fetchlands'
+    /// "{T}, Pay 1 life, Sacrifice this land" must apply every payable
+    /// component, including the life payment.
+    #[test]
+    fn composite_activated_pay_life_cost_deducts_life() {
+        let mut state = setup_game_at_main_phase();
+        let fetch = create_object(
+            &mut state,
+            CardId(0xFE7C),
+            PlayerId(0),
+            "Fetchland".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fetch)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: 1,
+                },
+            ],
+        };
+        let life_before = state.players[0].life;
+        let mut events = Vec::new();
+
+        pay_ability_cost(&mut state, PlayerId(0), fetch, &cost, &mut events)
+            .expect("fetchland-style composite cost should be payable");
+
+        assert_eq!(state.players[0].life, life_before - 1);
+        assert_eq!(state.objects.get(&fetch).unwrap().zone, Zone::Graveyard);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeChanged { player_id, amount: -1 } if *player_id == PlayerId(0))),
+            "pay-life cost must emit the life-loss event"
         );
     }
 

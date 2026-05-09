@@ -4,9 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, BasicLandType, CastVariantPaid, CastingPermission,
-    CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, AdditionalCost, BasicLandType, CastTimingPermission, CastVariantPaid,
+    CastingPermission, CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -349,6 +349,12 @@ pub struct GameObject {
     /// ability conditions that check "if its sneak/ninjutsu cost was paid this turn."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_variant_paid: Option<(CastVariantPaid, u32)>,
+
+    /// CR 601.3b + CR 702.8a: Which cast-timing permission was used to cast
+    /// the spell that became this permanent, and on which turn. Used by trigger
+    /// conditions that care whether normal sorcery timing was bypassed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_timing_permission: Option<(CastTimingPermission, u32)>,
 
     /// CR 107.3m: The value of X paid when the spell that produced this object
     /// was cast. Populated by `finalize_cast` from the pending ability's
@@ -733,6 +739,7 @@ impl GameObject {
             summoning_sick: false,
             echo_due: false,
             cast_variant_paid: None,
+            cast_timing_permission: None,
             cost_x_paid: None,
             kickers_paid: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -829,6 +836,7 @@ impl GameObject {
         self.is_saddled = false;
         self.chosen_attributes.clear();
         self.cast_variant_paid = None;
+        self.cast_timing_permission = None;
         // CR 400.7 + CR 702.33d: kicker payments are bound to the casting
         // event that produced this object. A re-entering permanent has no
         // memory of prior kicker payments — clear before the cast resolution

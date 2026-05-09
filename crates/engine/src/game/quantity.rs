@@ -1196,6 +1196,16 @@ fn resolve_ref(
                             obj.controller == scoped_player_or_controller(ability, controller)
                         }
                         ControllerRef::TargetPlayer => target_player == Some(obj.controller),
+                        ControllerRef::ParentTargetController => ability
+                            .and_then(|ability| {
+                                ability.targets.iter().find_map(|target| match target {
+                                    TargetRef::Object(id) => {
+                                        state.objects.get(id).map(|obj| obj.controller)
+                                    }
+                                    TargetRef::Player(player) => Some(*player),
+                                })
+                            })
+                            .is_some_and(|player| player == obj.controller),
                         ControllerRef::DefendingPlayer => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == obj.controller)
@@ -1494,6 +1504,16 @@ fn resolve_ref(
                                 })
                             })
                             .is_some_and(|pid| pid == snap.controller),
+                        Some(ControllerRef::ParentTargetController) => ability
+                            .and_then(|a| {
+                                a.targets.iter().find_map(|t| match t {
+                                    TargetRef::Object(id) => {
+                                        state.objects.get(id).map(|obj| obj.controller)
+                                    }
+                                    TargetRef::Player(pid) => Some(*pid),
+                                })
+                            })
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::DefendingPlayer) => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
@@ -1531,6 +1551,14 @@ fn damage_source_controller_matches(
                 ability.targets.iter().find_map(|target| match target {
                     TargetRef::Player(player) => Some(*player),
                     TargetRef::Object(_) => None,
+                })
+            })
+            .is_some_and(|player| actual == player),
+        ControllerRef::ParentTargetController => ability
+            .and_then(|ability| {
+                ability.targets.iter().find_map(|target| match target {
+                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+                    TargetRef::Player(player) => Some(*player),
                 })
             })
             .is_some_and(|player| actual == player),
@@ -2198,6 +2226,13 @@ pub(crate) fn resolve_player_count(
                                 triggering.is_none_or(|pid| pid != p.id)
                             }
                         }
+                        // CR 608.2c + CR 701.38: Match each player who cast a
+                        // vote for the recorded choice index in the most
+                        // recent vote within the current top-level resolution.
+                        PlayerFilter::VotedFor { choice_index } => state
+                            .last_vote_ballots
+                            .iter()
+                            .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
                     }
             })
             .count(),
@@ -4265,6 +4300,7 @@ mod tests {
                     colors: vec![ManaColor::Blue],
                     mana_value: 3,
                     has_x_in_cost: false,
+                    from_zone: None,
                 },
                 SpellCastRecord {
                     core_types: vec![CoreType::Artifact],
@@ -4274,6 +4310,7 @@ mod tests {
                     colors: vec![],
                     mana_value: 1,
                     has_x_in_cost: false,
+                    from_zone: None,
                 },
             ],
         );

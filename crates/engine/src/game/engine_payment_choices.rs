@@ -255,6 +255,22 @@ pub(super) fn handle_unless_payment(
                     }
                 }
             }
+            UnlessCost::PayEnergy { amount } => {
+                let Some(player_state) = state.players.iter_mut().find(|p| p.id == player) else {
+                    return Err(EngineError::InvalidAction(
+                        "Unless payment player not found".to_string(),
+                    ));
+                };
+                if player_state.energy < amount {
+                    payment_failed = true;
+                } else {
+                    player_state.energy -= amount;
+                    events.push(GameEvent::EnergyChanged {
+                        player,
+                        delta: -(amount as i32),
+                    });
+                }
+            }
             UnlessCost::DiscardCard { filter } => {
                 let hand_cards = crate::game::casting::find_eligible_discard_targets(
                     state,

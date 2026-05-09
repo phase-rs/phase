@@ -142,6 +142,15 @@ pub fn record_spell_cast(
     player: PlayerId,
     obj: &GameObject,
 ) {
+    record_spell_cast_from_zone(state, player, obj, obj.cast_from_zone);
+}
+
+pub fn record_spell_cast_from_zone(
+    state: &mut crate::types::game_state::GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    from_zone: Option<Zone>,
+) {
     state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
     *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
     // CR 117.1: Record spell characteristics for general-purpose filtered counting.
@@ -160,6 +169,7 @@ pub fn record_spell_cast(
             // trigger-filter evaluation (e.g. "your first spell with {X} in its
             // mana cost each turn") does not need to re-examine the spell object.
             has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+            from_zone,
         });
 }
 
@@ -1424,6 +1434,7 @@ mod tests {
                 colors: Vec::new(),
                 mana_value: 1,
                 has_x_in_cost: false,
+                from_zone: None,
             }],
         );
 
@@ -1455,6 +1466,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 1,
                     has_x_in_cost: false,
+                    from_zone: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     core_types: vec![CoreType::Sorcery],
@@ -1464,6 +1476,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 2,
                     has_x_in_cost: false,
+                    from_zone: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     core_types: vec![CoreType::Instant],
@@ -1473,6 +1486,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 3,
                     has_x_in_cost: false,
+                    from_zone: None,
                 },
             ],
         );

@@ -350,6 +350,8 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
             value(AbilityCondition::WhenYouDo, tag("when you do, ")),
             value(AbilityCondition::IfAPlayerDoes, tag("if a player does, ")),
             value(AbilityCondition::IfAPlayerDoes, tag("if they do, ")),
+            value(AbilityCondition::IfYouDo, tag("if that player does, ")),
+            value(AbilityCondition::IfYouDo, tag("if the player does, ")),
             value(
                 AbilityCondition::Not {
                     condition: Box::new(AbilityCondition::IfYouDo),

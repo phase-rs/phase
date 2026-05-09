@@ -207,6 +207,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if let Some(def) = parse_scry_count_replacement(&lower, &text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_mill_count_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "If you would draw a card, {effect}" ---
     if nom_primitives::scan_contains(&lower, "you would draw") {
         let effect_text = extract_replacement_effect(&normalized);
@@ -1398,6 +1406,9 @@ fn parse_enters_with_counters(
             count_expr = qty;
         }
     }
+    if let Some(qty) = parse_enters_with_where_x_suffix(work_text) {
+        count_expr = qty;
+    }
 
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
@@ -1477,6 +1488,18 @@ fn parse_enters_with_counters(
     }
 
     Some(def)
+}
+
+fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
+    let (_, (_, qty_text)) = nom_primitives::split_once_on(text, ", where x is ").ok()?;
+    let trimmed = qty_text.trim().trim_end_matches('.');
+    if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
+        return Some(QuantityExpr::Ref { qty: qty_ref });
+    }
+    if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
+        return Some(qty);
+    }
+    crate::parser::oracle_quantity::parse_event_context_quantity(trimmed)
 }
 
 fn multiply_counter_count_by_for_each(
@@ -2804,6 +2827,143 @@ fn extract_replacement_effect(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Clone, Copy)]
+enum MillReplacementSubject {
+    You,
+    Opponent,
+}
+
+fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let ((subject, count), rest) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag("if ").parse(input)?;
+        let (input, subject) = alt((
+            value(MillReplacementSubject::Opponent, tag("an opponent")),
+            value(MillReplacementSubject::Opponent, tag("opponent")),
+            value(MillReplacementSubject::You, tag("you")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" would mill one or more cards, ").parse(input)?;
+        let (input, _) = alt((tag("they mill "), tag("you mill "))).parse(input)?;
+        let (input, count) = parse_mill_replacement_count.parse(input)?;
+        let (input, _) = alt((tag(" cards instead"), tag(" instead"))).parse(input)?;
+        let (input, _) = opt(char('.')).parse(input)?;
+        Ok((input, (subject, count)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Mill)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mill {
+                count,
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+        ))
+        .description(original_text.to_string());
+
+    if matches!(subject, MillReplacementSubject::Opponent) {
+        def.valid_player = Some(ControllerRef::Opponent);
+    }
+
+    Some(def)
+}
+
+fn parse_mill_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    alt((
+        value(
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            },
+            tag("twice that many"),
+        ),
+        nom::combinator::map(
+            preceded(tag("that many cards plus "), nom_primitives::parse_number),
+            |value| QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+                offset: value as i32,
+            },
+        ),
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let ((effect_kind, count), rest) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag("if you would scry ").parse(input)?;
+        let (input, _) = tag("a number of cards, ").parse(input)?;
+        let (input, effect_kind) = alt((
+            value(ScryReplacementAction::Draw, tag("draw ")),
+            value(ScryReplacementAction::Scry, tag("scry ")),
+        ))
+        .parse(input)?;
+        let (input, count) = parse_scry_replacement_count.parse(input)?;
+        let (input, _) = tag(" instead").parse(input)?;
+        let (input, _) = opt(char('.')).parse(input)?;
+        Ok((input, (effect_kind, count)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let effect = match effect_kind {
+        ScryReplacementAction::Draw => Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        },
+        ScryReplacementAction::Scry => Effect::Scry {
+            count,
+            target: TargetFilter::Controller,
+        },
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Scry)
+            .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
+            .description(original_text.to_string()),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ScryReplacementAction {
+    Draw,
+    Scry,
+}
+
+fn parse_scry_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    alt((
+        nom::combinator::map(
+            preceded(tag("that many cards plus "), nom_primitives::parse_number),
+            |value| QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+                offset: value as i32,
+            },
+        ),
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many cards"),
+        ),
+    ))
+    .parse(input)
 }
 
 fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
@@ -5162,6 +5322,34 @@ mod tests {
     }
 
     #[test]
+    fn enters_with_x_counters_where_x_is_life_lost_uses_quantity_binding() {
+        let def = parse_replacement_line(
+            "This creature enters with X +1/+1 counters on it, where X is the total life lost by your opponents this turn.",
+            "Cryptborn Horror",
+        )
+        .unwrap();
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(counter_type, "P1P1");
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn { .. },
+                        }
+                    ),
+                    "count should use LifeLostThisTurn, got {count:?}"
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn enters_with_x_plus1_plus1_counters_uses_cost_x_paid() {
         // CR 107.3m: Walking Ballista / Endless One / Hangarback Walker class —
         // "enters with X +1/+1 counters on it".
@@ -7461,6 +7649,108 @@ mod tests {
         assert!(!super::has_except_first_draw_in_draw_step_clause(
             "except the first one you draw in each of your upkeeps"
         ));
+    }
+
+    #[test]
+    fn parses_opponent_mill_replacement_with_multiplier() {
+        let text =
+            "If an opponent would mill one or more cards, they mill twice that many cards instead.";
+        let def = parse_replacement_line(text, "Bruvac the Grandiloquent")
+            .expect("must parse mill replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Mill);
+        assert_eq!(def.valid_player, Some(ControllerRef::Opponent));
+        let execute = def.execute.as_ref().expect("mill replacement must execute");
+        match &*execute.effect {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(destination, &Zone::Graveyard);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        })
+                    }
+                );
+            }
+            other => panic!("expected Mill execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_opponent_mill_replacement_with_offset() {
+        let text = "If an opponent would mill one or more cards, they mill that many cards plus four instead.";
+        let def =
+            parse_replacement_line(text, "The Water Crystal").expect("must parse mill replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Mill);
+        assert_eq!(def.valid_player, Some(ControllerRef::Opponent));
+        let execute = def.execute.as_ref().expect("mill replacement must execute");
+        match &*execute.effect {
+            Effect::Mill { count, .. } => assert_eq!(
+                count,
+                &QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }),
+                    offset: 4
+                }
+            ),
+            other => panic!("expected Mill execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_scry_replacement_with_draw_followup() {
+        let text = "If you would scry a number of cards, draw that many cards instead.";
+        let def = parse_replacement_line(text, "Eligeth, Crossroads Augur")
+            .expect("must parse scry replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Scry);
+        let execute = def.execute.as_ref().expect("scry replacement must execute");
+        match &*execute.effect {
+            Effect::Draw { count, target } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                );
+            }
+            other => panic!("expected Draw execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_scry_replacement_with_scry_offset_followup() {
+        let text = "If you would scry a number of cards, scry that many cards plus one instead.";
+        let def = parse_replacement_line(text, "Kenessos, Priest of Thassa")
+            .expect("must parse scry replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Scry);
+        let execute = def.execute.as_ref().expect("scry replacement must execute");
+        match &*execute.effect {
+            Effect::Scry { count, target } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }),
+                        offset: 1
+                    }
+                );
+            }
+            other => panic!("expected Scry execute, got {other:?}"),
+        }
     }
 }
 

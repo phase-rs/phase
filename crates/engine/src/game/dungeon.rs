@@ -416,6 +416,7 @@ pub fn room_effects(
                 Effect::Sacrifice {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
                 },
                 source_id,
                 controller,
@@ -624,6 +625,7 @@ pub fn room_effects(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
                     count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
                 },
                 source_id,
                 controller,

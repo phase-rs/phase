@@ -7,11 +7,14 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
+use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::apply_draw_after_replacement;
 use super::effects::life::{apply_life_gain_after_replacement, apply_life_loss_after_replacement};
+use super::effects::mill::apply_mill_after_replacement;
+use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::sacrifice::apply_sacrifice_after_replacement;
@@ -166,6 +169,16 @@ pub(super) fn handle_replacement_choice(
                 draw @ ProposedEvent::Draw { .. } => {
                     apply_draw_after_replacement(state, draw, events);
                 }
+                // CR 701.22a: Scry accepted after replacement choice.
+                scry @ ProposedEvent::Scry { .. } => {
+                    apply_scry_after_replacement(state, scry, events);
+                }
+                // CR 701.17a: Mill accepted after replacement choice — delegate
+                // to the shared helper so count clamping and library movement
+                // match the non-choice delivery.
+                mill @ ProposedEvent::Mill { .. } => {
+                    let _ = apply_mill_after_replacement(state, mill, events);
+                }
                 // CR 119.1: Life gain accepted after replacement choice.
                 gain @ ProposedEvent::LifeGain { .. } => {
                     apply_life_gain_after_replacement(state, gain, events);
@@ -278,17 +291,16 @@ pub(super) fn handle_replacement_choice(
                 replacement_ctx = Some(ctx);
             }
 
-            if let Some(effect_def) = state.post_replacement_effect.take() {
+            if state.post_replacement_effect.is_some()
+                || state.post_replacement_resolved_effect.is_some()
+            {
                 // The ETB-replacement post-effect resolves against the
                 // zone-changing object, not the replacement source — drop the
                 // source slot so it doesn't leak into an unrelated later
                 // replacement.
                 state.post_replacement_source = None;
-                state.post_replacement_event_source = None;
-                state.post_replacement_event_target = None;
-                if let Some(next_waiting_for) = apply_post_replacement_effect(
+                if let Some(next_waiting_for) = apply_pending_post_replacement_effect(
                     state,
-                    &effect_def,
                     zone_change_object_id,
                     replacement_ctx.as_ref(),
                     events,
@@ -358,7 +370,7 @@ pub(super) fn handle_copy_target_choice(
 
     let ability = copy_effect_for_source(state, source_id)
         .map(|effect_def| {
-            resolved_ability_from_definition(
+            build_resolved_from_def_with_targets(
                 effect_def,
                 source_id,
                 player,
@@ -452,8 +464,40 @@ pub(super) fn apply_post_replacement_effect(
         .map(TargetRef::Object)
         .into_iter()
         .collect::<Vec<_>>();
-    let resolved = resolved_ability_from_definition(effect_def, source_id, controller, targets);
+    let resolved = build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
     let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
+
+    match &state.waiting_for {
+        WaitingFor::Priority { .. } => None,
+        wf => Some(wf.clone()),
+    }
+}
+
+pub(super) fn apply_pending_post_replacement_effect(
+    state: &mut GameState,
+    object_id: Option<ObjectId>,
+    spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let source = state.post_replacement_source.take().or(object_id);
+    let waiting_for = if let Some(resolved) = state.post_replacement_resolved_effect.take() {
+        apply_post_replacement_resolved_effect(state, &resolved, events)
+    } else if let Some(effect_def) = state.post_replacement_effect.take() {
+        apply_post_replacement_effect(state, &effect_def, source, spell_resolution, events)
+    } else {
+        None
+    };
+    state.post_replacement_event_source = None;
+    state.post_replacement_event_target = None;
+    waiting_for
+}
+
+fn apply_post_replacement_resolved_effect(
+    state: &mut GameState,
+    resolved: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let _ = effects::resolve_ability_chain(state, resolved, events, 0);
 
     match &state.waiting_for {
         WaitingFor::Priority { .. } => None,
@@ -477,6 +521,9 @@ fn apply_pending_spell_resolution(
     // replacement / triggered abilities can gate on which kickers were paid.
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
+        if let Some(permission) = ctx.cast_timing_permission {
+            obj.cast_timing_permission = Some((permission, state.turn_number));
+        }
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
         obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
     }
@@ -618,39 +665,6 @@ fn find_copy_targets(
         })
         .map(|(id, _)| *id)
         .collect()
-}
-
-fn resolved_ability_from_definition(
-    def: &AbilityDefinition,
-    source_id: ObjectId,
-    controller: PlayerId,
-    targets: Vec<TargetRef>,
-) -> ResolvedAbility {
-    let mut resolved =
-        ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
-    if let Some(sub) = &def.sub_ability {
-        resolved = resolved.sub_ability(resolved_ability_from_definition(
-            sub,
-            source_id,
-            controller,
-            Vec::new(),
-        ));
-    }
-    if let Some(else_ab) = &def.else_ability {
-        resolved.else_ability = Some(Box::new(resolved_ability_from_definition(
-            else_ab,
-            source_id,
-            controller,
-            Vec::new(),
-        )));
-    }
-    if let Some(d) = def.duration.clone() {
-        resolved = resolved.duration(d);
-    }
-    if let Some(c) = def.condition.clone() {
-        resolved = resolved.condition(c);
-    }
-    resolved
 }
 
 #[cfg(test)]

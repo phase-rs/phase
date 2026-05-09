@@ -117,6 +117,10 @@ pub fn resolve(
         shield = shield.combat_scope(CombatDamageScope::CombatOnly);
     }
 
+    if let Some(sub_ability) = &ability.sub_ability {
+        shield = shield.runtime_execute(sub_ability.as_ref().clone());
+    }
+
     // CR 615: For targeted prevention ("prevent the next N damage to target creature"),
     // the shield lives on the TARGET object — same pattern as regeneration shields.
     // This ensures the shield is found by find_applicable_replacements() which only
@@ -179,10 +183,13 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::zones::create_object;
-    use crate::types::ability::{PreventionAmount, ShieldKind, TypedFilter};
+    use crate::game::{effects::deal_damage, zones::create_object};
+    use crate::types::ability::{
+        PreventionAmount, PtValue, QuantityExpr, QuantityRef, ShieldKind, TypedFilter,
+    };
     use crate::types::game_state::ChosenDamageSource;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -347,6 +354,79 @@ mod tests {
             obj.replacement_definitions[0].combat_scope,
             Some(CombatDamageScope::CombatOnly)
         );
+    }
+
+    #[test]
+    fn prevention_shield_executes_prevented_damage_followup() {
+        let mut state = GameState::new_two_player(42);
+        let shield_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Inkshield".to_string(),
+            Zone::Stack,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut token = ResolvedAbility::new(
+            Effect::Token {
+                name: "Inkling".to_string(),
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string(), "Inkling".to_string()],
+                colors: vec![ManaColor::White, ManaColor::Black],
+                keywords: vec![Keyword::Flying],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            shield_source,
+            PlayerId(0),
+        );
+        token.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        let ability = make_prevent_ability(
+            shield_source,
+            PreventionAmount::All,
+            PreventionScope::CombatDamage,
+            vec![],
+        )
+        .sub_ability(token);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+        let result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Player(PlayerId(0)),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(matches!(result, deal_damage::DamageResult::Applied(0)));
+        assert_eq!(state.players[0].life, 20);
+        let inklings = state
+            .objects
+            .values()
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.name == "Inkling")
+            .count();
+        assert_eq!(inklings, 3);
     }
 
     #[test]

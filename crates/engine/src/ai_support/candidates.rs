@@ -684,11 +684,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             cards,
             count,
+            min_count,
             up_to,
             ..
         } => {
             if *up_to {
-                (0..=*count)
+                (*min_count..=*count)
                     .flat_map(|size| combinations(cards, size))
                     .map(|combo| {
                         candidate(

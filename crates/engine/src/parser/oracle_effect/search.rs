@@ -9,6 +9,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
+use super::super::oracle_quantity;
 use super::super::oracle_target::{
     parse_mana_value_suffix, parse_shared_quality_clause, parse_target, parse_type_phrase,
 };
@@ -594,15 +595,20 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
     };
 
     let (filter_text, from_top) = parse_seek_from_top_limit(filter_text);
+    let (filter_text, dynamic_count) = split_seek_for_each_count_suffix(filter_text)
+        .map_or((filter_text, None), |(remaining, count)| {
+            (remaining, Some(count))
+        });
 
     // Extract count: "two nonland cards" → (2, "nonland cards"); "x cards" → (X, "cards").
     // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
-    let (count, remaining) =
-        if let Ok((rest, expr)) = nom_quantity::parse_quantity_expr_number(filter_text) {
-            (expr, rest.trim_start())
-        } else {
-            (QuantityExpr::Fixed { value: 1 }, filter_text)
-        };
+    let (count, remaining) = if let Some(expr) = dynamic_count {
+        (expr, filter_text)
+    } else if let Ok((rest, expr)) = nom_quantity::parse_quantity_expr_number(filter_text) {
+        (expr, rest.trim_start())
+    } else {
+        (QuantityExpr::Fixed { value: 1 }, filter_text)
+    };
 
     // Strip leading article "a "/"an "
     let remaining = nom_primitives::parse_article
@@ -620,6 +626,17 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
         enter_tapped,
         extra_filters,
     }
+}
+
+fn split_seek_for_each_count_suffix(filter_text: &str) -> Option<(&str, QuantityExpr)> {
+    let (suffix, remaining) = take_until::<_, _, OracleError<'_>>(" for each ")
+        .parse(filter_text)
+        .ok()?;
+    let (clause, _) = tag::<_, _, OracleError<'_>>(" for each ")
+        .parse(suffix)
+        .ok()?;
+    let count = oracle_quantity::parse_for_each_clause_expr(clause.trim())?;
+    Some((remaining.trim_end(), count))
 }
 
 fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
@@ -770,7 +787,53 @@ fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option
         })
         .filter(search_filter_has_meaningful_content)
         .collect();
-    (filters.len() >= 2).then(|| normalize_search_filter(TargetFilter::Or { filters }))
+    (filters.len() >= 2).then(|| {
+        let filter = normalize_search_filter(TargetFilter::Or { filters });
+        apply_shared_leading_search_properties(filter_region, filter)
+    })
+}
+
+fn apply_shared_leading_search_properties(
+    filter_region: &str,
+    filter: TargetFilter,
+) -> TargetFilter {
+    if !filter_region.as_bytes().contains(&b',') {
+        return filter;
+    }
+
+    let suffix = leading_search_properties(filter_region);
+    if suffix.properties.is_empty() {
+        return filter;
+    }
+
+    if search_filter_all_land_subtype_branches(&filter) {
+        apply_search_suffix_constraints(filter, &suffix)
+    } else {
+        filter
+    }
+}
+
+fn leading_search_properties(filter_region: &str) -> SearchSuffixConstraints {
+    let mut suffix = SearchSuffixConstraints::default();
+    let mut remaining = filter_region;
+    while let Ok((rest, property)) = parse_search_leading_filter_property(remaining) {
+        suffix.properties.push(property);
+        remaining = rest;
+    }
+    suffix
+}
+
+fn search_filter_all_land_subtype_branches(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.type_filters.iter().any(|type_filter| {
+            matches!(type_filter, TypeFilter::Subtype(subtype)
+                if infer_core_type_for_subtype(subtype) == Some(CoreType::Land))
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(search_filter_all_land_subtype_branches)
+        }
+        _ => false,
+    }
 }
 
 /// Split a single search-filter expression on disjunctive filter boundaries:
@@ -1974,7 +2037,7 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 mod tests {
     use super::*;
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
 
     #[test]
@@ -2408,6 +2471,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_handles_keyword_kind_suffix() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter("card with augment, reveal it", &mut ctx);
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Augment
+            }
+        )));
+        assert!(ctx.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parse_search_filter_keeps_unimplemented_combine_after_augment_visible() {
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "card with augment and combine it with target host you control",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Augment
+            }
+        )));
+        assert!(
+            ctx.diagnostics
+                .iter()
+                .any(|d| matches!(d, OracleDiagnostic::TargetFallback { text, .. } if text == "combine it with target host you control")),
+            "combine continuation should remain visible until runtime combine is implemented: {:?}",
+            ctx.diagnostics
+        );
+    }
+
+    #[test]
     fn parse_search_filter_handles_zero_or_one_mana_cost() {
         let filter = parse_search_filter(
             "artifact card with mana cost {0} or {1}, put it onto the battlefield",
@@ -2714,6 +2820,32 @@ mod tests {
                 value: crate::types::card_type::Supertype::Basic
             }
         )));
+    }
+
+    #[test]
+    fn parse_search_filter_applies_shared_basic_to_land_subtype_list() {
+        let filter = parse_search_filter(
+            "basic swamp, forest, or island card",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+
+        for (filter, subtype) in filters.iter().zip(["Swamp", "Forest", "Island"]) {
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("expected typed {subtype} branch, got {filter:?}");
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Land));
+            assert_eq!(typed.get_subtype(), Some(subtype));
+            assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: Supertype::Basic
+                }
+            )));
+        }
     }
 
     #[test]

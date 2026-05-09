@@ -282,6 +282,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Any => "any target".into(),
         TargetFilter::Player => "player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::StackAbility => "ability on stack".into(),
@@ -527,6 +528,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::Opponent => "opponent",
                 ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
+                ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::DefendingPlayer => "defending player",
             };
             parts.push(label.into());
@@ -591,6 +593,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::Opponent => "opponent controls",
         ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
+        ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::DefendingPlayer => "defending player controls",
     }
     .into()
@@ -994,6 +997,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
+        PlayerFilter::VotedFor { .. } => "each player who voted for this option",
     }
     .into()
 }
@@ -4620,6 +4624,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
         AbilityCondition::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
         AbilityCondition::CastDuringPhase { .. } => ("CastDuringPhase", Handled),
+        AbilityCondition::CastTimingPermission { .. } => ("CastTimingPermission", Handled),
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
@@ -4801,6 +4806,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OwnersOfCardsExiledBySource => ("OwnersOfCardsExiledBySource", Handled),
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
+        PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
     }
 }
 
@@ -4839,7 +4845,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
-        StaticCondition::UnlessPay { .. } => ("UnlessPay", Unhandled),
+        StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander => ("ControlsCommander", Unhandled),
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Unhandled),
         StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Unhandled),
@@ -8343,6 +8349,27 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "AbilityCondition::IsYourTurn must classify as Handled",
+        );
+    }
+
+    #[test]
+    fn unless_pay_static_condition_is_marked_handled() {
+        let condition = StaticCondition::UnlessPay {
+            cost: crate::types::mana::ManaCost::generic(1),
+            scaling: crate::types::ability::UnlessPayScaling::PerQuantityRef {
+                quantity: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    card_types: Vec::new(),
+                    scope: CountScope::Controller,
+                },
+            },
+        };
+        let (name, support) = static_condition_feature(&condition);
+        assert_eq!(name, "UnlessPay");
+        assert_eq!(
+            support,
+            FeatureSupport::Handled,
+            "StaticCondition::UnlessPay is resolved by combat-tax payment handling",
         );
     }
 }

@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationRestriction, AdditionalCost, CastingRestriction, Comparator, ContinuousModification,
-    DelayedTriggerCondition, Effect, ManaProduction, ModalChoice, ParsedCondition, QuantityExpr,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, Comparator,
+    ContinuousModification, DelayedTriggerCondition, Effect, ManaProduction, ModalChoice,
+    ParsedCondition, QuantityExpr, ReplacementDefinition, SolveCondition, SpellCastingOption,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -854,6 +855,54 @@ fn ability_word_to_trigger_condition(
     }
 }
 
+fn parse_flash_cleanup_sacrifice_casting_option(
+    line: &str,
+) -> Option<(SpellCastingOption, TriggerDefinition)> {
+    let lower = line.trim().to_ascii_lowercase();
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("you may cast this spell as though it had flash. ")
+            .parse(lower.as_str())
+            .ok()?;
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("if you cast it any time a sorcery couldn't have been cast, ")
+            .parse(rest)
+            .ok()?;
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.",
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+    let delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Cleanup,
+            },
+            effect: Box::new(sacrifice),
+            uses_tracked_set: false,
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::CastTimingPermission {
+            permission: CastTimingPermission::AsThoughHadFlash,
+        })
+        .execute(delayed)
+        .description(line.to_string());
+
+    Some((SpellCastingOption::as_though_had_flash(), trigger))
+}
+
 /// Lower an `OracleDocIr` into the final `ParsedAbilities` via exhaustive match
 /// on each `OracleItemIr` variant.
 ///
@@ -1459,30 +1508,13 @@ pub(crate) fn parse_oracle_ir(
         if let Some(colon_pos) = find_activated_colon(&line) {
             let cost_text = line[..colon_pos].trim();
             let effect_text = line[colon_pos + 1..].trim();
-            let (effect_text, constraints) = strip_activated_constraints(effect_text);
-            // Normalize card name in cost text (e.g., "Exile Wilson from your graveyard" → "Exile ~ from your graveyard")
-            let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
-            let cost = parse_oracle_cost(&normalized_cost_text);
-
-            // Retry with `~` normalization if the first pass left an
-            // Unimplemented node or emitted a `target-fallback` warning
-            // (Metalhead class: PutCounter silently fell back to `Any`).
-            let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, &mut ctx);
-            normalize_activated_mana_instead_delta(&mut def);
-            if def.activation_zone.is_none() {
-                def.activation_zone = activation_zone_from_self_cost(&cost);
-            }
-            def.cost = Some(cost);
-            def.description = Some(line.to_string());
-            if constraints.sorcery_speed() {
-                def.sorcery_speed = true;
-            }
-            if !constraints.restrictions.is_empty() {
-                def.activation_restrictions = constraints.restrictions;
-            }
-            // CR 601.2f: Extract self-referential cost reduction from the terminal
-            // sub_ability in the chain (may be several levels deep).
-            extract_cost_reduction_from_chain(&mut def);
+            let (mut def, effect_text) = parse_activated_ability_definition(
+                cost_text,
+                effect_text,
+                &line,
+                card_name,
+                &mut ctx,
+            );
             i += 1;
             // CR 706: If the activated ability ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
@@ -1549,12 +1581,30 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 6b: Ability-word-prefixed triggers (e.g., "Heroic — Whenever ...",
-        // "Constellation — Whenever ..."). Must intercept BEFORE is_static_pattern and
-        // is_replacement_pattern checks, which would otherwise match on keywords like
-        // "prevent" in the effect text and misroute the line.
+        // Priority 6b: Ability-word-prefixed activated abilities/triggers (e.g.,
+        // "Threshold — {T}: ...", "Heroic — Whenever ..."). Must intercept BEFORE
+        // is_static_pattern and is_replacement_pattern checks, which would otherwise
+        // match on keywords like "gets" or "prevent" in the effect text and misroute
+        // the line.
         if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
             let effect_lower = effect_text.to_lowercase();
+            let aw_condition = ability_word_to_condition(&aw_name);
+            if aw_condition.is_some() {
+                if let Some(colon_pos) = find_activated_colon(&effect_text) {
+                    let cost_text = effect_text[..colon_pos].trim();
+                    let activated_effect_text = effect_text[colon_pos + 1..].trim();
+                    let (def, _) = parse_activated_ability_definition(
+                        cost_text,
+                        activated_effect_text,
+                        &line,
+                        card_name,
+                        &mut ctx,
+                    );
+                    result.abilities.push(def);
+                    i += 1;
+                    continue;
+                }
+            }
             if has_trigger_prefix(&effect_lower) {
                 // CR 707.9a: Thread the running trigger count as the base index.
                 let mut triggers = parse_trigger_lines_at_index(
@@ -1706,6 +1756,13 @@ pub(crate) fn parse_oracle_ir(
                 i += 1;
                 continue;
             }
+        }
+
+        if let Some((option, trigger)) = parse_flash_cleanup_sacrifice_casting_option(&line) {
+            result.casting_options.push(option);
+            result.triggers.push(trigger);
+            i += 1;
+            continue;
         }
 
         // Priority 7: Static/continuous patterns
@@ -2355,6 +2412,36 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
         AbilityCost::Composite { costs } => costs.iter().find_map(activation_zone_from_self_cost),
         _ => None,
     }
+}
+
+fn parse_activated_ability_definition(
+    cost_text: &str,
+    effect_text: &str,
+    description: &str,
+    card_name: &str,
+    ctx: &mut ParseContext,
+) -> (AbilityDefinition, String) {
+    let (effect_text, constraints) = strip_activated_constraints(effect_text);
+    let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
+    let cost = parse_oracle_cost(&normalized_cost_text);
+
+    // Retry with `~` normalization if the first pass left an Unimplemented node
+    // or emitted a target-fallback warning.
+    let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, ctx);
+    normalize_activated_mana_instead_delta(&mut def);
+    if def.activation_zone.is_none() {
+        def.activation_zone = activation_zone_from_self_cost(&cost);
+    }
+    def.cost = Some(cost);
+    def.description = Some(description.to_string());
+    if constraints.sorcery_speed() {
+        def.sorcery_speed = true;
+    }
+    if !constraints.restrictions.is_empty() {
+        def.activation_restrictions = constraints.restrictions;
+    }
+    extract_cost_reduction_from_chain(&mut def);
+    (def, effect_text)
 }
 
 /// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
@@ -4657,6 +4744,42 @@ mod tests {
     }
 
     #[test]
+    fn old_aura_flash_drawback_parses_cleanup_sacrifice_trigger() {
+        let r = parse(
+            "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nEnchant creature\nEnchanted creature gets +1/+0.",
+            "Lightning Reflexes",
+            &[],
+            &["Enchantment"],
+            &["Aura"],
+        );
+
+        assert_eq!(
+            r.casting_options,
+            vec![SpellCastingOption::as_though_had_flash()]
+        );
+        assert_eq!(r.triggers.len(), 1);
+        assert!(matches!(
+            r.triggers[0].condition,
+            Some(TriggerCondition::CastTimingPermission {
+                permission: CastTimingPermission::AsThoughHadFlash,
+            })
+        ));
+        let delayed = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("cleanup trigger executes delayed trigger");
+        assert!(matches!(
+            *delayed.effect,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::Cleanup
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn spell_casting_option_parses_free_cast_condition() {
         let r = parse(
             "If this spell is the first spell you've cast this game, you may cast it without paying its mana cost.\nLook at the top five cards of your library.",
@@ -4867,6 +4990,51 @@ mod tests {
             }
             other => panic!("expected Forest ReturnToHand cost, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ability_word_prefixed_activated_ability_preserves_restrictions() {
+        let r = parse(
+            "Threshold — Put three cards from your graveyard on the bottom of your library: This creature gets +3/+3 until end of turn. Activate only once each turn and only if there are seven or more cards in your graveyard.",
+            "Test Scrounger",
+            &[],
+            &["Creature"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert!(matches!(
+            ability.cost.as_ref(),
+            Some(AbilityCost::EffectCost { effect })
+                if matches!(effect.as_ref(), Effect::PutAtLibraryPosition { .. })
+        ));
+        assert!(matches!(
+            ability.effect.as_ref(),
+            Effect::Pump {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        assert!(ability.condition.is_none());
+        assert!(ability
+            .activation_restrictions
+            .iter()
+            .any(|restriction| matches!(restriction, ActivationRestriction::OnlyOnceEachTurn)));
+        assert!(ability.activation_restrictions.iter().any(|restriction| {
+            matches!(
+                restriction,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(
+                        crate::types::ability::ParsedCondition::ZoneCardCountAtLeast {
+                            zone: Zone::Graveyard,
+                            count: 7
+                        }
+                    )
+                }
+            )
+        }));
     }
 
     #[test]
@@ -5939,6 +6107,30 @@ mod tests {
         assert_eq!(modal.mode_count, 2);
         // Spell-level modal should NOT be set (this is an activated ability modal)
         assert!(r.modal.is_none(), "spell-level modal should be None");
+    }
+
+    #[test]
+    fn modal_activated_ability_preserves_activation_restrictions() {
+        let r = parse(
+            "{G}: Choose one. Activate only once each turn.\n\
+             • Until end of turn, this creature becomes a Rhino with base power and toughness 4/4 and gains trample.\n\
+             • Until end of turn, this creature becomes a Bird with base power and toughness 2/2 and gains flying.",
+            "Test Shifter",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let modal_def = r
+            .abilities
+            .iter()
+            .find(|ability| ability.modal.is_some())
+            .expect("should have a modal activated ability");
+        assert!(
+            modal_def
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "modal activated ability should preserve once-per-turn restriction"
+        );
     }
 
     #[test]
@@ -9798,7 +9990,7 @@ mod tests {
         // as count, and the same Typed filter lifted into target.
         let sacrifice = discard.sub_ability.as_ref().expect("sacrifice sub_ability");
         match &*sacrifice.effect {
-            Effect::Sacrifice { target, count } => {
+            Effect::Sacrifice { target, count, .. } => {
                 assert!(!count.is_up_to(), "expected non-UpTo sacrifice count");
                 match count {
                     QuantityExpr::DivideRounded {

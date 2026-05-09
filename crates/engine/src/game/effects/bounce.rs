@@ -1,10 +1,22 @@
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    ControllerRef, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::zones::Zone;
+
+fn filter_uses_scoped_player(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(filter) => filter.controller == Some(ControllerRef::ScopedPlayer),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_uses_scoped_player)
+        }
+        TargetFilter::Not { filter } => filter_uses_scoped_player(filter),
+        _ => false,
+    }
+}
 
 /// CR 400.6: Zone change — permanent moves from battlefield to its owner's hand.
 ///
@@ -91,12 +103,17 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target_filter, destination) = match &ability.effect {
+    let (target_filter, destination, count_expr) = match &ability.effect {
         Effect::BounceAll {
             target,
             destination,
-        } => (target.clone(), destination.unwrap_or(Zone::Hand)),
-        _ => (TargetFilter::None, Zone::Hand),
+            count,
+        } => (
+            target.clone(),
+            destination.unwrap_or(Zone::Hand),
+            count.as_ref(),
+        ),
+        _ => (TargetFilter::None, Zone::Hand, None),
     };
 
     // CR 701.3 + CR 611.2c: A `TargetFilter::None` lands here when the parser
@@ -111,6 +128,25 @@ pub fn resolve_all(
     } else {
         crate::game::effects::resolved_object_filter(ability, &target_filter)
     };
+    let scoped_ability;
+    let ability = if filter_uses_scoped_player(&effective_filter) && ability.scoped_player.is_none()
+    {
+        if let Some(player) = ability.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            TargetRef::Object(_) => None,
+        }) {
+            scoped_ability = {
+                let mut scoped = ability.clone();
+                scoped.set_scoped_player_recursive(player);
+                scoped
+            };
+            &scoped_ability
+        } else {
+            ability
+        }
+    } else {
+        ability
+    };
 
     // CR 107.3a + CR 601.2b: Filter evaluation runs in the ability's
     // resolution context (controller, target slots already filled).
@@ -124,7 +160,40 @@ pub fn resolve_all(
         .copied()
         .collect();
 
-    for obj_id in matching {
+    if let Some(count_expr) = count_expr {
+        let count = crate::game::quantity::resolve_quantity_with_targets(state, count_expr, ability)
+            .max(0) as usize;
+        if count == 0 {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+
+        if matching.len() > count {
+            state.waiting_for = crate::types::game_state::WaitingFor::EffectZoneChoice {
+                player: ability.controller,
+                cards: matching,
+                count,
+                min_count: count,
+                up_to: false,
+                source_id: ability.source_id,
+                effect_kind: EffectKind::BounceAll,
+                zone: Zone::Battlefield,
+                destination: Some(destination),
+                enter_tapped: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enters_attacking: false,
+                owner_library: false,
+            };
+            return Ok(());
+        }
+    }
+
+    for &obj_id in &matching {
         // CR 400.3 + CR 400.7: Move each matching permanent to the
         // destination zone. The single-bounce resolver runs the same
         // `zones::move_to_zone` primitive — no replacement-pipeline detour
@@ -136,6 +205,7 @@ pub fn resolve_all(
         }
     }
 
+    state.last_effect_count = Some(matching.len() as i32);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
@@ -429,6 +499,7 @@ mod tests {
             Effect::BounceAll {
                 target: creature_filter,
                 destination: None,
+                count: None,
             },
             vec![],
             ObjectId(999),
@@ -491,6 +562,7 @@ mod tests {
                     properties: vec![],
                 }),
                 destination: Some(Zone::Library),
+                count: None,
             },
             vec![],
             ObjectId(999),
@@ -506,5 +578,84 @@ mod tests {
             "bear moved to library when destination override is set"
         );
         assert!(!state.players[0].hand.contains(&bear));
+    }
+
+    #[test]
+    fn counted_bounce_all_prompts_controller_for_subset() {
+        use crate::types::ability::{ControllerRef, QuantityExpr, QuantityRef};
+
+        let mut state = GameState::new_two_player(42);
+        let opp_bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_dragon = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        let own_elf = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Controller Elf".to_string(),
+            Zone::Battlefield,
+        );
+
+        for id in [opp_bear, opp_dragon, own_elf] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let target =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer));
+        let ability = ResolvedAbility::new(
+            Effect::BounceAll {
+                target: target.clone(),
+                destination: None,
+                count: Some(QuantityExpr::DivideRounded {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter: target },
+                    }),
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Up,
+                }),
+            },
+            vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        match state.waiting_for {
+            crate::types::game_state::WaitingFor::EffectZoneChoice {
+                player,
+                count,
+                cards,
+                effect_kind: EffectKind::BounceAll,
+                zone: Zone::Battlefield,
+                destination: Some(Zone::Hand),
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 1);
+                assert!(cards.contains(&opp_bear));
+                assert!(cards.contains(&opp_dragon));
+                assert!(!cards.contains(&own_elf));
+            }
+            ref other => panic!("expected BounceAll EffectZoneChoice, got {other:?}"),
+        }
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Effect, PreventionAmount, QuantityExpr,
-    ReplacementCondition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
+    ReplacementCondition, ReplacementMode, ResolvedAbility, ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 
@@ -31,6 +31,33 @@ pub enum ReplacementResult {
 pub enum ApplyResult {
     Modified(ProposedEvent),
     Prevented,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PostReplacementEffect {
+    Definition(Box<AbilityDefinition>),
+    Resolved(Box<ResolvedAbility>),
+}
+
+fn stash_post_replacement_effect(
+    state: &mut GameState,
+    post: PostReplacementEffect,
+    source: ObjectId,
+    event_source: Option<ObjectId>,
+    event_target: Option<TargetRef>,
+) {
+    if state.post_replacement_effect.is_some() || state.post_replacement_resolved_effect.is_some() {
+        return;
+    }
+    match post {
+        PostReplacementEffect::Definition(def) => state.post_replacement_effect = Some(def),
+        PostReplacementEffect::Resolved(resolved) => {
+            state.post_replacement_resolved_effect = Some(resolved)
+        }
+    }
+    state.post_replacement_source = Some(source);
+    state.post_replacement_event_source = event_source;
+    state.post_replacement_event_target = event_target;
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -546,14 +573,77 @@ fn draw_replacement_count(
 
     match &*execute.effect {
         Effect::Draw { count: qty, .. } if execute.sub_ability.is_none() => {
-            let resolved = resolve_draw_replacement_quantity(qty, *count)?;
+            let resolved = resolve_event_replacement_quantity(qty, *count)?;
             Some(resolved.max(0) as u32)
         }
         _ => None,
     }
 }
 
-fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
+// --- 4b. Scry ---
+
+fn scry_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Scry { count, .. } if *count > 0)
+}
+
+fn scry_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let (player_id, count, applied) = match event {
+        ProposedEvent::Scry {
+            player_id,
+            count,
+            applied,
+        } => (player_id, count, applied),
+        other => return ApplyResult::Modified(other),
+    };
+
+    let execute = state
+        .objects
+        .get(&rid.source)
+        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|def| def.execute.as_deref());
+
+    match execute {
+        Some(ability) if ability.sub_ability.is_none() => match &*ability.effect {
+            Effect::Draw { count: qty, .. } => {
+                let new_count = resolve_event_replacement_quantity(qty, count)
+                    .map(|resolved| resolved.max(0) as u32)
+                    .unwrap_or(count);
+                ApplyResult::Modified(ProposedEvent::Draw {
+                    player_id,
+                    count: new_count,
+                    applied,
+                })
+            }
+            Effect::Scry { count: qty, .. } => {
+                let new_count = resolve_event_replacement_quantity(qty, count)
+                    .map(|resolved| resolved.max(0) as u32)
+                    .unwrap_or(count);
+                ApplyResult::Modified(ProposedEvent::Scry {
+                    player_id,
+                    count: new_count,
+                    applied,
+                })
+            }
+            _ => ApplyResult::Modified(ProposedEvent::Scry {
+                player_id,
+                count,
+                applied,
+            }),
+        },
+        _ => ApplyResult::Modified(ProposedEvent::Scry {
+            player_id,
+            count,
+            applied,
+        }),
+    }
+}
+
+fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
             qty: crate::types::ability::QuantityRef::EventContextAmount,
@@ -564,7 +654,7 @@ fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> O
             divisor,
             rounding,
         } => {
-            let value = resolve_draw_replacement_quantity(inner, event_count)?;
+            let value = resolve_event_replacement_quantity(inner, event_count)?;
             let divisor = i32::try_from((*divisor).max(1)).ok()?;
             Some(match rounding {
                 crate::types::ability::RoundingMode::Up => (value + divisor - 1) / divisor,
@@ -572,15 +662,15 @@ fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> O
             })
         }
         QuantityExpr::Offset { inner, offset } => {
-            Some(resolve_draw_replacement_quantity(inner, event_count)? + offset)
+            Some(resolve_event_replacement_quantity(inner, event_count)? + offset)
         }
         QuantityExpr::Multiply { factor, inner } => {
-            Some(factor * resolve_draw_replacement_quantity(inner, event_count)?)
+            Some(factor * resolve_event_replacement_quantity(inner, event_count)?)
         }
         QuantityExpr::Sum { exprs } => {
             let mut total = 0i32;
             for inner in exprs {
-                total += resolve_draw_replacement_quantity(inner, event_count)?;
+                total += resolve_event_replacement_quantity(inner, event_count)?;
             }
             Some(total)
         }
@@ -588,7 +678,7 @@ fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> O
         // `UpTo` transparently as its upper bound — the replacement-effect
         // pipeline does not honor "may pick fewer" semantics (the choice
         // already happened at effect resolution before the replacement fires).
-        QuantityExpr::UpTo { max } => resolve_draw_replacement_quantity(max, event_count),
+        QuantityExpr::UpTo { max } => resolve_event_replacement_quantity(max, event_count),
         QuantityExpr::Ref { .. } => None,
     }
 }
@@ -1116,26 +1206,57 @@ fn dealt_damage_applier(
     ApplyResult::Modified(event)
 }
 
-// --- 17. Mill (ZoneChange from Library to Graveyard) ---
+// --- 17. Mill ---
 
 fn mill_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(
         event,
-        ProposedEvent::ZoneChange {
-            from: Zone::Library,
-            to: Zone::Graveyard,
+        ProposedEvent::Mill {
+            count,
+            destination: Zone::Graveyard,
             ..
-        }
+        } if *count > 0
     )
 }
 
 fn mill_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
+    rid: ReplacementId,
+    state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    ApplyResult::Modified(event)
+    let (player_id, count, destination, applied) = match event {
+        ProposedEvent::Mill {
+            player_id,
+            count,
+            destination,
+            applied,
+        } => (player_id, count, destination, applied),
+        other => {
+            return ApplyResult::Modified(other);
+        }
+    };
+
+    let new_count = state
+        .objects
+        .get(&rid.source)
+        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|def| def.execute.as_deref())
+        .and_then(|execute| match &*execute.effect {
+            Effect::Mill { count: qty, .. } if execute.sub_ability.is_none() => {
+                resolve_event_replacement_quantity(qty, count)
+            }
+            _ => None,
+        })
+        .map(|resolved| resolved.max(0) as u32)
+        .unwrap_or(count);
+
+    ApplyResult::Modified(ProposedEvent::Mill {
+        player_id,
+        count: new_count,
+        destination,
+        applied,
+    })
 }
 
 // --- 18. PayLife (matches LifeLoss) ---
@@ -1258,6 +1379,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         ReplacementHandlerEntry {
             matcher: draw_matcher,
             applier: draw_applier,
+        },
+    );
+    registry.insert(
+        ReplacementEvent::Scry,
+        ReplacementHandlerEntry {
+            matcher: scry_matcher,
+            applier: scry_applier,
         },
     );
     registry.insert(ReplacementEvent::DrawCards, stub()); // stays stub (alias for Draw)
@@ -1639,6 +1767,7 @@ fn evaluate_replacement_condition(
                 // replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
             };
@@ -1664,6 +1793,7 @@ fn evaluate_replacement_condition(
                 // replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
             };
@@ -1761,6 +1891,7 @@ fn evaluate_replacement_condition(
                 ControllerRef::Opponent => event_source_controller != controller,
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
+                | ControllerRef::ParentTargetController
                 | ControllerRef::DefendingPlayer => false,
             }
         }
@@ -1992,6 +2123,9 @@ pub fn find_applicable_replacements(
                                 // closed — parser never emits this variant here.
                                 crate::types::ability::ControllerRef::ScopedPlayer => false,
                                 crate::types::ability::ControllerRef::TargetPlayer => false,
+                                crate::types::ability::ControllerRef::ParentTargetController => {
+                                    false
+                                }
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
                             };
                             if !matches {
@@ -2003,7 +2137,9 @@ pub fn find_applicable_replacements(
                     // trigger this replacement. For GainLife events, determines whose life
                     // gain is replaced. Default (None) = controller only.
                     if let ProposedEvent::LifeGain { player_id, .. }
-                    | ProposedEvent::Draw { player_id, .. } = event
+                    | ProposedEvent::Draw { player_id, .. }
+                    | ProposedEvent::Scry { player_id, .. }
+                    | ProposedEvent::Mill { player_id, .. } = event
                     {
                         let player_ok = match &repl_def.valid_player {
                             Some(crate::types::ability::ControllerRef::Opponent) => {
@@ -2016,6 +2152,9 @@ pub fn find_applicable_replacements(
                             // replacement-application time. Fail closed.
                             Some(crate::types::ability::ControllerRef::ScopedPlayer) => false,
                             Some(crate::types::ability::ControllerRef::TargetPlayer) => false,
+                            Some(crate::types::ability::ControllerRef::ParentTargetController) => {
+                                false
+                            }
                             Some(crate::types::ability::ControllerRef::DefendingPlayer) => false,
                             None => {
                                 // Default: controller-only (backward compatible)
@@ -2453,23 +2592,29 @@ fn apply_single_replacement(
                     // apply to Damage events, where there is no `etb_counters`
                     // slot to absorb the counters into.
                     let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
-                    repl_def.execute.as_deref().and_then(|def| {
-                        // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
-                        // PutCounter/ChangeZone) in the sub_ability chain to find
-                        // the first non-modifier work. Covers both the existing
-                        // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
-                        // back) and composed replacements like Tap → BecomeCopy
-                        // (Vesuva "enter tapped as a copy").
-                        match EventModifiers::first_non_modifier_ability(Some(def)) {
-                            Some(real_work) => Some(Box::new(real_work.clone())),
-                            None if !is_damage
-                                && EventModifiers::has_only_event_modifier(Some(def)) =>
-                            {
-                                None
+                    if let Some(runtime) = repl_def.runtime_execute.clone() {
+                        Some(PostReplacementEffect::Resolved(runtime))
+                    } else {
+                        repl_def.execute.as_deref().and_then(|def| {
+                            // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
+                            // PutCounter/ChangeZone) in the sub_ability chain to find
+                            // the first non-modifier work. Covers both the existing
+                            // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
+                            // back) and composed replacements like Tap → BecomeCopy
+                            // (Vesuva "enter tapped as a copy").
+                            match EventModifiers::first_non_modifier_ability(Some(def)) {
+                                Some(real_work) => Some(PostReplacementEffect::Definition(
+                                    Box::new(real_work.clone()),
+                                )),
+                                None if !is_damage
+                                    && EventModifiers::has_only_event_modifier(Some(def)) =>
+                                {
+                                    None
+                                }
+                                _ => Some(PostReplacementEffect::Definition(Box::new(def.clone()))),
                             }
-                            _ => Some(Box::new(def.clone())),
-                        }
-                    })
+                        })
+                    }
                 }
                 _ => None,
             };
@@ -2530,15 +2675,10 @@ fn apply_single_replacement(
                 // pipeline wins; this matches how Optional replacements queue their
                 // accept-branch post-effect.
                 if let Some(post) = mandatory_post_effect {
-                    if state.post_replacement_effect.is_none() {
-                        state.post_replacement_effect = Some(post);
-                        state.post_replacement_source = Some(rid.source);
-                        // CR 615.5 + CR 609.7: only the Prevented arm populates
-                        // `post_replacement_event_source`; clear here so a prior
-                        // prevention's source can't leak into a non-prevention stash.
-                        state.post_replacement_event_source = None;
-                        state.post_replacement_event_target = None;
-                    }
+                    // CR 615.5 + CR 609.7: only the Prevented arm populates
+                    // `post_replacement_event_source`; clear here so a prior
+                    // prevention's source can't leak into a non-prevention stash.
+                    stash_post_replacement_effect(state, post, rid.source, None, None);
                 }
                 events.push(GameEvent::ReplacementApplied {
                     source_id: rid.source,
@@ -2561,12 +2701,13 @@ fn apply_single_replacement(
                 // (Swans of Bryn Argoll). Distinct from `post_replacement_source`,
                 // which is the replacement's own source (Swans itself).
                 if let Some(post) = mandatory_post_effect {
-                    if state.post_replacement_effect.is_none() {
-                        state.post_replacement_effect = Some(post);
-                        state.post_replacement_source = Some(rid.source);
-                        state.post_replacement_event_source = proposed_damage_source;
-                        state.post_replacement_event_target = proposed_damage_target.clone();
-                    }
+                    stash_post_replacement_effect(
+                        state,
+                        post,
+                        rid.source,
+                        proposed_damage_source,
+                        proposed_damage_target.clone(),
+                    );
                 }
                 events.push(GameEvent::ReplacementApplied {
                     source_id: rid.source,
@@ -2755,6 +2896,7 @@ pub fn continue_replacement(
             state.post_replacement_event_target = None;
         }
         state.post_replacement_effect = post_effect;
+        state.post_replacement_resolved_effect = None;
 
         return pipeline_loop(state, proposed, pending.depth + 1, &registry, events);
     }
@@ -2789,8 +2931,8 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr,
-        ReplacementDefinition, TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer,
+        QuantityExpr, ReplacementDefinition, TargetFilter, TargetRef,
     };
     use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -3111,6 +3253,176 @@ mod tests {
             }
             other => panic!("expected Execute with Draw, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn mill_replacement_uses_event_context_amount_multiplier() {
+        let repl =
+            ReplacementDefinition::new(ReplacementEvent::Mill).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::Mill {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::EventContextAmount,
+                        }),
+                    },
+                    target: TargetFilter::Controller,
+                    destination: Zone::Graveyard,
+                },
+            ));
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let proposed = ProposedEvent::Mill {
+            player_id: PlayerId(0),
+            count: 3,
+            destination: Zone::Graveyard,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::Mill { count, .. }) => {
+                assert_eq!(count, 6);
+            }
+            other => panic!("expected Execute with Mill, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scry_replacement_can_replace_scry_with_draw() {
+        let repl =
+            ReplacementDefinition::new(ReplacementEvent::Scry).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let proposed = ProposedEvent::Scry {
+            player_id: PlayerId(0),
+            count: 3,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::Draw { count, .. }) => {
+                assert_eq!(count, 3);
+            }
+            other => panic!("expected Execute with Draw, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scry_replacement_can_modify_scry_count() {
+        let repl =
+            ReplacementDefinition::new(ReplacementEvent::Scry).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::Scry {
+                    count: QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::EventContextAmount,
+                        }),
+                        offset: 1,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let proposed = ProposedEvent::Scry {
+            player_id: PlayerId(0),
+            count: 2,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::Scry { count, .. }) => {
+                assert_eq!(count, 3);
+            }
+            other => panic!("expected Execute with Scry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scry_replacement_defaults_to_controller_scope() {
+        let repl =
+            ReplacementDefinition::new(ReplacementEvent::Scry).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let registry = build_replacement_registry();
+        let controller_event = ProposedEvent::Scry {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let opponent_event = ProposedEvent::Scry {
+            player_id: PlayerId(1),
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        assert_eq!(
+            find_applicable_replacements(&state, &controller_event, &registry).len(),
+            1
+        );
+        assert!(find_applicable_replacements(&state, &opponent_event, &registry).is_empty());
+    }
+
+    #[test]
+    fn opponent_mill_replacement_does_not_apply_to_controller() {
+        let mut repl =
+            ReplacementDefinition::new(ReplacementEvent::Mill).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::Mill {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::EventContextAmount,
+                        }),
+                    },
+                    target: TargetFilter::Controller,
+                    destination: Zone::Graveyard,
+                },
+            ));
+        repl.valid_player = Some(ControllerRef::Opponent);
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let registry = build_replacement_registry();
+
+        let controller_event = ProposedEvent::Mill {
+            player_id: PlayerId(0),
+            count: 3,
+            destination: Zone::Graveyard,
+            applied: HashSet::new(),
+        };
+        let opponent_event = ProposedEvent::Mill {
+            player_id: PlayerId(1),
+            count: 3,
+            destination: Zone::Graveyard,
+            applied: HashSet::new(),
+        };
+
+        assert!(find_applicable_replacements(&state, &controller_event, &registry).is_empty());
+        assert_eq!(
+            find_applicable_replacements(&state, &opponent_event, &registry).len(),
+            1
+        );
     }
 
     #[test]

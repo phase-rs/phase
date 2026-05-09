@@ -1023,6 +1023,22 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ),
         value(
             QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+            tag("the total life lost by your opponents this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+            tag("total life lost by your opponents this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::Controller,
             },
             tag("total life you lost this turn"),
@@ -2267,6 +2283,7 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
     alt((
         value(CountScope::Controller, tag("you have")),
         value(CountScope::Opponents, tag("each opponent has")),
+        value(CountScope::Opponents, tag("your opponents have")),
         value(CountScope::All, tag("each player has")),
     ))
     .parse(input)
@@ -2850,6 +2867,19 @@ mod tests {
                 scope: CountScope::Controller,
             }
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_total_life_lost_by_opponents() {
+        let (rest, q) =
+            parse_quantity_ref("the total life lost by your opponents this turn").unwrap();
+        assert!(matches!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent { .. }
+            }
+        ));
         assert_eq!(rest, "");
     }
 
@@ -4081,6 +4111,11 @@ mod tests {
             (
                 "rad counters each opponent has",
                 PlayerCounterKind::Rad,
+                CountScope::Opponents,
+            ),
+            (
+                "poison counter your opponents have",
+                PlayerCounterKind::Poison,
                 CountScope::Opponents,
             ),
         ];

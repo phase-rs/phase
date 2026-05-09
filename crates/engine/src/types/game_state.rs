@@ -43,6 +43,10 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
 fn default_remaining_one() -> u32 {
     1
 }
@@ -182,6 +186,11 @@ pub struct SpellCastRecord {
     /// the underlying object (which may have left the stack).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_x_in_cost: bool,
+    /// CR 400.1 + CR 601.2a: Zone the spell was cast from, captured at cast-time
+    /// so per-turn spell-history conditions can answer "from your hand" after
+    /// the spell has moved on from the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_zone: Option<Zone>,
 }
 
 /// CR 601.2f: A pending one-shot cost reduction for the next spell a player casts.
@@ -618,6 +627,8 @@ pub struct PendingCast {
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
     #[serde(default)]
     pub casting_variant: CastingVariant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
     /// resource (damage, counters, life) among the chosen targets via DistributeAmong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -681,6 +692,7 @@ impl PendingCast {
             activation_ability_index: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -1220,6 +1232,10 @@ pub enum WaitingFor {
         player: PlayerId,
         cards: Vec<ObjectId>,
         count: usize,
+        /// CR 107.1c: Minimum number of cards that must be selected when a
+        /// choice allows a range. Defaults to 0 for ordinary "up to" choices.
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        min_count: usize,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         up_to: bool,
         source_id: ObjectId,
@@ -1797,6 +1813,14 @@ pub enum WaitingFor {
         /// Vote tallies indexed parallel to `options`. `tallies[i]` is the
         /// number of votes cast for `options[i]` so far.
         tallies: Vec<u32>,
+        /// CR 608.2c + CR 701.38: Per-vote ballot ledger. Each entry is
+        /// `(voter, choice_index)` recorded when the voter casts that vote.
+        /// Mirrors `tallies` aggregation but preserves voter identity so the
+        /// per-choice sub-effect can route to `PlayerFilter::VotedFor` against
+        /// `state.last_vote_ballots`. Append-only; the lifecycle matches
+        /// `last_zone_changed_ids` (cleared at chain depth 0).
+        #[serde(default)]
+        ballots: im::Vector<(PlayerId, u8)>,
         /// CR 701.38: Per-choice sub-effects. `per_choice_effect[i]` resolves
         /// once for each vote tallied against `options[i]`. Carried on the
         /// WaitingFor so the resolver chain doesn't need to re-find the source
@@ -2531,6 +2555,10 @@ pub struct GameState {
     /// Set by `continue_replacement` for Optional replacements, consumed by the caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_effect: Option<Box<crate::types::ability::AbilityDefinition>>,
+    /// Transient resolved continuation for runtime-created replacement shields.
+    /// This preserves selected targets for CR 615.5 prevention follow-ups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_replacement_resolved_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
 
     /// CR 615.5: Source object of the replacement that stashed
     /// `post_replacement_effect`. Used by prevention follow-ups (e.g. Phyrexian
@@ -3022,6 +3050,19 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_zone_changed_ids: Vec<ObjectId>,
 
+    /// CR 608.2c + CR 701.38: Per-vote ballots from the most recent
+    /// `Effect::Vote` resolution within the current top-level ability
+    /// resolution. Each entry is `(voter, choice_index)`; populated by
+    /// `vote::resolve_tally` immediately before per-choice sub-effects fan
+    /// out, and read by `PlayerFilter::VotedFor` to route per-choice
+    /// `player_scope` sub-effects ("for each player who chose money,
+    /// you and that player each ...").
+    ///
+    /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0
+    /// in `resolve_ability_chain` so cross-resolution leakage is impossible.
+    #[serde(default)]
+    pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
+
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like
     /// `players_who_searched_library_this_turn`: this set accumulates only
@@ -3165,6 +3206,8 @@ pub struct PendingSpellResolution {
     pub controller: PlayerId,
     pub casting_variant: CastingVariant,
     pub cast_from_zone: Option<crate::types::zones::Zone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     pub spell_targets: Vec<crate::types::ability::TargetRef>,
     #[serde(default)]
     pub actual_mana_spent: u32,
@@ -3267,6 +3310,7 @@ impl GameState {
             priority_pass_count: 0,
             pending_replacement: None,
             post_replacement_effect: None,
+            post_replacement_resolved_effect: None,
             post_replacement_source: None,
             post_replacement_event_source: None,
             post_replacement_event_target: None,
@@ -3366,6 +3410,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             last_zone_changed_ids: Vec::new(),
+            last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
             last_effect_count: None,
@@ -3575,6 +3620,7 @@ impl PartialEq for GameState {
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
             && self.last_zone_changed_ids == other.last_zone_changed_ids
+            && self.last_vote_ballots == other.last_vote_ballots
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
             && self.last_effect_counts_by_player == other.last_effect_counts_by_player
@@ -3702,6 +3748,7 @@ mod tests {
                 activation_ability_index: None,
                 target_constraints: vec![],
                 casting_variant: CastingVariant::Normal,
+                cast_timing_permission: None,
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
@@ -3920,6 +3967,7 @@ mod tests {
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
             count: 1,
+            min_count: 0,
             up_to: false,
             source_id: ObjectId(100),
             effect_kind: crate::types::ability::EffectKind::Sacrifice,
@@ -3966,6 +4014,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -4144,6 +4193,7 @@ mod tests {
             player: PlayerId(0),
             cards: vec![ObjectId(1), ObjectId(2)],
             count: 1,
+            min_count: 0,
             up_to: true,
             source_id: ObjectId(10),
             effect_kind: crate::types::ability::EffectKind::ChangeZone,

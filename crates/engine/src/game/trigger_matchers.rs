@@ -522,6 +522,8 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::None => false,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        // CR 109.5: OriginalController is a player reference, not an object.
+        TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false,
         // SpecificPlayer scopes to a player, not an object — never matches an object.
         TargetFilter::SpecificPlayer { .. } => false,

@@ -291,6 +291,17 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             return (TargetFilter::ParentTarget, rem);
         }
     }
+    // "the first [type phrase]" → anaphoric reference to an object identified
+    // by the triggering event. Lifeline-style delayed triggers snapshot this
+    // parent target while the event context is still available.
+    if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("the first ").parse(lower.as_str())
+    {
+        let original_rest = &text[lower.len() - rest_subject.len()..];
+        let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
+        if !matches!(filter, TargetFilter::Any) {
+            return (TargetFilter::ParentTarget, rem);
+        }
+    }
 
     // "~" — self-reference (normalized from card name)
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("~").parse(lower.as_str()) {
@@ -2863,6 +2874,17 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
         }
     }
 
+    if let Ok((rest, kind)) = value(
+        KeywordKind::Augment,
+        tag::<_, _, OracleError<'_>>("augment"),
+    )
+    .parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
     if matches!(
         text,
         "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
@@ -4029,6 +4051,13 @@ mod tests {
     }
 
     #[test]
+    fn the_first_typed_object_inherits_parent_target() {
+        let (f, rest) = parse_target("the first card to the battlefield");
+        assert_eq!(f, TargetFilter::ParentTarget);
+        assert_eq!(rest, " to the battlefield");
+    }
+
+    #[test]
     fn tap_or_untap_target_permanent_strips_verb_prefix() {
         let (f, rest) = parse_target("or untap target permanent");
         assert_eq!(f, TargetFilter::Typed(TypedFilter::permanent()));
@@ -4796,6 +4825,19 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::card().properties(vec![FilterProp::HasKeywordKind {
                     value: KeywordKind::Flashback,
+                },])
+            )
+        );
+    }
+
+    #[test]
+    fn card_with_augment_uses_keyword_kind_filter() {
+        let (f, _) = parse_type_phrase("card with augment");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::HasKeywordKind {
+                    value: KeywordKind::Augment,
                 },])
             )
         );
@@ -6309,6 +6351,23 @@ mod tests {
             assert_eq!(filters.len(), 2, "expected 2 Or branches, got {filters:?}");
         } else {
             panic!("expected Or filter, got {filter:?}");
+        }
+    }
+
+    #[test]
+    fn parse_type_phrase_handles_plural_head_subtype() {
+        let (filter, remainder) = parse_type_phrase("Heads");
+        assert!(
+            remainder.trim().is_empty(),
+            "remainder should be empty, got: '{remainder}'"
+        );
+        match filter {
+            TargetFilter::Typed(typed) => {
+                assert!(typed
+                    .type_filters
+                    .contains(&TypeFilter::Subtype("Head".to_string())));
+            }
+            other => panic!("expected Head subtype filter, got {other:?}"),
         }
     }
 

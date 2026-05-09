@@ -687,6 +687,7 @@ pub fn apply_create_token_after_replacement(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,
                         count: QuantityExpr::Fixed { value: 1 },
+                        min_count: 0,
                     },
                     vec![TargetRef::Object(obj_id)],
                     spec.source_id,
