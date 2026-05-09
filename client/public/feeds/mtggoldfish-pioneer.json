@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-22T00:00:00Z",
+  "updated": "2026-05-23T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -163,8 +163,8 @@
       "name": "Orzhov Greasefang",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "B"
+        "B",
+        "W"
       ],
       "tags": [
         "metagame"
@@ -172,19 +172,15 @@
       "main": [
         {
           "count": 2,
-          "name": "Bleachbone Verge"
-        },
-        {
-          "count": 2,
           "name": "Brightclimb Pathway"
         },
         {
-          "count": 4,
-          "name": "Iron-Shield Elf"
+          "count": 2,
+          "name": "Ral Zarek, Guest Lecturer"
         },
         {
-          "count": 4,
-          "name": "Godless Shrine"
+          "count": 2,
+          "name": "Swamp"
         },
         {
           "count": 4,
@@ -204,15 +200,15 @@
         },
         {
           "count": 4,
-          "name": "Monument to Endurance"
+          "name": "Iron-Shield Elf"
         },
         {
           "count": 4,
           "name": "Parhelion II"
         },
         {
-          "count": 4,
-          "name": "Thoughtseize"
+          "count": 1,
+          "name": "Plains"
         },
         {
           "count": 4,
@@ -223,8 +219,8 @@
           "name": "Takenuma, Abandoned Mire"
         },
         {
-          "count": 1,
-          "name": "Ral Zarek, Guest Lecturer"
+          "count": 4,
+          "name": "The Mycosynth Gardens"
         },
         {
           "count": 1,
@@ -232,69 +228,53 @@
         },
         {
           "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
+          "name": "Godless Shrine"
         },
         {
           "count": 4,
-          "name": "The Mycosynth Gardens"
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 4,
+          "name": "Monument to Endurance"
         },
         {
           "count": 3,
           "name": "Vanishing Verse"
         },
         {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
           "count": 2,
           "name": "Shadowy Backstreet"
         },
         {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Lively Dirge"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
+          "count": 2,
+          "name": "Bleachbone Verge"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Loran of the Third Path"
-        },
-        {
-          "count": 1,
-          "name": "Cryptcaller Chariot"
-        },
-        {
-          "count": 3,
-          "name": "Pest Control"
-        },
-        {
           "count": 2,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 4,
           "name": "Duress"
         },
         {
           "count": 2,
-          "name": "Soul-Guide Lantern"
+          "name": "High Noon"
         },
         {
           "count": 3,
           "name": "Doorkeeper Thrull"
         },
         {
-          "count": 2,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 1,
-          "name": "Ral Zarek, Guest Lecturer"
+          "count": 4,
+          "name": "Pest Control"
         }
       ]
     },
@@ -302,8 +282,8 @@
       "name": "Izzet Prowess",
       "author": "MTGGoldfish",
       "colors": [
-        "R",
-        "U"
+        "U",
+        "R"
       ],
       "tags": [
         "metagame"
@@ -323,6 +303,10 @@
         },
         {
           "count": 4,
+          "name": "Cori-Steel Cutter"
+        },
+        {
+          "count": 2,
           "name": "Emberheart Challenger"
         },
         {
@@ -331,15 +315,39 @@
         },
         {
           "count": 4,
+          "name": "Flow State"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
           "name": "Spirebluff Canal"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Reckless Rage"
         },
         {
           "count": 3,
           "name": "Riverglide Pathway"
+        },
+        {
+          "count": 3,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 3,
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
         },
         {
           "count": 2,
@@ -351,38 +359,14 @@
         },
         {
           "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
           "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 3,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 3,
-          "name": "Flow State"
-        },
-        {
-          "count": 3,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Cori-Steel Cutter"
         }
       ],
       "sideboard": [
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
         {
           "count": 1,
           "name": "Accumulate Wisdom"
@@ -396,16 +380,20 @@
           "name": "Firebending Lesson"
         },
         {
-          "count": 2,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
+          "count": 1,
+          "name": "Iroh's Demonstration"
         },
         {
           "count": 1,
-          "name": "Spider-Sense"
+          "name": "Octopus Form"
+        },
+        {
+          "count": 2,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 2,
+          "name": "Scorching Shot"
         },
         {
           "count": 2,
@@ -413,23 +401,11 @@
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
           "name": "Abrade"
         },
         {
           "count": 1,
-          "name": "Octopus Form"
-        },
-        {
-          "count": 1,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Charm"
+          "name": "Spider-Sense"
         }
       ]
     },
@@ -453,22 +429,6 @@
           "name": "Archon of Emeria"
         },
         {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Collected Company"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Innocence"
-        },
-        {
           "count": 4,
           "name": "Razorverge Thicket"
         },
@@ -477,16 +437,24 @@
           "name": "Ouroboroid"
         },
         {
-          "count": 3,
-          "name": "Plains"
+          "count": 4,
+          "name": "Collected Company"
         },
         {
           "count": 4,
           "name": "Skyclave Apparition"
         },
         {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 2,
+          "name": "The Wandering Emperor"
+        },
+        {
           "count": 4,
-          "name": "Badgermole Cub"
+          "name": "Elvish Mystic"
         },
         {
           "count": 4,
@@ -502,11 +470,11 @@
         },
         {
           "count": 4,
-          "name": "Elvish Mystic"
+          "name": "Llanowar Elves"
         },
         {
           "count": 4,
-          "name": "Llanowar Elves"
+          "name": "Enduring Innocence"
         },
         {
           "count": 2,
@@ -518,11 +486,19 @@
         },
         {
           "count": 2,
-          "name": "The Wandering Emperor"
+          "name": "Starting Town"
         },
         {
-          "count": 2,
-          "name": "Starting Town"
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 3,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
         }
       ],
       "sideboard": [
@@ -533,10 +509,6 @@
         {
           "count": 2,
           "name": "Seam Rip"
-        },
-        {
-          "count": 3,
-          "name": "Beza, the Bounding Spring"
         },
         {
           "count": 2,
@@ -553,6 +525,10 @@
         {
           "count": 2,
           "name": "Aven Interrupter"
+        },
+        {
+          "count": 3,
+          "name": "Beza, the Bounding Spring"
         }
       ]
     },
