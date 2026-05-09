@@ -4155,8 +4155,9 @@ fn apply_mana_spell_grants(
     }
 }
 
-/// Pay an activated ability's cost. Handles `Tap`, `Mana`, `Composite` (recursive),
-/// and passes through other cost types that require interactive resolution.
+/// Pay an activated ability's cost. Handles auto-payable cost components
+/// (`Tap`, `Mana`, `PayLife`, `Composite`, and self-referential zone costs)
+/// and passes through cost types that require interactive resolution.
 pub fn pay_ability_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -4196,6 +4197,19 @@ pub fn pay_ability_cost(
         AbilityCost::Composite { costs } => {
             for sub_cost in costs {
                 pay_ability_cost(state, player, source_id, sub_cost, events)?;
+            }
+        }
+        AbilityCost::PayLife { amount } => {
+            let amount = resolve_quantity(state, amount, player, source_id);
+            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            match super::life_costs::pay_life_as_cost(state, player, amount, events) {
+                super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                super::life_costs::PayLifeCostResult::InsufficientLife
+                | super::life_costs::PayLifeCostResult::LockedCantLoseLife => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay life cost".to_string(),
+                    ));
+                }
             }
         }
         // CR 118.3: Sacrifice as a cost — sacrifice the source (SelfRef) or a chosen permanent.
@@ -4414,10 +4428,9 @@ pub fn pay_ability_cost(
                 None,
             );
         }
-        // Other cost types (Exile, PayLife, etc.) require interactive resolution
-        // and are intercepted before reaching pay_ability_cost, or are not yet auto-payable.
+        // Other cost types require interactive resolution and are intercepted
+        // before reaching pay_ability_cost, or are not yet auto-payable.
         AbilityCost::Untap
-        | AbilityCost::PayLife { .. }
         | AbilityCost::Discard { .. }
         | AbilityCost::Exile { .. }
         | AbilityCost::CollectEvidence { .. }
@@ -4753,10 +4766,9 @@ fn can_pay_ability_cost_now(
             return false;
         }
     }
-    // CR 118.3 + CR 119.4b + CR 119.8: Pay-life is paid interactively (or via
-    // the effect resolver); `pay_ability_cost`'s `PayLife` arm is a no-op.
-    // Pre-check both insufficient-life and CantLoseLife so locked or underfunded
-    // activated abilities never appear as legal actions.
+    // CR 118.3 + CR 119.4b + CR 119.8: Pre-check both insufficient-life and
+    // CantLoseLife so locked or underfunded activated abilities never appear
+    // as legal actions. The real payment is applied by `pay_ability_cost`.
     if let Some(amount) = find_pay_life_cost(cost, state, player, source_id) {
         if !super::life_costs::can_pay_life_cost(state, player, amount) {
             return false;
@@ -13568,6 +13580,55 @@ mod tests {
         assert!(
             !can_activate_ability_now(&state, PlayerId(0), greed, 0),
             "can_activate_ability_now must reject PayLife activation with insufficient life"
+        );
+    }
+
+    /// CR 118.3 + CR 119.4: Composite activated costs such as fetchlands'
+    /// "{T}, Pay 1 life, Sacrifice this land" must apply every payable
+    /// component, including the life payment.
+    #[test]
+    fn composite_activated_pay_life_cost_deducts_life() {
+        let mut state = setup_game_at_main_phase();
+        let fetch = create_object(
+            &mut state,
+            CardId(0xFE7C),
+            PlayerId(0),
+            "Fetchland".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fetch)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: 1,
+                },
+            ],
+        };
+        let life_before = state.players[0].life;
+        let mut events = Vec::new();
+
+        pay_ability_cost(&mut state, PlayerId(0), fetch, &cost, &mut events)
+            .expect("fetchland-style composite cost should be payable");
+
+        assert_eq!(state.players[0].life, life_before - 1);
+        assert_eq!(state.objects.get(&fetch).unwrap().zone, Zone::Graveyard);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeChanged { player_id, amount: -1 } if *player_id == PlayerId(0))),
+            "pay-life cost must emit the life-loss event"
         );
     }
 
