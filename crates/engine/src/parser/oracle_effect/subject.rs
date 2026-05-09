@@ -159,6 +159,10 @@ fn extract_subject_text(text: &str) -> Option<String> {
 fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) -> Option<ClauseAst> {
     type VE<'a> = OracleError<'a>;
 
+    if let Some(clause) = try_parse_contracted_subject_additive_type_clause(text, ctx) {
+        return Some(clause);
+    }
+
     let lower = text.to_lowercase();
     let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
         alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
@@ -170,6 +174,40 @@ fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) ->
     let predicate = &text[text.len() - predicate_lower.len()..];
     let application = additive_type_subject_application(subject_text, ctx)?;
     let clause = build_additive_type_continuous_clause(&application, predicate)?;
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: application.affected,
+            target: application.target,
+            multi_target: application.multi_target,
+            inherits_parent: application.inherits_parent,
+            is_optional: application.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Continuous {
+            effect: clause.effect,
+            duration: clause.duration,
+            sub_ability: clause.sub_ability,
+        }),
+    })
+}
+
+fn try_parse_contracted_subject_additive_type_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = text.to_lowercase();
+    let (_, (subject_text, prefix_len)) = alt((
+        value(("it", "it's ".len()), tag::<_, _, VE>("it's ")),
+        value(("it", "it’s ".len()), tag::<_, _, VE>("it’s ")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let rest_original = &text[prefix_len..];
+    let predicate = format!("is {rest_original}");
+    let application = additive_type_subject_application(subject_text, ctx)?;
+    let clause = build_additive_type_continuous_clause(&application, &predicate)?;
 
     Some(ClauseAst::SubjectPredicate {
         subject: Box::new(SubjectPhraseAst {

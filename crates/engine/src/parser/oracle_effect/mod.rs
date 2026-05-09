@@ -5688,6 +5688,12 @@ fn has_typed_target(effect: &Effect) -> bool {
         } | Effect::Attach {
             target: TargetFilter::Typed(_),
             ..
+        } | Effect::ChangeZone {
+            target: TargetFilter::Typed(_),
+            ..
+        } | Effect::ChangeZoneAll {
+            target: TargetFilter::Typed(_),
+            ..
         } | Effect::GenericEffect {
             target: Some(TargetFilter::Typed(_)),
             ..
@@ -26191,6 +26197,41 @@ mod snapshot_tests {
                 matches!(
                     modification,
                     ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn returned_target_can_receive_contracted_additive_type_followup() {
+        let def = parse_effect_chain(
+            "Return target creature card from a graveyard to the battlefield under your control. It's a Phyrexian in addition to its other types.",
+            AbilityKind::Activated,
+        );
+
+        assert!(
+            matches!(&*def.effect, Effect::ChangeZone { .. }),
+            "expected ChangeZone, got {:?}",
+            def.effect
+        );
+
+        let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
+        assert_eq!(subtype_followup.duration, Some(Duration::Permanent));
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*subtype_followup.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
+        };
+        assert_eq!(*duration, Some(Duration::Permanent));
+        assert_eq!(*target, Some(TargetFilter::ParentTarget));
+        assert!(static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddSubtype { subtype } if subtype == "Phyrexian"
                 )
             })
         }));
