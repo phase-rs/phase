@@ -12611,7 +12611,7 @@ mod tests {
         AbilityCondition, CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator,
         ContinuousModification, ControllerRef, CountScope, DoublePTMode, Duration, FilterProp,
         GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction, ObjectScope,
-        PaymentCost, QuantityExpr, QuantityRef, TypeFilter, ZoneRef,
+        PaymentCost, QuantityExpr, QuantityRef, SearchSelectionConstraint, TypeFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::keywords::Keyword;
@@ -19429,43 +19429,42 @@ mod tests {
     }
 
     #[test]
-    fn lotuslight_dancers_serial_search_moves_each_card_to_graveyard() {
+    fn lotuslight_dancers_multi_filter_search_prompts_once_for_three_cards() {
         let def = parse_effect_chain(
             "Search your library for a black card, a green card, and a blue card. Put those cards into your graveyard, then shuffle.",
             AbilityKind::Spell,
         );
 
-        assert_search_color(&def, ManaColor::Black);
-        let first_move = def.sub_ability.as_deref().expect("expected first move");
-        assert_library_change_destination(first_move, Zone::Graveyard);
-
-        let second_search = first_move
-            .sub_ability
-            .as_deref()
-            .expect("expected second search");
-        assert_search_color(second_search, ManaColor::Green);
-        let second_move = second_search
-            .sub_ability
-            .as_deref()
-            .expect("expected second move");
-        assert_library_change_destination(second_move, Zone::Graveyard);
-
-        let third_search = second_move
-            .sub_ability
-            .as_deref()
-            .expect("expected third search");
-        assert_search_color(third_search, ManaColor::Blue);
-        let third_move = third_search
-            .sub_ability
-            .as_deref()
-            .expect("expected third move");
-        assert_library_change_destination(third_move, Zone::Graveyard);
-    }
-
-    fn assert_search_color(def: &AbilityDefinition, expected: ManaColor) {
-        let Effect::SearchLibrary { filter, .. } = &*def.effect else {
+        let Effect::SearchLibrary {
+            filter,
+            count,
+            selection_constraint,
+            ..
+        } = &*def.effect
+        else {
             panic!("expected SearchLibrary, got {:?}", def.effect);
         };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or search filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+        assert_filter_has_color(&filters[0], ManaColor::Black);
+        assert_filter_has_color(&filters[1], ManaColor::Green);
+        assert_filter_has_color(&filters[2], ManaColor::Blue);
+        let SearchSelectionConstraint::MatchEachFilter {
+            filters: constrained,
+        } = selection_constraint
+        else {
+            panic!("expected MatchEachFilter constraint, got {selection_constraint:?}");
+        };
+        assert_eq!(constrained, filters);
+
+        let move_found = def.sub_ability.as_deref().expect("expected move");
+        assert_library_change_destination(move_found, Zone::Graveyard);
+    }
+
+    fn assert_filter_has_color(filter: &TargetFilter, expected: ManaColor) {
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected typed search filter, got {filter:?}");
         };

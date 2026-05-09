@@ -8565,6 +8565,52 @@ mod tests {
     }
 
     #[test]
+    fn self_return_to_hand_cost_only_offers_source() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(73),
+            PlayerId(0),
+            "Maze's End".to_string(),
+            Zone::Battlefield,
+        );
+        let other_land = add_basic_land(&mut state, CardId(74), "Forest", "Forest");
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::SearchLibrary {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Land)
+                                .with_type(TypeFilter::Subtype("Gate".to_string())),
+                        ),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        reveal: false,
+                        target_player: None,
+                        selection_constraint: SearchSelectionConstraint::None,
+                    },
+                )
+                .cost(AbilityCost::ReturnToHand {
+                    count: 1,
+                    filter: Some(TargetFilter::SelfRef),
+                }),
+            );
+        }
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
+        match waiting {
+            WaitingFor::ReturnToHandForCost { permanents, .. } => {
+                assert_eq!(permanents, vec![source]);
+                assert!(!permanents.contains(&other_land));
+            }
+            other => panic!("expected ReturnToHandForCost, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn cancel_targeted_activated_ability_does_not_untap_source() {
         let mut state = setup_game_at_main_phase();
         let source = create_object(

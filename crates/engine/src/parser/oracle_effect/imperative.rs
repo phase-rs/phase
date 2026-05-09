@@ -3102,20 +3102,16 @@ pub(super) fn lower_put_counter_list(
     clause
 }
 
-/// CR 701.23a + CR 107.1: Lower a multi-filter library search ("a X card and
-/// a Y card [and a Z card ...], put them onto the battlefield [tapped], then
-/// shuffle") into a `ParsedEffectClause`. The result shape is an interleaved
-/// chain of `SearchLibrary` and `ChangeZone` effects — one search per filter,
-/// each followed by a move-to-destination for the found card — terminated by
-/// the final `SearchLibrary`. The terminal `ChangeZone` for that last search
-/// is added downstream by the sequence parser's intrinsic continuation (the
-/// same path that handles single-filter searches), so the total resolved
-/// chain is: `Search(f1) → ChangeZone → Search(f2) → ... → Search(fN) →
-/// ChangeZone → [Shuffle]`.
+/// CR 701.23a + CR 701.23h: Lower a multi-filter library search ("a X card
+/// and a Y card [and a Z card ...], put them onto the battlefield [tapped],
+/// then shuffle") into a single `SearchLibrary` when each printed filter asks
+/// for one card. The prompt exposes the union of legal cards while
+/// `SearchSelectionConstraint::MatchEachFilter` requires the submitted set to
+/// be assignable to each printed description.
 ///
-/// Each search runs independently (CR 701.23 — search is a compound action
-/// per filter) and shares the same `reveal` / `target_player` / `up_to`
-/// semantics derived from the sentence.
+/// Non-unit counts, `up to`, or additional group constraints keep the older
+/// chained lowering below so those semantics remain explicit until they can be
+/// represented as a composed selection constraint.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_multi_filter_search_library(
     primary_filter: TargetFilter,
@@ -3128,6 +3124,26 @@ pub(super) fn lower_multi_filter_search_library(
     destination: Zone,
     enter_tapped: bool,
 ) -> ParsedEffectClause {
+    if !up_to
+        && selection_constraint == SearchSelectionConstraint::None
+        && matches!(count, QuantityExpr::Fixed { value: 1 })
+    {
+        let filters = std::iter::once(primary_filter)
+            .chain(extra_filters)
+            .collect::<Vec<_>>();
+        return parsed_clause(Effect::SearchLibrary {
+            filter: TargetFilter::Or {
+                filters: filters.clone(),
+            },
+            count: QuantityExpr::Fixed {
+                value: filters.len() as i32,
+            },
+            reveal,
+            target_player,
+            selection_constraint: SearchSelectionConstraint::MatchEachFilter { filters },
+        });
+    }
+
     // Build the chain right-to-left so each link owns its successor. The chain
     // ends at a `SearchLibrary` (the last extra filter) so the outer intrinsic
     // continuation can append the terminal `ChangeZone` for that last search.

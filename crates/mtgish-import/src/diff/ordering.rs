@@ -163,6 +163,10 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("SearchSelectionConstraint", "qualities"),
         OrderingClass::SetEquivalent,
     ),
+    (
+        ("SearchSelectionConstraint", "filters"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- ChoiceType / mana production -----
     // Player-facing string options. The player picks one; order is the
     // display order in the prompt UI. Treat as positional so the diff

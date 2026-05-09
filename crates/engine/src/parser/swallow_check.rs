@@ -1078,6 +1078,10 @@ fn detect_dynamic_qty(
         // Sylvan Library class: "For each of those cards, pay N life or put
         // the card on top" is captured as a dedicated per-card choice effect.
         "ChooseDrawnThisTurnPayOrTopdeck",
+        // CR 608.2c + CR 701.38: "For each player who chose <choice>" vote
+        // bodies are captured by `PlayerFilter::VotedFor`, which resolves
+        // against the vote ballot ledger rather than a QuantityExpr.
+        "VotedFor",
     ];
     if json_has_any(ast_json, dynamic_markers) {
         return;
@@ -1991,6 +1995,20 @@ mod tests {
             "Commander creatures you own have \"When this creature enters and at the beginning of your upkeep, each player may put two +1/+1 counters on a creature they control. For each opponent who does, you gain protection from that player until your next turn.\"",
             "Noble Heritage",
             &["Enchantment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    #[test]
+    fn dynamic_qty_accepts_vote_voted_for_carrier() {
+        let parsed = parse_named(
+            "At the beginning of your upkeep, each opponent chooses money, friends, or secrets. \
+             For each player who chose money, you and that player each create a Treasure token. \
+             For each player who chose friends, you and that player each create a 1/1 green and white Citizen creature token. \
+             For each player who chose secrets, you and that player each draw a card.",
+            "Master of Ceremonies",
+            &["Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));

@@ -2632,10 +2632,11 @@ pub mod tests {
     use crate::game::filter::{matches_target_filter, FilterContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Comparator, ControllerRef, DelayedTriggerCondition, Effect,
-        FilterProp, GainLifePlayer, KickerVariant, MultiTargetSpec, QuantityExpr, QuantityRef,
-        ResolvedAbility, SharedQuality, SharedQualityRelation, StaticDefinition, TargetFilter,
-        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, AggregateFunction, Comparator, ContinuousModification,
+        ControllerRef, DelayedTriggerCondition, Effect, FilterProp, GainLifePlayer, KickerVariant,
+        MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
+        SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
+        TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -2647,6 +2648,7 @@ pub mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::AttackTargetFilter;
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -8010,6 +8012,100 @@ pub mod tests {
                 )
             }),
             "paid granted casualty should create a copy trigger"
+        );
+    }
+
+    #[test]
+    fn background_granted_commander_attack_trigger_uses_defending_player_life_condition() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        state.players[0].life = 20;
+        state.players[1].life = 20;
+
+        let background = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Guild Artisan".to_string(),
+            Zone::Battlefield,
+        );
+        let commander = create_object(
+            &mut state,
+            CardId(2),
+            controller,
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.is_commander = true;
+        }
+
+        let mut granted_trigger = TriggerDefinition::new(TriggerMode::Attacks)
+            .valid_card(TargetFilter::SelfRef)
+            .condition(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::DefendingPlayer,
+                    },
+                },
+            })
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        granted_trigger.attack_target_filter = Some(AttackTargetFilter::Player);
+
+        let grant = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).properties(vec![
+                    FilterProp::IsCommander,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                ]),
+            ))
+            .modifications(vec![ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted_trigger),
+            }]);
+        state
+            .objects
+            .get_mut(&background)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+        state.layers_dirty = true;
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![commander],
+                defending_player: PlayerId(1),
+                attacks: vec![(
+                    commander,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                )],
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == commander
+                && matches!(&entry.kind, StackEntryKind::TriggeredAbility { ability, .. }
+                    if matches!(ability.effect, Effect::Draw { .. }))),
+            "Guild Artisan-style Background grant should trigger from the attacking commander"
         );
     }
 

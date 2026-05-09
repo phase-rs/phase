@@ -117,7 +117,47 @@ pub fn selection_satisfies_constraint(
             }
             comparator.evaluate(total, *value)
         }
+        SearchSelectionConstraint::MatchEachFilter { filters } => {
+            selection_matches_each_filter(state, chosen, filters)
+        }
     }
+}
+
+fn selection_matches_each_filter(
+    state: &GameState,
+    chosen: &[crate::types::identifiers::ObjectId],
+    filters: &[TargetFilter],
+) -> bool {
+    if chosen.len() != filters.len() {
+        return false;
+    }
+    let mut used = vec![false; chosen.len()];
+    assign_filter_slot(state, chosen, filters, &mut used, 0)
+}
+
+fn assign_filter_slot(
+    state: &GameState,
+    chosen: &[crate::types::identifiers::ObjectId],
+    filters: &[TargetFilter],
+    used: &mut [bool],
+    filter_idx: usize,
+) -> bool {
+    if filter_idx == filters.len() {
+        return true;
+    }
+
+    let filter_ctx = FilterContext::neutral();
+    chosen.iter().enumerate().any(|(card_idx, card_id)| {
+        if used[card_idx]
+            || !matches_target_filter(state, *card_id, &filters[filter_idx], &filter_ctx)
+        {
+            return false;
+        }
+        used[card_idx] = true;
+        let matched = assign_filter_slot(state, chosen, filters, used, filter_idx + 1);
+        used[card_idx] = false;
+        matched
+    })
 }
 
 fn selection_has_distinct_quality(
@@ -337,7 +377,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Comparator, QuantityExpr, TypedFilter};
+    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -1095,12 +1135,56 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn match_each_filter_selection_constraint_requires_distinct_assignments() {
+        let mut state = GameState::new_two_player(42);
+        let black_green = add_library_creature(&mut state, 1, PlayerId(0), "Golgari");
+        let blue = add_library_creature(&mut state, 2, PlayerId(0), "Drake");
+        let colorless = add_library_creature(&mut state, 3, PlayerId(0), "Construct");
+        {
+            let obj = state.objects.get_mut(&black_green).unwrap();
+            obj.color = vec![
+                crate::types::mana::ManaColor::Black,
+                crate::types::mana::ManaColor::Green,
+            ];
+        }
+        state.objects.get_mut(&blue).unwrap().color = vec![crate::types::mana::ManaColor::Blue];
+
+        let color_filter = |color| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties: vec![FilterProp::HasColor { color }],
+            })
+        };
+        let constraint = SearchSelectionConstraint::MatchEachFilter {
+            filters: vec![
+                color_filter(crate::types::mana::ManaColor::Black),
+                color_filter(crate::types::mana::ManaColor::Green),
+                color_filter(crate::types::mana::ManaColor::Blue),
+            ],
+        };
+
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[black_green, blue, colorless],
+            &constraint
+        ));
+
+        let green = add_library_creature(&mut state, 4, PlayerId(0), "Elf");
+        state.objects.get_mut(&green).unwrap().color = vec![crate::types::mana::ManaColor::Green];
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[black_green, green, blue],
+            &constraint
+        ));
+    }
+
     /// CR 107.3a + CR 601.2b: Nature's Rhythm — search for a creature card with mana
     /// value X or less. With X=4, only CMC-≤-4 creatures should be selectable,
     /// regardless of what's in the library.
     #[test]
     fn natures_rhythm_x_mana_value_restricts_search_targets() {
-        use crate::types::ability::{FilterProp, QuantityExpr, QuantityRef};
         let mut state = GameState::new_two_player(42);
         let cmc2 = add_library_creature_with_cmc(&mut state, 1, PlayerId(0), "Small", 2);
         let cmc4 = add_library_creature_with_cmc(&mut state, 2, PlayerId(0), "Mid", 4);

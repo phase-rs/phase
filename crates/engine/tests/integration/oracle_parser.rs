@@ -203,13 +203,14 @@ fn class_structural_correctness() {
     );
 }
 
-/// CR 701.23a + CR 107.1: Dual-filter library search lowers into a chain of
-/// `SearchLibrary → ChangeZone → SearchLibrary → ChangeZone → Shuffle`.
-/// Krosan Verge is the canonical case: activate produces TWO independent
-/// searches (Forest, then Plains), each entering the battlefield tapped.
+/// CR 701.23a + CR 701.23h: Dual-filter library search lowers into one
+/// `SearchLibrary` choice constrained to match each printed filter, then a
+/// single destination move for the found set. Krosan Verge is the canonical
+/// case: the prompt asks for two cards assignable to Forest and Plains, then
+/// puts both onto the battlefield tapped.
 #[test]
-fn krosan_verge_lowers_to_dual_search_chain() {
-    use engine::types::ability::Effect;
+fn krosan_verge_lowers_to_dual_search_choice() {
+    use engine::types::ability::{Effect, QuantityExpr, SearchSelectionConstraint, TargetFilter};
 
     let result = parse(
         "Krosan Verge enters tapped.\n{2}, {T}, Sacrifice Krosan Verge: Search your library for a Forest card and a Plains card, put them onto the battlefield tapped, then shuffle.",
@@ -225,22 +226,11 @@ fn krosan_verge_lowers_to_dual_search_chain() {
         .find(|a| matches!(&*a.effect, Effect::SearchLibrary { .. }))
         .expect("expected activated search ability");
 
-    // Walk the sub_ability chain and record the sequence of Effect variants.
     let mut effects: Vec<&'static str> = Vec::new();
-    let mut subtypes: Vec<Option<String>> = Vec::new();
     let mut cursor: Option<&engine::types::ability::AbilityDefinition> = Some(activated);
     while let Some(def) = cursor {
         let label = match &*def.effect {
-            Effect::SearchLibrary { filter, .. } => {
-                let subtype = match filter {
-                    engine::types::ability::TargetFilter::Typed(tf) => {
-                        tf.get_subtype().map(|s| s.to_string())
-                    }
-                    _ => None,
-                };
-                subtypes.push(subtype);
-                "SearchLibrary"
-            }
+            Effect::SearchLibrary { .. } => "SearchLibrary",
             Effect::ChangeZone {
                 destination,
                 enter_tapped,
@@ -263,20 +253,38 @@ fn krosan_verge_lowers_to_dual_search_chain() {
 
     assert_eq!(
         effects,
-        vec![
-            "SearchLibrary",
-            "ChangeZone",
-            "SearchLibrary",
-            "ChangeZone",
-            "Shuffle",
-        ],
-        "expected dual-search chain with interleaved ChangeZones"
+        vec!["SearchLibrary", "ChangeZone", "Shuffle"],
+        "expected one constrained search, one move, then shuffle"
     );
+    let Effect::SearchLibrary {
+        filter,
+        count,
+        selection_constraint,
+        ..
+    } = &*activated.effect
+    else {
+        panic!("expected SearchLibrary");
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or filter, got {filter:?}");
+    };
     assert_eq!(
-        subtypes,
-        vec![Some("Forest".to_string()), Some("Plains".to_string())],
-        "expected Forest then Plains subtype filters"
+        filters
+            .iter()
+            .filter_map(|filter| match filter {
+                TargetFilter::Typed(tf) => tf.get_subtype().map(str::to_string),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["Forest".to_string(), "Plains".to_string()],
+        "expected Forest and Plains subtype filters"
     );
+    assert!(matches!(
+        selection_constraint,
+        SearchSelectionConstraint::MatchEachFilter { filters: constrained }
+            if constrained == filters
+    ));
 }
 
 /// CR 701.23a + CR 107.1: Corpse Harvester exercises the Hand-destination
@@ -302,11 +310,10 @@ fn corpse_harvester_lowers_to_dual_search_into_hand() {
         .expect("expected activated search ability");
 
     let mut cursor: Option<&engine::types::ability::AbilityDefinition> = Some(activated);
-    let mut search_count = 0;
     let mut change_zone_count = 0;
     while let Some(def) = cursor {
         match &*def.effect {
-            Effect::SearchLibrary { .. } => search_count += 1,
+            Effect::SearchLibrary { .. } => {}
             Effect::ChangeZone { destination, .. } => {
                 assert_eq!(
                     *destination,
@@ -321,6 +328,8 @@ fn corpse_harvester_lowers_to_dual_search_into_hand() {
         cursor = def.sub_ability.as_deref();
     }
 
-    assert_eq!(search_count, 2, "expected two SearchLibrary effects");
-    assert_eq!(change_zone_count, 2, "expected two ChangeZone effects");
+    assert_eq!(
+        change_zone_count, 1,
+        "expected one ChangeZone for found set"
+    );
 }

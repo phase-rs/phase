@@ -97,6 +97,17 @@ pub struct FilterContext<'a> {
 }
 
 impl<'a> FilterContext<'a> {
+    /// Context-free object matching. Use only for constraints whose filters are
+    /// printed object qualities rather than source/controller-relative clauses.
+    pub fn neutral() -> Self {
+        Self {
+            source_id: ObjectId(0),
+            source_controller: None,
+            ability: None,
+            recipient_id: None,
+        }
+    }
+
     /// Bare context: source object known, controller derived from state.
     /// Use when no activating ability is in scope (combat restrictions, layer
     /// predicates, passive trigger condition checks).

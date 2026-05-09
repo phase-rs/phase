@@ -3047,7 +3047,8 @@ fn cap_search_choice_pool(
         }
         SearchSelectionConstraint::None
         | SearchSelectionConstraint::DistinctQualities { .. }
-        | SearchSelectionConstraint::TotalManaValue { .. } => cards.to_vec(),
+        | SearchSelectionConstraint::TotalManaValue { .. }
+        | SearchSelectionConstraint::MatchEachFilter { .. } => cards.to_vec(),
     };
     if collapsed.len() <= cap {
         collapsed

@@ -758,11 +758,28 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
         .map(|((), rest)| rest)
         .unwrap_or(filter_text);
-    // "~" is the self-reference placeholder — filter: None means "this permanent"
-    if filter_text == "~" {
+    // "~" is the self-reference placeholder. Preserve it as an explicit
+    // SelfRef so the runtime does not treat an unconstrained filter as "any
+    // permanent you control".
+    if nom_on_lower(filter_text, filter_text, |i| {
+        value(
+            (),
+            alt((
+                tag("~"),
+                tag("this card"),
+                tag("this creature"),
+                tag("this artifact"),
+                tag("this equipment"),
+                tag("this land"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some_and(|((), rest)| rest.trim().is_empty())
+    {
         return Some(AbilityCost::ReturnToHand {
             count: 1,
-            filter: None,
+            filter: Some(TargetFilter::SelfRef),
         });
     }
     let target_text = format!("target {filter_text}");
@@ -923,7 +940,18 @@ mod tests {
             parse_oracle_cost("Return ~ to its owner's hand"),
             AbilityCost::ReturnToHand {
                 count: 1,
-                filter: None,
+                filter: Some(TargetFilter::SelfRef),
+            }
+        );
+    }
+
+    #[test]
+    fn cost_return_this_land_to_hand_is_self_ref() {
+        assert_eq!(
+            parse_oracle_cost("Return this land to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::SelfRef),
             }
         );
     }

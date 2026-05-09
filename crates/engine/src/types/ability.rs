@@ -58,7 +58,7 @@ pub enum ChooseFromZoneConstraint {
 /// `WaitingFor::SearchChoice` step. Lives one abstraction up from `count` /
 /// `up_to` so the engine can reject illegal combinations and the AI can
 /// prune its candidate space without bespoke per-card knowledge.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SearchSelectionConstraint {
     /// CR 107.1c: No restriction beyond `count` (and `up_to`).
@@ -74,6 +74,11 @@ pub enum SearchSelectionConstraint {
     /// tutor text, where the constraint applies across the selected set rather
     /// than to each individual card.
     TotalManaValue { comparator: Comparator, value: i32 },
+    /// CR 701.23a + CR 701.23h: A single library search may ask for several
+    /// independently described cards ("a black card, a green card, and a blue
+    /// card"). The chosen set must be assignable to the printed descriptions,
+    /// with each physical card used for at most one description slot.
+    MatchEachFilter { filters: Vec<TargetFilter> },
 }
 
 /// CR 608.2d: Who may choose to perform an optional effect during resolution.
