@@ -19,7 +19,7 @@ use crate::types::ability::{
     QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::{parse_counter_type, CounterMatch, CounterType};
+use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -1398,7 +1398,7 @@ fn resolve_ref(
                 .iter()
                 .filter(|record| {
                     counter_added_actor_matches(actor, controller, record.actor)
-                        && counter_match_matches(counters, &record.counter_type)
+                        && counters.matches(&record.counter_type)
                         && matches_target_filter_on_counter_added_record(
                             state,
                             record,
@@ -1605,13 +1605,6 @@ fn counter_added_actor_matches(scope: &CountScope, controller: PlayerId, actor: 
         CountScope::Controller => actor == controller,
         CountScope::All => true,
         CountScope::Opponents => actor != controller,
-    }
-}
-
-fn counter_match_matches(counter_match: &CounterMatch, counter_type: &CounterType) -> bool {
-    match counter_match {
-        CounterMatch::Any => true,
-        CounterMatch::OfType(expected) => expected == counter_type,
     }
 }
 
@@ -2343,7 +2336,7 @@ mod tests {
         TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
-    use crate::types::counter::CounterType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::events::PlayerActionKind;
     use crate::types::game_state::{
         DamageRecord, ExileLink, ExileLinkKind, ManaSpentSourceSnapshot, ZoneChangeRecord,

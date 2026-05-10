@@ -2185,20 +2185,15 @@ pub fn find_applicable_replacements(
                     // `None` and `Some(CounterMatch::Any)` accept any counter
                     // type (Doubling Season, modern wording).
                     if let (
-                        Some(ref m),
+                        Some(m),
                         ProposedEvent::AddCounter {
                             counter_type: ev_ct,
                             ..
                         },
                     ) = (&repl_def.counter_match, event)
                     {
-                        match m {
-                            crate::types::counter::CounterMatch::Any => {}
-                            crate::types::counter::CounterMatch::OfType(expected) => {
-                                if expected != ev_ct {
-                                    continue;
-                                }
-                            }
+                        if !m.matches(ev_ct) {
+                            continue;
                         }
                     }
                     candidates.push(rid);
