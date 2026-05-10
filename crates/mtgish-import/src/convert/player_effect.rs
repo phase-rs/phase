@@ -19,6 +19,7 @@ use engine::types::phase::Phase;
 use engine::types::statics::{
     CastFrequency, CastingProhibitionScope as ProhibitionScope, HandSizeModification, StaticMode,
 };
+use engine::types::zones::Zone;
 
 use crate::convert::cost as cost_conv;
 use crate::convert::filter::{player_to_controller, players_to_controller, spells_to_filter};
@@ -203,7 +204,8 @@ fn player_effect_to_static(
             return Ok(StaticDefinition::new(StaticMode::CastWithKeyword {
                 keyword: Keyword::Flash,
             })
-            .affected(spell_scope_for_caster(spells, controller)?));
+            .affected(spell_scope_for_caster(spells, controller)?)
+            .active_zones(vec![Zone::Battlefield]));
         }
         // CR 305.1 + CR 604.2: "[Player] may play lands from [their]
         // graveyard." The "lands" axis lives in `play_mode = Play`; the
