@@ -156,6 +156,21 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
     })
 }
 
+/// CR 108.3 + CR 608.2c: Resolve the owner of an ability's first parent target.
+///
+/// Mirrors `parent_target_controller` but returns the *owner* of an object target
+/// per CR 108.3 (owner is the player who started the game with the card in their
+/// deck). Used by `TargetFilter::ParentTargetOwner` for "its owner" anaphors —
+/// e.g., Enslave's "enchanted creature deals 1 damage to its owner" once a
+/// parent-target slot has been bound. Returns `None` if the ability has no
+/// targets or the targeted object no longer exists.
+pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
+    ability.targets.iter().find_map(|t| match t {
+        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
+        TargetRef::Player(pid) => Some(*pid),
+    })
+}
+
 pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelectionConstraint> {
     modal
         .constraints

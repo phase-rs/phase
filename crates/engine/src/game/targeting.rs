@@ -263,6 +263,15 @@ pub fn resolve_event_context_target(
         | TargetFilter::PostReplacementDamageTarget => {
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
         }
+        // CR 108.3 + CR 608.2c: `ParentTargetOwner` may fall back to the source's
+        // AttachedTo host (Enslave's "enchanted creature deals 1 damage to its
+        // owner" — phase trigger has no event source). Allow the no-event path so
+        // the AttachedTo branch in the inner resolver runs even when no trigger
+        // event is active.
+        TargetFilter::ParentTargetOwner => {
+            let event = state.current_trigger_event.as_ref();
+            resolve_event_context_target_for_event_or_state(state, filter, source_id, event)
+        }
         _ => {
             let event = state.current_trigger_event.as_ref()?;
             resolve_event_context_target_for_event_or_state(state, filter, source_id, Some(event))
@@ -382,6 +391,32 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
+        // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
+        // but returns the *owner* of the resolved object. When no trigger event
+        // supplies a source object (Enslave's phase trigger), fall back to the
+        // ability source's AttachedTo host — the Aura/Equipment context where
+        // "its owner" anaphorically refers to the equipped/enchanted permanent.
+        TargetFilter::ParentTargetOwner => {
+            if let Some(event) = event {
+                if let Some(source_obj_id) = extract_source_from_event(event) {
+                    if let Some(owner) = state.objects.get(&source_obj_id).map(|o| o.owner) {
+                        return Some(TargetRef::Player(owner));
+                    }
+                }
+            }
+            // CR 301.5 + CR 303.4: Aura/Equipment fallback — the source's
+            // attached host is the implicit "it" subject of the sentence.
+            let host = state.objects.get(&source_id)?.attached_to?;
+            match host {
+                crate::game::game_object::AttachTarget::Object(id) => state
+                    .objects
+                    .get(&id)
+                    .map(|obj| TargetRef::Player(obj.owner)),
+                crate::game::game_object::AttachTarget::Player(player) => {
+                    Some(TargetRef::Player(player))
+                }
+            }
+        }
         // CR 615.5 + CR 609.7: "the source's controller" / "that source's
         // controller" inside a prevention follow-up resolves to the controller
         // of the prevented event's damage source. Stashed by the prevention
@@ -441,6 +476,20 @@ pub fn resolve_effect_player_ref(
                     }
                 })
             }),
+        // CR 108.3 + CR 608.2c: Parent target's *owner* — mirrors the controller
+        // path above, but resolves through `parent_target_owner` and falls back
+        // to the event-context resolver (which itself may fall back to the
+        // source's AttachedTo host for Aura phase triggers).
+        TargetFilter::ParentTargetOwner => {
+            crate::game::ability_utils::parent_target_owner(ability, state).or_else(|| {
+                resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
+                    match target {
+                        TargetRef::Player(player) => Some(player),
+                        TargetRef::Object(id) => state.objects.get(&id).map(|obj| obj.owner),
+                    }
+                })
+            })
+        }
         _ => resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
             match target {
                 TargetRef::Player(player) => Some(player),

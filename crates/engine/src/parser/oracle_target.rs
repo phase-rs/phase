@@ -91,6 +91,12 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
                 TargetFilter::ParentTargetController,
                 tag("their controller"),
             ),
+            // CR 108.3 + CR 608.2c: "its owner" / "their owner" — owner of the parent target.
+            // Used by Aura damage triggers (Enslave) and damage continuations (Bomb Squad,
+            // The Beast Deathless Prince) where the anaphoric "its" refers to a permanent
+            // mentioned earlier in the sentence.
+            value(TargetFilter::ParentTargetOwner, tag("its owner")),
+            value(TargetFilter::ParentTargetOwner, tag("their owner")),
             value(TargetFilter::TriggeringPlayer, tag("that player")),
             value(TargetFilter::TriggeringSource, tag("that source")),
             // "that permanent or player" before "that permanent" — longest match first.
@@ -131,13 +137,48 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     let text = text.trim_start();
     let lower = text.to_lowercase();
 
+    // CR 115.1 + CR 701.9b: Trailing " chosen at random" suffix on a noun-phrase
+    // target (e.g. Zaffai, Thunder Conductor — "an opponent chosen at random").
+    // This is the noun-phrase analogue of the leading "random target X"
+    // pattern handled below: instead of `random target opponent`, the random
+    // qualifier rides as a postnominal modifier. Strip it, mark the selection
+    // mode on `ctx`, and recurse on the prefix so the underlying noun phrase
+    // ("an opponent") parses through the normal arms below. Use `TextPair`
+    // for the dual-string strip so the original casing is preserved.
+    {
+        let tp = TextPair::new(text, &lower);
+        // Trim trailing punctuation (period/comma) and whitespace before
+        // checking the suffix, so " chosen at random." matches.
+        let trimmed = tp
+            .trim_end()
+            .trim_end_matches('.')
+            .trim_end_matches(',')
+            .trim_end();
+        // allow-noncombinator: TextPair::strip_suffix is the dual-string structural API for postnominal qualifier stripping (PATTERNS.md §9).
+        if let Some(prefix) = trimmed.strip_suffix(" chosen at random") {
+            ctx.target_selection_mode = TargetSelectionMode::Random;
+            let (filter, _) = parse_target_with_ctx(prefix.original, ctx);
+            // Return empty remainder — the entire input has been consumed
+            // (prefix + stripped suffix + any trailing punctuation).
+            return (filter, &text[text.len()..]);
+        }
+    }
+
     // Strip leading article ("a "/"an ") before "target" to handle "a target creature".
     // Guard: only strip when followed by "target " (controller-choice) or
     // "random target " (random-selection, CR 115.1 + CR 701.9b) to avoid
     // over-stripping. The recursion re-enters parse_target_with_ctx where the
     // bare-"random " arm below sets the selection mode on `ctx`.
     if let Ok((after_article, _)) = alt((
+        // CR 115.1: Ordinal targets — "a second", "a third", etc. — surface
+        // distinctness over multi-target effects (Cone of Flame, Serpentine
+        // Spike). The article is structural; the ordinal is enforced by the
+        // multi-target machinery rather than the filter, so they collapse to
+        // the same bare-"target" arm as "a "/"an ".
         tag::<_, _, OracleError<'_>>("a second "),
+        tag("a third "),
+        tag("a fourth "),
+        tag("a fifth "),
         tag("a "),
         tag("an "),
     ))
@@ -152,6 +193,18 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         {
             let original_rest = &text[lower.len() - after_article.len()..];
             return parse_target_with_ctx(original_rest, ctx);
+        }
+        // CR 115.1: Bare-trailing "target" with no following type word — the
+        // recipient is the multi-target chain's terminal slot ("a third
+        // target", Cone of Flame). Recurse on the original-case offset so the
+        // bare-target arm below resolves to `TargetFilter::Any`.
+        if let Ok((rest_after_target, _)) =
+            tag::<_, _, OracleError<'_>>("target").parse(after_article)
+        {
+            if rest_after_target.is_empty() || rest_after_target.starts_with([',', '.']) {
+                let original_rest = &text[lower.len() - after_article.len()..];
+                return parse_target_with_ctx(original_rest, ctx);
+            }
         }
     }
 
@@ -312,12 +365,25 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     // "the first [type phrase]" → anaphoric reference to an object identified
     // by the triggering event. Lifeline-style delayed triggers snapshot this
     // parent target while the event context is still available.
+    //
+    // CR 608.2c carve-out: "the first player" / "the second player" are
+    // cross-clause ordinal player anaphors with distinct semantics (chooser
+    // vs. chosen target — see the longest-match anaphor block below). The
+    // generic "the first [type phrase] → ParentTarget" lift would clobber
+    // both bindings, so let the player-anaphor block handle them. The check
+    // is intentionally narrow: "the first card", "the first creature", etc.
+    // continue to flow through this generic arm.
     if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("the first ").parse(lower.as_str())
     {
-        let original_rest = &text[lower.len() - rest_subject.len()..];
-        let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
-        if !matches!(filter, TargetFilter::Any) {
-            return (TargetFilter::ParentTarget, rem);
+        let is_player_ordinal_anaphor = tag::<_, _, OracleError<'_>>("player")
+            .parse(rest_subject)
+            .is_ok_and(|(after, _)| after.is_empty() || after.starts_with([' ', ',', '.']));
+        if !is_player_ordinal_anaphor {
+            let original_rest = &text[lower.len() - rest_subject.len()..];
+            let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
+            if !matches!(filter, TargetFilter::Any) {
+                return (TargetFilter::ParentTarget, rem);
+            }
         }
     }
 
@@ -403,6 +469,17 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(lower.as_str()) {
             return (TargetFilter::SelfRef, &text[lower.len() - rest.len()..]);
+        }
+    }
+
+    // CR 115.1: Bare "target" with no following type phrase — terminal usage in
+    // multi-target damage chains ("3 damage to a third target", Cone of Flame /
+    // Serpentine Spike). The recipient is otherwise unspecified; resolves to
+    // any legal target. Boundary check ensures we don't swallow "targeted" /
+    // "targets" or the leading word of "target creature".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("target").parse(lower.as_str()) {
+        if rest.is_empty() || rest.starts_with([',', '.']) {
+            return (TargetFilter::Any, &text[lower.len() - rest.len()..]);
         }
     }
 
@@ -560,6 +637,9 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                 tag("the source's controller"),
             ),
             value(TargetFilter::ParentTargetController, tag("its controller")),
+            // CR 108.3 + CR 608.2c: "its owner" / "their owner" — owner of the parent target.
+            value(TargetFilter::ParentTargetOwner, tag("its owner")),
+            value(TargetFilter::ParentTargetOwner, tag("their owner")),
             // CR 115.1 + CR 608.2c: "the permanent or player" — anaphoric
             // back-reference to the parent target on "any target" effects
             // (Rhystic Lightning's "deals 2 damage to the permanent or
@@ -567,6 +647,21 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             // for longest-match-first dispatch.
             value(TargetFilter::ParentTarget, tag("the permanent or player")),
             value(TargetFilter::ParentTarget, tag("the permanent")),
+            // CR 608.2c: Cross-clause ordinal player anaphors. When a prior
+            // sentence binds two distinct players via "<subject> chooses
+            // target player ...", later sentences refer to them by ordinal:
+            // "the first player" = the subject/chooser (the triggering
+            // player for upkeep triggers), "the second player" = the chosen
+            // target (the prior `TargetOnly` slot, hence ParentTargetSlot 0).
+            // Used by Oath of Mages — "that player chooses target player who
+            // has more life ... The first player may have this enchantment
+            // deal 1 damage to the second player." Placed before the bare
+            // "the player" arm so the longer phrase wins under longest-match.
+            value(TargetFilter::TriggeringPlayer, tag("the first player")),
+            value(
+                TargetFilter::ParentTargetSlot { index: 0 },
+                tag("the second player"),
+            ),
             value(TargetFilter::ParentTarget, tag("the player")),
             value(TargetFilter::ParentTarget, tag("the creature")),
             value(TargetFilter::ParentTarget, tag("the spell")),
@@ -636,12 +731,22 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (TargetFilter::SelfRef, &text[lower.len() - rest.len()..]);
     }
 
-    // "each opponent" / "opponents" — opponent player references
+    // CR 115.1 + CR 102.2: Opponent player references — "each opponent",
+    // "opponents", and the bare "an opponent" form used by postnominal
+    // random-selection patterns (Zaffai — "an opponent chosen at random")
+    // and chooser phrases ("an opponent of your choice"). The bare "an
+    // opponent" arm must appear here because the leading-article guard
+    // above only strips "a "/"an " when followed by a recognized type word,
+    // and "opponent" is a player reference rather than a card type.
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 tag::<_, _, OracleError<'_>>("each opponent"),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("an opponent"),
             ),
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
@@ -3919,6 +4024,79 @@ mod tests {
     }
 
     #[test]
+    fn opponent_chosen_at_random_marks_random_mode() {
+        // CR 115.1 + CR 701.9b: "<noun-phrase> chosen at random" — postnominal
+        // random qualifier mirrors the leading "random target X" form. The
+        // suffix is stripped, the inner noun phrase parses normally, and the
+        // selection mode flips to Random on the parse context.
+        // Repro: Zaffai, Thunder Conductor — "deals 10 damage to an opponent
+        // chosen at random."
+        let mut ctx = ParseContext::default();
+        let (f, rest) = parse_target_with_ctx("an opponent chosen at random", &mut ctx);
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest, "");
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Random);
+    }
+
+    #[test]
+    fn creature_chosen_at_random_marks_random_mode() {
+        // The postnominal "chosen at random" suffix is independent of the noun
+        // phrase: the suffix-strip path applies to any noun-phrase target,
+        // including type-word phrases like "a creature".
+        let mut ctx = ParseContext::default();
+        let (f, _rest) = parse_target_with_ctx("a creature chosen at random", &mut ctx);
+        assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Random);
+    }
+
+    #[test]
+    fn opponent_chosen_at_random_with_trailing_period() {
+        // The suffix-strip path tolerates trailing punctuation; sentence-final
+        // periods at the end of effect clauses must not break the match.
+        let mut ctx = ParseContext::default();
+        let (f, _rest) = parse_target_with_ctx("an opponent chosen at random.", &mut ctx);
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Random);
+    }
+
+    #[test]
+    fn an_opponent_target_without_random_suffix() {
+        // CR 115.1: bare "an opponent" parses as an opponent reference even
+        // without the "target" prefix. Used by chooser phrases like "an
+        // opponent of your choice" and post-stripping recursion from the
+        // "chosen at random" arm above.
+        let mut ctx = ParseContext::default();
+        let (f, rest) = parse_target_with_ctx("an opponent", &mut ctx);
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest, "");
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Chosen);
+    }
+
+    #[test]
+    fn first_and_second_player_cross_clause_anaphors() {
+        // CR 608.2c: "the first player" / "the second player" are cross-clause
+        // ordinal player anaphors used by Oath of Mages and similar patterns.
+        // The first player = the chooser of the prior sentence (= triggering
+        // player). The second player = the chosen target of the prior sentence
+        // (parent target slot 0).
+        let mut ctx = ParseContext::default();
+        let (f, _) = parse_target_with_ctx("the first player", &mut ctx);
+        assert_eq!(f, TargetFilter::TriggeringPlayer);
+        let mut ctx = ParseContext::default();
+        let (f, _) = parse_target_with_ctx("the second player", &mut ctx);
+        assert_eq!(f, TargetFilter::ParentTargetSlot { index: 0 });
+    }
+
+    #[test]
     fn target_creature_keeps_chosen_mode_on_context() {
         // CR 115.1: ordinary "target X" leaves the default `Chosen` mode intact.
         let mut ctx = ParseContext::default();
@@ -5340,6 +5518,23 @@ mod tests {
     fn parse_target_that_land_controller_uses_parent_target_controller() {
         let (filter, rest) = parse_target("that land's controller");
         assert_eq!(filter, TargetFilter::ParentTargetController);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_its_owner_uses_parent_target_owner() {
+        // CR 108.3 + CR 608.2c: "its owner" anaphor — owner of the parent
+        // target object (Enslave: "enchanted creature deals 1 damage to its
+        // owner"; Bomb Squad: "that creature deals 4 damage to its owner").
+        let (filter, rest) = parse_target("its owner");
+        assert_eq!(filter, TargetFilter::ParentTargetOwner);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_their_owner_uses_parent_target_owner() {
+        let (filter, rest) = parse_target("their owner");
+        assert_eq!(filter, TargetFilter::ParentTargetOwner);
         assert_eq!(rest, "");
     }
 

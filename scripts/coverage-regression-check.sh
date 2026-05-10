@@ -206,18 +206,67 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
         new_cards=0
     fi
 
+    # Per-category honesty analysis (D-09 extension): for each diagnostic
+    # category that increased, partition newly-affected cards into
+    # "honesty-only" (parse_details unchanged — silent fallback newly
+    # surfaced) vs "real_regress" (parse_details changed — true semantic
+    # regression). Honesty-only emissions count toward the "REGRESSED
+    # (coverage honesty)" bucket and do NOT fail the ratchet.
+    jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
+      def cards_emitting($cat):
+        [.cards[]? | select(tostring | contains($cat)) | .card_name];
+      ($base[0]) as $b |
+      ($curr[0]) as $c |
+      ($b.cards // [] | map({key: .card_name, value: .parse_details}) | from_entries) as $bpd |
+      ($c.cards // [] | map({key: .card_name, value: .parse_details}) | from_entries) as $cpd |
+      [
+        ($c.diagnostics // {} | keys[]) as $cat |
+        ($c.diagnostics[$cat] // 0) as $cc |
+        ($b.diagnostics[$cat] // 0) as $bc |
+        select($cc > $bc) |
+        ($b | cards_emitting($cat)) as $base_cards |
+        ($c | cards_emitting($cat)) as $curr_cards |
+        (($curr_cards - $base_cards) | unique) as $newly |
+        {
+          category: $cat,
+          newly_affected: [
+            $newly[] | {
+              name: .,
+              parse_details_unchanged: (($bpd[.] // null) == ($cpd[.] // null))
+            }
+          ],
+        } |
+        .honesty_only = [.newly_affected[] | select(.parse_details_unchanged) | .name] |
+        .real_regress = [.newly_affected[] | select(.parse_details_unchanged | not) | .name]
+      ]
+    ' > "$tmpdir/honesty.json" 2>/dev/null
+
     while IFS='=' read -r cat count; do
         base_count=$(jq -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
         if [[ "$count" -gt "$base_count" ]]; then
             increase=$((count - base_count))
-            # Allow up to (new_cards) increase per category — each new card
-            # can contribute at most 1 diagnostic per category. If the increase
-            # exceeds what new cards explain, it's a real parser regression.
-            if [[ "$increase" -gt "$new_cards" ]]; then
-                echo "DIAGNOSTIC REGRESSION: $cat increased from $base_count to $count (exceeds new-card allowance of +$new_cards)" >&2
+            honesty_only=$(jq -r --arg cat "$cat" '
+              [.[] | select(.category == $cat) | .honesty_only | length] | add // 0
+            ' "$tmpdir/honesty.json")
+            honesty_names=$(jq -r --arg cat "$cat" '
+              [.[] | select(.category == $cat) | .honesty_only[]] | join(", ")
+            ' "$tmpdir/honesty.json")
+            adjusted=$((increase - honesty_only))
+            if [[ "$adjusted" -lt 0 ]]; then adjusted=0; fi
+            if [[ "$honesty_only" -gt 0 ]]; then
+                echo "REGRESSED (coverage honesty): $cat +$honesty_only newly surfaced silent fallback(s) — parse_details unchanged: $honesty_names"
+            fi
+            # Allow up to (new_cards) remaining increase per category — each new
+            # card can contribute at most 1 diagnostic per category. If the
+            # adjusted increase exceeds what new cards explain, it's a real
+            # parser regression.
+            if [[ "$adjusted" -gt "$new_cards" ]]; then
+                echo "DIAGNOSTIC REGRESSION: $cat increased from $base_count to $count (+$adjusted real, exceeds new-card allowance of +$new_cards)" >&2
                 diag_fail=1
+            elif [[ "$adjusted" -gt 0 ]]; then
+                echo "DIAGNOSTIC NOTE: $cat increased from $base_count to $count (+$adjusted real, within new-card allowance of +$new_cards)"
             else
-                echo "DIAGNOSTIC NOTE: $cat increased from $base_count to $count (+$increase, within new-card allowance of +$new_cards)"
+                echo "DIAGNOSTIC NOTE: $cat increased from $base_count to $count (+$increase, all honesty-only — non-fatal)"
             fi
         elif [[ "$count" -lt "$base_count" ]]; then
             echo "DIAGNOSTIC IMPROVEMENT: $cat decreased from $base_count to $count"

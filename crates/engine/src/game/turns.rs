@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::RestrictionExpiry;
+use crate::types::ability::{ReplacementDefinition, RestrictionExpiry};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
@@ -695,22 +695,19 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     // CR 701.19b: Regeneration shields expire at cleanup.
     // CR 615: Prevention effects also expire.
-    // CR 514.2: Resolution-time replacements with `expires_at_eot` (e.g., the
-    // "if [target] would die this turn, exile it instead" rider on damage
-    // spells) also expire here regardless of whether they fired.
+    // CR 514.2: Resolution-time replacements with `expiry: EndOfTurn` (e.g.,
+    // the "if [target] would die this turn, exile it instead" rider on
+    // damage spells) also expire here regardless of whether they fired.
     // Also prune any consumed shields from earlier this turn.
+    let expires_at_eot = |r: &ReplacementDefinition| {
+        r.shield_kind.is_shield() || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn))
+    };
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.replacement_definitions.retain(|r| {
-            !(r.shield_kind.is_shield()
-                || r.expires_at_eot
-                || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn)))
-        });
+        obj.replacement_definitions.retain(|r| !expires_at_eot(r));
     }
-    state.pending_damage_replacements.retain(|r| {
-        !(r.shield_kind.is_shield()
-            || r.expires_at_eot
-            || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn)))
-    });
+    state
+        .pending_damage_replacements
+        .retain(|r| !expires_at_eot(r));
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);

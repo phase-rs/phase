@@ -420,6 +420,19 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         }
     }
 
+    // CR 120.2b + CR 608.2c: Multi-target damage split — "deals A damage to
+    // T1, B damage to T2[, and C damage to T3]" (Cone of Flame, Banshee,
+    // Serpentine Spike). When the closing chunk already established a
+    // damage event AND the next segment is a bare "<amount> damage" tail,
+    // the comma is a within-effect delimiter — not a clause boundary. Keep
+    // the line as one chunk so `try_parse_multi_target_damage_chain` can
+    // build the chained DealDamage sub_abilities.
+    if current_ends_with_damage_recipient(&current_lower)
+        && starts_with_damage_amount_continuation(&trimmed_lower)
+    {
+        return None;
+    }
+
     if starts_clause_text(trimmed) || starts_with_damage_clause(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
@@ -427,12 +440,49 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     // Strip "and " connector before checking clause start
     // Handles patterns like ", and get {E}{E}" or ", and draw a card"
     if let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed_lower.as_str()) {
+        // Multi-target damage chain final segment — same gate as the leading
+        // "and" form but for ", and B damage to T2".
+        if current_ends_with_damage_recipient(&current_lower)
+            && starts_with_damage_amount_continuation(after_and)
+        {
+            return None;
+        }
         if starts_clause_text(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
     }
 
     None
+}
+
+/// CR 120.2b: True when the closing chunk text contains a `damage to `
+/// boundary at a word position (i.e., the chunk has already established a
+/// damage event with a recipient). Used by the multi-target damage chain
+/// detector to recognize a continuation comma instead of a clause boundary.
+fn current_ends_with_damage_recipient(current_lower: &str) -> bool {
+    nom_primitives::scan_contains(current_lower, "damage to ")
+}
+
+/// CR 120.2b: True when `trimmed_lower` (post-comma, post-optional-"and ")
+/// begins with a bare amount + "damage" tail — i.e. a damage continuation
+/// segment that should be re-attached to the preceding damage clause.
+///
+/// Recognised amount shapes mirror [`parse_bare_damage_continuation`]:
+/// fixed numbers, `half X`/`half <ref>`, `twice that much`, `that much`,
+/// `X`. Each must be immediately followed by ` damage`.
+fn starts_with_damage_amount_continuation(trimmed_lower: &str) -> bool {
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("twice that much damage"),
+        tag("that much damage"),
+    ))
+    .parse(trimmed_lower)
+    {
+        return rest.is_empty() || rest.starts_with([' ', ',', '.']);
+    }
+    let Some((_amount, rest)) = crate::parser::oracle_util::parse_count_expr(trimmed_lower) else {
+        return false;
+    };
+    tag::<_, _, OracleError<'_>>("damage").parse(rest).is_ok()
 }
 
 fn starts_prefix_clause(current_lower: &str) -> bool {

@@ -792,12 +792,14 @@ mod diagnostic_snapshots {
     }
 
     #[test]
-    /// TargetFallback diagnostics from `parse_target` inside effect chains are
-    /// captured in `ir.diagnostics` once the call site is migrated to
-    /// `parse_target_with_ctx` (the no-ctx wrapper drops them). The
-    /// `try_parse_damage` path was migrated as part of the
-    /// `TargetSelectionMode::Random` plumbing — the "instead" trailing fragment
-    /// in this test now surfaces a `TargetFallback`.
+    /// CR 117.1 + CR 400.7j + CR 608.2k: Regression guard for Surtland Flinger.
+    /// The "If the sacrificed creature was a Giant, ~ deals twice that much
+    /// damage instead" override now parses cleanly via
+    /// `parse_cost_paid_object_definite_noun_form` (definite-noun form
+    /// generalized over noun + type-or-subtype predicate). The instead branch
+    /// is captured as a `ConditionInstead { CostPaidObjectMatchesFilter }`,
+    /// the trailing "instead" sentinel is consumed by the instead-clause
+    /// stripper, and no `TargetFallback` leaks to diagnostics.
     fn diagnostic_target_fallback() {
         let diagnostics = parse_diagnostics(
             "Whenever this creature attacks, you may sacrifice another creature. When you do, this creature deals damage equal to the sacrificed creature's power to any target. If the sacrificed creature was a Giant, this creature deals twice that much damage instead.",

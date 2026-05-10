@@ -359,7 +359,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
 /// Recursive walk: does any def in the tree carry an `AddTargetReplacement`
 /// effect? This single Effect variant simultaneously encodes a replacement
 /// effect (CR 614.1a "instead"), a conditional gate ("if [target] would die"),
-/// and an EOT duration (the carried replacement's `expires_at_eot`). Its
+/// and an EOT duration (the carried replacement's `expiry: EndOfTurn`). Its
 /// presence satisfies the Replacement_Instead, Condition_If, and
 /// Duration_ThisTurn detectors when the original text matches the
 /// "die this turn, exile instead" rider grammar.
@@ -1524,10 +1524,10 @@ fn detect_duration_this_turn(
         "ThisTurn",
         "EndOfTurn",
         "EndOfCombat",
-        // CR 514.2: AddTargetReplacement carries `expires_at_eot: true`,
+        // CR 514.2: AddTargetReplacement carries `expiry: Some(RestrictionExpiry::EndOfTurn)`,
         // which IS the EOT duration encoded structurally on the
         // ReplacementDefinition rather than via `def.duration`.
-        "\"expires_at_eot\":true",
+        "\"expiry\":{\"type\":\"EndOfTurn\"}",
         // CR 614.6: `DamageDone` replacement events scope to a single
         // resolution (one-shot prevention/redirection); the "this turn"
         // wording is implicit in the spell-level replacement lifetime,

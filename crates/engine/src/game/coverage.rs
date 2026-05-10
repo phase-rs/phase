@@ -300,6 +300,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
+        TargetFilter::ParentTargetOwner => "parent target's owner".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
         }
@@ -1657,8 +1658,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(zone) = replacement.destination_zone {
                 d.push(("destination".into(), format!("{zone:?}")));
             }
-            if replacement.expires_at_eot {
-                d.push(("expires_at_eot".into(), "yes".into()));
+            if let Some(expiry) = &replacement.expiry {
+                d.push(("expiry".into(), format!("{expiry:?}")));
             }
         }
         Effect::GenericEffect {

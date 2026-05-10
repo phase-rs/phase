@@ -535,6 +535,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::StackAbility

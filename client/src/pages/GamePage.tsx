@@ -1809,7 +1809,13 @@ function GameOverScreen({
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
-    const params = new URLSearchParams();
+    // Preserve the original launch configuration (format, players, match,
+    // first, source, draftId, …) by copying the current URL's searchParams.
+    // Only drop params that are bound to this specific game instance — the
+    // P2P join code and per-room name don't apply to a fresh game.
+    const params = new URLSearchParams(searchParams);
+    params.delete("code");
+    params.delete("roomName");
     if (mode) params.set("mode", mode);
     params.set("difficulty", difficulty);
     navigate(`/game/${newId}?${params.toString()}`);

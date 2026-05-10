@@ -55,6 +55,10 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_source_state_conditions,
         parse_player_state_conditions,
         parse_you_have_conditions,
+        // CR 201.2 + CR 603.4: Named-pair MUST precede the generic compound
+        // control combinator so " and " between named cards binds to the
+        // names list, not interpreted as a second `you control` clause.
+        parse_control_named_pair,
         parse_compound_control_presence,
         parse_filter_have_total_property,
         parse_control_conditions,
@@ -166,6 +170,103 @@ fn parse_compound_control_presence(input: &str) -> OracleResult<'_, StaticCondit
             conditions: vec![first, second],
         },
     ))
+}
+
+/// CR 201.2 + CR 603.4: Parse "you control [type] named [Name1] and [Name2]"
+/// as a conjunction of two single-named presence checks. Each named card is its
+/// own control predicate; the AND in the source phrase joins the two names, not
+/// the type word.
+///
+/// Empires cycle canonical: Scepter of Empires' "if you control artifacts named
+/// Crown of Empires and Throne of Empires" — semantically requires you control
+/// one artifact named "Crown of Empires" AND one artifact named "Throne of
+/// Empires". Distinct from `parse_compound_control_presence` (which requires
+/// "you control" twice and joins distinct typed filters); here the bare type
+/// word is shared across both names.
+///
+/// Must precede `parse_compound_control_presence` so the trailing " and "
+/// is bound to the names list, not interpreted as a second `you control` clause.
+fn parse_control_named_pair(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    // Split on " named " — the type-phrase head precedes it, the names list follows.
+    let (after_named, type_text) = take_until(" named ").parse(rest)?;
+    let (after_named, _) = tag(" named ").parse(after_named)?;
+    let (filter_base, type_remainder) = parse_type_phrase(type_text);
+    if matches!(filter_base, TargetFilter::Any) || !type_remainder.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // Strip any FilterProp::Named that parse_type_phrase may have attached so the
+    // synthesized per-name conjuncts carry exactly one Named property each.
+    let filter_base = strip_filter_named_property(filter_base);
+    // First name extends to " and "; second name extends to end-of-clause
+    // (period or end of input). Both use take_until-style scanning to avoid
+    // string-method dispatch.
+    let (after_first_name, first_name) = take_until(" and ").parse(after_named)?;
+    let (after_first_name, _) = tag(" and ").parse(after_first_name)?;
+    // Second name: stop at period or end. parse_until_clause_end consumes the
+    // remainder up to a sentence boundary so trailing punctuation does not bleed
+    // into the captured name.
+    let (rest_after_pair, second_name) = parse_until_clause_end(after_first_name)?;
+    let first_name = first_name.trim();
+    let second_name = second_name.trim();
+    if first_name.is_empty() || second_name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let first_filter = with_named_property(filter_base.clone(), first_name);
+    let second_filter = with_named_property(filter_base, second_name);
+    let first = StaticCondition::IsPresent {
+        filter: Some(inject_controller_you(first_filter)),
+    };
+    let second = StaticCondition::IsPresent {
+        filter: Some(inject_controller_you(second_filter)),
+    };
+    Ok((
+        rest_after_pair,
+        StaticCondition::And {
+            conditions: vec![first, second],
+        },
+    ))
+}
+
+/// Consume bytes up to a clause boundary (period, comma, or end of input).
+/// Returns the captured slice and the remainder positioned at the boundary.
+fn parse_until_clause_end(input: &str) -> OracleResult<'_, &str> {
+    use nom::bytes::complete::take_till;
+    take_till(|c| c == '.' || c == ',').parse(input)
+}
+
+/// Append a `FilterProp::Named { name }` to a typed filter. Used by
+/// `parse_control_named_pair` to materialize per-name conjuncts.
+fn with_named_property(filter: TargetFilter, name: &str) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(FilterProp::Named {
+                name: name.to_string(),
+            });
+            TargetFilter::Typed(tf)
+        }
+        other => other,
+    }
+}
+
+/// Remove any `FilterProp::Named` from a typed filter. Used to clean up the
+/// shared base filter before the per-name conjuncts attach their own name
+/// property in `parse_control_named_pair`.
+fn strip_filter_named_property(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties
+                .retain(|prop| !matches!(prop, FilterProp::Named { .. }));
+            TargetFilter::Typed(tf)
+        }
+        other => other,
+    }
 }
 
 fn parse_control_presence_tail(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -3649,6 +3750,53 @@ mod tests {
                 assert!(conditions
                     .iter()
                     .all(|c| matches!(c, StaticCondition::IsPresent { filter: Some(_) })));
+            }
+            other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_control_named_pair() {
+        // CR 201.2 + CR 603.4: Scepter of Empires class — "you control [type]
+        // named [Name1] and [Name2]" requires both named cards under your
+        // control, lowered to And { IsPresent(Named X1), IsPresent(Named X2) }.
+        let (rest, c) = parse_inner_condition(
+            "you control artifacts named crown of empires and throne of empires",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                let names: Vec<&str> = conditions
+                    .iter()
+                    .map(|cond| match cond {
+                        StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(tf)),
+                        } => tf.properties.iter().find_map(|p| match p {
+                            FilterProp::Named { name } => Some(name.as_str()),
+                            _ => None,
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .expect("both conjuncts must be IsPresent of typed Named filters");
+                assert_eq!(names, vec!["crown of empires", "throne of empires"]);
+                // Both conjuncts must constrain the type to Artifact and the
+                // controller to You. Both must also include InZone(Battlefield).
+                for cond in &conditions {
+                    let StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::Typed(tf)),
+                    } = cond
+                    else {
+                        panic!("expected typed IsPresent");
+                    };
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+                    assert!(tf.properties.iter().any(
+                        |p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)
+                    ));
+                }
             }
             other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
         }

@@ -1984,6 +1984,17 @@ pub enum TargetFilter {
     /// Used for "its controller" in compound effects (e.g., "counter target spell. Its controller
     /// loses 2 life."). At resolution time, looks up the controller of the first parent target.
     ParentTargetController,
+    /// CR 108.3 + CR 608.2c: Resolves to the *owner* of the parent ability's target
+    /// object. Used for "its owner" anaphoric references where the acting player is the
+    /// owner of a previously-mentioned permanent — e.g., Enslave's "enchanted creature
+    /// deals 1 damage to its owner" or Bomb Squad's "that creature deals 4 damage to
+    /// its owner". Resolution mirrors `ParentTargetController` (parent target slot →
+    /// trigger-event source → AttachedTo host on source for Aura phase triggers), but
+    /// returns the resolved object's `owner` rather than `controller` per CR 108.3.
+    ///
+    /// Distinct from `Owner` (which always reads the source object's owner) and
+    /// `ParentTargetController` (which returns the controller per CR 109.4).
+    ParentTargetOwner,
     /// CR 109.5 + CR 608.2c: Resolves to the ability's *original* controller — the
     /// player who put the spell or ability on the stack — even when a surrounding
     /// `player_scope` iteration has rebound `ResolvedAbility::controller` to a
@@ -4711,8 +4722,18 @@ pub enum Effect {
     /// SelfRef on a replacement resolves against the carrying object.
     /// Player-bound damage replacements are stored in GameState's pending
     /// damage replacements after context references are resolved.
-    /// Cleanup at end-of-turn relies on `expires_at_eot: true` on the
-    /// carried definition (CR 514.2).
+    /// Cleanup at end-of-turn relies on `expiry: Some(RestrictionExpiry::EndOfTurn)`
+    /// on the carried definition (CR 514.2).
+    ///
+    /// `target: TargetFilter::None` is the "no per-target binding" mode for
+    /// self-contained turn-bound replacements (Rankle and Torbran's "If a
+    /// source would deal damage to a player or battle this turn, it deals
+    /// that much damage plus 2 instead.", I Call for Slaughter's "If a
+    /// source you control would deal damage this turn, it deals that much
+    /// damage plus 1 instead."). The carried `ReplacementDefinition`
+    /// already constrains its own source/target/scope filters, so the
+    /// resolver pushes it directly to `pending_damage_replacements` with
+    /// no per-target inference of `damage_target_filter`.
     AddTargetReplacement {
         replacement: Box<ReplacementDefinition>,
         #[serde(default = "default_target_filter_any")]
@@ -5605,6 +5626,7 @@ impl TargetFilter {
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::ParentTargetController
+                | TargetFilter::ParentTargetOwner
                 | TargetFilter::PostReplacementSourceController
                 | TargetFilter::PostReplacementDamageTarget
                 | TargetFilter::TrackedSet { .. }
@@ -8152,16 +8174,18 @@ pub struct ReplacementDefinition {
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
-    /// CR 514.2 + CR 614.1a: When true, this replacement is removed at the end-of-turn
-    /// cleanup step regardless of whether it fired. Used by resolution-time replacement
-    /// registrations like "If [target] would die this turn, exile it instead." (CR 614.1a).
-    /// Orthogonal to `shield_kind`: shields imply EOT expiry via `is_shield()`, but this
-    /// flag covers non-shield replacements (e.g., zone-redirection riders) that also need
-    /// EOT cleanup. Cleanup logic ORs both signals.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub expires_at_eot: bool,
-    /// CR 514.2 + CR 611.2a: Expiry for pending replacements whose lifetime is
-    /// not just cleanup, e.g. "until your next turn".
+    /// CR 514.2 + CR 611.2a + CR 614.1a: When this replacement expires.
+    ///
+    /// Single typed authority covering both end-of-turn cleanup (e.g., the
+    /// "if [target] would die this turn, exile it instead." rider on damage
+    /// spells — `Some(RestrictionExpiry::EndOfTurn)`) and longer-lived
+    /// pending replacements (e.g., "until your next turn" — `Some(...UntilPlayerNextTurn)`).
+    /// `None` means this replacement persists until removed by other means
+    /// (e.g., the source object leaving the battlefield).
+    ///
+    /// Orthogonal to `shield_kind`: shields imply EOT expiry via
+    /// `is_shield()`. Cleanup logic ORs both signals so a replacement may
+    /// be both a shield and have an explicit `EndOfTurn` expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiry: Option<RestrictionExpiry>,
     /// CR 615.1a: Damage redirection target filter — when present, prevented damage is
@@ -8237,7 +8261,6 @@ impl ReplacementDefinition {
             token_owner_scope: None,
             valid_player: None,
             is_consumed: false,
-            expires_at_eot: false,
             expiry: None,
             redirect_target: None,
             mana_modification: None,

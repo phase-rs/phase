@@ -1026,6 +1026,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::ParentTarget => "ParentTarget",
         TargetFilter::ParentTargetSlot { .. } => "ParentTargetSlot",
         TargetFilter::ParentTargetController => "ParentTargetController",
+        TargetFilter::ParentTargetOwner => "ParentTargetOwner",
         TargetFilter::PostReplacementSourceController => "PostReplacementSourceController",
         TargetFilter::PostReplacementDamageTarget => "PostReplacementDamageTarget",
         TargetFilter::DefendingPlayer => "DefendingPlayer",

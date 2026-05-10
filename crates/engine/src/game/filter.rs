@@ -635,11 +635,13 @@ fn filter_inner_for_object(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::DefendingPlayer => false,
-        // ParentTarget/ParentTargetController/PostReplacementSourceController resolve
-        // at resolution time, not via object matching.
+        // ParentTarget/ParentTargetController/ParentTargetOwner/PostReplacementSourceController
+        // resolve at resolution time, not via object matching. ParentTargetOwner
+        // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget => false,
         // "card with the chosen name" — match against source's ChosenAttribute::CardName.
@@ -853,6 +855,7 @@ fn zone_change_filter_inner(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -1067,6 +1070,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -1271,6 +1275,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer

@@ -459,7 +459,6 @@ mod tests {
             token_owner_scope: None,
             valid_player: None,
             is_consumed: false,
-            expires_at_eot: false,
             expiry: None,
             redirect_target: None,
             mana_modification: None,

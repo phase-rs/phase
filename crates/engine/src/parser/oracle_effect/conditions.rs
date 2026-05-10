@@ -2173,14 +2173,20 @@ fn parse_cost_paid_object_subject_verb_form(lower: &str) -> Option<AbilityCondit
 /// property of the object paid as cost (not just its type). The `was`/`is`
 /// tense agrees with the cost-paid-object snapshot's LKI.
 ///
-/// Examples (Stormscale Anarch class):
+/// Examples (Stormscale Anarch class / Surtland Flinger):
 ///   "the discarded card was multicolored"
-///   "the sacrificed creature was a Goblin"  (future extension)
+///   "the sacrificed creature was a Giant"
+///   "the exiled creature was a Spirit"
 ///
 /// Composes three orthogonal axes:
 ///   - verb participle: `discarded` / `sacrificed` / `exiled`
-///   - noun: `card` / `creature` / `permanent` / etc. (delegated to type filter)
-///   - property predicate: `multicolored` / `monocolored` / `colorless` / a color
+///   - noun: `card` / `creature` / `permanent` / etc. — driven by
+///     [`parse_cost_paid_object_noun_prefix`] and added to `type_filters` so
+///     the runtime check matches both the noun and the property.
+///   - property predicate: a color-set property (multicolored/monocolored/
+///     colorless/named color) OR a type-or-subtype match ("a Giant",
+///     "a creature", "an artifact"). Color predicates land in `properties`;
+///     type/subtype predicates extend `type_filters`.
 fn parse_cost_paid_object_definite_noun_form(lower: &str) -> Option<AbilityCondition> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("the ").parse(lower).ok()?;
     let (rest, _) = alt((
@@ -2190,18 +2196,84 @@ fn parse_cost_paid_object_definite_noun_form(lower: &str) -> Option<AbilityCondi
     ))
     .parse(rest)
     .ok()?;
-    // Consume the noun phrase up to the verb. We use `card` as the broad
-    // default; other nouns (`creature`, `artifact`, etc.) extend in future
-    // work as cards demand.
-    let (rest, _) = tag::<_, _, OracleError<'_>>("card ").parse(rest).ok()?;
+    let (rest, noun_filter) = parse_cost_paid_object_noun_prefix(rest)?;
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("was "), tag("is ")))
         .parse(rest)
         .ok()?;
-    let property = parse_color_property_predicate(rest)?;
+    let predicate = parse_cost_paid_object_predicate(rest)?;
 
+    let mut typed = TypedFilter::new(noun_filter);
+    match predicate {
+        CostPaidPredicate::Color(prop) => {
+            typed = typed.properties(vec![prop]);
+        }
+        CostPaidPredicate::TypeMatch(tf) => {
+            typed = typed.with_type(tf);
+        }
+    }
     Some(AbilityCondition::CostPaidObjectMatchesFilter {
-        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![property])),
+        filter: TargetFilter::Typed(typed),
     })
+}
+
+/// Predicate result for a definite-noun form's property clause. Color-set
+/// predicates land on `TypedFilter::properties`; type-or-subtype predicates
+/// land on `TypedFilter::type_filters` so the conjunction reflects both the
+/// noun ("creature") and the typed match ("a Giant"). See
+/// [`parse_cost_paid_object_definite_noun_form`].
+enum CostPaidPredicate {
+    Color(FilterProp),
+    TypeMatch(TypeFilter),
+}
+
+/// Non-consuming variant of [`parse_cost_paid_object_type_filter`]: matches a
+/// leading noun word (with the trailing space) and returns `(rest, TypeFilter)`.
+/// Used by the definite-noun form to bind the noun into the resulting filter.
+///
+/// Subtypes are intentionally excluded here — the noun position takes a
+/// permanent/card category word; subtype matching belongs in the predicate
+/// position ("the sacrificed creature was a Giant", not "the sacrificed Giant
+/// was …").
+fn parse_cost_paid_object_noun_prefix(input: &str) -> Option<(&str, TypeFilter)> {
+    alt((
+        value(
+            TypeFilter::Creature,
+            tag::<_, _, OracleError<'_>>("creature "),
+        ),
+        value(TypeFilter::Artifact, tag("artifact ")),
+        value(TypeFilter::Enchantment, tag("enchantment ")),
+        value(TypeFilter::Land, tag("land ")),
+        value(TypeFilter::Planeswalker, tag("planeswalker ")),
+        value(TypeFilter::Permanent, tag("permanent ")),
+        value(TypeFilter::Card, tag("card ")),
+    ))
+    .parse(input)
+    .ok()
+}
+
+/// Parse a definite-noun-form predicate after the `was/is` connector. Tries
+/// the color-set predicate first (orthogonal property axis) and falls back to
+/// a type/subtype match introduced by the article `a`/`an` (CR 205).
+fn parse_cost_paid_object_predicate(rest: &str) -> Option<CostPaidPredicate> {
+    if let Some(prop) = parse_color_property_predicate(rest) {
+        return Some(CostPaidPredicate::Color(prop));
+    }
+    parse_article_type_predicate(rest).map(CostPaidPredicate::TypeMatch)
+}
+
+/// Parse an `a [type]` / `an [type]` predicate where `[type]` is any noun the
+/// cost-paid-object machinery understands (creature, artifact, planeswalker,
+/// …) or a subtype (Giant, Spirit, Goblin, …). Returns the matched
+/// `TypeFilter` if the entire predicate is consumed.
+fn parse_article_type_predicate(rest: &str) -> Option<TypeFilter> {
+    let trimmed = rest.trim().trim_end_matches('.').trim();
+    let (after_article, _) = alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    parse_cost_paid_object_type_filter(after_article)
 }
 
 /// CR 105.2: Parse a color-set property predicate as a `FilterProp`. Covers

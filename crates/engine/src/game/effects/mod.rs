@@ -996,7 +996,9 @@ fn effect_refs_parent_target(effect: &Effect) -> bool {
 /// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
 fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::ParentTargetController | TargetFilter::ParentTarget => true,
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::ParentTarget => true,
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_refs_parent_target)
         }
@@ -1138,6 +1140,21 @@ pub(crate) fn resolve_player_for_context_ref(
     // succeeds) wins over chain inheritance.
     if matches!(target_filter, TargetFilter::ParentTargetController) {
         if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
+            return player;
+        }
+    }
+    // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
+    // for the owner-axis ("its owner" anaphor). Resolves through
+    // `parent_target_owner` (parent target's owner), then via the unified
+    // event-context resolver (which falls back to the source's AttachedTo
+    // host for Aura phase triggers like Enslave).
+    if matches!(target_filter, TargetFilter::ParentTargetOwner) {
+        if let Some(player) = crate::game::ability_utils::parent_target_owner(ability, state) {
+            return player;
+        }
+        if let Some(player) =
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+        {
             return player;
         }
     }
@@ -2596,7 +2613,7 @@ fn resolve_unless_payer(
         // pays {X}" (Mana Leak) — `ParentTargetController` reads the
         // controller of the targeted spell (the parent ability's first
         // target), which `resolve_effect_player_ref` looks up via the stack.
-        TargetFilter::ParentTargetController => {
+        TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         _ => None,
