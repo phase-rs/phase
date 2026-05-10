@@ -75,13 +75,25 @@ pub fn resolve(
         .unwrap_or_default();
 
     if !copy_targets.is_empty() {
-        // Build target slots — each slot shows current target. Legal alternatives
-        // are not computed here (the engine handler validates at selection time).
+        // Compute legal alternatives for each slot so the UI can present valid
+        // choices. If build_target_slots fails (no legal targets exist for the
+        // copy), fall back to empty alternatives — the copy still goes on the
+        // stack and will fizzle at resolution per CR 608.2b if all targets remain
+        // illegal.
+        let selection_slots = top_entry
+            .ability()
+            .and_then(|a| super::super::ability_utils::build_target_slots(state, a).ok())
+            .unwrap_or_default();
+
         let target_slots: Vec<CopyTargetSlot> = copy_targets
             .iter()
-            .map(|t| CopyTargetSlot {
+            .enumerate()
+            .map(|(i, t)| CopyTargetSlot {
                 current: t.clone(),
-                legal_alternatives: Vec::new(),
+                legal_alternatives: selection_slots
+                    .get(i)
+                    .map(|s| s.legal_targets.clone())
+                    .unwrap_or_default(),
             })
             .collect();
 
