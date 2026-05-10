@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 364
 expression: "&ir"
 ---
 {
@@ -70,6 +71,10 @@ expression: "&ir"
         "quantity_modification": {
           "type": "Plus",
           "value": 1
+        },
+        "counter_match": {
+          "type": "OfType",
+          "data": "P1P1"
         }
       }
     }

@@ -11358,6 +11358,85 @@ mod tests {
             r.parse_warnings
         );
     }
+
+    /// CR 614.1a + CR 122.1a: End-to-end check that Vizier of Remedies
+    /// parses cleanly through `parse_oracle_text` (the canonical entry
+    /// point used by the card-data pipeline) and produces a single
+    /// AddCounter replacement gated to -1/-1 counters on creatures the
+    /// controller controls. The full card must be fully supported (zero
+    /// gaps) — this is what flips the runtime `supported: true` flag in
+    /// `card-data.json`.
+    #[test]
+    fn vizier_of_remedies_parses_to_single_counter_replacement() {
+        use crate::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};
+        use crate::types::ability::QuantityModification;
+        use crate::types::card::CardFace;
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let oracle = "If one or more -1/-1 counters would be put on a creature you control, that many -1/-1 counters minus one are put on it instead.";
+        let parsed = parse_oracle_text(
+            oracle,
+            "Vizier of Remedies",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Cleric".to_string()],
+        );
+
+        assert!(
+            parsed.abilities.is_empty(),
+            "no spell abilities expected, got {:?}",
+            parsed.abilities
+        );
+        assert!(
+            parsed.triggers.is_empty(),
+            "no triggered abilities expected, got {:?}",
+            parsed.triggers
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "expected exactly one replacement, got {:?}",
+            parsed.replacements
+        );
+
+        let repl = &parsed.replacements[0];
+        assert_eq!(repl.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            repl.quantity_modification,
+            Some(QuantityModification::Minus { value: 1 }),
+            "Vizier subtracts 1 from the counter count (saturating at 0 — CR 122.1a)"
+        );
+        assert_eq!(
+            repl.counter_match,
+            Some(CounterMatch::OfType(CounterType::Minus1Minus1)),
+            "Vizier must be gated to -1/-1 counters specifically"
+        );
+        assert!(matches!(
+            repl.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                ref type_filters,
+                controller: Some(ControllerRef::You),
+                ..
+            })) if type_filters == &vec![TypeFilter::Creature]
+        ));
+
+        // Coverage gate: build a CardFace from the parsed result and verify
+        // the engine reports zero gaps (i.e. this is a fully-supported card).
+        let face = CardFace {
+            name: "Vizier of Remedies".to_string(),
+            replacements: parsed.replacements.clone(),
+            ..CardFace::default()
+        };
+        assert!(
+            !card_face_has_unimplemented_parts(&face),
+            "Vizier of Remedies must report no Unimplemented parts"
+        );
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "Vizier of Remedies must have zero coverage gaps, got: {:?}",
+            card_face_gaps(&face)
+        );
+    }
 }
 
 #[cfg(test)]

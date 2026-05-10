@@ -31,6 +31,7 @@ use crate::types::ability::{
     ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -3403,8 +3404,12 @@ fn token_description_to_spec(
 }
 
 /// CR 614.1a: Parse counter addition replacement effects.
-/// Handles "twice that many ... counters" (Primal Vigor, Doubling Season)
-/// and "that many plus N ... counters" (Hardened Scales, Branching Evolution).
+/// Handles "twice that many ... counters" (Primal Vigor, Doubling Season),
+/// "that many plus N ... counters" (Hardened Scales, Branching Evolution),
+/// and "that many ... counters minus N" (Vizier of Remedies). The runtime
+/// applier saturates at 0 because counters are markers per CR 122.1 — you
+/// can't put a negative number of markers on a permanent — and the
+/// -1/-1-specific P/T semantics live in CR 122.1a / CR 613.4c.
 fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
@@ -3415,8 +3420,15 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
         // Delegate to nom_primitives::parse_number (input already lowercase)
         let (_rem, value) = nom_primitives::parse_number.parse(rest).ok()?;
         QuantityModification::Plus { value }
+    } else if let Some(rest) = strip_after(lower, "that many minus ") {
+        // "that many minus one ... counters are put on it instead"
+        // Direct "minus" form — symmetric to the "plus" form above.
+        let (_rem, value) = nom_primitives::parse_number.parse(rest).ok()?;
+        QuantityModification::Minus { value }
     } else {
-        let rest = strip_after(lower, "that many minus ")?;
+        // Vizier of Remedies form: "that many <type> counters minus one are put on it instead".
+        // The "minus N" follows the counter-type token rather than preceding it.
+        let rest = strip_after(lower, " counters minus ")?;
         let (_rem, value) = nom_primitives::parse_number.parse(rest).ok()?;
         QuantityModification::Minus { value }
     };
@@ -3434,7 +3446,43 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
         ));
     }
 
+    // CR 122.1a + CR 614.1a: When the Oracle text names a specific counter type
+    // ("+1/+1 counters", "-1/-1 counters", "loyalty counters", …), restrict the
+    // replacement to that counter type so Hardened Scales doesn't fire on -1/-1
+    // counter additions and Vizier of Remedies doesn't fire on +1/+1 counter
+    // additions. Counter-agnostic wordings ("those counters" — Doubling Season)
+    // leave `counter_match = None`, preserving the legacy any-counter behavior.
+    if let Some(ct) = extract_replacement_counter_type(lower) {
+        def = def.counter_match(CounterMatch::OfType(ct));
+    }
+
     Some(def)
+}
+
+/// CR 122.1a + CR 614.1a: Extract the counter-type token named in a counter
+/// replacement's Oracle text. Anchors on the "one or more <type> counter[s]"
+/// phrase that scopes the replaced event to a specific counter type and
+/// delegates the type token to `parse_counter_type_typed` (the single nom
+/// authority for counter type recognition). Returns `None` for counter-
+/// agnostic wordings such as Doubling Season's "if an effect would put one
+/// or more counters on a permanent you control" — in that case the
+/// replacement applies to every counter type, matching the printed behavior.
+fn extract_replacement_counter_type(lower: &str) -> Option<CounterType> {
+    // Compose nom end-to-end:
+    //   <any prefix> "one or more " <counter-type-token> " counter"[s]
+    // The leading `take_until("one or more ")` advances to the anchor without
+    // delegating to `str::find` for parsing dispatch. The trailing-noun guard
+    // (` counter` / ` counters`) prevents a counter-agnostic phrasing
+    // ("one or more counters") from accidentally consuming a recognized
+    // counter-type stem (e.g. the named-counter list contains "stun").
+    let mut combinator = (
+        take_until::<_, _, OracleError<'_>>("one or more "),
+        tag("one or more "),
+        nom_primitives::parse_counter_type_typed,
+        alt((tag(" counters"), tag(" counter"))),
+    )
+        .map(|(_, _, ct, _): (&str, &str, CounterType, &str)| ct);
+    combinator.parse(lower).ok().map(|(_rest, ct)| ct)
 }
 
 /// CR 614.1a: Parse damage redirection replacement effects.
@@ -6959,6 +7007,21 @@ mod tests {
     }
 
     #[test]
+    fn counter_agnostic_one_or_more_does_not_set_counter_match() {
+        // CR 614.1a + CR 122.1: Sanity check — "if an effect would put one
+        // or more counters on a permanent you control" (Doubling Season's
+        // modern wording) must NOT be treated as type-specific. The
+        // counter-agnostic wording leaves counter_match = None so the
+        // replacement matches every counter type.
+        let def = parse_replacement_line(
+            "If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
+            "Doubling Season",
+        )
+        .unwrap();
+        assert_eq!(def.counter_match, None);
+    }
+
+    #[test]
     fn counter_doubling_replacement_current_oracle_wording() {
         let def = parse_replacement_line(
             "If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
@@ -6977,6 +7040,66 @@ mod tests {
                 controller: Some(ControllerRef::You),
                 ..
             })) if type_filters == vec![TypeFilter::Permanent]
+        ));
+        // CR 122.1a + CR 614.1a: Doubling Season's modern wording uses "those
+        // counters" — counter-agnostic, so no `counter_match` is set.
+        assert_eq!(def.counter_match, None);
+    }
+
+    #[test]
+    fn counter_plus_one_replacement_hardened_scales() {
+        // CR 614.1a + CR 122.1a: Hardened Scales — "+1/+1 counters" specifically.
+        let def = parse_replacement_line(
+            "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.",
+            "Hardened Scales",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Plus1Plus1))
+        );
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                ..
+            })) if type_filters == vec![TypeFilter::Creature]
+        ));
+    }
+
+    #[test]
+    fn counter_minus_one_replacement_vizier_of_remedies() {
+        // CR 614.1a + CR 122.1a: Vizier of Remedies — "-1/-1 counters"
+        // specifically. The "minus one" follows the type token in this
+        // wording (vs. Hardened Scales's "that many plus one"), so the
+        // parser falls through to the " counters minus " branch.
+        let def = parse_replacement_line(
+            "If one or more -1/-1 counters would be put on a creature you control, that many -1/-1 counters minus one are put on it instead.",
+            "Vizier of Remedies",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Minus { value: 1 })
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Minus1Minus1))
+        );
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                ..
+            })) if type_filters == vec![TypeFilter::Creature]
         ));
     }
 

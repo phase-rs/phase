@@ -92,6 +92,7 @@ pub fn convert_as_enters(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -170,6 +171,7 @@ pub fn convert_replace_would_enter(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -231,6 +233,7 @@ pub fn convert_replace_would_deal_damage(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -601,6 +604,7 @@ pub fn convert_replace_would_draw(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -719,6 +723,7 @@ pub fn convert_replace_would_put_into_graveyard(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -936,6 +941,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -988,6 +994,12 @@ pub fn convert_replace_would_put_counters(
     actions: &[ReplacementActionWouldPutCounters],
 ) -> ConvResult<Vec<ReplacementDefinition>> {
     let valid_card = counter_event_to_valid_card(event)?;
+    // CR 122.1a + CR 614.1a: When the schema event names a specific counter
+    // type ("CountersOfTypeWouldBePointOnAPermanent"), restrict the
+    // replacement to that counter type so Hardened Scales (+1/+1) doesn't
+    // fire on -1/-1 counter additions and Vizier of Remedies (-1/-1)
+    // doesn't fire on +1/+1 counter additions.
+    let counter_match = counter_event_to_counter_match(event)?;
     let mut out = Vec::new();
     for act in actions {
         let modification = counter_action_to_modification(act)?;
@@ -1016,9 +1028,30 @@ pub fn convert_replace_would_put_counters(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: counter_match.clone(),
         });
     }
     Ok(out)
+}
+
+/// CR 122.1a + CR 614.1a: Map a schema `ReplacableEventWouldPutCounters` to
+/// the engine's `CounterMatch` discriminator. The schema's
+/// `CountersOfTypeWouldBePointOnAPermanent(counter, _)` carries a typed
+/// counter — translate it through the canonical
+/// `filter::counter_type_to_engine` and wrap as `CounterMatch::OfType(...)`.
+/// All other event shapes (counter-agnostic phrasings) return `None`,
+/// matching every counter type in the runtime.
+fn counter_event_to_counter_match(
+    event: &ReplacableEventWouldPutCounters,
+) -> ConvResult<Option<engine::types::counter::CounterMatch>> {
+    use ReplacableEventWouldPutCounters as E;
+    match event {
+        E::CountersOfTypeWouldBePointOnAPermanent(counter, _) => {
+            let ct = crate::convert::filter::counter_type_to_engine(counter)?;
+            Ok(Some(engine::types::counter::CounterMatch::OfType(ct)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// CR 614.1a: Decompose a `ReplacableEventWouldPutCounters` event into a
@@ -1176,6 +1209,7 @@ pub fn convert_replace_would_gain_life(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -1294,6 +1328,7 @@ fn try_build_may_cost_pair(
         mana_replacement_scope: ManaReplacementScope::Any,
         additional_token_spec: None,
         ensure_token_specs: None,
+        counter_match: None,
     }))
 }
 

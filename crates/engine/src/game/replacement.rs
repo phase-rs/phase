@@ -2176,6 +2176,31 @@ pub fn find_applicable_replacements(
                     {
                         continue;
                     }
+                    // CR 122.1a + CR 614.1a: Counter-type filter on AddCounter
+                    // replacements. Hardened Scales ("+1/+1 counters") must not
+                    // fire on -1/-1 counter additions, and Vizier of Remedies
+                    // ("-1/-1 counters") must not fire on +1/+1 counter additions
+                    // — the printed Oracle text names a specific counter type as
+                    // the discriminator, so the engine honors that here.
+                    // `None` and `Some(CounterMatch::Any)` accept any counter
+                    // type (Doubling Season, modern wording).
+                    if let (
+                        Some(ref m),
+                        ProposedEvent::AddCounter {
+                            counter_type: ev_ct,
+                            ..
+                        },
+                    ) = (&repl_def.counter_match, event)
+                    {
+                        match m {
+                            crate::types::counter::CounterMatch::Any => {}
+                            crate::types::counter::CounterMatch::OfType(expected) => {
+                                if expected != ev_ct {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     candidates.push(rid);
                 }
             }
@@ -5926,5 +5951,172 @@ mod tests {
             ),
             "draw step draws by the non-active player must replace"
         );
+    }
+
+    /// CR 122.1a + CR 614.1a: A counter-replacement that names "+1/+1
+    /// counters" in its Oracle text (Hardened Scales) must NOT fire on a
+    /// -1/-1 counter addition. The runtime gate honors `counter_match`
+    /// when the proposed event is `AddCounter`.
+    #[test]
+    fn counter_match_filters_hardened_scales_from_minus_one_minus_one_event() {
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let source = ObjectId(1);
+        let target = ObjectId(2);
+
+        let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(crate::types::ability::QuantityModification::Plus { value: 1 })
+            .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1));
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+        // The proposed AddCounter event targets a separate creature on the
+        // battlefield owned by the same player so any controller-scoped
+        // checks in the registry pass through unchanged.
+        let mut creature = crate::game::game_object::GameObject::new(
+            target,
+            CardId(2),
+            PlayerId(0),
+            "C".into(),
+            Zone::Battlefield,
+        );
+        creature
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        state.objects.insert(target, creature);
+        state.battlefield.push_back(target);
+
+        let registry = build_replacement_registry();
+        let proposed = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
+            object_id: target,
+            counter_type: CounterType::Minus1Minus1,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &proposed, &registry).is_empty(),
+            "Hardened-Scales-class replacement must not fire on -1/-1 counter additions"
+        );
+
+        // Sanity: the same replacement DOES fire on a +1/+1 counter event.
+        let proposed_p1p1 = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
+            object_id: target,
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &proposed_p1p1, &registry).len(),
+            1,
+            "Hardened-Scales-class replacement must fire on +1/+1 counter additions"
+        );
+    }
+
+    /// CR 122.1a + CR 614.1a: Vizier of Remedies's "-1/-1 counters"
+    /// replacement must fire on a -1/-1 counter addition, but not on a
+    /// +1/+1 counter addition. Mirrors the Hardened Scales test in the
+    /// opposite direction.
+    #[test]
+    fn counter_match_filters_vizier_from_plus_one_plus_one_event() {
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let source = ObjectId(10);
+        let target = ObjectId(20);
+
+        let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(crate::types::ability::QuantityModification::Minus { value: 1 })
+            .counter_match(CounterMatch::OfType(CounterType::Minus1Minus1));
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+        let mut creature = crate::game::game_object::GameObject::new(
+            target,
+            CardId(2),
+            PlayerId(0),
+            "C".into(),
+            Zone::Battlefield,
+        );
+        creature
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        state.objects.insert(target, creature);
+        state.battlefield.push_back(target);
+
+        let registry = build_replacement_registry();
+
+        let proposed_p1p1 = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
+            object_id: target,
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &proposed_p1p1, &registry).is_empty(),
+            "Vizier-class replacement must not fire on +1/+1 counter additions"
+        );
+
+        let proposed_m1m1 = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
+            object_id: target,
+            counter_type: CounterType::Minus1Minus1,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &proposed_m1m1, &registry).len(),
+            1,
+            "Vizier-class replacement must fire on -1/-1 counter additions"
+        );
+    }
+
+    /// CR 614.1a + CR 122.1a: Counter-agnostic replacements (Doubling Season's
+    /// modern wording: "those counters") leave `counter_match = None` and
+    /// continue to match every counter type — current behavior is preserved.
+    #[test]
+    fn counter_match_none_matches_any_counter_type() {
+        use crate::types::counter::CounterType;
+
+        let source = ObjectId(30);
+        let target = ObjectId(40);
+
+        let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(crate::types::ability::QuantityModification::Double);
+        // Note: counter_match is left as None.
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+        let mut creature = crate::game::game_object::GameObject::new(
+            target,
+            CardId(2),
+            PlayerId(0),
+            "C".into(),
+            Zone::Battlefield,
+        );
+        creature
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        state.objects.insert(target, creature);
+        state.battlefield.push_back(target);
+
+        let registry = build_replacement_registry();
+        for ct in [
+            CounterType::Plus1Plus1,
+            CounterType::Minus1Minus1,
+            CounterType::Loyalty,
+            CounterType::Generic("charge".to_string()),
+        ] {
+            let proposed = ProposedEvent::AddCounter {
+                actor: PlayerId(0),
+                object_id: target,
+                counter_type: ct.clone(),
+                count: 1,
+                applied: HashSet::new(),
+            };
+            assert_eq!(
+                find_applicable_replacements(&state, &proposed, &registry).len(),
+                1,
+                "counter_match=None must accept any counter type, including {ct:?}"
+            );
+        }
     }
 }

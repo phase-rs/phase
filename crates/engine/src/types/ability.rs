@@ -8202,6 +8202,17 @@ pub struct ReplacementDefinition {
     /// orthogonal — a single replacement may set either, but not both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ensure_token_specs: Option<Vec<crate::types::proposed_event::TokenSpec>>,
+    /// CR 614.1a + CR 122.1a: Counter-type discriminator for `AddCounter`
+    /// replacements that explicitly name a counter type in their Oracle text
+    /// ("If one or more +1/+1 counters …" — Hardened Scales; "If one or more
+    /// -1/-1 counters …" — Vizier of Remedies). When set to
+    /// `Some(CounterMatch::OfType(ct))`, the replacement only fires for
+    /// `ProposedEvent::AddCounter` events whose `counter_type == ct`.
+    /// `None` (and the redundant `Some(CounterMatch::Any)`) match any
+    /// counter type — used by Doubling Season ("those counters") and other
+    /// counter-agnostic replacements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_match: Option<CounterMatch>,
 }
 
 impl ReplacementDefinition {
@@ -8233,6 +8244,7 @@ impl ReplacementDefinition {
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         }
     }
 
@@ -8311,6 +8323,15 @@ impl ReplacementDefinition {
 
     pub fn quantity_modification(mut self, modification: QuantityModification) -> Self {
         self.quantity_modification = Some(modification);
+        self
+    }
+
+    /// CR 614.1a + CR 122.1a: Restrict an `AddCounter` replacement to a specific
+    /// counter type (e.g., Vizier of Remedies's `-1/-1` filter). Replacements
+    /// whose Oracle text doesn't name a specific counter type leave this `None`,
+    /// which matches every counter type (current behavior for Doubling Season).
+    pub fn counter_match(mut self, m: CounterMatch) -> Self {
+        self.counter_match = Some(m);
         self
     }
 

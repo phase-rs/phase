@@ -466,6 +466,7 @@ mod tests {
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
         object.replacement_definitions.push(ReplacementDefinition {
             destination_zone: None,
