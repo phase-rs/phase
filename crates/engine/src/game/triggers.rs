@@ -998,6 +998,13 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 }));
             }
 
+            // CR 702.152b: Casualty triggers when the spell is cast with the
+            // cost paid. Applies to both printed Casualty (obj.additional_cost
+            // is set) and dynamically granted Casualty (e.g. from Silverquill).
+            // The WasCast intervening-if is intentionally omitted: the trigger
+            // only fires on SpellCast (which is only emitted for actual casts),
+            // and obj.cast_from_zone is cleared after trigger collection so a
+            // WasCast check at resolution would always fail.
             let dynamically_granted_casualty_instances = state
                 .objects
                 .get(cast_obj_id)
@@ -2763,12 +2770,12 @@ pub mod tests {
     use crate::game::filter::{matches_target_filter, FilterContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, AggregateFunction, ChosenAttribute, ChosenSubtypeKind,
-        Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration,
-        Effect, FilterProp, GainLifePlayer, KickerVariant, MultiTargetSpec, PlayerScope,
-        QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation,
-        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-        TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AggregateFunction,
+        ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
+        DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, KickerVariant,
+        MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -8960,6 +8967,137 @@ pub mod tests {
                 )
             }),
             "paid granted casualty should create a copy trigger"
+        );
+    }
+
+    #[test]
+    fn printed_casualty_triggers_copy_when_paid() {
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        // Printed Casualty — additional_cost on the object itself
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Test Instant".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.cast_from_zone = Some(Zone::Hand);
+            obj.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: 1,
+            }));
+            obj.keywords.push(Keyword::Casualty(2));
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            spell,
+            caster,
+        );
+        ability.context.additional_cost_paid = true;
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: caster,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if matches!(ability.effect, Effect::CopySpell { target: TargetFilter::SelfRef })
+                )
+            }),
+            "paid printed casualty should create a copy trigger"
+        );
+    }
+
+    #[test]
+    fn printed_casualty_no_copy_when_not_paid() {
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Test Instant".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.cast_from_zone = Some(Zone::Hand);
+            obj.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: 1,
+            }));
+            obj.keywords.push(Keyword::Casualty(2));
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            spell,
+            caster,
+        );
+        // additional_cost_paid = false (default)
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: caster,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert!(
+            !state.stack.iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if matches!(ability.effect, Effect::CopySpell { .. })
+                )
+            }),
+            "unpaid casualty should not create a copy trigger"
         );
     }
 
