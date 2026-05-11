@@ -58,6 +58,7 @@ import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { DialogHost } from "../components/modal/DialogHost.tsx";
 import { EvokeCostModal } from "../components/modal/EvokeCostModal.tsx";
 import { BestowCostModal } from "../components/modal/BestowCostModal.tsx";
+import { OverloadCostModal } from "../components/modal/OverloadCostModal.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
@@ -1202,6 +1203,7 @@ function GamePageContent({
         <CombatTaxModal />
         <EvokeCostModal />
         <BestowCostModal />
+        <OverloadCostModal />
         <PermanentTypeSlotModal />
         <ModeChoiceModal />
         <ChooseOneOfBranchModal />
@@ -1272,6 +1274,16 @@ function GamePageContent({
             />
           );
         })()}
+
+      {waitingFor?.type === "MulliganDecision" &&
+        waitingFor.data.player !== playerId && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+            <div className="relative text-center">
+              <p className="text-base font-semibold text-white">Opponent is deciding their opening hand…</p>
+            </div>
+          </div>
+        )}
 
       {waitingFor?.type === "MulliganBottomCards" &&
         (() => {
@@ -1452,6 +1464,12 @@ function MulliganDecisionPrompt({
   const legalActions = useGameStore((s) => s.legalActions);
   const hoverProps = useInspectHoverProps();
   const [buttonsVisible, setButtonsVisible] = useState(false);
+
+  const handCount = player?.hand.length ?? 0;
+  // Guard: if the hand has no cards to animate, buttons would never appear via onAnimationComplete
+  useEffect(() => {
+    if (handCount === 0) setButtonsVisible(true);
+  }, [handCount]);
 
   // Engine rule (CR 103.5 + 103.5c): bottom_count_on_keep = mulligan_count - (free_first ? 1 : 0).
   // The *next* mulligan is "free" iff applying that formula at mulligan_count + 1 yields 0.

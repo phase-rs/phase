@@ -35,9 +35,14 @@ export function PlayerHud() {
   const isHumanTargetSelection =
     (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
     && waitingFor.data.player === playerId;
-  const isValidTarget = isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
+  const isCopyRetargetForMe = waitingFor?.type === "CopyRetarget" && waitingFor.data.player === playerId;
+  const copyRetargetCurrentSlotHasMe = isCopyRetargetForMe && (() => {
+    const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
+    return (slot?.legal_alternatives ?? []).some((t) => "Player" in t && t.Player === playerId);
+  })();
+  const isValidTarget = (isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
     (target) => "Player" in target && target.Player === playerId,
-  );
+  )) || copyRetargetCurrentSlotHasMe;
 
   const handleTargetClick = useCallback(() => {
     if (isValidTarget) {

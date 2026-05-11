@@ -209,6 +209,7 @@ pub(crate) fn open_copy_target_selection(
         player: controller,
         copy_id,
         target_slots,
+        current_slot: 0,
     };
     Ok(true)
 }
@@ -549,6 +550,7 @@ mod tests {
                 player,
                 copy_id: cid,
                 target_slots,
+                ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(*cid, copy_id);

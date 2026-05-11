@@ -3060,12 +3060,64 @@ fn apply_action(
             effects::drain_pending_continuation(state, &mut events);
             state.waiting_for.clone()
         }
-        // CR 707.10c: Copy retarget — player chose new targets for the copy.
+        // CR 707.10c: Copy retarget — player chose target for the current slot
+        // via battlefield click. Advances slot-by-slot; finalizes on the last slot.
         (
             WaitingFor::CopyRetarget {
                 player,
                 copy_id,
                 target_slots,
+                current_slot,
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            let p = *player;
+            let cid = *copy_id;
+            let slot_idx = *current_slot;
+            if let Some(ref t) = target {
+                let slot = &target_slots[slot_idx];
+                if !slot.legal_alternatives.is_empty() && !slot.legal_alternatives.contains(t) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Target {t:?} not a legal alternative for copy slot {slot_idx}"
+                    )));
+                }
+            }
+            let mut updated_slots = target_slots.clone();
+            if let Some(t) = target {
+                updated_slots[slot_idx].current = t.clone();
+            }
+            let next_slot = slot_idx + 1;
+            if next_slot < updated_slots.len() {
+                state.waiting_for = WaitingFor::CopyRetarget {
+                    player: p,
+                    copy_id: cid,
+                    target_slots: updated_slots,
+                    current_slot: next_slot,
+                };
+            } else {
+                let targets: Vec<_> = updated_slots.iter().map(|s| s.current.clone()).collect();
+                if let Some(entry) = state.stack.iter_mut().find(|e| e.id == cid) {
+                    if let Some(ability) = entry.ability_mut() {
+                        ability.targets = targets;
+                    }
+                }
+                events.push(GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::CopySpell,
+                    source_id: cid,
+                });
+                state.waiting_for = WaitingFor::Priority { player: p };
+                state.priority_player = p;
+                effects::drain_pending_continuation(state, &mut events);
+            }
+            state.waiting_for.clone()
+        }
+        // CR 707.10c: Copy retarget — player chose new targets for the copy (all at once).
+        (
+            WaitingFor::CopyRetarget {
+                player,
+                copy_id,
+                target_slots,
+                ..
             },
             GameAction::SelectTargets { targets },
         ) => {
@@ -7549,6 +7601,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),

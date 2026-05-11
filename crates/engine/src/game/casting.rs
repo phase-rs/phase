@@ -3837,6 +3837,31 @@ fn continue_with_prepared(
             );
         }
 
+        // CR 601.2b: Casualty (optional sacrifice) must be declared before targets are
+        // chosen. Detect an effective Casualty cost and route through the deferred target
+        // selection path so the sacrifice prompt appears first.
+        if let Some(casualty_cost) =
+            casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+        {
+            return casting_costs::begin_optional_cost_before_targets(
+                state,
+                player,
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                prepared.mana_cost,
+                casualty_cost,
+                prepared.casting_variant,
+                prepared.cast_timing_permission,
+                prepared
+                    .ability_def
+                    .as_ref()
+                    .and_then(|a| a.distribute.clone()),
+                prepared.origin_zone,
+                events,
+            );
+        }
+
         if let Some(targets) =
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
         {
