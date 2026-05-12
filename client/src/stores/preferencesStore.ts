@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { GameFormat, MatchType, Phase } from "../adapter/types";
+import type { CommanderBracket } from "../types/bracket";
 import {
   ANIMATION_SPEED_DEFAULT,
   ANIMATION_SPEED_MAX,
@@ -116,6 +117,7 @@ function buildDefaultPreferences(): PreferencesState {
     aiSeats: [defaultAiSeat()],
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
+    aiBracketFilter: [] as CommanderBracket[],
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
@@ -156,6 +158,7 @@ interface PreferencesState {
   aiSeats: AiSeatPref[];
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
+  aiBracketFilter: CommanderBracket[];
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
@@ -201,6 +204,7 @@ interface PreferencesActions {
   ensureAiSeatCount: (count: number) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
+  setAiBracketFilter: (brackets: CommanderBracket[]) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
@@ -324,6 +328,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
+      setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
@@ -374,7 +379,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 6,
+      version: 7,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -387,6 +392,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          of display names.
       // v4 → v5: Add artStrategy and artOverrides for card art preferences.
       // v5 → v6: Replace artStrategy (single enum) with artChain (ordered preference list).
+      // v6 → v7: Add aiBracketFilter; legacy stores default to empty (filter off).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -465,6 +471,15 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           const { artStrategy: _oldStrat, ...rest } = migrated;
           void _oldStrat;
           migrated = { ...rest, artChain };
+        }
+
+        // v6 → v7: introduce aiBracketFilter; existing users default to "off" ([]).
+        if (version < 7) {
+          const legacy = migrated as { aiBracketFilter?: unknown } & Record<string, unknown>;
+          migrated = {
+            ...legacy,
+            aiBracketFilter: Array.isArray(legacy.aiBracketFilter) ? legacy.aiBracketFilter : [],
+          };
         }
 
         return migrated;

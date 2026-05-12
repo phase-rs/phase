@@ -23,6 +23,7 @@ describe("preferencesStore", () => {
         musicMuted: false,
         masterMuted: false,
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
+        aiBracketFilter: [],
       });
     });
     localStorage.clear();
@@ -452,5 +453,42 @@ describe("preferencesStore", () => {
     expect(state.followActiveOpponent).toBe(true);
     expect(state.logDefaultState).toBe("open");
     expect(state.boardBackground).toBe("green");
+  });
+
+  it("aiBracketFilter defaults to empty (filter off)", () => {
+    const state = usePreferencesStore.getState();
+    expect(state.aiBracketFilter).toEqual([]);
+  });
+
+  it("setAiBracketFilter replaces the array", () => {
+    act(() => {
+      usePreferencesStore.getState().setAiBracketFilter([2, 4]);
+    });
+    expect(usePreferencesStore.getState().aiBracketFilter).toEqual([2, 4]);
+
+    act(() => {
+      usePreferencesStore.getState().setAiBracketFilter([]);
+    });
+    expect(usePreferencesStore.getState().aiBracketFilter).toEqual([]);
+  });
+
+  it("v6 → v7 migration defaults aiBracketFilter to empty", () => {
+    // Hydrate the persist key as a v6 payload (no aiBracketFilter field).
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: {
+          aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
+          aiArchetypeFilter: "Any",
+          aiCoverageFloor: 90,
+        },
+        version: 6,
+      }),
+    );
+
+    // Force the store to re-hydrate so the migration runs.
+    usePreferencesStore.persist.rehydrate();
+
+    expect(usePreferencesStore.getState().aiBracketFilter).toEqual([]);
   });
 });
