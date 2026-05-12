@@ -660,6 +660,13 @@ pub(crate) enum SearchCreationImperativeAst {
         /// flag for multi-filter chains. Ignored when `extra_filters` is empty.
         multi_enter_tapped: bool,
     },
+    SearchOutsideGame {
+        filter: TargetFilter,
+        count: QuantityExpr,
+        reveal: bool,
+        destination: Zone,
+        up_to: bool,
+    },
     Dig {
         count: QuantityExpr,
         /// CR 701.20a vs CR 701.16a: True = revealed (public), false = looked at (private).

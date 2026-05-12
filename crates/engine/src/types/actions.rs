@@ -120,6 +120,9 @@ pub enum GameAction {
     SelectCards {
         cards: Vec<ObjectId>,
     },
+    ChooseOutsideGameCards {
+        sideboard_indices: Vec<usize>,
+    },
     SelectTargets {
         targets: Vec<TargetRef>,
     },
@@ -820,6 +823,7 @@ impl GameAction {
             | GameAction::MulliganDecision { .. }
             | GameAction::ReorderHand { .. }
             | GameAction::SelectCards { .. }
+            | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
             | GameAction::ChooseReplacement { .. }

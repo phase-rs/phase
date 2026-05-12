@@ -143,6 +143,7 @@ pub fn create_commander_from_card_face(
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.deck_pools.clear();
+    state.outside_game_cards_brought_in.clear();
     state.sideboard_submitted.clear();
 
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
@@ -526,6 +527,44 @@ mod tests {
         assert_eq!(state.players[0].library.len(), 6); // 4 + 2
         assert_eq!(state.players[1].library.len(), 3);
         assert_eq!(state.objects.len(), 9); // 6 + 3
+    }
+
+    #[test]
+    fn load_deck_clears_outside_game_cards_brought_in() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .outside_game_cards_brought_in
+            .push(crate::types::game_state::OutsideGameCardUse {
+                player: PlayerId(0),
+                sideboard_index: 0,
+                count: 1,
+            });
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                sideboard: vec![DeckEntry {
+                    card: make_instant_face(),
+                    count: 1,
+                }],
+                commander: vec![],
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                sideboard: vec![],
+                commander: vec![],
+            },
+            ai_decks: vec![],
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert!(state.outside_game_cards_brought_in.is_empty());
     }
 
     #[test]

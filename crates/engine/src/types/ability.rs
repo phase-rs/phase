@@ -4749,6 +4749,18 @@ pub enum Effect {
         )]
         selection_constraint: SearchSelectionConstraint,
     },
+    /// CR 400.11/400.11a + CR 701.23j: Choose card(s) the player owns from
+    /// outside the game. For tournament-style play, the bounded accessible set
+    /// is the player's current sideboard, which is not modeled as a zone.
+    SearchOutsideGame {
+        filter: TargetFilter,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        #[serde(default)]
+        reveal: bool,
+        #[serde(default = "default_zone_hand")]
+        destination: Zone,
+    },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -6040,6 +6052,7 @@ impl Effect {
             | Effect::Vote { .. }
             | Effect::Cleanup { .. }
             | Effect::RevealTop { .. }
+            | Effect::SearchOutsideGame { .. }
             | Effect::Choose { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::SolveCase
@@ -6178,6 +6191,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Shuffle { .. } => "Shuffle",
         Effect::Transform { .. } => "Transform",
         Effect::SearchLibrary { .. } => "SearchLibrary",
+        Effect::SearchOutsideGame { .. } => "SearchOutsideGame",
         Effect::RevealHand { .. } => "RevealHand",
         Effect::RevealFromHand { .. } => "RevealFromHand",
         Effect::Reveal { .. } => "Reveal",
@@ -6346,6 +6360,7 @@ pub enum EffectKind {
     Discard,
     Shuffle,
     SearchLibrary,
+    SearchOutsideGame,
     ExileTop,
     TargetOnly,
     Choose,
@@ -6516,6 +6531,7 @@ impl From<&Effect> for EffectKind {
             Effect::Shuffle { .. } => EffectKind::Shuffle,
             Effect::Transform { .. } => EffectKind::Transform,
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
+            Effect::SearchOutsideGame { .. } => EffectKind::SearchOutsideGame,
             Effect::RevealHand { .. } => EffectKind::Reveal,
             Effect::RevealFromHand { .. } => EffectKind::Reveal,
             Effect::Reveal { .. } => EffectKind::Reveal,

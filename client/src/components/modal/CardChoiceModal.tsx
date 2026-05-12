@@ -23,6 +23,7 @@ type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
+type OutsideGameChoice = Extract<WaitingFor, { type: "OutsideGameChoice" }>;
 type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
@@ -168,6 +169,9 @@ export function CardChoiceModal() {
     case "SearchChoice":
       if (!canActForWaitingState) return null;
       return <SearchModal data={waitingFor.data} />;
+    case "OutsideGameChoice":
+      if (!canActForWaitingState) return null;
+      return <OutsideGameModal key={outsideGameChoiceKey(waitingFor.data)} data={waitingFor.data} />;
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
       return <ChooseFromZoneModal data={waitingFor.data} />;
@@ -832,6 +836,93 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       </ScrollableCardStrip>
     </ChoiceOverlay>
   );
+}
+
+function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const [selectedCounts, setSelectedCounts] = useState<Map<number, number>>(new Map());
+  const availableCounts = useMemo(
+    () => new Map(data.choices.map((choice) => [choice.sideboard_index, choice.entry.count])),
+    [data.choices],
+  );
+  const selectedIndices = useMemo(
+    () =>
+      Array.from(selectedCounts.entries()).flatMap(([sideboardIndex, count]) => {
+        const availableCount = availableCounts.get(sideboardIndex) ?? 0;
+        return Array.from({ length: Math.min(count, availableCount) }, () => sideboardIndex);
+      }),
+    [availableCounts, selectedCounts],
+  );
+  const minCount = data.up_to ? 0 : data.count;
+  const countValid = selectedIndices.length >= minCount && selectedIndices.length <= data.count;
+
+  const toggleSelect = useCallback(
+    (sideboardIndex: number, maxCopies: number) => {
+      setSelectedCounts((prev) => {
+        const next = new Map(prev);
+        const current = next.get(sideboardIndex) ?? 0;
+        const selectedTotal = Array.from(prev.values()).reduce((sum, count) => sum + count, 0);
+        if (current > 0 && (current >= maxCopies || selectedTotal >= data.count)) {
+          next.delete(sideboardIndex);
+        } else if (selectedTotal < data.count) {
+          next.set(sideboardIndex, current + 1);
+        }
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    if (countValid) {
+      dispatch({
+        type: "ChooseOutsideGameCards",
+        data: { sideboard_indices: selectedIndices },
+      });
+    }
+  }, [countValid, dispatch, selectedIndices]);
+
+  return (
+    <ChoiceOverlay
+      title="Choose From Sideboard"
+      subtitle={`Choose ${data.up_to ? "up to " : ""}${data.count}`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
+    >
+      <div className="flex max-h-[60vh] min-w-[280px] flex-col gap-2 overflow-y-auto p-1">
+        {data.choices.map((choice) => {
+          const selectedCount = Math.min(
+            selectedCounts.get(choice.sideboard_index) ?? 0,
+            choice.entry.count,
+          );
+          const isSelected = selectedCount > 0;
+          return (
+            <button
+              key={choice.sideboard_index}
+              type="button"
+              className={`flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm transition ${
+                isSelected
+                  ? "border-emerald-400 bg-emerald-500/20 text-white"
+                  : "border-white/15 bg-black/30 text-zinc-100 hover:bg-white/10"
+              }`}
+              onClick={() => toggleSelect(choice.sideboard_index, choice.entry.count)}
+            >
+              <span>{choice.entry.card.name}</span>
+              <span className="text-xs text-zinc-400">
+                {isSelected ? `${selectedCount}/` : ""}x{choice.entry.count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </ChoiceOverlay>
+  );
+}
+
+function outsideGameChoiceKey(data: OutsideGameChoice["data"]) {
+  const choicesKey = data.choices
+    .map((choice) => `${choice.sideboard_index}:${choice.entry.count}`)
+    .join(",");
+  return `${data.player}:${data.count}:${data.up_to ?? false}:${data.destination}:${choicesKey}`;
 }
 
 // ── Choose From Zone Modal ───────────────────────────────────────────────────

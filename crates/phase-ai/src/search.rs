@@ -320,6 +320,15 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::UnlessBounceChoice { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
+        WaitingFor::OutsideGameChoice { choices, count, .. } => {
+            Some(GameAction::ChooseOutsideGameCards {
+                sideboard_indices: choices
+                    .iter()
+                    .flat_map(|choice| (0..choice.entry.count).map(move |_| choice.sideboard_index))
+                    .take(*count)
+                    .collect(),
+            })
+        }
 
         // Sylvan Library-style choices: topdeck the required cards rather than
         // paying life in the fallback path.
