@@ -128,21 +128,29 @@ pub fn resolve(
     // on the battlefield controlled by the ability's controller. For each amplifier,
     // queue an additional CopySpell continuation targeting the original spell by ID so
     // the extra copy is created after the current copy's CopyRetarget (if any) resolves.
-    let amplifier_count = game_active_statics(state)
-        .filter(|(obj, def)| {
-            obj.controller == ability.controller && def.mode == StaticMode::CopySpellAmplifier
-        })
-        .count();
-    for _ in 0..amplifier_count {
-        let extra = ResolvedAbility::new(
-            Effect::CopySpell {
-                target: TargetFilter::Any,
-            },
-            vec![TargetRef::Object(top_entry.id)],
-            ability.source_id,
-            ability.controller,
-        );
-        append_to_pending_continuation(state, Some(Box::new(extra)));
+    //
+    // Guard: skip when this resolve call is itself an amplifier-spawned continuation so
+    // the replacement effect applies exactly once to the original copy event, not
+    // recursively to each additional copy it produces (which would loop infinitely).
+    let is_amplifier_spawn = matches!(ability.effect, Effect::CopySpell { amplifier_spawn: true, .. });
+    if !is_amplifier_spawn {
+        let amplifier_count = game_active_statics(state)
+            .filter(|(obj, def)| {
+                obj.controller == ability.controller && def.mode == StaticMode::CopySpellAmplifier
+            })
+            .count();
+        for _ in 0..amplifier_count {
+            let extra = ResolvedAbility::new(
+                Effect::CopySpell {
+                    target: TargetFilter::Any,
+                    amplifier_spawn: true,
+                },
+                vec![TargetRef::Object(top_entry.id)],
+                ability.source_id,
+                ability.controller,
+            );
+            append_to_pending_continuation(state, Some(Box::new(extra)));
+        }
     }
 
     // CR 707.10c: If the copy has targets, allow the controller to choose new ones.
@@ -261,6 +269,7 @@ mod tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                amplifier_spawn: false,
             },
             vec![],
             ObjectId(20),
@@ -313,6 +322,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                amplifier_spawn: false,
             },
             vec![],
             ObjectId(20),
@@ -352,6 +362,7 @@ mod tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                amplifier_spawn: false,
             },
             vec![],
             ObjectId(20),
@@ -394,6 +405,7 @@ mod tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                amplifier_spawn: false,
             },
             vec![],
             ObjectId(20),
@@ -514,6 +526,7 @@ mod tests {
         let casualty_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
+                amplifier_spawn: false,
             },
             vec![],
             ObjectId(10), // source_id = original spell
@@ -589,6 +602,7 @@ mod tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                amplifier_spawn: false,
             },
             vec![],
             ObjectId(30),
@@ -608,6 +622,71 @@ mod tests {
         assert!(
             state.pending_continuation.is_some(),
             "Amplifier must queue an extra copy in pending_continuation"
+        );
+    }
+
+    /// CR 614.1a: The CopySpellAmplifier replacement effect applies once to the original
+    /// copy event. When the amplifier-spawned continuation fires, it must NOT re-check
+    /// amplifiers — otherwise each extra copy would queue another continuation ad infinitum.
+    #[test]
+    fn test_amplifier_spawn_does_not_re_trigger_amplifier() {
+        use crate::game::game_object::GameObject;
+        use crate::types::StaticDefinition;
+
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Divination",
+            original_ability,
+            CastingVariant::Normal,
+        );
+
+        // Place Twinning Staff on the battlefield.
+        let mut staff = GameObject::new(
+            ObjectId(20),
+            CardId(99),
+            PlayerId(0),
+            "Twinning Staff".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        staff.static_definitions =
+            vec![StaticDefinition::new(StaticMode::CopySpellAmplifier)].into();
+        state.objects.insert(ObjectId(20), staff);
+        state.battlefield.push_back(ObjectId(20));
+
+        // Simulate the continuation ability that the amplifier previously queued.
+        // amplifier_spawn: true means this is the extra copy — should not re-amplify.
+        let continuation_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                amplifier_spawn: true,
+            },
+            vec![TargetRef::Object(ObjectId(10))],
+            ObjectId(30),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &continuation_ability, &mut events).unwrap();
+
+        // Stack: original + one copy = 2 entries. No further continuation queued.
+        assert_eq!(state.stack.len(), 2, "Amplifier-spawned copy should produce exactly one copy");
+        assert!(
+            state.pending_continuation.is_none(),
+            "Amplifier-spawned copy must not queue another continuation (infinite loop guard)"
         );
     }
 }

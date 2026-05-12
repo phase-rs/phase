@@ -1037,6 +1037,7 @@ pub fn casualty_copy_ability_definition() -> AbilityDefinition {
         AbilityKind::Spell,
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
+            amplifier_spawn: false,
         },
     )
     .condition(AbilityCondition::additional_cost_paid_any())
@@ -1083,6 +1084,7 @@ pub fn synthesize_casualty(face: &mut CardFace) {
                 t.execute.as_deref().map(|a| &*a.effect),
                 Some(Effect::CopySpell {
                     target: TargetFilter::SelfRef,
+                    ..
                 })
             )
     });

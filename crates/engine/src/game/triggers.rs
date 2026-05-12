@@ -933,6 +933,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     let mut storm_ability = ResolvedAbility::new(
                         Effect::CopySpell {
                             target: TargetFilter::SelfRef,
+                            amplifier_spawn: false,
                         },
                         Vec::new(),
                         *cast_obj_id,
@@ -8969,7 +8970,7 @@ pub mod tests {
                 matches!(
                     &entry.kind,
                     StackEntryKind::TriggeredAbility { ability, .. }
-                        if matches!(ability.effect, Effect::CopySpell { target: TargetFilter::SelfRef })
+                        if matches!(ability.effect, Effect::CopySpell { target: TargetFilter::SelfRef, .. })
                 )
             }),
             "paid granted casualty should create a copy trigger"

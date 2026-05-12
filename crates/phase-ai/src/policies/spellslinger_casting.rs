@@ -448,6 +448,7 @@ mod tests {
             2,
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                amplifier_spawn: false,
             },
         );
         let (context, config) = make_context(0.8);
@@ -501,6 +502,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                amplifier_spawn: false,
             },
         ));
         let (context, config) = make_context(0.8);

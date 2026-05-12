@@ -756,6 +756,7 @@ mod auto_pass_decision_tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                amplifier_spawn: false,
             },
             Vec::new(),
             copy_id,
