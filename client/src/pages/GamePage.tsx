@@ -1276,7 +1276,7 @@ function GamePageContent({
         })()}
 
       {waitingFor?.type === "MulliganDecision" &&
-        waitingFor.data.player !== playerId && (
+        !waitingFor.data.pending.some((e) => e.player === playerId) && (
           <div className="fixed inset-0 z-50 flex items-center justify-center">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
             <div className="relative text-center">
