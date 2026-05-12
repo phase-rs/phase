@@ -1244,6 +1244,60 @@ mod tests {
     }
 
     #[test]
+    fn protection_from_each_color_blocks_every_color_source() {
+        // CR 702.16b + CR 105.2: "Protection from each color" — Akroma's Will
+        // / Iridescent Angel scenario. End-to-end: parse the Oracle text via
+        // `extract_keyword_line` (which routes through `expand_protection_parts`
+        // and emits 5 typed `Protection(Color(X))` keywords), attach the
+        // parsed keywords to a creature, and verify every monocolored source
+        // is rejected by `find_legal_targets`. Regression test for the bug
+        // where "protection from each color" was emitted as the no-op
+        // `ProtectionTarget::CardType("each color")`, letting black sources
+        // like Dark Impostor target a creature buffed by Akroma's Will.
+        use crate::types::mana::ManaColor;
+
+        let keywords = crate::parser::oracle_keyword::extract_keyword_line(
+            "protection from each color",
+            &["protection".to_string()],
+        )
+        .expect("'protection from each color' should parse as a keyword line");
+
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .extend(keywords);
+
+        for (idx, color) in [
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+            ManaColor::Green,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = create_object(
+                &mut state,
+                CardId(100u64 + idx as u64),
+                PlayerId(0),
+                format!("{color:?} Source"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&source).unwrap().color.push(color);
+
+            let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), source);
+            assert!(
+                !targets.contains(&TargetRef::Object(c1)),
+                "creature with protection from each color must reject {color:?} source"
+            );
+        }
+    }
+
+    #[test]
     fn ward_does_not_prevent_targeting() {
         // Ward should be recognized but not block targeting (cost enforcement deferred)
         let (mut state, _c0, c1) = setup_with_creatures();
