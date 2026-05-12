@@ -8,7 +8,7 @@ import { PrintingPickerModal } from "./PrintingPickerModal";
 import type { ParsedDeck } from "../../services/deckParser";
 import { deduplicateEntries, resolveCommander } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
-import { STORAGE_KEY_PREFIX, loadSavedDeck, stampDeckMeta } from "../../constants/storage";
+import { STORAGE_KEY_PREFIX, loadSavedDeck, loadSavedDeckBracket, stampDeckMeta } from "../../constants/storage";
 import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
@@ -23,6 +23,9 @@ import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY, formatMetadata } from "../../data/formatRegistry";
 import { FormatFilter } from "./FormatFilter";
 import { CommanderPanel } from "./CommanderPanel";
+import { BracketPicker } from "./BracketPicker";
+import type { CommanderBracket } from "../../types/bracket";
+import { getPreconBracket } from "../../data/preconBrackets";
 import {
   getColorIdentityViolations,
   getSingletonViolations,
@@ -78,6 +81,7 @@ export function DeckBuilder({
   const [deck, setDeck] = useState<ParsedDeck>({ main: [], sideboard: [] });
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
   const [deckName, setDeckName] = useState("");
+  const [bracket, setBracket] = useState<CommanderBracket | null>(null);
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
   const [justSaved, setJustSaved] = useState(false);
   const [commanders, setCommanders] = useState<string[]>([]);
@@ -277,7 +281,9 @@ export function DeckBuilder({
 
   const handleSave = () => {
     if (!deckName.trim()) return;
-    const data = JSON.stringify({ ...currentDeck, format });
+    const payload: Record<string, unknown> = { ...currentDeck, format };
+    if (bracket !== null) payload.bracket = bracket;
+    const data = JSON.stringify(payload);
     localStorage.setItem(STORAGE_KEY_PREFIX + deckName.trim(), data);
     stampDeckMeta(deckName.trim());
     setSavedDecks(listSavedDecks());
@@ -296,12 +302,14 @@ export function DeckBuilder({
     if (!parsed || !data) {
       if (!name.startsWith(PRECON_PREFIX)) return;
       const decks = await loadPreconDeckMap();
-      const deckEntry = Object.values(decks ?? {}).find((entry) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
-      if (!deckEntry) return;
+      const found = Object.entries(decks ?? {}).find(([, entry]) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
+      if (!found) return;
+      const [deckId, deckEntry] = found;
       const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
       applyDeckToEditor(resolved);
       setIsDeckViewExpanded(true);
       setDeckName(`${deckEntry.name} (${deckEntry.code})`);
+      setBracket(getPreconBracket(deckId) ?? null);
       return;
     }
     const persisted = JSON.parse(data) as ParsedDeck & { format?: string };
@@ -317,6 +325,7 @@ export function DeckBuilder({
       onFormatChange("Commander");
     }
     setDeckName(name);
+    setBracket(loadSavedDeckBracket(name));
   }, [applyDeckToEditor, onFormatChange]);
 
   const handleLoadRef = useRef(handleLoad);
@@ -436,7 +445,15 @@ export function DeckBuilder({
             </div>
           </div>
         </div>
-        <FormatFilter selected={format} onChange={onFormatChange} />
+        <div className="flex items-center gap-3">
+          <FormatFilter selected={format} onChange={onFormatChange} />
+          {format === "Commander" && (
+            <div className="flex items-center gap-2">
+              <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Bracket</span>
+              <BracketPicker value={bracket} onChange={setBracket} />
+            </div>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <input
             type="text"
